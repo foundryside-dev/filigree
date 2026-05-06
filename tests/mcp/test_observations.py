@@ -228,9 +228,21 @@ class TestPromoteObservationTool:
             },
         )
         data = _parse(result)
-        assert "issue" in data
-        assert data["issue"]["title"] == "Null pointer risk"
+        assert "issue_id" in data
+        assert data["title"] == "Null pointer risk"
         assert mcp_db.list_observations() == []
+
+    async def test_promote_returns_flat_public_issue_after_enrichments(self, mcp_db: FiligreeDB) -> None:
+        obs = mcp_db.create_observation("Promote shape")
+
+        result = await call_tool("promote_observation", {"observation_id": obs["id"]})
+
+        data = _parse(result)
+        assert "issue" not in data
+        assert "issue_id" in data
+        assert "id" not in data
+        assert data["title"] == "Promote shape"
+        assert "from-observation" in data["labels"]
 
     async def test_promote_with_title_override(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Original summary")
@@ -239,7 +251,7 @@ class TestPromoteObservationTool:
             {"observation_id": obs["id"], "title": "Better title"},
         )
         data = _parse(result)
-        assert data["issue"]["title"] == "Better title"
+        assert data["title"] == "Better title"
 
     async def test_promote_with_extra_description(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation(
@@ -251,8 +263,8 @@ class TestPromoteObservationTool:
             {"observation_id": obs["id"], "description": "Extra context from review"},
         )
         data = _parse(result)
-        assert "Extra context from review" in data["issue"]["description"]
-        assert "Some detail" in data["issue"]["description"]
+        assert "Extra context from review" in data["description"]
+        assert "Some detail" in data["description"]
 
     async def test_promote_with_title_and_description(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Original", detail="Original detail")
@@ -265,8 +277,8 @@ class TestPromoteObservationTool:
             },
         )
         data = _parse(result)
-        assert data["issue"]["title"] == "Custom title"
-        assert "Prepended context" in data["issue"]["description"]
+        assert data["title"] == "Custom title"
+        assert "Prepended context" in data["description"]
 
     async def test_promote_nonexistent_fails(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("promote_observation", {"observation_id": "nope-123"})
@@ -292,7 +304,7 @@ class TestPromoteObservationTool:
         with patch.object(mcp_db, "add_label", side_effect=sqlite3.OperationalError("label boom")):
             result = await call_tool("promote_observation", {"observation_id": obs["id"]})
         data = _parse(result)
-        assert "issue" in data
+        assert "issue_id" in data
         assert "warnings" in data
         assert any("label" in w for w in data["warnings"])
 

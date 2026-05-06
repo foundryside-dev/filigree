@@ -9,6 +9,7 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
+from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _MAX_LIST_RESULTS,
     _apply_has_more,
@@ -333,7 +334,8 @@ async def _handle_promote_observation(arguments: dict[str, Any]) -> list[TextCon
         logger.error("promote_observation database error", exc_info=True)
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     _refresh_summary()
-    resp: dict[str, object] = {"issue": result["issue"].to_dict()}
+    issue = tracker.get_issue(result["issue"].id)
+    resp: dict[str, object] = dict(issue_to_public(issue))
     if result.get("warnings"):
         resp["warnings"] = result["warnings"]
     return _text(resp)
