@@ -334,6 +334,23 @@ class WorkflowStatusesResponse(TypedDict):
     statuses: dict[str, list[str]]
 
 
+class EntityIdSchema(TypedDict):
+    """One entity ID prefix entry returned by get_schema."""
+
+    entity: str
+    prefix: str
+    primary_key: str
+    example: str
+    accepted_by_tools: list[str]
+
+
+class SchemaResponse(TypedDict):
+    """Agent-facing MCP schema/discovery metadata."""
+
+    project_prefix: str
+    entity_id_prefixes: dict[str, EntityIdSchema]
+
+
 class PackListItem(TypedDict):
     """Single pack entry returned by list_packs MCP tool."""
 

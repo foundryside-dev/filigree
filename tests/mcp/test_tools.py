@@ -1148,6 +1148,28 @@ class TestActorIdentity:
 
 
 class TestResource:
+    async def test_get_schema_documents_entity_id_prefixes(self, mcp_db: FiligreeDB) -> None:
+        tools = {tool.name for tool in await list_tools()}
+        assert "get_schema" in tools
+
+        result = await call_tool("get_schema", {})
+
+        data = _parse(result)
+        assert data["project_prefix"] == "mcp"
+        prefixes = data["entity_id_prefixes"]
+        assert prefixes["issue"]["prefix"] == "mcp-"
+        assert prefixes["issue"]["primary_key"] == "issue_id"
+        assert "get_issue" in prefixes["issue"]["accepted_by_tools"]
+        assert prefixes["observation"]["prefix"] == "mcp-obs-"
+        assert prefixes["observation"]["primary_key"] == "observation_id"
+        assert "promote_observation" in prefixes["observation"]["accepted_by_tools"]
+        assert prefixes["scan_finding"]["prefix"] == "mcp-sf-"
+        assert prefixes["scan_finding"]["primary_key"] == "finding_id"
+        assert "promote_finding" in prefixes["scan_finding"]["accepted_by_tools"]
+        assert prefixes["file_record"]["prefix"] == "mcp-f-"
+        assert prefixes["file_record"]["primary_key"] == "file_id"
+        assert "get_file" in prefixes["file_record"]["accepted_by_tools"]
+
     async def test_list_resources(self, mcp_db: FiligreeDB) -> None:
         resources = await list_resources()
         assert len(resources) == 1

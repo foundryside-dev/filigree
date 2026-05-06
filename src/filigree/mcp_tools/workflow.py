@@ -14,6 +14,7 @@ from filigree.types.api import (
     InboundTransitionInfo,
     OutboundTransitionInfo,
     PackListItem,
+    SchemaResponse,
     StatusExplanation,
     TransitionDetail,
     ValidationResult,
@@ -56,6 +57,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="get_workflow_statuses",
             description="Return workflow statuses by category (open/wip/done) from enabled templates.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="get_schema",
+            description="Return MCP schema/discovery metadata including entity ID prefixes and the tools that accept each ID family.",
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
@@ -134,6 +140,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
     handlers: dict[str, Callable[..., Any]] = {
         "get_template": _handle_get_template,
         "get_workflow_statuses": _handle_get_workflow_statuses,
+        "get_schema": _handle_get_schema,
         "list_types": _handle_list_types,
         "get_type_info": _handle_get_type_info,
         "list_packs": _handle_list_packs,
@@ -174,6 +181,85 @@ async def _handle_get_workflow_statuses(arguments: dict[str, Any]) -> list[TextC
                 "wip": tracker._get_states_for_category("wip"),
                 "done": tracker._get_states_for_category("done"),
             }
+        )
+    )
+
+
+async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_db
+
+    tracker = _get_db()
+    prefix = tracker.prefix
+    return _text(
+        SchemaResponse(
+            project_prefix=prefix,
+            entity_id_prefixes={
+                "issue": {
+                    "entity": "issue",
+                    "prefix": f"{prefix}-",
+                    "primary_key": "issue_id",
+                    "example": f"{prefix}-<hash>",
+                    "accepted_by_tools": [
+                        "get_issue",
+                        "list_issues",
+                        "update_issue",
+                        "close_issue",
+                        "reopen_issue",
+                        "start_work",
+                        "claim_issue",
+                        "release_claim",
+                        "add_comment",
+                        "get_comments",
+                        "add_label",
+                        "remove_label",
+                        "get_issue_events",
+                        "get_issue_files",
+                        "get_valid_transitions",
+                        "validate_issue",
+                        "add_dependency",
+                        "remove_dependency",
+                        "add_file_association",
+                    ],
+                },
+                "observation": {
+                    "entity": "observation",
+                    "prefix": f"{prefix}-obs-",
+                    "primary_key": "observation_id",
+                    "example": f"{prefix}-obs-<hash>",
+                    "accepted_by_tools": [
+                        "dismiss_observation",
+                        "promote_observation",
+                        "batch_dismiss_observations",
+                    ],
+                },
+                "scan_finding": {
+                    "entity": "scan_finding",
+                    "prefix": f"{prefix}-sf-",
+                    "primary_key": "finding_id",
+                    "example": f"{prefix}-sf-<hash>",
+                    "accepted_by_tools": [
+                        "get_finding",
+                        "update_finding",
+                        "batch_update_findings",
+                        "promote_finding",
+                        "dismiss_finding",
+                    ],
+                },
+                "file_record": {
+                    "entity": "file_record",
+                    "prefix": f"{prefix}-f-",
+                    "primary_key": "file_id",
+                    "example": f"{prefix}-f-<hash>",
+                    "accepted_by_tools": [
+                        "get_file",
+                        "get_file_timeline",
+                        "get_issue_files",
+                        "add_file_association",
+                        "list_findings",
+                        "list_observations",
+                    ],
+                },
+            },
         )
     )
 
