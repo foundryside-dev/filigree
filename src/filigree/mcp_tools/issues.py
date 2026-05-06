@@ -706,7 +706,10 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.CONFLICT))
+        msg = str(e)
+        if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
+            return _text(_build_transition_error(tracker, args["issue_id"], msg))
+        return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
 
 
 async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:

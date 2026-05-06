@@ -597,8 +597,12 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
         except ValueError as e:
+            msg = str(e)
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                code = classify_value_error(msg)
+                if code != ErrorCode.INVALID_TRANSITION:
+                    code = ErrorCode.CONFLICT
+                click.echo(json_mod.dumps({"error": msg, "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)

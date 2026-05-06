@@ -431,6 +431,54 @@ class TestInvalidTransitionParity:
 
 
 # ---------------------------------------------------------------------------
+# Scenario 6b: claim on closed issue -> INVALID_TRANSITION
+#
+# claim_issue has two logical ValueError branches below the data layer:
+# assignee CAS failure (retryable CONFLICT) and status/category mismatch
+# (operator-action INVALID_TRANSITION). Pin the latter across surfaces.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestClosedClaimInvalidTransitionParity:
+    async def test_parity(
+        self,
+        dashboard_surface: AsyncClient,
+        mcp_surface: FiligreeDB,
+        cli_surface: Callable[..., Any],
+    ) -> None:
+        dash_create = await dashboard_surface.post("/api/issues", json={"title": "Closed claim"})
+        assert dash_create.status_code == 201
+        dash_id = dash_create.json()["id"]
+        first = await dashboard_surface.post(f"/api/issue/{dash_id}/close", json={})
+        assert first.status_code == 200
+        dash_resp = await dashboard_surface.post(f"/api/issue/{dash_id}/claim", json={"assignee": "agent-1"})
+        dash_env = dash_resp.json()
+        _assert_flat_envelope(dash_env, surface="dashboard")
+        assert dash_resp.status_code == 409
+
+        mcp_issue = mcp_surface.create_issue("Closed claim")
+        mcp_surface.close_issue(mcp_issue.id)
+        mcp_env = _mcp_envelope(await _handle_claim_issue({"issue_id": mcp_issue.id, "assignee": "agent-1"}))
+        _assert_flat_envelope(mcp_env, surface="mcp")
+
+        def cli_action(runner: CliRunner, _: Path) -> Any:
+            create = runner.invoke(cli, ["create", "Closed claim", "--json"])
+            assert create.exit_code == 0, create.output
+            issue_id = json.loads(create.output)["issue_id"]
+            close = runner.invoke(cli, ["close", issue_id, "--json"])
+            assert close.exit_code == 0, close.output
+            return runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1", "--json"])
+
+        cli_env = _cli_envelope(cli_surface(cli_action))
+        _assert_flat_envelope(cli_env, surface="cli")
+
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.INVALID_TRANSITION, (
+            f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Scenario 7: already-closed issue on close → CONFLICT or INVALID_TRANSITION
 #
 # close_issue on an already-closed issue raises ValueError; classify_value_error

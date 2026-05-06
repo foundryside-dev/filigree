@@ -679,6 +679,17 @@ class TestClaimIssue:
         assert data["status"] == "in_progress"
         assert data["assignee"] == "agent-bravo"
 
+    async def test_claim_closed_issue_is_invalid_transition(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Closed claim", type="task")
+        mcp_db.close_issue(issue.id, reason="done")
+
+        result = await call_tool("claim_issue", {"issue_id": issue.id, "assignee": "agent-1"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.INVALID_TRANSITION
+        assert "valid_transitions" in data
+        assert "hint" in data
+
     async def test_claim_not_found(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("claim_issue", {"issue_id": "mcp-nonexistent", "assignee": "agent-1"})
         data = _parse(result)

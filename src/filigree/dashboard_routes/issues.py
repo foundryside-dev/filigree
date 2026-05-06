@@ -635,7 +635,10 @@ def create_classic_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409)
+            code = classify_value_error(str(e))
+            if code != ErrorCode.INVALID_TRANSITION:
+                code = ErrorCode.CONFLICT
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/release")
@@ -1186,7 +1189,10 @@ def create_loom_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409)
+            code = classify_value_error(str(e))
+            if code != ErrorCode.INVALID_TRANSITION:
+                code = ErrorCode.CONFLICT
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue_to_loom(issue))
 
     @router.post("/issues/{issue_id}/release")
