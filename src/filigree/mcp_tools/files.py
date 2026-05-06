@@ -10,6 +10,7 @@ from typing import Any
 from mcp.types import TextContent, Tool
 
 from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES
+from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _list_response,
     _parse_args,
@@ -23,7 +24,6 @@ from filigree.mcp_tools.payloads import (
     file_detail_to_mcp,
     file_record_to_mcp,
     finding_to_mcp,
-    observation_to_mcp,
     timeline_entry_to_mcp,
 )
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
@@ -215,7 +215,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="promote_finding",
-            description="Promote a scan finding to an observation for triage tracking.",
+            description="Promote a scan finding directly to a tracked issue and link the finding to it.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -590,7 +590,7 @@ async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
+    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, PromoteFindingArgs)
     finding_id = args.get("finding_id", "")
@@ -606,7 +606,7 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
 
     tracker = _get_db()
     try:
-        obs = tracker.promote_finding_to_observation(finding_id, priority=priority, actor=actor)
+        result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor)
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
@@ -615,7 +615,11 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     except sqlite3.Error as exc:
         _logger.exception("Database error promoting finding %s", finding_id)
         return _text(ErrorResponse(error=f"Database error promoting finding: {exc}", code=ErrorCode.IO))
-    return _text(observation_to_mcp(obs))
+    _refresh_summary()
+    response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    if result.get("warnings"):
+        response["warnings"] = result["warnings"]
+    return _text(response)
 
 
 async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent]:

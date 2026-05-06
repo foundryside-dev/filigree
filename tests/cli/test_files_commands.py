@@ -20,8 +20,10 @@ Finding shapes:
         last_seen_at, metadata, data_warnings
 - get-finding: ScanFindingDict (same)
 - update-finding: ScanFindingDict (same)
-- promote-finding: ObservationDict — {id, summary, detail, file_id, file_path, line,
-                                       source_issue_id, priority, actor, created_at, expires_at}
+- promote-finding: PublicIssue — {issue_id, title, status, status_category, priority,
+                                  type, parent_id, assignee, created_at, updated_at,
+                                  closed_at, description, notes, fields, labels,
+                                  blocks, blocked_by, is_ready, children, data_warnings}
 - dismiss-finding: ScanFindingDict (same as get-finding)
 - batch-update-findings: BatchResponse[str] — {succeeded, failed} or error envelope
 """
@@ -90,6 +92,31 @@ _OBSERVATION_KEYS = frozenset(
         "actor",
         "created_at",
         "expires_at",
+    }
+)
+
+_PUBLIC_ISSUE_KEYS = frozenset(
+    {
+        "issue_id",
+        "title",
+        "status",
+        "status_category",
+        "priority",
+        "type",
+        "parent_id",
+        "assignee",
+        "created_at",
+        "updated_at",
+        "closed_at",
+        "description",
+        "notes",
+        "fields",
+        "labels",
+        "blocks",
+        "blocked_by",
+        "is_ready",
+        "children",
+        "data_warnings",
     }
 )
 
@@ -684,7 +711,7 @@ class TestUpdateFindingCommand:
 
 class TestPromoteFindingCommand:
     def test_promote_finding_happy_path_json(self, initialized_project_with_finding: SeededProject) -> None:
-        """promote-finding returns an ObservationDict."""
+        """promote-finding returns a PublicIssue and links the source finding."""
         runner = CliRunner()
         original = os.getcwd()
         os.chdir(str(initialized_project_with_finding.path))
@@ -693,8 +720,11 @@ class TestPromoteFindingCommand:
             result = runner.invoke(cli, ["promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert set(data.keys()) == _OBSERVATION_KEYS, f"Shape mismatch: {set(data.keys()) ^ _OBSERVATION_KEYS}"
-            assert "Test finding" in data["summary"] or data["summary"]
+            assert set(data.keys()) == _PUBLIC_ISSUE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _PUBLIC_ISSUE_KEYS}"
+            assert "id" not in data
+            assert data["issue_id"]
+            assert "Test finding" in data["title"] or data["title"]
+            assert "from-finding" in data["labels"]
         finally:
             os.chdir(original)
 
@@ -715,6 +745,7 @@ class TestPromoteFindingCommand:
             result = runner.invoke(cli, ["promote-finding", finding_id])
             assert result.exit_code == 0
             assert "Promoted" in result.output
+            assert "issue" in result.output
         finally:
             os.chdir(original)
 
@@ -875,7 +906,7 @@ class TestPromoteFindingHonoursGlobalActor:
     actor in ``ctx.obj["actor"]`` was silently dropped. (filigree-cb82dc6b37)
     """
 
-    def test_global_actor_is_recorded_on_observation(self, initialized_project_with_finding: SeededProject) -> None:
+    def test_global_actor_is_recorded_on_issue_event(self, initialized_project_with_finding: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()
         os.chdir(str(initialized_project_with_finding.path))
@@ -884,7 +915,11 @@ class TestPromoteFindingHonoursGlobalActor:
             result = runner.invoke(cli, ["--actor", "bot-1", "promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert data["actor"] == "bot-1", f"global --actor was dropped; observation.actor={data['actor']!r}"
+            events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
+            assert events_result.exit_code == 0, events_result.output
+            events = json.loads(events_result.output)["items"]
+            created_event = next(event for event in events if event["event_type"] == "created")
+            assert created_event["actor"] == "bot-1", f"global --actor was dropped; created.actor={created_event['actor']!r}"
         finally:
             os.chdir(original)
 
@@ -909,7 +944,11 @@ class TestPromoteFindingHonoursGlobalActor:
             )
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert data["actor"] == "bot-2"
+            events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
+            assert events_result.exit_code == 0, events_result.output
+            events = json.loads(events_result.output)["items"]
+            created_event = next(event for event in events if event["event_type"] == "created")
+            assert created_event["actor"] == "bot-2"
         finally:
             os.chdir(original)
 

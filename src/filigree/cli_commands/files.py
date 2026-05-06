@@ -18,6 +18,7 @@ import click
 
 from filigree.cli_common import get_db
 from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES, find_filigree_anchor
+from filigree.issue_payloads import issue_to_public
 from filigree.paths import safe_path
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import AssocType, FindingStatus
@@ -596,7 +597,7 @@ def promote_finding_cmd(
     actor: str | None,
     as_json: bool,
 ) -> None:
-    """Promote a scan finding to an observation for triage tracking."""
+    """Promote a scan finding directly to a tracked issue."""
     if actor is None:
         resolved_actor = ctx.obj["actor"]
     else:
@@ -610,7 +611,7 @@ def promote_finding_cmd(
         resolved_actor = cleaned
     with get_db() as db:
         try:
-            obs = db.promote_finding_to_observation(finding_id, priority=priority, actor=resolved_actor)
+            promoted = db.promote_finding_to_issue(finding_id, priority=priority, actor=resolved_actor)
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Finding not found: {finding_id}", "code": ErrorCode.NOT_FOUND}))
@@ -631,9 +632,13 @@ def promote_finding_cmd(
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(obs, indent=2, default=str))
+            payload: dict[str, Any] = dict(issue_to_public(promoted["issue"]))
+            if promoted.get("warnings"):
+                payload["warnings"] = promoted["warnings"]
+            click.echo(json_mod.dumps(payload, indent=2, default=str))
         else:
-            click.echo(f"Promoted finding {finding_id} → observation {obs['id']}: {obs['summary']}")
+            issue = promoted["issue"]
+            click.echo(f"Promoted finding {finding_id} → issue {issue.id}: {issue.title}")
 
 
 @click.command("dismiss-finding")

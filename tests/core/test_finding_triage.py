@@ -202,6 +202,31 @@ class TestPromoteFindingToObservation:
         assert obs["priority"] == expected_priority
 
 
+class TestPromoteFindingToIssue:
+    def test_creates_issue_and_links_finding(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        result = db.promote_finding_to_issue(ids["sqli"])
+        issue = result["issue"]
+
+        assert issue.type == "bug"
+        assert issue.priority == 0
+        assert "SQL injection" in issue.title
+        assert issue.fields["source_finding_id"] == ids["sqli"]
+        assert db.get_finding(ids["sqli"])["issue_id"] == issue.id
+        labels = db.conn.execute("SELECT label FROM labels WHERE issue_id = ?", (issue.id,)).fetchall()
+        assert any(row["label"] == "from-finding" for row in labels)
+
+    def test_reuses_existing_issue_on_retry(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        first = db.promote_finding_to_issue(ids["sqli"])
+
+        second = db.promote_finding_to_issue(ids["sqli"])
+
+        assert second["issue"].id == first["issue"].id
+        assert "warnings" in second
+        assert any("already linked" in warning for warning in second["warnings"])
+
+
 class TestProcessScanResultsBreakingChange:
     """The old create_issues parameter was removed — callers must use create_observations."""
 

@@ -145,12 +145,17 @@ class TestBatchUpdateFindingsTool:
 
 
 class TestPromoteFindingTool:
-    async def test_promote_creates_observation(self, mcp_db: FiligreeDB) -> None:
+    async def test_promote_creates_issue(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
         data = _parse(await call_tool("promote_finding", {"finding_id": ids["sqli"]}))
-        assert "observation_id" in data
+        assert "issue_id" in data
         assert "id" not in data
-        assert "summary" in data
+        assert "observation_id" not in data
+        assert data["type"] == "bug"
+        assert "SQL injection" in data["title"]
+        assert "from-finding" in data["labels"]
+        assert mcp_db.get_finding(ids["sqli"])["issue_id"] == data["issue_id"]
+        assert mcp_db.list_observations() == []
 
     async def test_promote_with_priority_override(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)

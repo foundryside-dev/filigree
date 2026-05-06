@@ -1160,6 +1160,94 @@ class FilesMixin(DBMixinProtocol):
             actor=actor,
         )
 
+    def promote_finding_to_issue(
+        self,
+        finding_id: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+    ) -> dict[str, Any]:
+        """Promote a finding directly to a tracked issue.
+
+        The older ``promote_finding_to_observation`` helper remains available
+        for explicit scratchpad triage. This method backs public
+        ``promote_finding`` surfaces where agents expect a real work item.
+        """
+        finding = self.get_finding(finding_id)
+        if priority is None:
+            priority = self._SEVERITY_TO_PRIORITY.get(finding["severity"], 3)
+
+        warnings: list[str] = []
+        linked_issue_id = finding.get("issue_id")
+        if linked_issue_id:
+            try:
+                issue = self.get_issue(str(linked_issue_id))
+            except KeyError:
+                warnings.append(f"Finding {finding_id} referenced missing issue {linked_issue_id}; creating a new issue")
+            else:
+                warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
+                return {"issue": issue, "warnings": warnings}
+
+        existing_issue_row = self.conn.execute(
+            "SELECT id FROM issues WHERE json_valid(fields) AND json_extract(fields, '$.source_finding_id') = ?",
+            (finding_id,),
+        ).fetchone()
+        if existing_issue_row is not None:
+            issue = self.get_issue(existing_issue_row["id"])
+            try:
+                self.update_finding(finding_id, issue_id=issue.id)
+            except (KeyError, ValueError, sqlite3.Error):
+                warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id}, but relinking failed")
+            warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id} (returning existing)")
+            return {"issue": issue, "warnings": warnings}
+
+        file_path = self._file_path_for_finding(finding["file_id"])
+        if not file_path:
+            logger.warning(
+                "Promoting finding %s without file context (file_id=%s not found)",
+                finding_id,
+                finding["file_id"],
+            )
+
+        title = f"[{finding['scan_source']}] {finding['message']}"
+        description_parts = [
+            f"Scan source: {finding['scan_source']}",
+            f"Rule: {finding['rule_id']}",
+            f"Severity: {finding['severity']}",
+        ]
+        if file_path:
+            location = f"`{file_path}`"
+            if finding.get("line_start") is not None:
+                location += f":{finding['line_start']}"
+            description_parts.append(f"Finding location: {location}")
+        else:
+            description_parts.append(f"Finding file record was missing: {finding['file_id']}")
+        if finding.get("suggestion"):
+            description_parts.append(f"Suggestion: {finding['suggestion']}")
+
+        issue = self.create_issue(
+            title,
+            type="bug",
+            priority=priority,
+            description="\n\n".join(description_parts),
+            fields={
+                "source_finding_id": finding_id,
+                "scan_source": finding["scan_source"],
+                "rule_id": finding["rule_id"],
+            },
+            labels=["from-finding"],
+            actor=actor,
+        )
+        try:
+            self.update_finding(finding_id, issue_id=issue.id)
+        except (KeyError, ValueError, sqlite3.Error):
+            warnings.append(f"Created issue {issue.id}, but linking finding {finding_id} failed")
+
+        result: dict[str, Any] = {"issue": self.get_issue(issue.id)}
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     def _file_path_for_finding(self, file_id: str) -> str:
         """Look up the file path for a file_id, returning empty string if not found."""
         row = self.conn.execute("SELECT path FROM file_records WHERE id = ?", (file_id,)).fetchone()
