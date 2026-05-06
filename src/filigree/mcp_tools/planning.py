@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from mcp.types import TextContent, Tool
 
+from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _list_response,
     _parse_args,
@@ -17,6 +18,7 @@ from filigree.mcp_tools.common import (
 )
 from filigree.mcp_tools.payloads import critical_path_node_to_mcp, plan_tree_to_mcp
 from filigree.types.api import (
+    BatchResponse,
     BlockedIssue,
     CriticalPathMcpNode,
     CriticalPathResponse,
@@ -24,11 +26,14 @@ from filigree.types.api import (
     ErrorCode,
     ErrorResponse,
     PlanResponse,
+    PublicIssue,
+    parse_response_detail,
 )
 from filigree.types.inputs import (
     AddDependencyArgs,
     CreatePlanArgs,
     GetPlanArgs,
+    LabelSubtreeArgs,
     MilestoneInput,
     PhaseInput,
     RemoveDependencyArgs,
@@ -101,6 +106,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "title": {"type": "string"},
                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                             "description": {"type": "string", "default": ""},
+                            "labels": {"type": "array", "items": {"type": "string"}, "description": "Labels to apply to the milestone and all descendants"},
                         },
                         "required": ["title"],
                     },
@@ -112,6 +118,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                 "title": {"type": "string"},
                                 "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                 "description": {"type": "string", "default": ""},
+                                "labels": {"type": "array", "items": {"type": "string"}, "description": "Additional labels to apply to this phase and its steps"},
                                 "steps": {
                                     "type": "array",
                                     "items": {
@@ -120,6 +127,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                             "title": {"type": "string"},
                                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                             "description": {"type": "string", "default": ""},
+                                            "labels": {"type": "array", "items": {"type": "string"}, "description": "Additional labels to apply to this step"},
                                             "deps": {
                                                 "type": "array",
                                                 "items": {"type": ["integer", "string"]},
@@ -139,6 +147,24 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             },
         ),
         Tool(
+            name="label_subtree",
+            description="Apply one label to a parent issue and every descendant in its subtree.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "parent_id": {"type": "string", "description": "Root issue ID whose subtree should be labeled"},
+                    "label": {"type": "string", "description": "Label to apply"},
+                    "response_detail": {
+                        "type": "string",
+                        "enum": ["slim", "full"],
+                        "default": "slim",
+                        "description": "'slim' returns issue ID strings; 'full' returns full PublicIssue records.",
+                    },
+                },
+                "required": ["parent_id", "label"],
+            },
+        ),
+        Tool(
             name="get_critical_path",
             description="Longest dependency chain among open issues. Helps prioritize work that unblocks the most downstream items.",
             inputSchema={"type": "object", "properties": {}},
@@ -152,6 +178,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "get_blocked": _handle_get_blocked,
         "get_plan": _handle_get_plan,
         "create_plan": _handle_create_plan,
+        "label_subtree": _handle_label_subtree,
         "get_critical_path": _handle_get_critical_path,
     }
 
@@ -320,6 +347,34 @@ async def _handle_create_plan(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(plan_tree_to_mcp(plan))
     except (KeyError, IndexError, ValueError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+
+
+async def _handle_label_subtree(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_db, _refresh_summary
+
+    args = _parse_args(arguments, LabelSubtreeArgs)
+    detail = parse_response_detail(args.get("response_detail"))
+    if isinstance(detail, dict):
+        return _text(detail)
+    tracker = _get_db()
+    try:
+        succeeded, failed = tracker.label_subtree(args["parent_id"], label=args["label"])
+    except KeyError:
+        return _text(ErrorResponse(error=f"Issue not found: {args['parent_id']}", code=ErrorCode.NOT_FOUND))
+    except ValueError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+    _refresh_summary()
+    if detail == "full":
+        full_result: BatchResponse[PublicIssue] = BatchResponse(
+            succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in succeeded],
+            failed=failed,
+        )
+        return _text(full_result)
+    result: BatchResponse[str] = BatchResponse(
+        succeeded=[row["id"] for row in succeeded],
+        failed=failed,
+    )
+    return _text(result)
 
 
 async def _handle_get_critical_path(arguments: dict[str, Any]) -> list[TextContent]:

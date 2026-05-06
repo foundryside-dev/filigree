@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from filigree.db_base import DBMixinProtocol, _now_iso
 from filigree.models import _EMPTY_TS, Issue
+from filigree.types.api import BatchFailure
 from filigree.types.core import IssueDict
 from filigree.types.planning import (
     ChildSummary,
@@ -82,6 +83,17 @@ def _normalize_dep_ref(dep_ref: Any) -> str:
         return dep_ref
     msg = f"dep_ref must be int or str, got {type(dep_ref).__name__}: {dep_ref!r}"
     raise ValueError(msg)
+
+
+def _merge_labels(*label_groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in label_groups:
+        for label in group:
+            if label not in seen:
+                merged.append(label)
+                seen.add(label)
+    return merged
 
 
 class NotAReleaseError(ValueError):
@@ -373,6 +385,75 @@ class PlanningMixin(DBMixinProtocol):
         ).fetchall()
         return self._build_issues_batch([r["id"] for r in rows])
 
+    def _normalize_label_inputs(self, labels: Any, source: str) -> list[str]:
+        if labels is None:
+            return []
+        if not isinstance(labels, list):
+            msg = f"{source} must be a list of strings"
+            raise ValueError(msg)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_label in labels:
+            label = self._validate_label_name(raw_label)
+            if label not in seen:
+                normalized.append(label)
+                seen.add(label)
+        return normalized
+
+    def _insert_label_no_commit(self, issue_id: str, label: str) -> bool:
+        if label.startswith("review:"):
+            existing_review = {
+                row["label"]
+                for row in self.conn.execute(
+                    "SELECT label FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
+                    (issue_id,),
+                ).fetchall()
+            }
+            if existing_review == {label}:
+                return False
+            self.conn.execute("DELETE FROM labels WHERE issue_id = ? AND label LIKE 'review:%'", (issue_id,))
+        cursor = self.conn.execute(
+            "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+            (issue_id, label),
+        )
+        return cursor.rowcount > 0
+
+    def _insert_labels_no_commit(self, issue_id: str, labels: list[str]) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        for label in labels:
+            added = self._insert_label_no_commit(issue_id, label)
+            results.append({"id": issue_id, "label": label, "status": "added" if added else "already_exists"})
+        return results
+
+    def _collect_subtree_issue_ids(self, parent_id: str) -> list[str]:
+        self.get_issue(parent_id)
+        issue_ids: list[str] = []
+        queue = deque([parent_id])
+        while queue:
+            issue_id = queue.popleft()
+            issue_ids.append(issue_id)
+            rows = self.conn.execute(
+                "SELECT id FROM issues WHERE parent_id = ? ORDER BY priority, created_at",
+                (issue_id,),
+            ).fetchall()
+            queue.extend(row["id"] for row in rows)
+        return issue_ids
+
+    def label_subtree(self, parent_id: str, *, label: str) -> tuple[list[dict[str, str]], list[BatchFailure]]:
+        """Add a label to a parent issue and every descendant."""
+        normalized = self._validate_label_name(label)
+        issue_ids = self._collect_subtree_issue_ids(parent_id)
+        try:
+            results: list[dict[str, str]] = []
+            for issue_id in issue_ids:
+                added = self._insert_label_no_commit(issue_id, normalized)
+                results.append({"id": issue_id, "status": "added" if added else "already_exists"})
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return results, []
+
     def get_plan(self, milestone_id: str) -> PlanTree:
         """Get milestone->phase->step tree with progress stats."""
         milestone = self.get_issue(milestone_id)
@@ -447,6 +528,24 @@ class PlanningMixin(DBMixinProtocol):
                     step_data.get("priority", 2),
                     f"Phase {phase_idx + 1}, Step {step_idx + 1}",
                 )
+        milestone_labels = self._normalize_label_inputs(milestone.get("labels"), "milestone.labels")
+        phase_labels: list[list[str]] = []
+        step_labels: list[list[list[str]]] = []
+        for phase_idx, phase_data in enumerate(phases):
+            labels_for_phase = _merge_labels(
+                milestone_labels,
+                self._normalize_label_inputs(phase_data.get("labels"), f"phases[{phase_idx}].labels"),
+            )
+            phase_labels.append(labels_for_phase)
+            labels_for_steps: list[list[str]] = []
+            for step_idx, step_data in enumerate(phase_data.get("steps", [])):
+                labels_for_steps.append(
+                    _merge_labels(
+                        labels_for_phase,
+                        self._normalize_label_inputs(step_data.get("labels"), f"phases[{phase_idx}].steps[{step_idx}].labels"),
+                    )
+                )
+            step_labels.append(labels_for_steps)
 
         now = _now_iso()
         milestone_initial = self.templates.get_initial_state("milestone")
@@ -473,6 +572,7 @@ class PlanningMixin(DBMixinProtocol):
                 ),
             )
             self._record_event(ms_id, "created", actor=actor, new_value=milestone["title"])
+            self._insert_labels_no_commit(ms_id, milestone_labels)
 
             # Track all created step IDs for cross-phase dependency resolution
             # step_ids[phase_idx][step_idx] = issue_id
@@ -500,6 +600,7 @@ class PlanningMixin(DBMixinProtocol):
                     ),
                 )
                 self._record_event(phase_id, "created", actor=actor, new_value=phase_data["title"])
+                self._insert_labels_no_commit(phase_id, phase_labels[phase_idx])
 
                 # Create steps
                 phase_step_ids: list[str] = []
@@ -525,6 +626,7 @@ class PlanningMixin(DBMixinProtocol):
                         ),
                     )
                     self._record_event(step_id, "created", actor=actor, new_value=step_data["title"])
+                    self._insert_labels_no_commit(step_id, step_labels[phase_idx][step_idx])
                     phase_step_ids.append(step_id)
                 step_ids.append(phase_step_ids)
 

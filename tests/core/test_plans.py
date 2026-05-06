@@ -103,6 +103,49 @@ class TestCreatePlan:
         assert plan["total_steps"] == 0
         assert len(plan["phases"]) == 1
 
+    def test_plan_labels_propagate_with_level_overrides(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Labelled", "labels": ["release:v1", " scratch "]},
+            [
+                {
+                    "title": "Phase 1",
+                    "labels": ["phase:build"],
+                    "steps": [
+                        {"title": "Step 1", "labels": ["step:one"]},
+                        {"title": "Step 2"},
+                    ],
+                },
+            ],
+        )
+
+        milestone = plan["milestone"]
+        phase = plan["phases"][0]["phase"]
+        step_with_override = plan["phases"][0]["steps"][0]
+        inherited_step = plan["phases"][0]["steps"][1]
+
+        assert set(milestone["labels"]) == {"release:v1", "scratch"}
+        assert set(phase["labels"]) == {"release:v1", "scratch", "phase:build"}
+        assert set(step_with_override["labels"]) == {"release:v1", "scratch", "phase:build", "step:one"}
+        assert set(inherited_step["labels"]) == {"release:v1", "scratch", "phase:build"}
+
+    def test_label_subtree_adds_label_to_root_and_descendants(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Needs label"},
+            [{"title": "Phase", "steps": [{"title": "Step"}]}],
+        )
+
+        labeled, errors = db.label_subtree(plan["milestone"]["id"], label="scratch")
+
+        assert errors == []
+        assert {row["id"] for row in labeled} == {
+            plan["milestone"]["id"],
+            plan["phases"][0]["phase"]["id"],
+            plan["phases"][0]["steps"][0]["id"],
+        }
+        assert "scratch" in db.get_issue(plan["milestone"]["id"]).labels
+        assert "scratch" in db.get_issue(plan["phases"][0]["phase"]["id"]).labels
+        assert "scratch" in db.get_issue(plan["phases"][0]["steps"][0]["id"]).labels
+
     def test_plan_empty_milestone_title_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="Milestone 'title' is required"):
             db.create_plan({"title": ""}, [{"title": "Phase 1"}])

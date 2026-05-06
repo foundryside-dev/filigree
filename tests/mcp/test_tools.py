@@ -575,6 +575,51 @@ class TestCreatePlan:
         assert data["milestone"]["priority"] == 1
         assert data["phases"][0]["steps"][0]["priority"] == 0
 
+    async def test_create_plan_labels_propagate_with_level_overrides(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool(
+            "create_plan",
+            {
+                "milestone": {"title": "Labelled plan", "labels": ["release:v1", "scratch"]},
+                "phases": [
+                    {
+                        "title": "Phase A",
+                        "labels": ["phase:build"],
+                        "steps": [
+                            {"title": "Step A.1", "labels": ["step:one"]},
+                            {"title": "Step A.2"},
+                        ],
+                    }
+                ],
+            },
+        )
+        data = _parse(result)
+        assert set(data["milestone"]["labels"]) == {"release:v1", "scratch"}
+        assert set(data["phases"][0]["phase"]["labels"]) == {"release:v1", "scratch", "phase:build"}
+        assert set(data["phases"][0]["steps"][0]["labels"]) == {"release:v1", "scratch", "phase:build", "step:one"}
+        assert set(data["phases"][0]["steps"][1]["labels"]) == {"release:v1", "scratch", "phase:build"}
+
+    async def test_label_subtree_labels_root_and_descendants(self, mcp_db: FiligreeDB) -> None:
+        created = await call_tool(
+            "create_plan",
+            {
+                "milestone": {"title": "Subtree"},
+                "phases": [{"title": "Phase", "steps": [{"title": "Step"}]}],
+            },
+        )
+        plan = _parse(created)
+        milestone_id = plan["milestone"]["issue_id"]
+        phase_id = plan["phases"][0]["phase"]["issue_id"]
+        step_id = plan["phases"][0]["steps"][0]["issue_id"]
+
+        result = await call_tool("label_subtree", {"parent_id": milestone_id, "label": "scratch"})
+        data = _parse(result)
+
+        assert set(data["succeeded"]) == {milestone_id, phase_id, step_id}
+        assert data["failed"] == []
+        assert "scratch" in mcp_db.get_issue(milestone_id).labels
+        assert "scratch" in mcp_db.get_issue(phase_id).labels
+        assert "scratch" in mcp_db.get_issue(step_id).labels
+
 
 class TestBatchClose:
     async def test_batch_close(self, mcp_db: FiligreeDB) -> None:

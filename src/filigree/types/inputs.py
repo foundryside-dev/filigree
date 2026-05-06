@@ -256,6 +256,7 @@ class StepInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    labels: NotRequired[list[str]]
     deps: NotRequired[list[int | str]]
 
 
@@ -263,6 +264,7 @@ class PhaseInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    labels: NotRequired[list[str]]
     steps: NotRequired[list[StepInput]]
 
 
@@ -270,12 +272,19 @@ class MilestoneInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    labels: NotRequired[list[str]]
 
 
 class CreatePlanArgs(TypedDict):
     milestone: MilestoneInput
     phases: list[PhaseInput]
     actor: NotRequired[str]
+
+
+class LabelSubtreeArgs(TypedDict):
+    parent_id: str
+    label: str
+    response_detail: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +522,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "remove_dependency": RemoveDependencyArgs,
     "get_plan": GetPlanArgs,
     "create_plan": CreatePlanArgs,
+    "label_subtree": LabelSubtreeArgs,
     # workflow.py
     "get_template": GetTemplateArgs,
     "get_type_info": GetTypeInfoArgs,
