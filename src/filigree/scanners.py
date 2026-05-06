@@ -84,6 +84,25 @@ class ScannerConfig:
             "name": self.name,
             "description": self.description,
             "file_types": list(self.file_types),
+            **self.risk_metadata(),
+        }
+
+    def risk_metadata(self) -> dict[str, object]:
+        """Return conservative execution and egress metadata for agent callers.
+
+        Registry scanners are arbitrary external processes. Filigree only
+        passes file paths, but those processes can read repository files and
+        report results through the configured callback URL, so expose that
+        risk before callers trigger a scan.
+        """
+        return {
+            "execution_mode": "external_process",
+            "may_send_contents": True,
+            "requires_dashboard": True,
+            "estimated_cost": "unknown",
+            "safe_preview_only": True,
+            "requires_approval": True,
+            "risk_summary": "External scanner process may read repository files; result callback is localhost-only by default.",
         }
 
 

@@ -2101,7 +2101,14 @@ class TestScannerTools:
         self._write_scanner_toml(mcp_db)
         result = _parse(await call_tool("list_scanners", {}))
         assert len(result["items"]) == 1
-        assert result["items"][0]["name"] == "test-scanner"
+        scanner = result["items"][0]
+        assert scanner["name"] == "test-scanner"
+        assert scanner["execution_mode"] == "external_process"
+        assert scanner["may_send_contents"] is True
+        assert scanner["requires_dashboard"] is True
+        assert scanner["estimated_cost"] == "unknown"
+        assert scanner["safe_preview_only"] is True
+        assert scanner["requires_approval"] is True
 
     async def test_trigger_scan_scanner_not_found(self, mcp_db: FiligreeDB) -> None:
         result = _parse(

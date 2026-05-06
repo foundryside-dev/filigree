@@ -835,5 +835,6 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
             "command_string": shlex.join(cmd),
             "valid": cmd_err is None,
             "validation_error": cmd_err,
+            **cfg.risk_metadata(),
         }
     )

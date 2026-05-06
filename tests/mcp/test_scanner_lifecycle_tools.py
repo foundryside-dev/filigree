@@ -78,6 +78,13 @@ class TestPreviewScanTool:
             assert data["scanner"] == "test-scanner"
             assert isinstance(data["command"], list)
             assert "preview_target.py" in data["command_string"]
+            assert data["execution_mode"] == "external_process"
+            assert data["may_send_contents"] is True
+            assert data["requires_dashboard"] is True
+            assert data["estimated_cost"] == "unknown"
+            assert data["safe_preview_only"] is True
+            assert data["requires_approval"] is True
+            assert "repository files" in data["risk_summary"]
         finally:
             _cleanup_files(mcp_db, files)
 

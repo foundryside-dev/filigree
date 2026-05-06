@@ -87,7 +87,7 @@ class TestListScannersCommand:
             os.chdir(original)
 
     def test_list_scanner_present_item_shape(self, initialized_project: Path) -> None:
-        """Items must include name, description, file_types (ScannerConfig.to_dict() shape)."""
+        """Items must include ScannerConfig.to_dict() scanner metadata."""
         _write_scanner_toml(initialized_project)
         runner = CliRunner()
         original = os.getcwd()
@@ -102,7 +102,18 @@ class TestListScannersCommand:
             assert "description" in item
             assert "file_types" in item
             # Exact key set matches ScannerConfig.to_dict()
-            assert set(item.keys()) == {"name", "description", "file_types"}
+            assert set(item.keys()) == {
+                "description",
+                "estimated_cost",
+                "execution_mode",
+                "file_types",
+                "may_send_contents",
+                "name",
+                "requires_approval",
+                "requires_dashboard",
+                "risk_summary",
+                "safe_preview_only",
+            }
         finally:
             os.chdir(original)
 
