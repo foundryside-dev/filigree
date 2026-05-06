@@ -1001,6 +1001,12 @@ class TestCriticalPathResponseShape:
             length=1,
         )
         hints = get_type_hints(CriticalPathResponse)
+        assert set(result.keys()) <= set(hints.keys())
+        assert {"path", "length"} <= set(result.keys())
+
+    def test_empty_note_is_optional(self) -> None:
+        result = CriticalPathResponse(path=[], length=0, note="no open dependency chains")
+        hints = get_type_hints(CriticalPathResponse)
         assert set(result.keys()) == set(hints.keys())
 
 

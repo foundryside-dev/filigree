@@ -482,4 +482,7 @@ async def _handle_get_critical_path(arguments: dict[str, Any]) -> list[TextConte
 
     tracker = _get_db()
     path = [cast(CriticalPathMcpNode, critical_path_node_to_mcp(node)) for node in tracker.get_critical_path()]
-    return _text(CriticalPathResponse(path=path, length=len(path)))
+    response = CriticalPathResponse(path=path, length=len(path))
+    if not path:
+        response["note"] = "no open dependency chains"
+    return _text(response)

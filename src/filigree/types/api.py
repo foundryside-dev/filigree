@@ -289,6 +289,7 @@ class CriticalPathResponse(TypedDict):
 
     path: list[CriticalPathMcpNode]
     length: int
+    note: NotRequired[str]
 
 
 class JsonlTransferResponse(TypedDict):

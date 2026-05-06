@@ -1123,6 +1123,7 @@ class TestCriticalPathMCP:
         data = _parse(result)
         assert data["length"] == 0
         assert data["path"] == []
+        assert data["note"] == "no open dependency chains"
 
 
 class TestUnknownTool:
