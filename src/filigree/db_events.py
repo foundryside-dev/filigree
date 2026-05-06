@@ -101,14 +101,40 @@ class EventsMixin(DBMixinProtocol):
         ).fetchall()
         return [self._build_event_record_with_title(r) for r in rows]
 
-    def get_events_since(self, since: str, *, limit: int = 100) -> list[EventRecordWithTitle]:
+    def get_events_since(
+        self,
+        since: str,
+        *,
+        limit: int = 100,
+        actor: str | None = None,
+        issue_id: str | None = None,
+        label: str | None = None,
+        event_type: str | None = None,
+    ) -> list[EventRecordWithTitle]:
         """Get events since a given ISO timestamp, ordered chronologically."""
+        clauses = ["e.created_at > ?"]
+        params: list[object] = [since]
+        if actor is not None:
+            clauses.append("e.actor = ?")
+            params.append(actor)
+        if issue_id is not None:
+            clauses.append("e.issue_id = ?")
+            params.append(issue_id)
+        if label is not None:
+            clauses.append("EXISTS (SELECT 1 FROM labels l WHERE l.issue_id = e.issue_id AND l.label = ?)")
+            params.append(label)
+        if event_type is not None:
+            clauses.append("e.event_type = ?")
+            params.append(event_type)
+        params.append(limit)
+
+        where_sql = " AND ".join(clauses)
         rows = self.conn.execute(
             "SELECT e.*, i.title as issue_title FROM events e "
             "JOIN issues i ON e.issue_id = i.id "
-            "WHERE e.created_at > ? "
+            f"WHERE {where_sql} "
             "ORDER BY e.created_at ASC, e.id ASC LIMIT ?",
-            (since, limit),
+            params,
         ).fetchall()
         return [self._build_event_record_with_title(r) for r in rows]
 

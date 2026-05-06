@@ -939,6 +939,49 @@ class TestGetChanges:
         data = _parse(result)
         assert len(data["items"]) == 2
 
+    async def test_get_changes_filters_by_actor_and_event_type(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("Alpha event", actor="agent-alpha")
+        mcp_db.create_issue("Beta event", actor="agent-beta")
+
+        result = await call_tool(
+            "get_changes",
+            {"since": "2000-01-01T00:00:00+00:00", "actor": "agent-alpha", "type": "created"},
+        )
+
+        data = _parse(result)
+        assert [item["actor"] for item in data["items"]] == ["agent-alpha"]
+        assert {item["event_type"] for item in data["items"]} == {"created"}
+        assert data["next_since"] == data["items"][-1]["created_at"]
+
+    async def test_get_changes_filters_by_issue_id(self, mcp_db: FiligreeDB) -> None:
+        target = mcp_db.create_issue("Target changes")
+        other = mcp_db.create_issue("Other changes")
+        mcp_db.update_issue(target.id, status="in_progress", actor="agent-alpha")
+        mcp_db.update_issue(other.id, status="in_progress", actor="agent-beta")
+
+        result = await call_tool("get_changes", {"since": "2000-01-01T00:00:00+00:00", "issue_id": target.id})
+
+        data = _parse(result)
+        assert data["items"]
+        assert {item["issue_id"] for item in data["items"]} == {target.id}
+
+    async def test_get_changes_filters_by_label_before_pagination(self, mcp_db: FiligreeDB) -> None:
+        target = mcp_db.create_issue("Labelled changes", labels=["cluster:focus"])
+        mcp_db.update_issue(target.id, status="in_progress", actor="agent-alpha")
+        for i in range(5):
+            mcp_db.create_issue(f"Noise {i}")
+
+        result = await call_tool(
+            "get_changes",
+            {"since": "2000-01-01T00:00:00+00:00", "label": "cluster:focus", "limit": 1},
+        )
+
+        data = _parse(result)
+        assert len(data["items"]) == 1
+        assert data["items"][0]["issue_id"] == target.id
+        assert data["has_more"] is True
+        assert data["next_since"] == data["items"][0]["created_at"]
+
 
 class TestActorIdentity:
     async def test_update_with_actor(self, mcp_db: FiligreeDB) -> None:

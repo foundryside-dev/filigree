@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 
 from mcp.types import TextContent, Tool
 
 from filigree.issue_payloads import issue_to_public
-from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range
+from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range, _validate_str
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp, undo_result_to_mcp
 from filigree.types.api import (
     AddCommentResult,
@@ -24,6 +24,7 @@ from filigree.types.api import (
     PublicIssue,
     parse_response_detail,
 )
+from filigree.types.events import EventType
 from filigree.types.inputs import (
     AddCommentArgs,
     AddLabelArgs,
@@ -184,7 +185,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="get_changes",
-            description="Get events since a timestamp (for session resumption). Returns chronological event list.",
+            description="Get events since a timestamp (for session resumption). Returns chronological event list with optional catch-up filters.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -194,6 +195,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "default": 100,
                         "minimum": 1,
                         "description": "Max events (default 100)",
+                    },
+                    "actor": {"type": "string", "description": "Only include events written by this actor"},
+                    "issue_id": {"type": "string", "description": "Only include events for this issue"},
+                    "label": {"type": "string", "description": "Only include events for issues currently carrying this label"},
+                    "type": {
+                        "type": "string",
+                        "enum": list(get_args(EventType)),
+                        "description": "Only include events of this event type",
                     },
                 },
                 "required": ["since"],
@@ -558,12 +567,39 @@ async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
         )
     tracker = _get_db()
     limit = args.get("limit", 100)
+    limit_err = _validate_int_range(limit, "limit", min_val=1)
+    if limit_err:
+        return limit_err
+    for field in ("actor", "issue_id", "label", "type"):
+        str_err = _validate_str(args.get(field), field)
+        if str_err:
+            return str_err
+    label = args.get("label")
+    if label is not None:
+        label = label.strip()
+        if not label:
+            return _text(ErrorResponse(error="label cannot be empty", code=ErrorCode.VALIDATION))
+        if any(ord(c) < 32 or c == "\x7f" for c in label):
+            return _text(ErrorResponse(error="label contains control characters", code=ErrorCode.VALIDATION))
+    event_type = args.get("type")
+    if event_type is not None and event_type not in get_args(EventType):
+        return _text(ErrorResponse(error=f"Invalid event type: {event_type}", code=ErrorCode.VALIDATION))
     # Overfetch by 1 to detect has_more, matching list_issues / search_issues.
-    events = tracker.get_events_since(since_normalized, limit=limit + 1)
+    events = tracker.get_events_since(
+        since_normalized,
+        limit=limit + 1,
+        actor=args.get("actor"),
+        issue_id=args.get("issue_id"),
+        label=label,
+        event_type=event_type,
+    )
     has_more = len(events) > limit
     if has_more:
         events = events[:limit]
-    return _text(_list_response([event_to_mcp(event) for event in events], has_more=has_more))
+    items = [event_to_mcp(event) for event in events]
+    response: dict[str, Any] = dict(_list_response(items, has_more=has_more))
+    response["next_since"] = items[-1]["created_at"] if items else since_normalized
+    return _text(response)
 
 
 async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
