@@ -238,6 +238,7 @@ async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
                         "dismiss_observation",
                         "promote_observation",
                         "batch_dismiss_observations",
+                        "batch_promote_observations",
                     ],
                 },
                 "scan_finding": {

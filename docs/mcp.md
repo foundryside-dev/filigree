@@ -20,7 +20,7 @@ Filigree exposes an MCP (Model Context Protocol) server so AI agents interact na
   - [Analytics](#analytics)
   - [Data Management](#data-management)
   - [Files and Traceability](#files-and-traceability)
-  - [Annotations](#annotations)
+  - [Agent Context Notes](#agent-context-notes)
   - [Scanning](#scanning)
 
 ## Setup
@@ -568,7 +568,24 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `file_id` | string | yes | File ID |
 | `force` | boolean | no | Cascade associations and open findings (default false) |
 
-### Annotations
+### Agent Context Notes
+
+Observations and annotations are both agent-facing context capture tools:
+observations are ephemeral triage notes, while annotations are durable
+file-anchored notes with provenance and drift detection.
+
+#### Observations
+
+| Tool | Description |
+|------|-------------|
+| `observe` | Record a quick scratchpad note, optionally anchored to a file |
+| `list_observations` | List active observations with file filters and pagination |
+| `dismiss_observation` | Dismiss one observation with audit trail |
+| `promote_observation` | Promote one observation to a tracked issue |
+| `batch_dismiss_observations` | Dismiss multiple observations in one call |
+| `batch_promote_observations` | Promote multiple observations in one call |
+
+#### Annotations
 
 Annotations are durable, project-shared file notes with provenance. They are
 not issues, comments, findings, or observations. Every annotation is anchored to
@@ -593,7 +610,7 @@ to `summary`; pass `full` to include provenance, links, and audit events.
 | `get_issue_annotations` | List annotations linked to an issue or epic |
 | `list_attention_annotations` | List active critical `must_consider` annotations |
 
-#### `annotate_file`
+##### `annotate_file`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

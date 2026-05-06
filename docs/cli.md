@@ -15,9 +15,8 @@ Most data commands support `--json` for machine-readable output (`--json` is sup
 - [Planning](#planning)
 - [Workflow Templates](#workflow-templates)
 - [Analytics and Events](#analytics-and-events)
-- [Observations](#observations)
+- [Agent Context Notes](#agent-context-notes)
 - [Files and Findings](#files-and-findings)
-- [Annotations](#annotations)
 - [Scanners](#scanners)
 - [Data Management](#data-management)
 
@@ -627,7 +626,13 @@ Event history for a specific issue, newest first.
 | `id` | string | Issue ID (positional) |
 | `--limit` | integer | Max events (default 50) |
 
-## Observations
+## Agent Context Notes
+
+Observations and annotations are both agent-facing context capture tools:
+observations are ephemeral scratchpad notes, while annotations are durable
+file-anchored notes with provenance and drift detection.
+
+### Observations
 
 Agent scratchpad — fire-and-forget notes that expire after 14 days. Use `list-observations` with `--label=from-observation` after promoting to find resulting issues.
 
@@ -640,7 +645,7 @@ filigree promote-observation <obs-id> --type bug --priority 1
 filigree batch-dismiss-observations <id1> <id2> --reason "Stale"
 ```
 
-### `observe`
+#### `observe`
 
 Record a quick observation note.
 
@@ -653,7 +658,7 @@ Record a quick observation note.
 | `--source-issue-id` | string | Link to a related issue |
 | `--priority` | 0-4 | Observation priority |
 
-### `list-observations`
+#### `list-observations`
 
 List observations with optional filters. Output: `ListResponse[T]` (`{items, has_more}`).
 
@@ -664,7 +669,7 @@ List observations with optional filters. Output: `ListResponse[T]` (`{items, has
 | `--file-path` | string | Filter by file path |
 | `--file-id` | string | Filter by file record ID |
 
-### `dismiss-observation`
+#### `dismiss-observation`
 
 Dismiss an observation (will not generate an issue).
 
@@ -673,7 +678,7 @@ Dismiss an observation (will not generate an issue).
 | `observation-id` | string | Observation ID (positional) |
 | `--reason` | string | Dismissal reason |
 
-### `promote-observation`
+#### `promote-observation`
 
 Promote an observation to a tracked issue.
 
@@ -685,7 +690,7 @@ Promote an observation to a tracked issue.
 | `--title` | string | Override title (default: observation summary) |
 | `--description` | string | Override description |
 
-### `batch-dismiss-observations`
+#### `batch-dismiss-observations`
 
 Dismiss multiple observations in one call.
 
@@ -847,7 +852,7 @@ Update multiple findings in one call.
 | `finding-ids` | string... | Finding IDs (positional, multiple) |
 | `--status` | string | New status (required) |
 
-## Annotations
+### Annotations
 
 Annotations are durable, project-shared file notes with checksum/git/diff
 provenance and computed anchor drift. They are file anchored and can link to
@@ -866,7 +871,7 @@ JSON list output uses `{items, has_more, next_offset?}`. `--detail summary` is
 the default for list commands; `--detail full` includes provenance, links, and
 audit events.
 
-### `annotate-file`
+#### `annotate-file`
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -879,7 +884,7 @@ audit events.
 | `--link` | string | `target_type:target_id:relationship` |
 | `--session-ref` | string | Optional opaque session/run reference |
 
-### `list-annotations`
+#### `list-annotations`
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

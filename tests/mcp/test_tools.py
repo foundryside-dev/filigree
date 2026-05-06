@@ -1163,6 +1163,7 @@ class TestResource:
         assert prefixes["observation"]["prefix"] == "mcp-obs-"
         assert prefixes["observation"]["primary_key"] == "observation_id"
         assert "promote_observation" in prefixes["observation"]["accepted_by_tools"]
+        assert "batch_promote_observations" in prefixes["observation"]["accepted_by_tools"]
         assert prefixes["scan_finding"]["prefix"] == "mcp-sf-"
         assert prefixes["scan_finding"]["primary_key"] == "finding_id"
         assert "promote_finding" in prefixes["scan_finding"]["accepted_by_tools"]

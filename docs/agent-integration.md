@@ -4,7 +4,7 @@ Filigree is built for AI coding agents. This guide covers how foreground agents,
 
 ## Foreground Agents
 
-Foreground agents (Claude Code, Codex) use the **MCP server** directly — 73 tools for full read/write access without parsing text.
+Foreground agents (Claude Code, Codex) use the **MCP server** directly — see the [MCP Server Reference](mcp.md) for the current live tool count and full read/write surface.
 
 ```bash
 filigree install --claude-code    # Set up MCP for Claude Code
@@ -49,7 +49,7 @@ The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, 
 
 ## Schema-Mismatch (Warm-but-Degraded MCP)
 
-When the installed `filigree` is older than the project's database, the MCP server still launches but every tool call returns an `ErrorResponse` with `code: NOT_INITIALIZED` and upgrade guidance. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
+When the installed `filigree` is older than the project's database, the MCP server still launches in warm-but-degraded mode. Most tool calls return an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance; `get_mcp_status` remains available as a safe read-only diagnostic. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
 
 ## Session Resumption
 
@@ -90,7 +90,7 @@ Via MCP:
 start_work(issue_id="...", assignee="agent-1")            # Claim + transition atomically
 start_next_work(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
 claim_issue(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
-release_claim(issue_id="...")                             # Release back to open
+release_claim(issue_id="...")                             # Clear assignee without changing status
 ```
 
 ### Tie-Break Ordering
