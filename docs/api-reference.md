@@ -4,6 +4,8 @@ Programmatic interface for the filigree issue tracker. All public classes and fu
 
 **See also:** [CLI Reference](cli.md) | [MCP Server](mcp.md) | [Architecture](architecture.md) | [Workflows](workflows.md)
 
+> **Surface scope.** This page documents the in-process Python API (`FiligreeDB` and helpers). It returns native Python objects (`Issue`, tuples, `None`) and raises native exceptions. The unified 2.0 response envelopes (`BatchResponse`, `ListResponse`, `ErrorResponse` with closed `ErrorCode`) live one layer up, on the MCP and CLI surfaces — see [MCP Server](mcp.md), [CLI Reference](cli.md), and [Agent Integration](agent-integration.md). The mapping from `ValueError` / `KeyError` here to `ErrorCode` on the wire is in `filigree.types.api.classify_value_error`.
+
 ---
 
 ## Quick Start
@@ -313,6 +315,49 @@ Releases a claimed issue by clearing its assignee. Does **not** change status.
 
 **Raises:** `ValueError` if the issue has no assignee set.
 
+#### `start_work`
+
+```python
+def start_work(
+    self,
+    issue_id: str,
+    *,
+    assignee: str,
+    target_status: str | None = None,
+    actor: str = "",
+) -> Issue
+```
+
+Composed 2.0 operation: atomically claim an issue **and** transition it to a working status in one call. Performs `claim_issue` followed by `update_issue(status=target_status)` with a compensating-action rollback — if the transition fails, the claim is released. Rollback only fires when *this* call acquired the claim, so a pre-existing same-assignee claim is preserved.
+
+`target_status` defaults to the type's `canonical_working_status()`. If the type defines multiple wip-category targets reachable from the current status, raises `AmbiguousTransitionError` (caller must specify `target_status` explicitly); if zero, raises `InvalidTransitionError`.
+
+This is the recommended path for picking up work in 2.0 — `claim_issue` remains for the niche "reserve without transitioning" case.
+
+**Raises:**
+- `KeyError` if the issue does not exist.
+- `ValueError` (`CONFLICT`) if the issue is already assigned to someone else.
+- `AmbiguousTransitionError` / `InvalidTransitionError` from working-status resolution.
+
+#### `start_next_work`
+
+```python
+def start_next_work(
+    self,
+    *,
+    assignee: str,
+    type_filter: str | None = None,
+    priority_min: int | None = None,
+    priority_max: int | None = None,
+    target_status: str | None = None,
+    actor: str = "",
+) -> Issue | None
+```
+
+Composed 2.0 operation: claim the highest-priority ready issue matching the filters and atomically transition it to a working status. Same rollback contract as `start_work`. Tie-break ordering inherits from `claim_next` (priority asc, `created_at` asc, `issue_id` asc).
+
+**Returns:** The claimed and transitioned `Issue`, or `None` if no matching ready issue exists.
+
 ---
 
 ### Batch Methods
@@ -395,6 +440,14 @@ def get_file(self, file_id: str) -> FileRecord
 
 Returns one file record by ID.
 
+#### `delete_file_record`
+
+```python
+def delete_file_record(self, file_id: str, *, force: bool = False) -> dict[str, Any]
+```
+
+Deletes a file record plus file-domain cleanup rows. Without `force`, refuses records that still have issue associations or non-terminal findings; with `force`, cascades associations and findings and unlinks observations from the deleted file.
+
 #### `get_file_timeline`
 
 ```python
@@ -405,10 +458,12 @@ def get_file_timeline(
     limit: int = 50,
     offset: int = 0,
     event_type: str | None = None,
+    include_issue_events: bool = False,
 ) -> dict[str, Any]
 ```
 
 Returns merged finding/association/metadata events for a file with pagination metadata.
+Pass `include_issue_events=True` to merge events from associated issues; `event_type="issue_event"` filters to those issue-side events.
 
 #### `get_issue_files`
 
@@ -762,10 +817,11 @@ Imports records from a JSONL file.
 #### `archive_closed`
 
 ```python
-def archive_closed(self, *, days_old: int = 30, actor: str = "") -> list[str]
+def archive_closed(self, *, days_old: int = 30, actor: str = "", label: str | None = None) -> list[str]
 ```
 
 Archives issues that have been closed for more than `days_old` days by setting their status to `"archived"`.
+When `label` is provided, only closed issues currently carrying that label are archived.
 
 **Returns:** List of archived issue IDs.
 

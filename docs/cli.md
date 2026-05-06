@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands support `--json` for machine-readable output. The global `--actor` flag sets identity for the audit trail (default: `cli`).
+Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The global `--actor` flag sets identity for the audit trail (default: `cli`).
 
 ## Contents
 
@@ -702,6 +702,7 @@ filigree get-file-timeline <file-id>
 filigree get-issue-files <issue-id>
 filigree add-file-association <file-id> <issue-id> <assoc-type>
 filigree register-file src/auth.py --language python
+filigree delete-file-record <file-id> --force
 filigree list-findings --status open
 filigree get-finding <finding-id>
 filigree update-finding <finding-id> --status fixed
@@ -741,7 +742,8 @@ Get the event timeline for a tracked file.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `file-id` | string | File record ID (positional) |
-| `--event-type` | string | Filter by event type |
+| `--event-type` | string | Filter by event type (`finding`, `association`, `file_metadata_update`, `issue_event`) |
+| `--include-issue-events` | flag | Merge events from issues currently associated with the file |
 | `--limit` | integer | Max results |
 | `--offset` | integer | Skip first N results |
 
@@ -773,6 +775,15 @@ Register a source file in the file inventory.
 | `--language` | string | Language override |
 | `--file-type` | string | File type classification |
 | `--metadata` | JSON string | Extra metadata |
+
+### `delete-file-record`
+
+Delete a tracked file record. By default, this refuses records that still have issue associations or open findings. Use `--force` to cascade file associations and findings.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `file-id` | string | File record ID (positional) |
+| `--force` | flag | Cascade associations and open findings |
 
 ### `list-findings`
 
@@ -903,6 +914,7 @@ Ingest a finding in loom-shape JSON format. Reads from stdin by default; `--file
 filigree export backup.jsonl                # Export all data
 filigree import backup.jsonl --merge        # Import (skip existing)
 filigree archive --days=30                  # Archive old closed issues
+filigree archive --days=0 --label=scratch   # Archive closed scratch/review fixtures only
 filigree compact --keep=50                  # Compact event history
 filigree migrate --from-beads              # Migrate from beads tracker
 filigree clean-stale-findings --days=30     # Move stale unseen findings to fixed
@@ -935,6 +947,7 @@ Archive old closed issues to reduce active issue count.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--days` | integer | 30 | Archive issues closed more than N days ago |
+| `--label` | string | none | Only archive closed issues currently carrying this label |
 
 ### `compact`
 

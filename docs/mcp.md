@@ -101,7 +101,7 @@ Workflow guide with optional live project context. Agents use this to understand
 | `status_category` | enum | no | Filter by category: `open`, `wip`, `done` |
 | `type` | string | no | Filter by issue type |
 | `priority` | 0-4 | no | Filter by priority |
-| `parent_id` | string | no | Filter by parent issue ID |
+| `parent_issue_id` | string | no | Filter by parent issue ID |
 | `limit` | integer | no | Max results (default 100) |
 | `offset` | integer | no | Skip first N results |
 
@@ -116,7 +116,7 @@ Workflow guide with optional live project context. Agents use this to understand
 | `notes` | string | no | Additional notes |
 | `labels` | string[] | no | Labels to attach during creation (no separate `add_label` call needed) |
 | `deps` | string[] | no | Dependency issue IDs |
-| `parent_id` | string | no | Parent issue ID |
+| `parent_issue_id` | string | no | Parent issue ID |
 | `fields` | object | no | Custom fields from template schema |
 | `actor` | string | no | Agent identity for audit trail |
 
@@ -131,7 +131,7 @@ Workflow guide with optional live project context. Agents use this to understand
 | `description` | string | no | New description |
 | `notes` | string | no | New notes |
 | `assignee` | string | no | New assignee |
-| `parent_id` | string | no | New parent (empty string to clear) |
+| `parent_issue_id` | string | no | New parent (empty string to clear) |
 | `fields` | object | no | Fields to merge into existing |
 | `actor` | string | no | Agent identity for audit trail |
 
@@ -172,15 +172,15 @@ These tools take no required parameters.
 
 | Tool | Description |
 |------|-------------|
-| `add_dependency` | Add blocker: `from_id` depends on `to_id` |
+| `add_dependency` | Add blocker: `from_issue_id` depends on `to_issue_id` |
 | `remove_dependency` | Remove blocker relationship |
 
 #### `add_dependency` / `remove_dependency`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `from_id` | string | yes | Issue that is blocked |
-| `to_id` | string | yes | Issue that blocks |
+| `from_issue_id` | string | yes | Issue that is blocked |
+| `to_issue_id` | string | yes | Issue that blocks |
 | `actor` | string | no | Agent identity for audit trail |
 
 ### Comments and Labels
@@ -315,6 +315,17 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `batch_close` | Close multiple with per-item error reporting |
 | `batch_add_label` | Add the same label to multiple issues |
 | `batch_add_comment` | Add the same comment to multiple issues |
+| `batch_dismiss_observations` | Dismiss multiple observations at once |
+| `batch_update_findings` | Update status on multiple scan findings |
+
+All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed, newly_unblocked?}`) and accept an optional `response_detail: "slim" | "full"` (default `"slim"`). In `"slim"` mode `succeeded` is a list of compact records (`SlimIssue` for issue ops, IDs for label/comment/observation/finding ops); in `"full"` mode each batch tool upgrades `succeeded` to the full record type:
+
+| Tool | Slim `succeeded[i]` | Full `succeeded[i]` |
+|------|---------------------|---------------------|
+| `batch_update`, `batch_close` | `SlimIssue` | `IssueDict` |
+| `batch_add_label`, `batch_add_comment` | `issue_id: str` | `IssueDict` |
+| `batch_dismiss_observations` | `observation_id: str` | `ObservationDict` (snapshot pre-dismissal) |
+| `batch_update_findings` | `finding_id: str` | `ScanFindingDict` |
 
 #### `batch_update`
 
@@ -325,6 +336,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `priority` | 0-4 | no | New priority |
 | `assignee` | string | no | New assignee |
 | `fields` | object | no | Fields to merge |
+| `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
 
 #### `batch_close`
@@ -333,6 +345,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `issue_ids` | string[] | yes | Issue IDs |
 | `reason` | string | no | Close reason |
+| `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
 
 #### `batch_add_label`
@@ -341,6 +354,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `issue_ids` | string[] | yes | Issue IDs |
 | `label` | string | yes | Label to add |
+| `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
 
 #### `batch_add_comment`
@@ -349,6 +363,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `issue_ids` | string[] | yes | Issue IDs |
 | `text` | string | yes | Comment text |
+| `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
 
 ### Templates and Workflow
@@ -363,6 +378,8 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `list_packs` | Enabled workflow packs |
 | `get_workflow_guide` | Pack documentation |
 | `get_workflow_statuses` | Statuses by category (open/wip/done) |
+| `get_schema` | Entity ID prefixes and accepted tool families |
+| `get_mcp_status` | Read-only MCP server/schema compatibility diagnostic |
 | `explain_status` | Status transitions and required fields |
 | `reload_templates` | Refresh templates from disk |
 
@@ -402,6 +419,10 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `type` | string | yes | Issue type name |
 | `status` | string | yes | Status name |
+
+#### `get_mcp_status`
+
+No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, and `guidance`. This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
 
 ### Analytics
 
@@ -459,6 +480,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `days_old` | integer | no | Archive issues closed more than N days ago (default 30) |
 | `actor` | string | no | Agent identity for audit trail |
+| `label` | string | no | Only archive closed issues currently carrying this label |
 
 #### `compact_events`
 
@@ -476,6 +498,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `get_issue_files` | List files associated with an issue |
 | `add_file_association` | Associate file and issue (`bug_in`, `task_for`, `scan_finding`, `mentioned_in`) |
 | `register_file` | Register/get file record by project-relative path |
+| `delete_file_record` | Delete a file record, refusing associations/open findings unless forced |
 
 #### `list_files`
 
@@ -506,7 +529,8 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `file_id` | string | yes | File ID |
 | `limit` | integer | no | Max events (default 50) |
 | `offset` | integer | no | Skip first N events |
-| `event_type` | enum | no | `finding`, `association`, `file_metadata_update` |
+| `event_type` | enum | no | `finding`, `association`, `file_metadata_update`, `issue_event` |
+| `include_issue_events` | boolean | no | Merge events from issues currently associated with the file |
 
 #### `get_issue_files`
 
@@ -531,18 +555,27 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `file_type` | string | no | Optional file type tag |
 | `metadata` | object | no | Optional metadata map |
 
+#### `delete_file_record`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `file_id` | string | yes | File ID |
+| `force` | boolean | no | Cascade associations and open findings (default false) |
+
 ### Scanning
 
 | Tool | Description |
 |------|-------------|
 | `list_scanners` | List registered scanners |
-| `trigger_scan` | Trigger async file scan |
+| `trigger_scan` | Trigger async file scan (single file) |
+| `trigger_scan_batch` | Trigger a scanner across multiple files in one call |
+| `get_scan_status` | Live status + log tail for a `scan_run_id` |
+| `preview_scan` | Preview the command a scan would execute, without spawning a process |
+| `report_finding` | Report a single agent-discovered finding (no scanner config needed) |
 
 #### `list_scanners`
 
-No parameters. Returns scanners registered in `.filigree/scanners/*.toml`.
-
-Response: `{scanners: [{name, description, file_types}]}`
+No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in the unified list envelope: `{items: [{name, description, file_types, ...}], has_more: bool}`.
 
 #### `trigger_scan`
 
@@ -550,14 +583,57 @@ Response: `{scanners: [{name, description, file_types}]}`
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name (from list_scanners) |
 | `file_path` | string | yes | File path to scan (relative to project root) |
-| `api_url` | string | no | Dashboard URL (default http://localhost:8377, localhost only) |
+| `api_url` | string | no | Dashboard URL (default `http://localhost:8377`, localhost only) |
 
 Response: `{status, scanner, file_path, file_id, scan_run_id, pid, message}`
 
+#### `trigger_scan_batch`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scanner` | string | yes | Scanner name |
+| `file_paths` | string[] | yes | File paths to scan (relative to project root) |
+| `api_url` | string | no | Dashboard URL where the scanner POSTs results (localhost only) |
+
+Spawns one scanner process per file and returns per-file `scan_run_id`s plus a `batch_id` for correlation. Same 30s rate-limit applies per scanner+file.
+
+#### `get_scan_status`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scan_run_id` | string | yes | Scan run ID returned by `trigger_scan` / `trigger_scan_batch` |
+| `log_lines` | integer | no | Tail size (1–500, default 50) |
+
+Returns scan status with a live PID check and a tail of the scanner's log.
+
+#### `preview_scan`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scanner` | string | yes | Scanner name |
+| `file_path` | string | yes | File path (relative to project root) |
+
+Returns the exact command that *would* be executed, without spawning anything. Useful for debugging scanner config.
+
+#### `report_finding`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `file_path` | string | yes | Project-relative file path (auto-registered if not tracked) |
+| `rule_id` | string | yes | Finding identifier / title (e.g. `unused-import`, `sql-injection`) |
+| `message` | string | yes | Detailed description |
+| `severity` | enum | no | One of the registered severities (default `info`) |
+| `line_start` | integer | no | Start line (≥ 1) |
+| `line_end` | integer | no | End line (≥ 1) |
+| `category` | string | no | Optional grouping category |
+
+The agent-shortcut path: report a finding without standing up a scanner config. Auto-registers the file if needed.
+
 **Workflow:**
 1. `list_scanners` — discover available scanners
-2. `trigger_scan` — fire-and-forget scan, get `file_id` and `scan_run_id`
-3. Check results later via `GET /api/files/{file_id}/findings`
+2. `trigger_scan` or `trigger_scan_batch` — fire-and-forget, get `scan_run_id`(s)
+3. `get_scan_status` — poll for completion / tail logs
+4. Check results via `list_findings` / `get_finding` or `GET /api/loom/files/{file_id}/findings`
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
