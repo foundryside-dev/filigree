@@ -164,9 +164,13 @@ class MetaMixin(DBMixinProtocol):
             namespaces.setdefault("has", {"type": "virtual", "writable": False, "labels": has_labels})
 
         # Truncate after virtual namespaces are added so the per-namespace
-        # cap applies uniformly. top=0 stays unlimited.
-        if top > 0:
-            for ns_data in namespaces.values():
+        # cap applies uniformly. top=0 stays unlimited. Report the pre-cap
+        # total so clients can tell when a namespace has hidden tail entries.
+        for ns_data in namespaces.values():
+            total_before_cap = len(ns_data["labels"])
+            ns_data["total"] = total_before_cap
+            ns_data["truncated"] = top > 0 and total_before_cap > top
+            if top > 0:
                 ns_data["labels"] = ns_data["labels"][:top]
 
         total = sum(len(ns["labels"]) for ns in namespaces.values())
@@ -282,6 +286,10 @@ class MetaMixin(DBMixinProtocol):
                 "description": "Common labels without namespace prefix",
                 "writable": True,
                 "suggested": ["tech-debt", "regression", "security", "perf", "cherry-pick", "hotfix", "flaky-test", "wontfix"],
+                "discouraged": {
+                    "pattern": "P[0-4]",
+                    "reason": "Use the numeric priority field as the canonical priority signal; manual P0-P4 labels can drift.",
+                },
             },
         }
 

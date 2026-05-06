@@ -10,6 +10,7 @@ from typing import Any, cast, get_args
 from mcp.types import TextContent, Tool
 
 from filigree.issue_payloads import issue_to_public
+from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range, _validate_str
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp, undo_result_to_mcp
 from filigree.types.api import (
@@ -755,7 +756,7 @@ async def _handle_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
     tracker = _get_db()
     try:
         result = tracker.list_labels(
-            namespace=args.get("namespace"),
+            namespace=label_namespace_from_public(args.get("namespace")),
             top=args.get("top", 10),
         )
     except (sqlite3.Error, ValueError) as exc:
@@ -765,7 +766,9 @@ async def _handle_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
     # entries so list_labels matches the ListResponse[T] envelope used by
     # every other MCP list tool. The bounded total is recoverable by the
     # caller as ``sum(len(item['labels']) for item in items)``.
-    items: list[dict[str, Any]] = [{"namespace": ns, **ns_data} for ns, ns_data in result["namespaces"].items()]
+    items: list[dict[str, Any]] = [
+        label_namespace_item_to_public(ns, ns_data) for ns, ns_data in result["namespaces"].items()
+    ]
     return _text(_list_response(items, has_more=False))
 
 

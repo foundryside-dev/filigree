@@ -1128,6 +1128,24 @@ class TestLabelsCommand:
         data = json.loads(result.output)
         assert "items" in data
 
+    def test_labels_json_renames_bare_namespace(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Issue A", "-l", "tech-debt"])
+        result = runner.invoke(cli, ["labels", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        namespaces = {item["namespace"] for item in data["items"]}
+        assert "unnamespaced" in namespaces
+        assert "_bare" not in namespaces
+
+    def test_labels_public_unnamespaced_filter(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Issue A", "-l", "tech-debt", "-l", "cluster:x"])
+        result = runner.invoke(cli, ["labels", "--namespace", "unnamespaced", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["namespace"] for item in data["items"]] == ["unnamespaced"]
+
     def test_labels_namespace_filter(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         runner.invoke(cli, ["create", "Issue A", "-l", "cluster:x", "-l", "effort:m"])
@@ -1151,3 +1169,4 @@ class TestTaxonomyCommand:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "manual_suggested" in data
+        assert data["bare_labels"]["discouraged"]["pattern"] == "P[0-4]"

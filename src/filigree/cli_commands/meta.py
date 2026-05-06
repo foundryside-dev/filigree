@@ -10,6 +10,7 @@ import click
 
 from filigree.cli_common import get_db, refresh_summary
 from filigree.issue_payloads import issue_to_public
+from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public, label_namespace_to_public
 from filigree.types.api import ErrorCode
 
 
@@ -513,16 +514,19 @@ def batch_add_comment(
 
 def _list_labels_impl(namespace: str | None, top: int, as_json: bool) -> None:
     with get_db() as db:
-        result = db.list_labels(namespace=namespace, top=top)
+        result = db.list_labels(namespace=label_namespace_from_public(namespace), top=top)
         if as_json:
-            items = [{"namespace": ns, **ns_data} for ns, ns_data in result["namespaces"].items()]
+            items = [label_namespace_item_to_public(ns, ns_data) for ns, ns_data in result["namespaces"].items()]
             click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2))
             return
         for ns_name, ns_data in sorted(result["namespaces"].items()):
             writable = "rw" if ns_data["writable"] else "ro"
-            click.echo(f"\n{ns_name}: ({ns_data['type']}, {writable})")
+            display_name = label_namespace_to_public(ns_name)
+            click.echo(f"\n{display_name}: ({ns_data['type']}, {writable})")
             for item in ns_data["labels"]:
                 click.echo(f"  {item['label']}  ({item['count']})")
+            if ns_data.get("truncated"):
+                click.echo(f"  ... showing {len(ns_data['labels'])} of {ns_data['total']}; use --top 0 for all")
 
 
 @click.command("labels")

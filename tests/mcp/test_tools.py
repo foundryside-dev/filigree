@@ -3046,6 +3046,36 @@ class TestListLabels:
         assert "age" in ns_names
         assert "has" in ns_names
 
+    async def test_list_labels_renames_bare_namespace_for_public_response(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("A", labels=["tech-debt"])
+        result = await call_tool("list_labels", {})
+        data = _parse(result)
+
+        ns_names = {item["namespace"] for item in data["items"]}
+        assert "unnamespaced" in ns_names
+        assert "_bare" not in ns_names
+
+    async def test_list_labels_accepts_public_unnamespaced_filter(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("A", labels=["tech-debt", "cluster:x"])
+        result = await call_tool("list_labels", {"namespace": "unnamespaced"})
+        data = _parse(result)
+
+        assert [item["namespace"] for item in data["items"]] == ["unnamespaced"]
+        labels = {entry["label"] for entry in data["items"][0]["labels"]}
+        assert labels == {"tech-debt"}
+
+    async def test_list_labels_reports_truncated_groups(self, mcp_db: FiligreeDB) -> None:
+        for i in range(12):
+            mcp_db.create_issue(f"Issue {i}", labels=[f"bare-{i:02d}"])
+
+        result = await call_tool("list_labels", {})
+        data = _parse(result)
+        unnamespaced = next(item for item in data["items"] if item["namespace"] == "unnamespaced")
+
+        assert len(unnamespaced["labels"]) == 10
+        assert unnamespaced["total"] == 12
+        assert unnamespaced["truncated"] is True
+
 
 class TestGetLabelTaxonomy:
     async def test_taxonomy_returns_all_sections(self, mcp_db: FiligreeDB) -> None:
@@ -3055,3 +3085,8 @@ class TestGetLabelTaxonomy:
         assert "virtual" in data
         assert "manual_suggested" in data
         assert "bare_labels" in data
+
+    async def test_taxonomy_discourages_priority_text_labels(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("get_label_taxonomy", {})
+        data = _parse(result)
+        assert data["bare_labels"]["discouraged"]["pattern"] == "P[0-4]"

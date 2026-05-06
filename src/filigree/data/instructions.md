@@ -64,7 +64,7 @@ When the installed `filigree` is older than the project's database, the MCP serv
 filigree ready                              # Show issues ready to work (no blockers)
 filigree list --status=open                 # All open issues
 filigree list --status=in_progress          # Active work
-filigree list --label=bug --label=P1        # Filter by multiple labels (AND)
+filigree list --label=bug --priority=1      # Filter bugs by numeric priority
 filigree list --label-prefix=cluster:       # Filter by label namespace prefix
 filigree list --not-label=wontfix           # Exclude issues with label
 filigree show <id>                          # Detailed issue view
@@ -146,7 +146,8 @@ filigree preview-scan <scanner>                          # Dry-run a scanner
 filigree get-scan-status <scan_id>                       # Scan progress / results
 filigree report-finding ...                              # Report a finding from a scanner
 
-# All commands support --json and --actor flags
+# Most data commands support --json; --actor is global on every command.
+# (`install`, `doctor`, `session-context` etc. are human-output only.)
 filigree --actor bot-1 create "Title"            # Specify actor identity
 filigree list --json                             # Machine-readable output
 

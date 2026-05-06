@@ -36,6 +36,26 @@ class TestListLabels:
         result = db.list_labels(top=5)
         assert len(result["namespaces"]["cluster"]["labels"]) == 5
 
+    def test_top_n_reports_truncation_metadata(self, db: FiligreeDB) -> None:
+        for i in range(15):
+            db.create_issue(f"Issue {i}", labels=[f"cluster:type-{i:02d}"])
+
+        result = db.list_labels(top=5)
+        cluster = result["namespaces"]["cluster"]
+
+        assert cluster["total"] == 15
+        assert cluster["truncated"] is True
+
+    def test_top_zero_reports_untruncated_metadata(self, db: FiligreeDB) -> None:
+        for i in range(15):
+            db.create_issue(f"Issue {i}", labels=[f"cluster:type-{i:02d}"])
+
+        result = db.list_labels(top=0)
+        cluster = result["namespaces"]["cluster"]
+
+        assert cluster["total"] == 15
+        assert cluster["truncated"] is False
+
     def test_top_zero_returns_all(self, db: FiligreeDB) -> None:
         """top=0 means no truncation — all labels returned."""
         for i in range(15):
@@ -103,3 +123,9 @@ class TestGetLabelTaxonomy:
         result = db.get_label_taxonomy()
         assert "review" in result["manual_suggested"]
         assert "needed" in result["manual_suggested"]["review"]["values"]
+
+    def test_priority_text_labels_are_discouraged(self, db: FiligreeDB) -> None:
+        result = db.get_label_taxonomy()
+        discouraged = result["bare_labels"]["discouraged"]
+        assert discouraged["pattern"] == "P[0-4]"
+        assert "priority field" in discouraged["reason"]
