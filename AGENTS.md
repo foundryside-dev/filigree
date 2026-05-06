@@ -1,6 +1,6 @@
 1. This project uses UV like millions of other projects. Use uv run rather than trying literally nothing and then saying its broken.
 
-<!-- filigree:instructions:v2.0.0:a77ce361 -->
+<!-- filigree:instructions:v2.0.0:131abd53 -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -29,6 +29,7 @@ faster and return structured data. Key tools:
 - `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
 - `create_plan` / `get_plan` — milestone planning
 - `get_stats` / `get_metrics` — project health
+- `get_mcp_status` — read-only connector/schema compatibility diagnostic
 - `get_valid_transitions` — workflow navigation
 - `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
 - `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` — automated code scanning
@@ -58,7 +59,7 @@ Filigree 2.0 unifies response envelopes across MCP and CLI:
 
 ### Schema-mismatch (warm-but-degraded MCP)
 
-When the installed `filigree` is older than the project's database, the MCP server still launches but every tool call returns an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
+When the installed `filigree` is older than the project's database, the MCP server still launches but most tool calls return an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance. `get_mcp_status` remains available as a safe read-only diagnostic. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
 
 ### CLI Quick Reference
 
