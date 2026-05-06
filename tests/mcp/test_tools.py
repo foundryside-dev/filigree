@@ -457,6 +457,22 @@ class TestTemplateAndSummary:
         text = _parse(result)
         assert "Project Pulse" in text
 
+    async def test_session_context_tool_is_available(self, mcp_db: FiligreeDB) -> None:
+        tools = await list_tools()
+        assert "session_context" in {tool.name for tool in tools}
+
+    async def test_session_context_returns_startup_snapshot(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("Ready via MCP session context")
+
+        result = await call_tool("session_context", {})
+
+        text = _parse(result)
+        assert text.startswith("=== Filigree Project Snapshot ===")
+        assert "READY TO WORK" in text
+        assert "Ready via MCP session context" in text
+        assert "STATS:" in text
+        assert "Project Pulse" not in text
+
     async def test_get_stats(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("A")
         result = await call_tool("get_stats", {})

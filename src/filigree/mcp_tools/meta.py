@@ -205,6 +205,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
+            name="session_context",
+            description="Get the same startup project snapshot produced by `filigree session-context`.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
             name="get_stats",
             description="Get project statistics: counts by status, type, ready/blocked",
             inputSchema={"type": "object", "properties": {}},
@@ -345,6 +350,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "batch_add_comment": _handle_batch_add_comment,
         "get_changes": _handle_get_changes,
         "get_summary": _handle_get_summary,
+        "session_context": _handle_session_context,
         "get_stats": _handle_get_stats,
         "get_metrics": _handle_get_metrics,
         "export_jsonl": _handle_export_jsonl,
@@ -567,6 +573,14 @@ async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
     tracker = _get_db()
     summary = generate_summary(tracker)
     return _text(summary)
+
+
+async def _handle_session_context(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.hooks import _build_context
+    from filigree.mcp_server import _get_db, _resolve_request_filigree_dir
+
+    tracker = _get_db()
+    return _text(_build_context(tracker, _resolve_request_filigree_dir(tracker)))
 
 
 async def _handle_get_stats(arguments: dict[str, Any]) -> list[TextContent]:
