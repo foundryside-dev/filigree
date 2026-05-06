@@ -19,6 +19,13 @@ import click
 from filigree.cli_common import get_db
 from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES, find_filigree_anchor
 from filigree.issue_payloads import issue_to_public
+from filigree.mcp_tools.payloads import (
+    file_assoc_to_mcp,
+    file_detail_to_mcp,
+    file_record_to_mcp,
+    finding_to_mcp,
+    timeline_entry_to_mcp,
+)
 from filigree.paths import safe_path
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import AssocType, FindingStatus
@@ -107,7 +114,7 @@ def list_files_cmd(
         next_offset = offset + len(items) if has_more else None
 
         if as_json:
-            payload: dict[str, Any] = {"items": items, "has_more": has_more}
+            payload: dict[str, Any] = {"items": [file_record_to_mcp(item) for item in items], "has_more": has_more}
             if has_more and next_offset is not None:
                 payload["next_offset"] = next_offset
             click.echo(json_mod.dumps(payload, indent=2, default=str))
@@ -144,7 +151,7 @@ def get_file_cmd(file_id: str, as_json: bool) -> None:
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(data, indent=2, default=str))
+            click.echo(json_mod.dumps(file_detail_to_mcp(data), indent=2, default=str))
             return
 
         f = data["file"]
@@ -216,7 +223,7 @@ def get_file_timeline_cmd(
         next_offset = offset + len(items) if has_more else None
 
         if as_json:
-            payload: dict[str, Any] = {"items": items, "has_more": has_more}
+            payload: dict[str, Any] = {"items": [timeline_entry_to_mcp(item) for item in items], "has_more": has_more}
             if has_more and next_offset is not None:
                 payload["next_offset"] = next_offset
             click.echo(json_mod.dumps(payload, indent=2, default=str))
@@ -254,7 +261,7 @@ def get_issue_files_cmd(issue_id: str, as_json: bool) -> None:
 
         # Normalize raw list → ListResponse (CLI surface normalization; MCP returns raw list)
         if as_json:
-            payload: dict[str, Any] = {"items": list(items), "has_more": False}
+            payload: dict[str, Any] = {"items": [file_assoc_to_mcp(item) for item in items], "has_more": False}
             click.echo(json_mod.dumps(payload, indent=2, default=str))
             return
 
@@ -401,7 +408,7 @@ def register_file_cmd(
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(file_record.to_dict(), indent=2, default=str))
+            click.echo(json_mod.dumps(file_record_to_mcp(file_record.to_dict()), indent=2, default=str))
         else:
             click.echo(f"Registered {file_record.id}: {file_record.path}")
 
@@ -515,7 +522,7 @@ def list_findings_cmd(
         next_offset = offset + len(findings) if has_more else None
 
         if as_json:
-            payload: dict[str, Any] = {"items": findings, "has_more": has_more}
+            payload: dict[str, Any] = {"items": [finding_to_mcp(item) for item in findings], "has_more": has_more}
             if has_more and next_offset is not None:
                 payload["next_offset"] = next_offset
             click.echo(json_mod.dumps(payload, indent=2, default=str))
@@ -553,7 +560,7 @@ def get_finding_cmd(finding_id: str, as_json: bool) -> None:
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(finding, indent=2, default=str))
+            click.echo(json_mod.dumps(finding_to_mcp(finding), indent=2, default=str))
             return
 
         click.echo(f"Finding: {finding['id']}")
@@ -615,7 +622,7 @@ def update_finding_cmd(
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(updated, indent=2, default=str))
+            click.echo(json_mod.dumps(finding_to_mcp(updated), indent=2, default=str))
         else:
             click.echo(f"Updated finding {finding_id}: status={updated.get('status', '')}")
 
@@ -711,7 +718,7 @@ def dismiss_finding_cmd(finding_id: str, reason: str | None, as_json: bool) -> N
             sys.exit(1)
 
         if as_json:
-            click.echo(json_mod.dumps(updated, indent=2, default=str))
+            click.echo(json_mod.dumps(finding_to_mcp(updated), indent=2, default=str))
         else:
             click.echo(f"Dismissed finding {finding_id}")
 
@@ -750,7 +757,7 @@ def batch_update_findings_cmd(
                 record = db.update_finding(fid, status=cast(FindingStatus, status))
                 updated_ids.append(fid)
                 if response_detail == "full":
-                    updated_records.append(dict(record))
+                    updated_records.append(finding_to_mcp(record))
             except KeyError as e:
                 errors.append(BatchFailure(id=fid, error=str(e), code=ErrorCode.NOT_FOUND))
             except ValueError as e:

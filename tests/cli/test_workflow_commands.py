@@ -908,6 +908,41 @@ class TestBatchCli:
         assert len(data["failed"]) == 1
         assert data["failed"][0]["id"] == "nonexistent-abc"
 
+    def test_batch_remove_label_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r1 = runner.invoke(cli, ["create", "A"])
+        id1 = _extract_id(r1.output)
+        r2 = runner.invoke(cli, ["create", "B"])
+        id2 = _extract_id(r2.output)
+        runner.invoke(cli, ["batch-add-label", "security", id1, id2, "--json"])
+
+        result = runner.invoke(cli, ["batch-remove-label", "security", id1, id2, "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert set(data["succeeded"]) == {id1, id2}
+        assert data["failed"] == []
+
+        listed = runner.invoke(cli, ["list", "--label", "security", "--json"])
+        listed_data = json.loads(listed.output)
+        listed_ids = {row["issue_id"] for row in listed_data["items"]}
+        assert id1 not in listed_ids
+        assert id2 not in listed_ids
+
+    def test_batch_remove_label_partial_failure(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r1 = runner.invoke(cli, ["create", "A"])
+        id1 = _extract_id(r1.output)
+        runner.invoke(cli, ["add-label", "security", id1])
+
+        result = runner.invoke(cli, ["batch-remove-label", "security", id1, "nonexistent-abc", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["succeeded"] == [id1]
+        assert len(data["failed"]) == 1
+        assert data["failed"][0]["id"] == "nonexistent-abc"
+
     def test_batch_add_comment_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
@@ -956,6 +991,29 @@ class TestEventsCli:
         data = json.loads(result.output)
         assert "items" in data
         assert len(data["items"]) >= 1
+
+    def test_changes_json_has_next_since_cursor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Cursor event A"])
+        runner.invoke(cli, ["create", "Cursor event B"])
+
+        result = runner.invoke(cli, ["changes", "--since", "2020-01-01T00:00:00", "--limit", "1", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["has_more"] is True
+        assert data["next_since"] == data["items"][-1]["created_at"]
+
+    def test_changes_json_empty_next_since_echoes_normalized_since(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["changes", "--since", "2099-01-01T00:00:00Z", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["items"] == []
+        assert data["has_more"] is False
+        assert data["next_since"] == "2099-01-01T00:00:00+00:00"
 
     def test_changes_empty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

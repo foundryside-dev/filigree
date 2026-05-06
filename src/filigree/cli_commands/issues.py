@@ -240,6 +240,8 @@ def _list_issues_impl(
     label: tuple[str, ...],
     label_prefix: str | None,
     not_label: str | None,
+    sort_by: str,
+    direction: str,
     limit: int,
     offset: int,
     as_json: bool,
@@ -257,6 +259,8 @@ def _list_issues_impl(
                 label=label_filter,
                 label_prefix=label_prefix,
                 not_label=not_label,
+                sort_by=sort_by,
+                direction=direction,
                 limit=limit + 1 if limit > 0 else limit,
                 offset=offset,
             )
@@ -295,6 +299,8 @@ def _list_issues_impl(
 @click.option("--label", "-l", multiple=True, help="Filter by label (repeatable, AND logic). Supports virtuals.")
 @click.option("--label-prefix", default=None, help="Filter by label namespace prefix (include trailing colon)")
 @click.option("--not-label", default=None, help="Exclude issues with this label")
+@click.option("--sort-by", default="priority", help="Sort by priority, created_at, or updated_at")
+@click.option("--direction", default="asc", help="Sort direction: asc or desc")
 @click.option("--limit", default=100, type=click.IntRange(min=0), help="Max results (default 100)")
 @click.option("--offset", default=0, type=click.IntRange(min=0), help="Skip first N results")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -307,12 +313,28 @@ def list_cmd(
     label: tuple[str, ...],
     label_prefix: str | None,
     not_label: str | None,
+    sort_by: str,
+    direction: str,
     limit: int,
     offset: int,
     as_json: bool,
 ) -> None:
     """List issues with optional filters."""
-    _list_issues_impl(status, issue_type, priority, parent, assignee, label, label_prefix, not_label, limit, offset, as_json)
+    _list_issues_impl(
+        status,
+        issue_type,
+        priority,
+        parent,
+        assignee,
+        label,
+        label_prefix,
+        not_label,
+        sort_by,
+        direction,
+        limit,
+        offset,
+        as_json,
+    )
 
 
 @click.command("list-issues")
@@ -324,6 +346,8 @@ def list_cmd(
 @click.option("--label", "-l", multiple=True, help="Filter by label (repeatable, AND logic). Supports virtuals.")
 @click.option("--label-prefix", default=None, help="Filter by label namespace prefix (include trailing colon)")
 @click.option("--not-label", default=None, help="Exclude issues with this label")
+@click.option("--sort-by", default="priority", help="Sort by priority, created_at, or updated_at")
+@click.option("--direction", default="asc", help="Sort direction: asc or desc")
 @click.option("--limit", default=100, type=click.IntRange(min=0), help="Max results (default 100)")
 @click.option("--offset", default=0, type=click.IntRange(min=0), help="Skip first N results")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -336,12 +360,28 @@ def list_issues_cmd(
     label: tuple[str, ...],
     label_prefix: str | None,
     not_label: str | None,
+    sort_by: str,
+    direction: str,
     limit: int,
     offset: int,
     as_json: bool,
 ) -> None:
     """List issues with optional filters. Alias for `list`."""
-    _list_issues_impl(status, issue_type, priority, parent, assignee, label, label_prefix, not_label, limit, offset, as_json)
+    _list_issues_impl(
+        status,
+        issue_type,
+        priority,
+        parent,
+        assignee,
+        label,
+        label_prefix,
+        not_label,
+        sort_by,
+        direction,
+        limit,
+        offset,
+        as_json,
+    )
 
 
 def _update_impl(

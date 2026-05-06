@@ -95,6 +95,27 @@ class TestCliMetaBatchDetail:
         assert set(item.keys()) >= _FULL_ONLY_KEYS
         assert "x" in item["labels"]
 
+    def test_batch_remove_label_slim_default_emits_id_strings(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _create_issue(runner)
+        runner.invoke(cli, ["add-label", "x", issue_id])
+        result = runner.invoke(cli, ["batch-remove-label", "x", issue_id, "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["succeeded"] == [issue_id]
+
+    def test_batch_remove_label_full_emits_full_records(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _create_issue(runner)
+        runner.invoke(cli, ["add-label", "x", issue_id])
+        result = runner.invoke(cli, ["batch-remove-label", "x", issue_id, "--detail", "full", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        item = data["succeeded"][0]
+        assert isinstance(item, dict)
+        assert set(item.keys()) >= _FULL_ONLY_KEYS
+        assert "x" not in item["labels"]
+
     def test_batch_add_comment_slim_default_emits_id_strings(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         issue_id = _create_issue(runner)
@@ -164,7 +185,8 @@ class TestCliFindingsAndObservationsBatchDetail:
         data = json.loads(result.output)
         item = data["succeeded"][0]
         assert isinstance(item, dict)
-        assert set(item.keys()) > {"id"}
+        assert "finding_id" in item
+        assert "id" not in item
         assert item["status"] == "fixed"
 
     def test_batch_dismiss_observations_slim_default(self, cli_in_project: tuple[CliRunner, Path]) -> None:

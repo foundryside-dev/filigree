@@ -459,6 +459,51 @@ def batch_add_label(label_name: str, issue_ids: tuple[str, ...], response_detail
             sys.exit(1)
 
 
+@click.command("batch-remove-label")
+@click.argument("label_name")
+@click.argument("issue_ids", nargs=-1, required=True)
+@click.option(
+    "--detail",
+    "response_detail",
+    type=click.Choice(["slim", "full"]),
+    default="slim",
+    help="JSON shape for succeeded[]: 'slim' (default, issue ID strings) or 'full' (PublicIssue records).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def batch_remove_label(label_name: str, issue_ids: tuple[str, ...], response_detail: str, as_json: bool) -> None:
+    """Remove the same label from multiple issues."""
+    with get_db() as db:
+        removed, errors = db.batch_remove_label(list(issue_ids), label=label_name)
+
+        if as_json:
+            if response_detail == "full":
+                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in removed]
+            else:
+                succeeded_payload = [row["id"] for row in removed]
+            click.echo(
+                json_mod.dumps(
+                    {
+                        "succeeded": succeeded_payload,
+                        "failed": errors,
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            for row in removed:
+                if row["status"] == "removed":
+                    click.echo(f"  Removed label '{label_name}' from {row['id']}")
+                else:
+                    click.echo(f"  Label '{label_name}' not found on {row['id']}")
+            for err in errors:
+                click.echo(f"  Error {err['id']}: {err['error']}", err=True)
+            click.echo(f"Removed label from {len(removed)}/{len(issue_ids)} issues")
+        refresh_summary(db)
+        if errors:
+            sys.exit(1)
+
+
 @click.command("batch-add-comment")
 @click.argument("text")
 @click.argument("issue_ids", nargs=-1, required=True)
@@ -594,4 +639,5 @@ def register(cli: click.Group) -> None:
     cli.add_command(batch_update)
     cli.add_command(batch_close)
     cli.add_command(batch_add_label)
+    cli.add_command(batch_remove_label)
     cli.add_command(batch_add_comment)

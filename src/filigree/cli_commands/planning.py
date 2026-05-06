@@ -430,7 +430,12 @@ def _changes_impl(since: str, limit: int, as_json: bool) -> None:
         events = raw[:limit] if has_more else raw
 
         if as_json:
-            click.echo(json_mod.dumps({"items": events, "has_more": has_more}, indent=2, default=str))
+            payload = {
+                "items": events,
+                "has_more": has_more,
+                "next_since": events[-1]["created_at"] if events else since,
+            }
+            click.echo(json_mod.dumps(payload, indent=2, default=str))
             return
 
         if not events:

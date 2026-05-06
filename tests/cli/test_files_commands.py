@@ -3,10 +3,10 @@
 MCP shape verification (verified against mcp_tools/files.py handlers):
 
 File shapes:
-- list-files items: EnrichedFileItem — FileRecordDict + {summary, associations_count, observation_count}
-  FileRecordDict keys: id, path, language, file_type, first_seen, updated_at, metadata, data_warnings
+- list-files items: EnrichedFileItem — PublicFileRecord + {summary, associations_count, observation_count}
+  PublicFileRecord keys: file_id, path, language, file_type, first_seen, updated_at, metadata, data_warnings
 - get-file: FileDetail — {file, associations, recent_findings, summary, observation_count}
-- get-file-timeline: ListResponse of TimelineEntry — {id, type, timestamp, source_id, data}
+- get-file-timeline: ListResponse of TimelineEntry — {timeline_event_id, type, timestamp, data, typed source ID}
   NOTE: MCP returns raw PaginatedResult; CLI normalizes to ListResponse.
 - get-issue-files: ListResponse of IssueFileAssociation
   NOTE: MCP returns raw list; CLI normalizes to ListResponse.
@@ -15,8 +15,8 @@ File shapes:
 - delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations}
 
 Finding shapes:
-- list-findings items: ScanFindingDict
-  keys: id, file_id, severity, status, scan_source, rule_id, message, suggestion,
+- list-findings items: PublicScanFinding
+  keys: finding_id, file_id, severity, status, scan_source, rule_id, message, suggestion,
         scan_run_id, line_start, line_end, issue_id, seen_count, first_seen, updated_at,
         last_seen_at, metadata, data_warnings
 - get-finding: ScanFindingDict (same)
@@ -46,20 +46,23 @@ from tests._seeds import SeededProject
 # Canonical MCP key-sets
 # ---------------------------------------------------------------------------
 
-_FILE_RECORD_KEYS = frozenset({"id", "path", "language", "file_type", "first_seen", "updated_at", "metadata", "data_warnings"})
+_FILE_RECORD_KEYS = frozenset({"file_id", "path", "language", "file_type", "first_seen", "updated_at", "metadata", "data_warnings"})
 
 # EnrichedFileItem = FileRecordDict + extra fields
 _ENRICHED_FILE_ITEM_KEYS = _FILE_RECORD_KEYS | frozenset({"summary", "associations_count", "observation_count"})
 
 _FILE_DETAIL_KEYS = frozenset({"file", "associations", "recent_findings", "summary", "observation_count"})
 
-_TIMELINE_ENTRY_KEYS = frozenset({"id", "type", "timestamp", "source_id", "data"})
+_TIMELINE_ENTRY_BASE_KEYS = frozenset({"timeline_event_id", "type", "timestamp", "data"})
+_TIMELINE_FINDING_ENTRY_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"finding_id"})
+_TIMELINE_ASSOC_ENTRY_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"assoc_id"})
+_TIMELINE_ISSUE_EVENT_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"event_id", "issue_id"})
 
-_ISSUE_FILE_ASSOC_KEYS = frozenset({"id", "file_id", "issue_id", "assoc_type", "created_at", "file_path", "file_language"})
+_ISSUE_FILE_ASSOC_KEYS = frozenset({"assoc_id", "file_id", "issue_id", "assoc_type", "created_at", "file_path", "file_language"})
 
 _SCAN_FINDING_KEYS = frozenset(
     {
-        "id",
+        "finding_id",
         "file_id",
         "severity",
         "status",
@@ -226,7 +229,7 @@ class TestGetFileCommand:
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
             assert set(data.keys()) == _FILE_DETAIL_KEYS, f"Shape mismatch: {set(data.keys()) ^ _FILE_DETAIL_KEYS}"
-            assert data["file"]["id"] == file_id
+            assert data["file"]["file_id"] == file_id
         finally:
             os.chdir(original)
 
@@ -272,7 +275,7 @@ class TestDeleteFileRecordCommand:
         runner, _ = cli_in_project
         created = runner.invoke(cli, ["register-file", "src/delete_me.py", "--json"])
         assert created.exit_code == 0, created.output
-        file_id = json.loads(created.output)["id"]
+        file_id = json.loads(created.output)["file_id"]
 
         result = runner.invoke(cli, ["delete-file-record", file_id, "--json"])
 
@@ -287,7 +290,7 @@ class TestDeleteFileRecordCommand:
     def test_delete_file_record_refuses_association_without_force(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         created = runner.invoke(cli, ["register-file", "src/linked.py", "--json"])
-        file_id = json.loads(created.output)["id"]
+        file_id = json.loads(created.output)["file_id"]
         issue = runner.invoke(cli, ["create", "Linked file issue", "--json"])
         issue_id = json.loads(issue.output)["issue_id"]
         runner.invoke(cli, ["add-file-association", file_id, issue_id, "mentioned_in"])
@@ -336,7 +339,9 @@ class TestGetFileTimelineCommand:
             data = json.loads(result.output)
             assert len(data["items"]) >= 1
             entry = data["items"][0]
-            assert set(entry.keys()) == _TIMELINE_ENTRY_KEYS, f"Timeline entry key mismatch: {set(entry.keys()) ^ _TIMELINE_ENTRY_KEYS}"
+            assert set(entry.keys()) == _TIMELINE_FINDING_ENTRY_KEYS, (
+                f"Timeline entry key mismatch: {set(entry.keys()) ^ _TIMELINE_FINDING_ENTRY_KEYS}"
+            )
         finally:
             os.chdir(original)
 
@@ -369,7 +374,7 @@ class TestGetFileTimelineCommand:
     def test_get_file_timeline_can_include_issue_events(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         created = runner.invoke(cli, ["register-file", "src/timeline_issue.py", "--json"])
-        file_id = json.loads(created.output)["id"]
+        file_id = json.loads(created.output)["file_id"]
         issue = runner.invoke(cli, ["create", "CLI issue timeline", "--json"])
         issue_id = json.loads(issue.output)["issue_id"]
         runner.invoke(cli, ["add-file-association", file_id, issue_id, "mentioned_in"])
@@ -383,8 +388,13 @@ class TestGetFileTimelineCommand:
         assert with_issue_events.exit_code == 0, with_issue_events.output
         assert issue_only.exit_code == 0, issue_only.output
         assert all(e["type"] != "issue_event" for e in json.loads(default.output)["items"])
-        issue_events = [e for e in json.loads(with_issue_events.output)["items"] if e["type"] == "issue_event"]
+        with_issue_items = json.loads(with_issue_events.output)["items"]
+        association_events = [e for e in with_issue_items if e["type"] == "association_created"]
+        assert association_events
+        assert set(association_events[0].keys()) == _TIMELINE_ASSOC_ENTRY_KEYS
+        issue_events = [e for e in with_issue_items if e["type"] == "issue_event"]
         assert issue_events
+        assert set(issue_events[0].keys()) == _TIMELINE_ISSUE_EVENT_KEYS
         assert issue_events[0]["data"]["issue_id"] == issue_id
         assert issue_events[0]["data"]["event_type"] == "status_changed"
         assert all(e["type"] == "issue_event" for e in json.loads(issue_only.output)["items"])
@@ -539,7 +549,7 @@ class TestRegisterFileCommand:
         assert result2.exit_code == 0, result2.output
         data2 = json.loads(result2.output)
 
-        assert data1["id"] == data2["id"]
+        assert data1["file_id"] == data2["file_id"]
 
     def test_register_file_plain_text(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -682,7 +692,7 @@ class TestGetFindingCommand:
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
             assert set(data.keys()) == _SCAN_FINDING_KEYS, f"Shape mismatch: {set(data.keys()) ^ _SCAN_FINDING_KEYS}"
-            assert data["id"] == finding_id
+            assert data["finding_id"] == finding_id
         finally:
             os.chdir(original)
 

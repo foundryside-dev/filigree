@@ -166,6 +166,61 @@ class TestJsonOutput:
         assert data["has_more"] is False
         assert "next_offset" not in data
 
+    def test_list_json_sort_by_updated_at_desc(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        older = runner.invoke(cli, ["create", "Older task", "--type", "task"])
+        newer = runner.invoke(cli, ["create", "Newer task", "--type", "task"])
+        older_id = _extract_id(older.output)
+        newer_id = _extract_id(newer.output)
+
+        from filigree.cli_common import get_db
+
+        with get_db() as db:
+            db.conn.execute(
+                "UPDATE issues SET updated_at = ? WHERE id = ?",
+                ("2026-01-01T00:00:00+00:00", older_id),
+            )
+            db.conn.execute(
+                "UPDATE issues SET updated_at = ? WHERE id = ?",
+                ("2026-02-01T00:00:00+00:00", newer_id),
+            )
+            db.conn.commit()
+
+        result = runner.invoke(
+            cli,
+            ["list", "--type", "task", "--sort-by", "updated_at", "--direction", "desc", "--limit", "2", "--json"],
+        )
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [newer_id, older_id]
+
+    def test_list_issues_alias_accepts_sort_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        low = runner.invoke(cli, ["create", "Low priority task", "--type", "task", "--priority", "3"])
+        high = runner.invoke(cli, ["create", "High priority task", "--type", "task", "--priority", "1"])
+        low_id = _extract_id(low.output)
+        high_id = _extract_id(high.output)
+
+        result = runner.invoke(
+            cli,
+            ["list-issues", "--type", "task", "--sort-by", "priority", "--direction", "desc", "--limit", "2", "--json"],
+        )
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [low_id, high_id]
+
+    def test_list_json_invalid_sort_by_returns_validation_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["list", "--sort-by", "title", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "sort_by" in data["error"]
+
     def test_ready_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         runner.invoke(cli, ["create", "Ready JSON"])
