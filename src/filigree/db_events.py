@@ -384,8 +384,12 @@ class EventsMixin(DBMixinProtocol):
 
     # -- Archival / Compaction ------------------------------------------------
 
-    def archive_closed(self, *, days_old: int = 30, actor: str = "") -> list[str]:
+    def archive_closed(self, *, days_old: int = 30, actor: str = "", label: str | None = None) -> list[str]:
         """Archive done-category issues older than `days_old` days.
+
+        When ``label`` is provided, only issues currently carrying that label
+        are archived. This gives review/test cleanup a scoped maintenance path
+        without changing the default project-wide archive behavior.
 
         Sets their status to 'archived' (preserving closed_at).
         Returns list of archived issue IDs.
@@ -395,6 +399,8 @@ class EventsMixin(DBMixinProtocol):
         if days_old < 0:
             msg = f"days_old must be >= 0, got {days_old}"
             raise ValueError(msg)
+
+        normalized_label = self._validate_label_name(label) if label is not None else None
 
         cutoff_dt = datetime.now(UTC) - timedelta(days=days_old)
         cutoff = cutoff_dt.isoformat()
@@ -407,9 +413,15 @@ class EventsMixin(DBMixinProtocol):
         if not done_params:
             # No done-category states registered; nothing to archive.
             return []
+        clauses = [f"({done_sql})", "closed_at < ?", "closed_at IS NOT NULL"]
+        params: list[object] = [*done_params, cutoff]
+        if normalized_label is not None:
+            clauses.append("EXISTS (SELECT 1 FROM labels l WHERE l.issue_id = issues.id AND l.label = ?)")
+            params.append(normalized_label)
+        where_sql = " AND ".join(clauses)
         rows = self.conn.execute(
-            f"SELECT id FROM issues WHERE ({done_sql}) AND closed_at < ? AND closed_at IS NOT NULL",
-            [*done_params, cutoff],
+            f"SELECT id FROM issues WHERE {where_sql}",
+            params,
         ).fetchall()
 
         archived_ids = [r["id"] for r in rows]

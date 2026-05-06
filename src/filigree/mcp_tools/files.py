@@ -30,6 +30,7 @@ from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResp
 from filigree.types.inputs import (
     AddFileAssociationArgs,
     BatchUpdateFindingsArgs,
+    DeleteFileRecordArgs,
     DismissFindingArgs,
     GetFileArgs,
     GetFileTimelineArgs,
@@ -96,8 +97,32 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "offset": {"type": "integer", "default": 0, "minimum": 0},
                     "event_type": {
                         "type": "string",
-                        "enum": ["finding", "association", "file_metadata_update"],
+                        "enum": ["finding", "association", "file_metadata_update", "issue_event"],
                         "description": "Optional event type filter",
+                    },
+                    "include_issue_events": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Merge events from issues currently associated with the file",
+                    },
+                },
+                "required": ["file_id"],
+            },
+        ),
+        Tool(
+            name="delete_file_record",
+            description=(
+                "Delete a file record. Refuses by default when associations or open findings exist; "
+                "force=true cascades file associations and findings."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_id": {"type": "string", "description": "File ID"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Cascade associations and open findings",
                     },
                 },
                 "required": ["file_id"],
@@ -248,6 +273,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
     handlers: dict[str, Callable[..., Any]] = {
         "list_files": _handle_list_files,
         "get_file": _handle_get_file,
+        "delete_file_record": _handle_delete_file_record,
         "get_file_timeline": _handle_get_file_timeline,
         "get_issue_files": _handle_get_issue_files,
         "add_file_association": _handle_add_file_association,
@@ -333,6 +359,29 @@ async def _handle_get_file(arguments: dict[str, Any]) -> list[TextContent]:
     return _text(file_detail_to_mcp(data))
 
 
+async def _handle_delete_file_record(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_db
+
+    args = _parse_args(arguments, DeleteFileRecordArgs)
+    tracker = _get_db()
+    file_id = args.get("file_id", "")
+    force = args.get("force", False)
+    if not isinstance(file_id, str) or not file_id.strip():
+        return _text(ErrorResponse(error="file_id is required", code=ErrorCode.VALIDATION))
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+    try:
+        result = tracker.delete_file_record(file_id, force=force)
+    except KeyError:
+        return _text(ErrorResponse(error=f"File not found: {file_id}", code=ErrorCode.NOT_FOUND))
+    except ValueError as exc:
+        code = ErrorCode.CONFLICT if "Cannot delete file record" in str(exc) else ErrorCode.VALIDATION
+        return _text(ErrorResponse(error=str(exc), code=code))
+    except sqlite3.Error as exc:
+        return _text(ErrorResponse(error=f"Database error: {exc}", code=ErrorCode.IO))
+    return _text(result)
+
+
 async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db
 
@@ -342,7 +391,8 @@ async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextConte
     limit = args.get("limit", 50)
     offset = args.get("offset", 0)
     event_type = args.get("event_type")
-    valid_event_types = {"finding", "association", "file_metadata_update"}
+    include_issue_events = args.get("include_issue_events", False)
+    valid_event_types = {"finding", "association", "file_metadata_update", "issue_event"}
 
     if not isinstance(file_id, str) or not file_id.strip():
         return _text(ErrorResponse(error="file_id is required", code=ErrorCode.VALIDATION))
@@ -357,9 +407,17 @@ async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextConte
                 code=ErrorCode.VALIDATION,
             )
         )
+    if not isinstance(include_issue_events, bool):
+        return _text(ErrorResponse(error="include_issue_events must be a boolean", code=ErrorCode.VALIDATION))
 
     try:
-        timeline_result = tracker.get_file_timeline(file_id, limit=limit, offset=offset, event_type=event_type)
+        timeline_result = tracker.get_file_timeline(
+            file_id,
+            limit=limit,
+            offset=offset,
+            event_type=event_type,
+            include_issue_events=include_issue_events,
+        )
     except KeyError:
         return _text(ErrorResponse(error=f"File not found: {file_id}", code=ErrorCode.NOT_FOUND))
     items = [timeline_entry_to_mcp(item) for item in timeline_result["results"]]

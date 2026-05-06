@@ -65,6 +65,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
+            name="get_mcp_status",
+            description="Read-only MCP server health and schema-compatibility diagnostic. Safe in schema-mismatch mode.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
             name="list_types",
             description="List all registered issue types with their workflow info (states, pack, description).",
             inputSchema={"type": "object", "properties": {}},
@@ -141,6 +146,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "get_template": _handle_get_template,
         "get_workflow_statuses": _handle_get_workflow_statuses,
         "get_schema": _handle_get_schema,
+        "get_mcp_status": _handle_get_mcp_status,
         "list_types": _handle_list_types,
         "get_type_info": _handle_get_type_info,
         "list_packs": _handle_list_packs,
@@ -252,6 +258,7 @@ async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
                     "example": f"{prefix}-f-<hash>",
                     "accepted_by_tools": [
                         "get_file",
+                        "delete_file_record",
                         "get_file_timeline",
                         "get_issue_files",
                         "add_file_association",
@@ -262,6 +269,12 @@ async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
             },
         )
     )
+
+
+async def _handle_get_mcp_status(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import get_mcp_status_payload
+
+    return _text(get_mcp_status_payload())
 
 
 async def _handle_list_types(arguments: dict[str, Any]) -> list[TextContent]:

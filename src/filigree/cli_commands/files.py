@@ -2,7 +2,7 @@
 
 Mirrors the MCP file-domain tools:
   list-files, get-file, get-file-timeline, get-issue-files,
-  add-file-association, register-file,
+  add-file-association, register-file, delete-file-record,
   list-findings, get-finding, update-finding,
   promote-finding, dismiss-finding, batch-update-findings.
 """
@@ -166,9 +166,10 @@ def get_file_cmd(file_id: str, as_json: bool) -> None:
 @click.option(
     "--event-type",
     default=None,
-    type=click.Choice(["finding", "association", "file_metadata_update"]),
+    type=click.Choice(["finding", "association", "file_metadata_update", "issue_event"]),
     help="Optional event type filter",
 )
+@click.option("--include-issue-events", is_flag=True, help="Merge events from associated issues")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def get_file_timeline_cmd(
     file_id: str,
@@ -176,6 +177,7 @@ def get_file_timeline_cmd(
     offset: int,
     no_limit: bool,
     event_type: str | None,
+    include_issue_events: bool,
     as_json: bool,
 ) -> None:
     """Get merged timeline events for a file (findings, associations, metadata updates)."""
@@ -187,6 +189,7 @@ def get_file_timeline_cmd(
                 limit=effective_limit,
                 offset=offset,
                 event_type=event_type,
+                include_issue_events=include_issue_events,
             )
         except KeyError:
             if as_json:
@@ -401,6 +404,44 @@ def register_file_cmd(
             click.echo(json_mod.dumps(file_record.to_dict(), indent=2, default=str))
         else:
             click.echo(f"Registered {file_record.id}: {file_record.path}")
+
+
+@click.command("delete-file-record")
+@click.argument("file_id")
+@click.option("--force", is_flag=True, help="Cascade associations and open findings")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def delete_file_record_cmd(file_id: str, force: bool, as_json: bool) -> None:
+    """Delete a file record. Refuses linked/open-finding records unless --force is passed."""
+    with get_db() as db:
+        try:
+            result = db.delete_file_record(file_id, force=force)
+        except KeyError:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"File not found: {file_id}", "code": ErrorCode.NOT_FOUND}))
+            else:
+                click.echo(f"Error: File not found: {file_id}", err=True)
+            sys.exit(1)
+        except ValueError as e:
+            code = ErrorCode.CONFLICT if "Cannot delete file record" in str(e) else ErrorCode.VALIDATION
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
+            click.echo(json_mod.dumps(result, indent=2, default=str))
+        else:
+            click.echo(
+                f"Deleted {file_id} "
+                f"({result['deleted_findings']} finding(s), {result['deleted_associations']} association(s))"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +818,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(get_issue_files_cmd)
     cli.add_command(add_file_association_cmd)
     cli.add_command(register_file_cmd)
+    cli.add_command(delete_file_record_cmd)
     cli.add_command(list_findings_cmd)
     cli.add_command(get_finding_cmd)
     cli.add_command(update_finding_cmd)

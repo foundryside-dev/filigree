@@ -1169,6 +1169,40 @@ class TestResource:
         assert prefixes["file_record"]["prefix"] == "mcp-f-"
         assert prefixes["file_record"]["primary_key"] == "file_id"
         assert "get_file" in prefixes["file_record"]["accepted_by_tools"]
+        assert "delete_file_record" in prefixes["file_record"]["accepted_by_tools"]
+
+    async def test_get_mcp_status_reports_compatible_database(self, mcp_db: FiligreeDB) -> None:
+        tools = {tool.name for tool in await list_tools()}
+        assert "get_mcp_status" in tools
+
+        result = await call_tool("get_mcp_status", {})
+
+        data = _parse(result)
+        assert data["status"] == "ok"
+        assert data["db_initialized"] is True
+        assert data["schema_compatible"] is True
+        assert data["database_schema_version"] == data["installed_schema_version"]
+        assert data["code"] is None
+
+    async def test_get_mcp_status_survives_schema_mismatch(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        import filigree.mcp_server as mcp_mod
+        from filigree.types.api import SchemaVersionMismatchError
+
+        monkeypatch.setattr(mcp_mod, "db", None)
+        monkeypatch.setattr(mcp_mod, "_schema_mismatch", SchemaVersionMismatchError(installed=8, database=9))
+        monkeypatch.setattr(mcp_mod, "_db_open_error", None)
+
+        status = _parse(await call_tool("get_mcp_status", {}))
+        blocked = _parse(await call_tool("get_schema", {}))
+
+        assert status["status"] == "schema_mismatch"
+        assert status["db_initialized"] is False
+        assert status["schema_compatible"] is False
+        assert status["installed_schema_version"] == 8
+        assert status["database_schema_version"] == 9
+        assert status["code"] == ErrorCode.SCHEMA_MISMATCH
+        assert "upgrade" in status["guidance"].lower()
+        assert blocked["code"] == ErrorCode.SCHEMA_MISMATCH
 
     async def test_list_resources(self, mcp_db: FiligreeDB) -> None:
         resources = await list_resources()
@@ -2024,6 +2058,7 @@ class TestFileTools:
             "get_issue_files",
             "add_file_association",
             "register_file",
+            "delete_file_record",
         }.issubset(names)
 
     async def test_create_issue_tool_docs_call_out_labels_at_creation(self, mcp_db: FiligreeDB) -> None:
@@ -2044,6 +2079,49 @@ class TestFileTools:
         assert detail["file"]["file_id"] == created["file_id"]
         assert "id" not in detail["file"]
         assert detail["file"]["path"] == "src/example.py"
+
+    async def test_delete_file_record_removes_unreferenced_file(self, mcp_db: FiligreeDB) -> None:
+        created = _parse(await call_tool("register_file", {"path": "src/delete_me.py"}))
+
+        deleted = _parse(await call_tool("delete_file_record", {"file_id": created["file_id"]}))
+
+        assert deleted["status"] == "deleted"
+        assert deleted["file_id"] == created["file_id"]
+        assert deleted["deleted_findings"] == 0
+        missing = _parse(await call_tool("get_file", {"file_id": created["file_id"]}))
+        assert missing["code"] == ErrorCode.NOT_FOUND
+
+    async def test_delete_file_record_refuses_open_findings_without_force(self, mcp_db: FiligreeDB) -> None:
+        scan = mcp_db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "src/delete_open_finding.py", "rule_id": "R1", "message": "Open"}],
+        )
+        file_record = mcp_db.get_file_by_path("src/delete_open_finding.py")
+        assert file_record is not None
+
+        result = _parse(await call_tool("delete_file_record", {"file_id": file_record.id}))
+
+        assert result["code"] == ErrorCode.CONFLICT
+        assert "open finding" in result["error"]
+        assert mcp_db.get_finding(scan["new_finding_ids"][0])["file_id"] == file_record.id
+
+    async def test_delete_file_record_force_cascades_dependents(self, mcp_db: FiligreeDB) -> None:
+        scan = mcp_db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "src/delete_force.py", "rule_id": "R1", "message": "Open"}],
+        )
+        file_record = mcp_db.get_file_by_path("src/delete_force.py")
+        assert file_record is not None
+        issue = mcp_db.create_issue("Force delete linked issue")
+        mcp_db.add_file_association(file_record.id, issue.id, "mentioned_in")
+
+        result = _parse(await call_tool("delete_file_record", {"file_id": file_record.id, "force": True}))
+
+        assert result["status"] == "deleted"
+        assert result["deleted_findings"] == 1
+        assert result["deleted_associations"] == 1
+        with pytest.raises(KeyError):
+            mcp_db.get_finding(scan["new_finding_ids"][0])
 
     async def test_get_file_recent_findings_use_finding_id(self, mcp_db: FiligreeDB) -> None:
         created = _parse(await call_tool("register_file", {"path": "src/with_finding.py", "language": "python"}))
@@ -2200,6 +2278,36 @@ class TestFileTools:
         assert association_event["assoc_id"]
         assert "id" not in association_event
         assert "source_id" not in association_event
+
+    async def test_get_file_timeline_can_include_associated_issue_events(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("MCP issue timeline")
+        file_data = _parse(await call_tool("register_file", {"path": "src/timeline_issue.py"}))
+        _parse(
+            await call_tool(
+                "add_file_association",
+                {
+                    "file_id": file_data["file_id"],
+                    "issue_id": issue.id,
+                    "assoc_type": "mentioned_in",
+                },
+            )
+        )
+        await call_tool("update_issue", {"issue_id": issue.id, "status": "in_progress"})
+
+        default_timeline = _parse(await call_tool("get_file_timeline", {"file_id": file_data["file_id"]}))
+        with_issue_events = _parse(
+            await call_tool("get_file_timeline", {"file_id": file_data["file_id"], "include_issue_events": True})
+        )
+        issue_only = _parse(await call_tool("get_file_timeline", {"file_id": file_data["file_id"], "event_type": "issue_event"}))
+
+        assert all(e["type"] != "issue_event" for e in default_timeline["items"])
+        issue_events = [e for e in with_issue_events["items"] if e["type"] == "issue_event"]
+        assert issue_events
+        assert issue_events[0]["issue_id"] == issue.id
+        assert issue_events[0]["data"]["issue_title"] == "MCP issue timeline"
+        assert issue_events[0]["data"]["event_type"] == "status_changed"
+        assert issue_only["items"]
+        assert all(e["type"] == "issue_event" for e in issue_only["items"])
 
     async def test_get_file_timeline_for_finding_event_uses_finding_id(self, mcp_db: FiligreeDB) -> None:
         file_data = _parse(await call_tool("register_file", {"path": "src/timeline_finding.py"}))
@@ -3149,6 +3257,22 @@ class TestMCPV10:
         data = _parse(result)
         assert data["status"] == "ok"
         assert data["archived_count"] == 1
+
+    async def test_archive_closed_can_be_scoped_to_label(self, mcp_db: FiligreeDB) -> None:
+        scratch = mcp_db.create_issue("MCP scratch cleanup")
+        unrelated = mcp_db.create_issue("MCP unrelated closed")
+        mcp_db.add_label(scratch.id, "scratch")
+        mcp_db.close_issue(scratch.id)
+        mcp_db.close_issue(unrelated.id)
+
+        result = await call_tool("archive_closed", {"days_old": 0, "label": "scratch"})
+
+        data = _parse(result)
+        assert data["status"] == "ok"
+        assert data["archived_count"] == 1
+        assert data["archived_ids"] == [scratch.id]
+        assert mcp_db.get_issue(scratch.id).status == "archived"
+        assert mcp_db.get_issue(unrelated.id).status == "closed"
 
     async def test_compact_events_via_mcp(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("compact_events", {})

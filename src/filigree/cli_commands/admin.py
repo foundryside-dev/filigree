@@ -679,17 +679,23 @@ def import_data(input_file: str, merge: bool, allow_foreign_ids: bool) -> None:
 
 @click.command("archive")
 @click.option("--days", default=30, type=click.IntRange(min=0), help="Archive issues closed more than N days ago (default: 30)")
+@click.option("--label", default=None, type=str, help="Only archive closed issues currently carrying this label")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def archive(ctx: click.Context, days: int, as_json: bool) -> None:
+def archive(ctx: click.Context, days: int, label: str | None, as_json: bool) -> None:
     """Archive old closed issues to reduce active issue count."""
     with get_db() as db:
-        archived = db.archive_closed(days_old=days, actor=ctx.obj["actor"])
+        try:
+            archived = db.archive_closed(days_old=days, actor=ctx.obj["actor"], label=label)
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         if as_json:
             click.echo(json_mod.dumps({"archived": archived, "count": len(archived)}, indent=2, default=str))
         else:
             if archived:
-                click.echo(f"Archived {len(archived)} issues (closed > {days} days)")
+                scope = f" with label {label!r}" if label is not None else ""
+                click.echo(f"Archived {len(archived)} issues{scope} (closed > {days} days)")
                 for aid in archived:
                     click.echo(f"  {aid}")
             else:

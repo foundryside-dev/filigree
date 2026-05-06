@@ -86,6 +86,17 @@ class FileDetail(TypedDict):
     observation_count: int
 
 
+class DeleteFileRecordResult(TypedDict):
+    """Shape returned by ``delete_file_record()``."""
+
+    status: str
+    file_id: str
+    deleted_findings: int
+    deleted_associations: int
+    deleted_file_events: int
+    unlinked_observations: int
+
+
 class ScanRunRecord(TypedDict):
     """Shape returned by ``get_scan_runs()``.
 

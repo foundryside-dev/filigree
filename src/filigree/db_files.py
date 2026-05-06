@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from filigree.types.core import ObservationDict, PaginatedResult, ScanFindingDict
     from filigree.types.files import (
         CleanStaleResult,
+        DeleteFileRecordResult,
         EnrichedFileItem,
         FileAssociation,
         FileDetail,
@@ -227,6 +228,64 @@ class FilesMixin(DBMixinProtocol):
         if row is None:
             return None
         return self._build_file_record(row)
+
+    def delete_file_record(self, file_id: str, *, force: bool = False) -> DeleteFileRecordResult:
+        """Delete a file record and file-domain dependent rows.
+
+        Refuses by default when the file still has issue associations or
+        non-terminal findings. Terminal findings, metadata events, and
+        observation links are cleanup residue and can be removed/unlinked
+        without ``force``.
+        """
+        self.get_file(file_id)  # raises KeyError if not found
+        if not isinstance(force, bool):
+            msg = "force must be a boolean"
+            raise ValueError(msg)
+
+        counts = self.conn.execute(
+            f"""
+            SELECT
+              (SELECT COUNT(*) FROM file_associations WHERE file_id = ?) AS associations,
+              (SELECT COUNT(*) FROM scan_findings WHERE file_id = ? AND {self._OPEN_FINDINGS_FILTER}) AS open_findings
+            """,
+            (file_id, file_id),
+        ).fetchone()
+        associations = int(counts["associations"])
+        open_findings = int(counts["open_findings"])
+        if not force and (associations or open_findings):
+            blockers: list[str] = []
+            if associations:
+                blockers.append(f"{associations} association{'s' if associations != 1 else ''}")
+            if open_findings:
+                blockers.append(f"{open_findings} open finding{'s' if open_findings != 1 else ''}")
+            msg = f"Cannot delete file record {file_id}: " + " and ".join(blockers) + "; pass force=True to cascade."
+            raise ValueError(msg)
+
+        try:
+            observations = self.conn.execute(
+                "UPDATE observations SET file_id = NULL WHERE file_id = ?",
+                (file_id,),
+            ).rowcount
+            file_events = self.conn.execute("DELETE FROM file_events WHERE file_id = ?", (file_id,)).rowcount
+            deleted_associations = self.conn.execute("DELETE FROM file_associations WHERE file_id = ?", (file_id,)).rowcount
+            deleted_findings = self.conn.execute("DELETE FROM scan_findings WHERE file_id = ?", (file_id,)).rowcount
+            deleted_files = self.conn.execute("DELETE FROM file_records WHERE id = ?", (file_id,)).rowcount
+            if deleted_files != 1:
+                msg = f"File not found: {file_id}"
+                raise KeyError(msg)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return {
+            "status": "deleted",
+            "file_id": file_id,
+            "deleted_findings": deleted_findings,
+            "deleted_associations": deleted_associations,
+            "deleted_file_events": file_events,
+            "unlinked_observations": observations,
+        }
 
     def list_files(
         self,
@@ -1455,7 +1514,28 @@ class FilesMixin(DBMixinProtocol):
 
     # -- File Timeline -------------------------------------------------------
 
-    _TIMELINE_CTE = """
+    @staticmethod
+    def _timeline_cte(*, include_issue_events: bool) -> str:
+        issue_events_sql = (
+            """
+        UNION ALL
+        SELECT 'issue_event' AS type, e.created_at AS timestamp,
+               CAST(e.id AS TEXT) AS source_id,
+               json_object('issue_id', e.issue_id,
+                           'issue_title', COALESCE(i.title, ''),
+                           'event_type', e.event_type,
+                           'actor', e.actor,
+                           'old_value', e.old_value,
+                           'new_value', e.new_value,
+                           'comment', e.comment) AS data_json
+        FROM events e
+        JOIN (SELECT DISTINCT issue_id FROM file_associations WHERE file_id = ?) fa ON fa.issue_id = e.issue_id
+        LEFT JOIN issues i ON e.issue_id = i.id
+            """
+            if include_issue_events
+            else ""
+        )
+        return f"""
     WITH timeline AS (
         SELECT 'finding_created' AS type, first_seen AS timestamp,
                id AS source_id,
@@ -1483,6 +1563,7 @@ class FilesMixin(DBMixinProtocol):
                json_object('field', field, 'old_value', old_value,
                            'new_value', new_value) AS data_json
         FROM file_events WHERE file_id = ?
+        {issue_events_sql}
     )
     """
 
@@ -1490,6 +1571,7 @@ class FilesMixin(DBMixinProtocol):
         "finding": "WHERE type IN ('finding_created', 'finding_updated')",
         "association": "WHERE type = 'association_created'",
         "file_metadata_update": "WHERE type = 'file_metadata_update'",
+        "issue_event": "WHERE type = 'issue_event'",
     }
 
     def get_file_timeline(
@@ -1499,6 +1581,7 @@ class FilesMixin(DBMixinProtocol):
         limit: int = 50,
         offset: int = 0,
         event_type: str | None = None,
+        include_issue_events: bool = False,
     ) -> PaginatedResult[TimelineEntry]:
         """Build a merged timeline of events for a file.
 
@@ -1511,22 +1594,29 @@ class FilesMixin(DBMixinProtocol):
         so only the requested page is materialized in Python.
         """
         self.get_file(file_id)  # validate existence
+        if not isinstance(include_issue_events, bool):
+            msg = "include_issue_events must be a boolean"
+            raise ValueError(msg)
 
         if event_type is not None and event_type not in self._TIMELINE_TYPE_FILTERS:
             valid_types = tuple(self._TIMELINE_TYPE_FILTERS)
             raise ValueError(f'Invalid event_type "{event_type}". Must be one of: {", ".join(valid_types)}')
 
+        include_issue_events = include_issue_events or event_type == "issue_event"
         type_filter = self._TIMELINE_TYPE_FILTERS[event_type] if event_type else ""
         base_params: list[Any] = [file_id, file_id, file_id, file_id]
+        if include_issue_events:
+            base_params.append(file_id)
+        timeline_cte = self._timeline_cte(include_issue_events=include_issue_events)
 
         total_row = self.conn.execute(
-            f"{self._TIMELINE_CTE} SELECT COUNT(*) FROM timeline {type_filter}",
+            f"{timeline_cte} SELECT COUNT(*) FROM timeline {type_filter}",
             base_params,
         ).fetchone()
         total: int = total_row[0]
 
         rows = self.conn.execute(
-            f"{self._TIMELINE_CTE} SELECT type, timestamp, source_id, data_json "
+            f"{timeline_cte} SELECT type, timestamp, source_id, data_json "
             f"FROM timeline {type_filter} "
             f"ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             [*base_params, limit, offset],

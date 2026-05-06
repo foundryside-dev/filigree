@@ -43,6 +43,7 @@ from filigree.core import (
     FiligreeDB,
     find_filigree_anchor,
 )
+from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
 from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backward compat
     _MAX_LIST_RESULTS,
@@ -153,6 +154,85 @@ def _safe_path(raw: str) -> Path:
         msg = "Project directory not initialized"
         raise ValueError(msg)
     return safe_path(raw, filigree_dir.parent)
+
+
+def get_mcp_status_payload() -> dict[str, Any]:
+    """Return read-only MCP server health without requiring a usable DB.
+
+    This is intentionally safe in warm-but-degraded schema-mismatch mode:
+    agents can inspect why the connector is degraded without mutating DB
+    metadata or restarting the MCP process.
+    """
+    active_db = _request_db.get() or db
+    filigree_dir = _get_filigree_dir()
+    installed = CURRENT_SCHEMA_VERSION
+
+    if _schema_mismatch is not None:
+        return {
+            "status": "schema_mismatch",
+            "db_initialized": False,
+            "schema_compatible": False,
+            "installed_schema_version": _schema_mismatch.installed,
+            "database_schema_version": _schema_mismatch.database,
+            "code": ErrorCode.SCHEMA_MISMATCH,
+            "error": str(_schema_mismatch),
+            "guidance": format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+        }
+
+    if _db_open_error is not None:
+        return {
+            "status": "db_open_error",
+            "db_initialized": False,
+            "schema_compatible": False,
+            "installed_schema_version": installed,
+            "database_schema_version": None,
+            "code": ErrorCode.IO,
+            "error": str(_db_open_error),
+            "guidance": "Run `filigree doctor` for diagnosis.",
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+        }
+
+    if active_db is None:
+        return {
+            "status": "not_initialized",
+            "db_initialized": False,
+            "schema_compatible": False,
+            "installed_schema_version": installed,
+            "database_schema_version": None,
+            "code": ErrorCode.NOT_INITIALIZED,
+            "error": "Database not initialized",
+            "guidance": "Run `filigree init` in the project, then restart MCP.",
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+        }
+
+    try:
+        database_version = active_db.get_schema_version()
+    except sqlite3.Error as exc:
+        return {
+            "status": "db_open_error",
+            "db_initialized": True,
+            "schema_compatible": False,
+            "installed_schema_version": installed,
+            "database_schema_version": None,
+            "code": ErrorCode.IO,
+            "error": str(exc),
+            "guidance": "Run `filigree doctor` for diagnosis.",
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+        }
+
+    compatible = database_version <= installed
+    return {
+        "status": "ok" if compatible else "schema_mismatch",
+        "db_initialized": True,
+        "schema_compatible": compatible,
+        "installed_schema_version": installed,
+        "database_schema_version": database_version,
+        "code": None if compatible else ErrorCode.SCHEMA_MISMATCH,
+        "error": None if compatible else f"Database schema v{database_version} is newer than installed v{installed}",
+        "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
+        "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +449,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools
     # still works (introspection needs no DB), so agents get a clean signal
     # instead of seeing a connection drop. See F3 of the 2.0 release plan.
-    if _schema_mismatch is not None:
+    if _schema_mismatch is not None and name != "get_mcp_status":
         from filigree.mcp_tools.common import _text as _common_text
 
         return _common_text(

@@ -226,6 +226,7 @@ class ImportJsonlArgs(TypedDict):
 class ArchiveClosedArgs(TypedDict):
     days_old: NotRequired[int]
     actor: NotRequired[str]
+    label: NotRequired[str]
 
 
 class CompactEventsArgs(TypedDict):
@@ -384,11 +385,17 @@ class GetFileArgs(TypedDict):
     file_id: str
 
 
+class DeleteFileRecordArgs(TypedDict):
+    file_id: str
+    force: NotRequired[bool]
+
+
 class GetFileTimelineArgs(TypedDict):
     file_id: str
     limit: NotRequired[int]
     offset: NotRequired[int]
     event_type: NotRequired[str]
+    include_issue_events: NotRequired[bool]
 
 
 class GetIssueFilesArgs(TypedDict):
@@ -593,6 +600,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     # files.py
     "list_files": ListFilesArgs,
     "get_file": GetFileArgs,
+    "delete_file_record": DeleteFileRecordArgs,
     "get_file_timeline": GetFileTimelineArgs,
     "get_issue_files": GetIssueFilesArgs,
     "add_file_association": AddFileAssociationArgs,

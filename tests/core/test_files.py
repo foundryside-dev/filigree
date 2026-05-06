@@ -130,6 +130,78 @@ class TestRegisterFile:
         assert f.metadata == {"owner": "team-a"}
 
 
+class TestDeleteFileRecord:
+    """Tests for deleting file records and their file-domain dependents."""
+
+    def test_delete_unreferenced_file_record(self, db: FiligreeDB) -> None:
+        file_record = db.register_file("src/delete_me.py")
+
+        result = db.delete_file_record(file_record.id)
+
+        assert result["status"] == "deleted"
+        assert result["file_id"] == file_record.id
+        assert result["deleted_findings"] == 0
+        with pytest.raises(KeyError):
+            db.get_file(file_record.id)
+
+    def test_delete_refuses_associations_without_force(self, db: FiligreeDB) -> None:
+        file_record = db.register_file("src/linked.py")
+        issue = db.create_issue("Linked issue")
+        db.add_file_association(file_record.id, issue.id, "mentioned_in")
+
+        with pytest.raises(ValueError, match="1 association"):
+            db.delete_file_record(file_record.id)
+
+        assert db.get_file(file_record.id).id == file_record.id
+
+    def test_delete_refuses_open_findings_without_force(self, db: FiligreeDB) -> None:
+        scan = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "src/open_finding.py", "rule_id": "R1", "message": "Still open"}],
+        )
+        file_record = db.get_file_by_path("src/open_finding.py")
+        assert file_record is not None
+
+        with pytest.raises(ValueError, match="1 open finding"):
+            db.delete_file_record(file_record.id)
+
+        assert db.get_finding(scan["new_finding_ids"][0])["file_id"] == file_record.id
+
+    def test_delete_allows_terminal_findings_without_force(self, db: FiligreeDB) -> None:
+        scan = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "src/terminal_finding.py", "rule_id": "R1", "message": "Dismissed"}],
+        )
+        file_record = db.get_file_by_path("src/terminal_finding.py")
+        assert file_record is not None
+        db.update_finding(scan["new_finding_ids"][0], status="false_positive")
+
+        result = db.delete_file_record(file_record.id)
+
+        assert result["deleted_findings"] == 1
+        with pytest.raises(KeyError):
+            db.get_file(file_record.id)
+
+    def test_force_delete_cascades_associations_and_open_findings(self, db: FiligreeDB) -> None:
+        scan = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "src/force_delete.py", "rule_id": "R1", "message": "Open"}],
+        )
+        file_record = db.get_file_by_path("src/force_delete.py")
+        assert file_record is not None
+        issue = db.create_issue("Force linked issue")
+        db.add_file_association(file_record.id, issue.id, "mentioned_in")
+
+        result = db.delete_file_record(file_record.id, force=True)
+
+        assert result["deleted_associations"] == 1
+        assert result["deleted_findings"] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (file_record.id,)).fetchone()[0] == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (file_record.id,)).fetchone()[0] == 0
+        with pytest.raises(KeyError):
+            db.get_finding(scan["new_finding_ids"][0])
+
+
 class TestListFiles:
     """Tests for listing file records."""
 
@@ -2165,6 +2237,25 @@ class TestFileTimeline:
         for e in findings_only["results"]:
             assert e["type"].startswith("finding_")
         assert findings_only["total"] < all_events["total"]
+
+    def test_timeline_can_include_associated_issue_events(self, db: FiligreeDB) -> None:
+        f = db.register_file("issue-events.py")
+        issue = db.create_issue("Timeline issue")
+        db.add_file_association(f.id, issue.id, "mentioned_in")
+        db.update_issue(issue.id, status="in_progress")
+
+        default_timeline = db.get_file_timeline(f.id)
+        with_issue_events = db.get_file_timeline(f.id, include_issue_events=True)
+        issue_only = db.get_file_timeline(f.id, event_type="issue_event")
+
+        assert all(e["type"] != "issue_event" for e in default_timeline["results"])
+        issue_events = [e for e in with_issue_events["results"] if e["type"] == "issue_event"]
+        assert issue_events
+        assert issue_events[0]["data"]["issue_id"] == issue.id
+        assert issue_events[0]["data"]["issue_title"] == "Timeline issue"
+        assert issue_events[0]["data"]["event_type"] == "status_changed"
+        assert issue_only["results"]
+        assert all(e["type"] == "issue_event" for e in issue_only["results"])
 
     def test_timeline_invalid_event_type_raises(self, db: FiligreeDB) -> None:
         """Unknown event_type must raise ValueError, not return empty results."""

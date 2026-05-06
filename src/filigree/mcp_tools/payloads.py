@@ -60,6 +60,11 @@ def timeline_entry_to_mcp(record: Mapping[str, Any]) -> dict[str, Any]:
         payload["assoc_id"] = source_id
     elif event_type == "file_metadata_update":
         payload["file_event_id"] = source_id
+    elif event_type == "issue_event":
+        payload["event_id"] = source_id
+        data = payload.get("data")
+        if isinstance(data, Mapping) and isinstance(data.get("issue_id"), str):
+            payload["issue_id"] = data["issue_id"]
     else:
         payload["source_ref"] = source_id
     return payload

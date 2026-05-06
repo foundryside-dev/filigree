@@ -12,6 +12,7 @@ File shapes:
   NOTE: MCP returns raw list; CLI normalizes to ListResponse.
 - add-file-association: {"status": "created"}
 - register-file: FileRecordDict — {id, path, language, file_type, first_seen, updated_at, metadata, data_warnings}
+- delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations}
 
 Finding shapes:
 - list-findings items: ScanFindingDict
@@ -266,6 +267,40 @@ class TestGetFileCommand:
             os.chdir(original)
 
 
+class TestDeleteFileRecordCommand:
+    def test_delete_file_record_happy_path_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["register-file", "src/delete_me.py", "--json"])
+        assert created.exit_code == 0, created.output
+        file_id = json.loads(created.output)["id"]
+
+        result = runner.invoke(cli, ["delete-file-record", file_id, "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "deleted"
+        assert data["file_id"] == file_id
+        missing = runner.invoke(cli, ["get-file", file_id, "--json"])
+        assert missing.exit_code != 0
+        assert json.loads(missing.output)["code"] == "NOT_FOUND"
+
+    def test_delete_file_record_refuses_association_without_force(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["register-file", "src/linked.py", "--json"])
+        file_id = json.loads(created.output)["id"]
+        issue = runner.invoke(cli, ["create", "Linked file issue", "--json"])
+        issue_id = json.loads(issue.output)["issue_id"]
+        runner.invoke(cli, ["add-file-association", file_id, issue_id, "mentioned_in"])
+
+        blocked = runner.invoke(cli, ["delete-file-record", file_id, "--json"])
+        forced = runner.invoke(cli, ["delete-file-record", file_id, "--force", "--json"])
+
+        assert blocked.exit_code != 0
+        assert json.loads(blocked.output)["code"] == "CONFLICT"
+        assert forced.exit_code == 0, forced.output
+        assert json.loads(forced.output)["deleted_associations"] == 1
+
+
 # ---------------------------------------------------------------------------
 # TestGetFileTimelineCommand
 # ---------------------------------------------------------------------------
@@ -330,6 +365,29 @@ class TestGetFileTimelineCommand:
             assert "total" not in data
         finally:
             os.chdir(original)
+
+    def test_get_file_timeline_can_include_issue_events(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["register-file", "src/timeline_issue.py", "--json"])
+        file_id = json.loads(created.output)["id"]
+        issue = runner.invoke(cli, ["create", "CLI issue timeline", "--json"])
+        issue_id = json.loads(issue.output)["issue_id"]
+        runner.invoke(cli, ["add-file-association", file_id, issue_id, "mentioned_in"])
+        runner.invoke(cli, ["update", issue_id, "--status", "in_progress"])
+
+        default = runner.invoke(cli, ["get-file-timeline", file_id, "--json"])
+        with_issue_events = runner.invoke(cli, ["get-file-timeline", file_id, "--include-issue-events", "--json"])
+        issue_only = runner.invoke(cli, ["get-file-timeline", file_id, "--event-type", "issue_event", "--json"])
+
+        assert default.exit_code == 0, default.output
+        assert with_issue_events.exit_code == 0, with_issue_events.output
+        assert issue_only.exit_code == 0, issue_only.output
+        assert all(e["type"] != "issue_event" for e in json.loads(default.output)["items"])
+        issue_events = [e for e in json.loads(with_issue_events.output)["items"] if e["type"] == "issue_event"]
+        assert issue_events
+        assert issue_events[0]["data"]["issue_id"] == issue_id
+        assert issue_events[0]["data"]["event_type"] == "status_changed"
+        assert all(e["type"] == "issue_event" for e in json.loads(issue_only.output)["items"])
 
 
 # ---------------------------------------------------------------------------

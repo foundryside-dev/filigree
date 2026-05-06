@@ -1644,6 +1644,20 @@ class TestArchival:
         assert issue.id in archived
         assert db.get_issue(issue.id).status == "archived"
 
+    def test_archive_closed_can_be_scoped_to_label(self, db: FiligreeDB) -> None:
+        """Review/test cleanup can archive only closed issues carrying a scratch label."""
+        scratch = db.create_issue("Scratch cleanup")
+        unrelated = db.create_issue("Real closed work")
+        db.add_label(scratch.id, "scratch")
+        db.close_issue(scratch.id)
+        db.close_issue(unrelated.id)
+
+        archived = db.archive_closed(days_old=0, label="scratch")
+
+        assert archived == [scratch.id]
+        assert db.get_issue(scratch.id).status == "archived"
+        assert db.get_issue(unrelated.id).status == "closed"
+
     @pytest.mark.parametrize("days", [-1, -30])
     def test_archive_rejects_negative_days_old(self, db: FiligreeDB, days: int) -> None:
         """filigree-0903743222: negative days_old shifted cutoff into the future, archiving every closed issue."""

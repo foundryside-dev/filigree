@@ -183,6 +183,27 @@ class TestJsonRetrofit:
         assert "archived" in data
         assert "count" in data
 
+    def test_archive_can_be_scoped_to_label(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        scratch = runner.invoke(cli, ["create", "CLI scratch cleanup"])
+        unrelated = runner.invoke(cli, ["create", "CLI unrelated closed"])
+        scratch_id = _extract_id(scratch.output)
+        unrelated_id = _extract_id(unrelated.output)
+        runner.invoke(cli, ["add-label", "scratch", scratch_id])
+        runner.invoke(cli, ["close", scratch_id])
+        runner.invoke(cli, ["close", unrelated_id])
+
+        result = runner.invoke(cli, ["archive", "--days", "0", "--label", "scratch", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["archived"] == [scratch_id]
+        assert data["count"] == 1
+        scratch_show = runner.invoke(cli, ["show", scratch_id, "--json"])
+        unrelated_show = runner.invoke(cli, ["show", unrelated_id, "--json"])
+        assert json.loads(scratch_show.output)["status"] == "archived"
+        assert json.loads(unrelated_show.output)["status"] == "closed"
+
     def test_archive_rejects_negative_days(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["archive", "--days", "-1"])
