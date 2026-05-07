@@ -50,6 +50,40 @@ class TestStartWorkCli:
         assert data["status"] == "in_progress"
         assert data["assignee"] == "bob"
 
+    def test_confirmed_bug_defaults_to_reachable_fixing(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Bug has two wip states, but confirmed can only enter fixing."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Bug work item", "--type", "bug", "--field", "severity=major"])
+        issue_id = _extract_id(r.output)
+        update = runner.invoke(cli, ["update", issue_id, "--status", "confirmed", "--json"])
+        assert update.exit_code == 0, update.output
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "bug-bot", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["issue_id"] == issue_id
+        assert data["assignee"] == "bug-bot"
+        assert data["status"] == "fixing"
+
+    def test_fresh_bug_default_reports_no_reachable_wip(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Fresh triage bugs need a state-specific error, not type-level ambiguity."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Fresh bug work item", "--type", "bug"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "bug-bot", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert "No wip-category transition from 'triage'" in data["error"]
+        show = runner.invoke(cli, ["show", issue_id, "--json"])
+        assert show.exit_code == 0, show.output
+        current = json.loads(show.output)
+        assert current["assignee"] == ""
+        assert current["status"] == "triage"
+
     def test_plain_text_output(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """Without --json, emits 'Started work on ...' message on stdout."""
         runner, _ = cli_in_project

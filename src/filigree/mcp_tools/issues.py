@@ -321,8 +321,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="start_work",
             description=(
                 "Atomically claim an issue and transition it to a working status. "
-                "target_status defaults to the type's canonical wip-category status; "
-                "AmbiguousTransitionError surfaces if the type has multiple wip statuses "
+                "target_status defaults to the unique wip-category status reachable from the current status; "
+                "AmbiguousTransitionError surfaces if the current status has multiple reachable wip targets "
                 "(specify target_status explicitly). On transition failure the claim is rolled back."
             ),
             inputSchema={
@@ -333,8 +333,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "target_status": {
                         "type": "string",
                         "description": (
-                            "Optional target status. Defaults to the type's unique wip-category status; "
-                            "required when the type defines multiple wip statuses."
+                            "Optional target status. Defaults to the unique wip-category status reachable "
+                            "from the current status; required when multiple wip targets are reachable."
                         ),
                     },
                     "actor": {
@@ -367,8 +367,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "target_status": {
                         "type": "string",
                         "description": (
-                            "Optional target status. Defaults to the type's unique wip-category status; "
-                            "required when the type defines multiple wip statuses."
+                            "Optional target status. Defaults to the unique wip-category status reachable "
+                            "from the selected issue's current status; required when multiple wip targets are reachable."
                         ),
                     },
                     "actor": {

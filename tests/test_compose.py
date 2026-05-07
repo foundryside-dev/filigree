@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from filigree.core import FiligreeDB
+from filigree.templates import StateDefinition, TransitionDefinition, TypeTemplate
 from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
 
 
@@ -76,6 +77,86 @@ class TestStartWork:
         issue = db.create_issue("d6-explicit-target", type="task")
         result = db.start_work(issue.id, assignee="alice", target_status="in_progress", actor="alice")
         assert result.status == "in_progress"
+
+    def test_confirmed_bug_defaults_to_reachable_fixing_status(self, db: FiligreeDB) -> None:
+        """Bug has two wip states, but confirmed can only enter fixing."""
+        issue = db.create_issue("d6-confirmed-bug", type="bug", fields={"severity": "major"})
+        db.update_issue(issue.id, status="confirmed")
+
+        result = db.start_work(issue.id, assignee="alice", actor="alice")
+
+        assert result.assignee == "alice"
+        assert result.status == "fixing"
+
+    def test_fresh_bug_default_reports_no_reachable_wip_status(self, db: FiligreeDB) -> None:
+        """A fresh triage bug has no direct wip transition, so the error should be state-specific."""
+        issue = db.create_issue("d6-fresh-bug", type="bug")
+
+        with pytest.raises(InvalidTransitionError, match="triage"):
+            db.start_work(issue.id, assignee="alice", actor="alice")
+
+        after = db.get_issue(issue.id)
+        assert after.assignee == ""
+        assert after.status == "triage"
+
+    def test_default_target_ignores_unreachable_wip_statuses(self, db: FiligreeDB) -> None:
+        """Only reachable wip targets from the current state participate in default selection."""
+        tpl = TypeTemplate(
+            type="single_reachable_wip",
+            display_name="Single Reachable Wip",
+            description="",
+            pack="test",
+            states=(
+                StateDefinition(name="open", category="open"),
+                StateDefinition(name="review", category="wip"),
+                StateDefinition(name="revise", category="wip"),
+                StateDefinition(name="closed", category="done"),
+            ),
+            initial_state="open",
+            transitions=(
+                TransitionDefinition(from_state="open", to_state="review", enforcement="soft"),
+                TransitionDefinition(from_state="review", to_state="revise", enforcement="soft"),
+                TransitionDefinition(from_state="review", to_state="closed", enforcement="soft"),
+                TransitionDefinition(from_state="revise", to_state="closed", enforcement="soft"),
+            ),
+            fields_schema=(),
+        )
+        db.templates._register_type(tpl)
+        issue = db.create_issue("d6-single-reachable", type="single_reachable_wip")
+
+        result = db.start_work(issue.id, assignee="alice", actor="alice")
+
+        assert result.status == "review"
+
+    def test_default_target_still_rejects_multiple_reachable_wip_statuses(self, db: FiligreeDB) -> None:
+        """When the current state can enter multiple wip states, callers must choose."""
+        tpl = TypeTemplate(
+            type="multiple_reachable_wip",
+            display_name="Multiple Reachable Wip",
+            description="",
+            pack="test",
+            states=(
+                StateDefinition(name="open", category="open"),
+                StateDefinition(name="review", category="wip"),
+                StateDefinition(name="revise", category="wip"),
+                StateDefinition(name="closed", category="done"),
+            ),
+            initial_state="open",
+            transitions=(
+                TransitionDefinition(from_state="open", to_state="review", enforcement="soft"),
+                TransitionDefinition(from_state="open", to_state="revise", enforcement="soft"),
+                TransitionDefinition(from_state="review", to_state="closed", enforcement="soft"),
+                TransitionDefinition(from_state="revise", to_state="closed", enforcement="soft"),
+            ),
+            fields_schema=(),
+        )
+        db.templates._register_type(tpl)
+        issue = db.create_issue("d6-multiple-reachable", type="multiple_reachable_wip")
+
+        with pytest.raises(AmbiguousTransitionError) as excinfo:
+            db.start_work(issue.id, assignee="alice", actor="alice")
+
+        assert set(excinfo.value.candidates) == {"review", "revise"}
 
     def test_actor_defaults_to_assignee(self, db: FiligreeDB) -> None:
         """When actor is omitted, the assignee is used for the audit trail."""

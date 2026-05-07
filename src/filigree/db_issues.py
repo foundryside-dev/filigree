@@ -1018,10 +1018,10 @@ class IssuesMixin(DBMixinProtocol):
         rollback: if the transition fails, the claim is released so the
         issue's ``assignee`` returns to its prior value.
 
-        ``target_status`` defaults to the type's
-        ``canonical_working_status()``. If the type defines multiple wip
-        statuses an ``AmbiguousTransitionError`` surfaces (caller must
-        specify ``target_status`` explicitly); if zero,
+        ``target_status`` defaults to the unique wip-category status reachable
+        from the issue's current status. If the current status can transition
+        to multiple wip statuses an ``AmbiguousTransitionError`` surfaces
+        (caller must specify ``target_status`` explicitly); if zero,
         ``InvalidTransitionError``.
 
         Note: rollback uses ``release_claim``, which itself may fail (e.g.
@@ -1060,7 +1060,7 @@ class IssuesMixin(DBMixinProtocol):
                 _rollback_claim()
                 raise InvalidTransitionError(issue.type, issue.status)
             try:
-                target_status = tpl.canonical_working_status()
+                target_status = tpl.reachable_working_status(issue.status)
             except Exception:
                 _rollback_claim()
                 raise
@@ -1122,7 +1122,7 @@ class IssuesMixin(DBMixinProtocol):
                 _rollback_claim()
                 raise InvalidTransitionError(claimed.type, claimed.status)
             try:
-                target_status = tpl.canonical_working_status()
+                target_status = tpl.reachable_working_status(claimed.status)
             except Exception:
                 _rollback_claim()
                 raise

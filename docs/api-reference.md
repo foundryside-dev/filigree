@@ -330,7 +330,7 @@ def start_work(
 
 Composed 2.0 operation: atomically claim an issue **and** transition it to a working status in one call. Performs `claim_issue` followed by `update_issue(status=target_status)` with a compensating-action rollback — if the transition fails, the claim is released. Rollback only fires when *this* call acquired the claim, so a pre-existing same-assignee claim is preserved.
 
-`target_status` defaults to the type's `canonical_working_status()`. If the type defines multiple wip-category targets reachable from the current status, raises `AmbiguousTransitionError` (caller must specify `target_status` explicitly); if zero, raises `InvalidTransitionError`.
+`target_status` defaults to the unique wip-category status reachable from the issue's current status. If the current status has multiple reachable wip-category targets, raises `AmbiguousTransitionError` (caller must specify `target_status` explicitly); if zero, raises `InvalidTransitionError`.
 
 This is the recommended path for picking up work in 2.0 — `claim_issue` remains for the niche "reserve without transitioning" case.
 

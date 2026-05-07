@@ -170,11 +170,10 @@ class TypeTemplate:
         """Return the unique wip-category status name for this type.
 
         Used by ``start_work`` / ``start_next_work`` (Phase D6) to default
-        ``target_status`` when the type defines exactly one wip-category
-        status. Raises ``AmbiguousTransitionError`` if multiple wip statuses
-        exist (caller must specify ``target_status`` explicitly); raises
-        ``InvalidTransitionError`` if the type has no wip statuses (start-work
-        cannot pick a target at all).
+        ``target_status`` for legacy type-level callers. Raises
+        ``AmbiguousTransitionError`` if multiple wip statuses exist (caller
+        must specify ``target_status`` explicitly); raises
+        ``InvalidTransitionError`` if the type has no wip statuses.
         """
         from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
 
@@ -184,6 +183,30 @@ class TypeTemplate:
         if not wip:
             raise InvalidTransitionError(self.type, self.initial_state)
         raise AmbiguousTransitionError(self.type, wip)
+
+    def reachable_working_status(self, current_status: str) -> str:
+        """Return the unique wip-category target reachable from current_status.
+
+        If the issue is already in a wip-category state, that status is the
+        working target so handoff claims do not accidentally advance workflow.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        categories = {state.name: state.category for state in self.states}
+        if categories.get(current_status) == "wip":
+            return current_status
+
+        candidates: list[str] = []
+        for transition in self.transitions:
+            if transition.from_state == current_status and categories.get(transition.to_state) == "wip":
+                candidates.append(transition.to_state)
+        candidates = list(dict.fromkeys(candidates))
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            raise InvalidTransitionError(self.type, current_status)
+        raise AmbiguousTransitionError(self.type, candidates, current_status=current_status)
 
 
 @dataclass(frozen=True)

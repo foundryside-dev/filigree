@@ -973,6 +973,28 @@ class TestStartWork:
         data = _parse(result)
         assert data["status"] == "in_progress"
 
+    async def test_start_work_confirmed_bug_defaults_to_reachable_fixing(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("mcp-d6-confirmed-bug", type="bug", fields={"severity": "major"})
+        mcp_db.update_issue(issue.id, status="confirmed")
+
+        result = await call_tool("start_work", {"issue_id": issue.id, "assignee": "bob"})
+
+        data = _parse(result)
+        assert data["assignee"] == "bob"
+        assert data["status"] == "fixing"
+
+    async def test_start_work_fresh_bug_reports_no_reachable_wip(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("mcp-d6-fresh-bug", type="bug")
+
+        result = await call_tool("start_work", {"issue_id": issue.id, "assignee": "bob"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.INVALID_TRANSITION
+        assert "No wip-category transition from 'triage'" in data["error"]
+        current = mcp_db.get_issue(issue.id)
+        assert current.assignee == ""
+        assert current.status == "triage"
+
     async def test_start_work_blank_assignee_rejected(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("mcp-d6-blank", type="task")
         result = await call_tool("start_work", {"issue_id": issue.id, "assignee": ""})

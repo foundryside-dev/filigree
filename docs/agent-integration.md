@@ -30,7 +30,7 @@ The recommended pattern for agents working with filigree 2.0:
 
 1. **Orient** — read `filigree://context` resource for project state
 2. **Find work** — `get_ready` to find unblocked work sorted by priority
-3. **Start** — `start_work` (specific issue) or `start_next_work` (highest-priority ready) atomically claims and transitions to `in_progress` in one step
+3. **Start** — `start_work` (specific issue) or `start_next_work` (highest-priority ready) atomically claims and transitions to the issue type's reachable working status in one step
 4. **Work** — do the task, `add_comment` to log progress
 5. **Close** — `close_issue` when done (response includes newly-unblocked items)
 6. **Repeat** — loop back to step 2

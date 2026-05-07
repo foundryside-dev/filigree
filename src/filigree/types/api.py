@@ -535,8 +535,7 @@ class SchemaVersionMismatchError(ValueError):
 
 
 class AmbiguousTransitionError(Exception):
-    """Raised by WorkflowPack.canonical_working_status when multiple
-    wip-category targets exist from the current status.
+    """Raised when start-work cannot choose between multiple wip-category targets.
 
     Carries the ambiguous type_name plus the full list of candidate
     target states so callers can render a disambiguation prompt. Stage 3
@@ -544,11 +543,13 @@ class AmbiguousTransitionError(Exception):
     so the mapping is stable when the raise sites land.
     """
 
-    def __init__(self, type_name: str, candidates: list[str]) -> None:
+    def __init__(self, type_name: str, candidates: list[str], current_status: str | None = None) -> None:
         self.type_name = type_name
         self.candidates = candidates
+        self.current_status = current_status
+        scope = f" from {current_status!r}" if current_status is not None else ""
         super().__init__(
-            f"start_work ambiguous for type {type_name!r}: "
+            f"start_work ambiguous for type {type_name!r}{scope}: "
             f"multiple wip-category targets available ({candidates}). "
             f"Specify target_status explicitly."
         )

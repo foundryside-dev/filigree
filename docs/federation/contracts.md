@@ -150,9 +150,10 @@ vocabulary that landed in Phase C:
 
 - **Composed operations.** New atomic MCP tools `start_work` and
   `start_next_work` claim an issue and transition it to a working
-  status in one call. `target_status` defaults to the type's
-  `canonical_working_status()`; ambiguous (multi-wip) types raise
-  `AmbiguousTransitionError` so the caller specifies. Backed by core
+  status in one call. `target_status` defaults to the unique wip-category
+  status reachable from the issue's current status; statuses with multiple
+  reachable wip targets raise `AmbiguousTransitionError` so the caller specifies.
+  Backed by core
   methods on `FiligreeDB` with compensating-action rollback (the
   claim is released if the transition fails) so the assignee/status
   pair returns to its prior state on error.

@@ -409,7 +409,7 @@ Atomically claim an issue AND transition it to its working status in a single ca
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `--assignee` | string | Who is claiming (required) |
-| `--target-status` | string | Target wip status (default: type's canonical wip status) |
+| `--target-status` | string | Target wip status (default: unique reachable wip target) |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ### `start-next-work`
@@ -422,7 +422,7 @@ Claim AND transition the highest-priority ready issue. Returns `{status: "empty"
 | `--type` | string | Filter by issue type |
 | `--priority-min` | 0-4 | Minimum priority filter |
 | `--priority-max` | 0-4 | Maximum priority filter |
-| `--target-status` | string | Target wip status (default: type's canonical wip status) |
+| `--target-status` | string | Target wip status (default: unique reachable wip target) |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ## Batch Operations

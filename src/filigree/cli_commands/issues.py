@@ -806,7 +806,7 @@ def undo_last_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
 @click.command("start-work")
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="Who is starting work (agent name)")
-@click.option("--target-status", default=None, help="Override wip status (defaults to type's canonical wip)")
+@click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_work(
@@ -880,7 +880,7 @@ def start_work(
 @click.option("--type", "type_filter", default=None, help="Filter by issue type")
 @click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
 @click.option("--priority-max", default=None, type=int, help="Maximum priority")
-@click.option("--target-status", default=None, help="Override wip status (defaults to type's canonical wip)")
+@click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_next_work(
