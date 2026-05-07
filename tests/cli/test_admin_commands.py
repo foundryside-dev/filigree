@@ -359,6 +359,9 @@ class TestInstallCli:
         self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner, project = cli_in_project
+        codex_home = project / ".test-home"
+        codex_home.mkdir()
+        monkeypatch.setattr("filigree.install_support.integrations.Path.home", lambda: codex_home)
 
         observed: dict[str, object] = {}
 
@@ -385,6 +388,10 @@ class TestInstallCli:
         assert observed["project_root"] == project
         assert observed["mode"] == "server"
         assert observed["server_port"] == 9911
+
+        from filigree.install_support.integrations import _codex_config_path
+
+        assert _codex_config_path() == codex_home / ".codex" / "config.toml"
 
 
 class TestDoctorCli:
