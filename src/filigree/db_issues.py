@@ -875,7 +875,7 @@ class IssuesMixin(DBMixinProtocol):
                 return cast(str, old_status)
         return self.templates.get_initial_state(issue.type)
 
-    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "") -> Issue:
+    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", _commit: bool = True) -> Issue:
         """Atomically claim an open/wip-category issue with optimistic locking.
 
         Sets assignee only — does NOT change status. Agent uses update_issue
@@ -939,7 +939,8 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
 
             self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
@@ -1019,6 +1020,7 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
+        _commit: bool = True,
     ) -> tuple[Issue, str] | None:
         """Internal: claim_next that also returns the candidate's prior assignee.
 
@@ -1046,7 +1048,7 @@ class IssuesMixin(DBMixinProtocol):
             try:
                 row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue.id,)).fetchone()
                 prior_assignee = (row["assignee"] if row is not None else "") or ""
-                claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee)
+                claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _commit=_commit)
             except (ValueError, KeyError) as exc:
                 skipped += 1
                 logger.debug("claim_next: skipping %s: %s", issue.id, exc)
@@ -1066,10 +1068,11 @@ class IssuesMixin(DBMixinProtocol):
     ) -> Issue:
         """Atomically claim an issue and transition it to a working status.
 
-        Phase D6 composed operation. Performs ``claim_issue`` followed by
-        ``update_issue(status=target_status)`` with a compensating-action
-        rollback: if the transition fails, the claim is released so the
-        issue's ``assignee`` returns to its prior value.
+        Phase D6 composed operation. Performs ``claim_issue`` without
+        committing, followed by ``update_issue(status=target_status)``. If the
+        transition fails, rolling back that open transaction removes both the
+        attempted claim and its audit event, so failed starts do not look like
+        real claim/release handoffs.
 
         ``target_status`` defaults to the unique wip-category status reachable
         from the issue's current status. If the current status can transition
@@ -1077,32 +1080,18 @@ class IssuesMixin(DBMixinProtocol):
         (caller must specify ``target_status`` explicitly); if zero,
         ``InvalidTransitionError``.
 
-        Note: rollback uses ``release_claim``, which itself may fail (e.g.
-        a concurrent reassignment). The audit trail preserves both the
-        ``claimed`` and ``released`` events even on rollback — auditability
-        is preserved at the cost of leaving a brief observable window
-        where the issue is claimed but not transitioned.
-
-        Rollback only releases the claim when *this* invocation acquired
-        it (filigree-31404d228f). ``claim_issue`` is idempotent for the
-        same identity — if the issue was already owned by ``assignee``
-        before the call, a transition failure must leave the claim in
-        place rather than wiping out an unrelated, pre-existing claim.
+        Transaction rollback preserves the prior ownership state
+        (filigree-31404d228f). ``claim_issue`` is idempotent for the same
+        identity — if the issue was already owned by ``assignee`` before the
+        call, a transition failure must leave the claim in place rather than
+        wiping out an unrelated, pre-existing claim.
         """
         actor = actor or assignee
 
-        # Capture the prior assignee so rollback knows whether THIS call
-        # acquired the claim. Read directly to avoid building a full Issue;
-        # if the row is missing, claim_issue will raise the canonical KeyError.
-        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-        prior_assignee = (row["assignee"] if row is not None else "") or ""
-
-        issue = self.claim_issue(issue_id, assignee=assignee, actor=actor)
-        newly_acquired_claim = prior_assignee == ""
+        issue = self.claim_issue(issue_id, assignee=assignee, actor=actor, _commit=False)
 
         def _rollback_claim() -> None:
-            if newly_acquired_claim:
-                self._safe_release_claim(issue_id, actor=actor)
+            self._rollback_uncommitted_start_claim(issue_id)
 
         if target_status is None:
             tpl = self.templates.get_type(issue.type)
@@ -1119,7 +1108,10 @@ class IssuesMixin(DBMixinProtocol):
                 raise
 
         try:
-            return self.update_issue(issue_id, status=target_status, actor=actor)
+            updated = self.update_issue(issue_id, status=target_status, actor=actor)
+            if self.conn.in_transaction:
+                self.conn.commit()
+            return updated
         except Exception:
             _rollback_claim()
             raise
@@ -1157,15 +1149,14 @@ class IssuesMixin(DBMixinProtocol):
             priority_min=priority_min,
             priority_max=priority_max,
             actor=actor,
+            _commit=False,
         )
         if claimed_with_prior is None:
             return None
-        claimed, prior_assignee = claimed_with_prior
-        newly_acquired_claim = prior_assignee == ""
+        claimed, _prior_assignee = claimed_with_prior
 
         def _rollback_claim() -> None:
-            if newly_acquired_claim:
-                self._safe_release_claim(claimed.id, actor=actor)
+            self._rollback_uncommitted_start_claim(claimed.id)
 
         if target_status is None:
             tpl = self.templates.get_type(claimed.type)
@@ -1181,21 +1172,28 @@ class IssuesMixin(DBMixinProtocol):
                 raise
 
         try:
-            return self.update_issue(claimed.id, status=target_status, actor=actor)
+            updated = self.update_issue(claimed.id, status=target_status, actor=actor)
+            if self.conn.in_transaction:
+                self.conn.commit()
+            return updated
         except Exception:
             _rollback_claim()
             raise
 
-    def _safe_release_claim(self, issue_id: str, *, actor: str) -> None:
-        """Best-effort claim rollback for start_work / start_next_work.
+    def _rollback_uncommitted_start_claim(self, issue_id: str) -> None:
+        """Rollback an uncommitted claim acquired by start_work/start_next_work.
 
-        Used in compensating-action paths — never raises; logs at WARN if
-        the rollback itself fails so operators can spot leaked claims.
+        The composed operation keeps claim and transition in one transaction.
+        If transition selection or validation fails before update_issue commits,
+        this removes the attempted claim and its event without recording a
+        synthetic release.
         """
+        if not self.conn.in_transaction:
+            return
         try:
-            self.release_claim(issue_id, actor=actor)
-        except (KeyError, ValueError) as exc:
-            logger.warning("start_work compensating release_claim failed for %s: %s", issue_id, exc)
+            self.conn.rollback()
+        except sqlite3.Error:
+            logger.warning("start_work rollback failed for uncommitted claim on %s", issue_id, exc_info=True)
 
     def _batch_with_transition_errors(
         self,

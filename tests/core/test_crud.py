@@ -142,9 +142,9 @@ class TestStartNextWorkRollbackPreservesPriorClaim:
     """filigree-fa01508ee2: start_next_work must not erase a pre-existing same-assignee claim on rollback.
 
     claim_issue is intentionally idempotent for the same identity, and claim_next
-    inherits that. start_next_work previously called _safe_release_claim
-    unconditionally on transition failure, wiping a claim that was already held
-    by ``assignee`` before the call. Mirrors the start_work contract.
+    inherits that. start_next_work previously released the claim unconditionally
+    on transition failure, wiping a claim that was already held by ``assignee``
+    before the call. Mirrors the start_work contract.
     """
 
     def test_failed_target_status_preserves_prior_claim(self, db: FiligreeDB) -> None:

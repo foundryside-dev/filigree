@@ -181,6 +181,26 @@ class TestStartWork:
             f"transition should have rolled back; got status={after.status!r}, expected {original_status!r}"
         )
 
+    def test_failed_attempts_do_not_record_claim_handoffs(self, db: FiligreeDB) -> None:
+        """Repeated invalid starts should not look like real claim/release handoffs."""
+        issue = db.create_issue("d6-rollback-events", type="task")
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match=r"status|transition"):
+                db.start_work(issue.id, assignee="alice", target_status="nonexistent_status", actor="alice")
+
+        result = db.start_work(issue.id, assignee="alice", target_status="in_progress", actor="alice")
+        assert result.assignee == "alice"
+        assert result.status == "in_progress"
+
+        issue_events = db.get_issue_events(issue.id, limit=20)
+        assert [e["event_type"] for e in issue_events if e["event_type"] == "claimed"] == ["claimed"]
+        assert [e["event_type"] for e in issue_events if e["event_type"] == "released"] == []
+
+        changes = db.get_events_since("2000-01-01T00:00:00+00:00", issue_id=issue.id, limit=20)
+        assert [e["event_type"] for e in changes if e["event_type"] == "claimed"] == ["claimed"]
+        assert [e["event_type"] for e in changes if e["event_type"] == "released"] == []
+
     def test_unknown_issue_raises_keyerror(self, db: FiligreeDB) -> None:
         """An unknown issue surfaces a KeyError from claim_issue (no rollback needed)."""
         with pytest.raises(KeyError):
@@ -212,3 +232,25 @@ class TestStartNextWork:
         result = db.start_next_work(assignee="erin", priority_max=2)
         assert result is not None
         assert result.id == med.id
+
+    def test_failed_attempts_do_not_record_claim_handoffs(self, db: FiligreeDB) -> None:
+        """start_next_work rollbacks should not leave claim/release audit noise."""
+        issue = db.create_issue("d6-next-rollback-events", type="task", priority=0)
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match=r"status|transition"):
+                db.start_next_work(assignee="alice", target_status="nonexistent_status", actor="alice")
+
+        result = db.start_next_work(assignee="alice", target_status="in_progress", actor="alice")
+        assert result is not None
+        assert result.id == issue.id
+        assert result.assignee == "alice"
+        assert result.status == "in_progress"
+
+        issue_events = db.get_issue_events(issue.id, limit=20)
+        assert [e["event_type"] for e in issue_events if e["event_type"] == "claimed"] == ["claimed"]
+        assert [e["event_type"] for e in issue_events if e["event_type"] == "released"] == []
+
+        changes = db.get_events_since("2000-01-01T00:00:00+00:00", issue_id=issue.id, limit=20)
+        assert [e["event_type"] for e in changes if e["event_type"] == "claimed"] == ["claimed"]
+        assert [e["event_type"] for e in changes if e["event_type"] == "released"] == []
