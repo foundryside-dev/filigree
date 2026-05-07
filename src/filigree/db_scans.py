@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any, get_args
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _begin_immediate, _now_iso
 from filigree.types.core import ScanRunStatus
 from filigree.types.files import ScanRunDict, ScanRunStatusDict
 
@@ -88,14 +88,7 @@ class ScansMixin(DBMixinProtocol):
         ``trigger_scan`` invocations can both pass the cooldown check and
         both spawn a scanner for the same file.
         """
-        # If another call left an open implicit transaction, roll it back
-        # first so BEGIN IMMEDIATE can take the writer lock cleanly. Use
-        # rollback (not commit): committing here would persist whatever
-        # pending writes that earlier caller left behind, which is not our
-        # work to keep.
-        if self.conn.in_transaction:
-            self.conn.rollback()
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn, "reserve_scan_run")
         try:
             blocking = self.check_scan_cooldown(scanner_name, file_path)
             if blocking is not None:

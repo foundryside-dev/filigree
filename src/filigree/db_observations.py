@@ -19,7 +19,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from filigree.db_base import DBMixinProtocol, _escape_like, _now_iso
+from filigree.db_base import DBMixinProtocol, _begin_immediate, _escape_like, _now_iso
 from filigree.db_files import _normalize_scan_path
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import BatchDismissResult, ISOTimestamp, ObservationDict, ObservationStatsDict, PromoteObservationResult
@@ -394,9 +394,7 @@ class ObservationsMixin(DBMixinProtocol):
         # no-op delete that silently reports success — masking the fact that
         # the row was already gone. Contract change: concurrent second dismiss
         # now correctly raises ``ValueError("Observation not found")``.
-        if self.conn.in_transaction:
-            self.conn.rollback()
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn, "dismiss_observation")
         try:
             row = self.conn.execute("SELECT id, summary FROM observations WHERE id = ?", (obs_id,)).fetchone()
             if row is None:
@@ -431,9 +429,7 @@ class ObservationsMixin(DBMixinProtocol):
         # found_ids/not_found computation must match the rows we actually
         # delete, otherwise the audit table inflates and ``not_found`` lies.
         # Hold a writer lock across the SELECT and the INSERT/DELETE.
-        if self.conn.in_transaction:
-            self.conn.rollback()
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn, "batch_dismiss_observations")
         try:
             # Find which IDs actually exist (under writer lock)
             found_rows = self.conn.execute(
@@ -512,9 +508,7 @@ class ObservationsMixin(DBMixinProtocol):
         # without it, one malformed row anywhere in the issues table makes
         # ``json_extract`` raise OperationalError and breaks every promote.
         warnings: list[str] = []
-        if self.conn.in_transaction:
-            self.conn.rollback()
-        self.conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate(self.conn, "promote_observation")
         try:
             existing_issue_row = self.conn.execute(
                 "SELECT id FROM issues WHERE json_valid(fields) AND json_extract(fields, '$.source_observation_id') = ?",

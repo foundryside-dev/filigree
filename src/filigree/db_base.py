@@ -26,6 +26,7 @@ __all__ = [
     "AGE_BUCKETS",
     "DBMixinProtocol",
     "StatusCategory",
+    "_begin_immediate",
     "_escape_like",
     "_escape_like_chars",
     "_normalize_iso_to_utc",
@@ -45,6 +46,13 @@ AGE_BUCKETS: dict[str, tuple[int, int]] = {
 
 def _now_iso() -> ISOTimestamp:
     return ISOTimestamp(datetime.now(UTC).isoformat())
+
+
+def _begin_immediate(conn: sqlite3.Connection, operation: str) -> None:
+    """Start a serialized writer transaction without discarding caller work."""
+    if conn.in_transaction:
+        raise RuntimeError(f"{operation}: nested transaction not supported; commit or roll back the active transaction first")
+    conn.execute("BEGIN IMMEDIATE")
 
 
 def _normalize_iso_to_utc(raw: object) -> str | None:

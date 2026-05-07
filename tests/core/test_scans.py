@@ -147,6 +147,29 @@ class TestCooldownCheck:
         db.update_scan_run_status("run-1", "failed")
         assert db.check_scan_cooldown("codex", "src/main.py") is None
 
+    def test_reserve_rejects_caller_transaction_without_rollback(self, db: FiligreeDB) -> None:
+        """reserve_scan_run must not silently roll back unrelated caller writes."""
+        db.conn.execute(
+            "INSERT INTO file_records (id, path, first_seen, updated_at) VALUES (?, ?, ?, ?)",
+            ("pending-file", "src/pending.py", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+
+        with pytest.raises(RuntimeError, match="nested transaction not supported"):
+            db.reserve_scan_run(
+                scan_run_id="nested-run",
+                scanner_name="codex",
+                scan_source="codex",
+                file_path="src/main.py",
+                file_id="f-1",
+            )
+
+        assert db.conn.in_transaction
+        assert db.conn.execute("SELECT id FROM file_records WHERE id = 'pending-file'").fetchone() is not None
+        db.conn.rollback()
+        assert db.conn.execute("SELECT id FROM file_records WHERE id = 'pending-file'").fetchone() is None
+        with pytest.raises(KeyError):
+            db.get_scan_run("nested-run")
+
 
 class TestGetScanStatus:
     def test_returns_status_with_process_info(self, db: FiligreeDB) -> None:

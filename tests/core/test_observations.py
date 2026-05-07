@@ -581,6 +581,23 @@ class TestPromoteObservation:
         result = db.promote_observation(obs["id"])
         assert "test-abc" in result["issue"].description
 
+    def test_promote_rejects_caller_transaction_without_rollback(self, db: FiligreeDB) -> None:
+        """promote_observation must not silently roll back unrelated caller writes."""
+        obs = db.create_observation("nested transaction risk")
+        db.conn.execute(
+            "INSERT INTO file_records (id, path, first_seen, updated_at) VALUES (?, ?, ?, ?)",
+            ("pending-file", "src/pending.py", _now_iso(), _now_iso()),
+        )
+
+        with pytest.raises(RuntimeError, match="nested transaction not supported"):
+            db.promote_observation(obs["id"])
+
+        assert db.conn.in_transaction
+        assert db.conn.execute("SELECT id FROM file_records WHERE id = 'pending-file'").fetchone() is not None
+        db.conn.rollback()
+        assert db.conn.execute("SELECT id FROM file_records WHERE id = 'pending-file'").fetchone() is None
+        assert db.conn.execute("SELECT id FROM observations WHERE id = ?", (obs["id"],)).fetchone() is not None
+
     def test_promote_preserves_observation_on_create_issue_failure(self, db: FiligreeDB) -> None:
         """If create_issue raises, the observation is NOT deleted — no data loss."""
         from unittest.mock import patch
