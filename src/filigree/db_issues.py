@@ -946,13 +946,35 @@ class IssuesMixin(DBMixinProtocol):
             raise
         return self.get_issue(issue_id)
 
-    def release_claim(self, issue_id: str, *, actor: str = "") -> Issue:
+    def release_claim(
+        self,
+        issue_id: str,
+        *,
+        actor: str = "",
+        if_held: bool = False,
+        expected_assignee: str | None = None,
+    ) -> Issue:
         """Release a claimed issue by clearing its assignee.
 
         Does NOT change status. Uses compare-and-swap on the observed
         assignee so a concurrent reassignment between read and UPDATE
         cannot be silently erased.
+
+        When ``if_held`` is true, the call is idempotent for release-if-held
+        cleanup flows: unassigned issues are returned unchanged, and claimed
+        issues are only released when the observed assignee matches
+        ``expected_assignee``. If no expected assignee is provided, ``actor`` is
+        used as the expected holder.
         """
+        if not isinstance(if_held, bool):
+            msg = "if_held must be a boolean"
+            raise ValueError(msg)
+        expected_holder: str | None = None
+        if if_held:
+            expected_holder = _normalize_assignee(actor if expected_assignee is None else expected_assignee)
+            if not expected_holder:
+                msg = "expected_assignee or actor is required when if_held=True"
+                raise ValueError(msg)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
@@ -960,7 +982,12 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         observed = row["assignee"] or ""
         if not observed:
+            if if_held:
+                return self.get_issue(issue_id)
             msg = f"Cannot release {issue_id}: no assignee set"
+            raise ValueError(msg)
+        if if_held and observed != expected_holder:
+            msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
             raise ValueError(msg)
 
         try:
@@ -976,7 +1003,13 @@ class IssuesMixin(DBMixinProtocol):
                     raise KeyError(msg)
                 new_assignee = current["assignee"] or ""
                 if not new_assignee:
+                    if if_held:
+                        self.conn.commit()
+                        return self.get_issue(issue_id)
                     msg = f"Cannot release {issue_id}: already released"
+                    raise ValueError(msg)
+                if if_held:
+                    msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
                     raise ValueError(msg)
                 msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
                 raise ValueError(msg)

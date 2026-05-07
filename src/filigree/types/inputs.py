@@ -107,6 +107,8 @@ class ClaimIssueArgs(TypedDict):
 class ReleaseClaimArgs(TypedDict):
     issue_id: str
     actor: NotRequired[str]
+    if_held: NotRequired[bool]
+    expected_assignee: NotRequired[str]
 
 
 class ClaimNextArgs(TypedDict):

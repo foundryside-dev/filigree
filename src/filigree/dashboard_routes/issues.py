@@ -170,6 +170,17 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
     return {"issue_ids": issue_ids, "reason": reason, "actor": actor}
 
 
+def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
+    """Validate optional release-claim body fields shared by classic and loom."""
+    if_held = body.get("if_held", False)
+    if not isinstance(if_held, bool):
+        return _error_response("if_held must be a boolean", ErrorCode.VALIDATION, 400)
+    expected_assignee = body.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
+    return {"if_held": if_held, "expected_assignee": expected_assignee}
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -650,8 +661,11 @@ def create_classic_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        release_options = _parse_release_claim_body(body)
+        if isinstance(release_options, JSONResponse):
+            return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor)
+            issue = db.release_claim(issue_id, actor=actor, **release_options)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
@@ -1204,8 +1218,11 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        release_options = _parse_release_claim_body(body)
+        if isinstance(release_options, JSONResponse):
+            return release_options
         try:
-            issue = db.release_claim(issue_id, actor=actor)
+            issue = db.release_claim(issue_id, actor=actor, **release_options)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:

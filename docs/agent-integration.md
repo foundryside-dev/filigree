@@ -91,6 +91,7 @@ start_work(issue_id="...", assignee="agent-1")            # Claim + transition a
 start_next_work(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
 claim_issue(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
 release_claim(issue_id="...")                             # Clear assignee without changing status
+release_claim(issue_id="...", actor="agent-1", if_held=True)  # No-op unless agent-1 holds the claim
 ```
 
 ### Tie-Break Ordering

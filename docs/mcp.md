@@ -271,7 +271,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `start_next_work` | Claim highest-priority ready issue and transition it into work |
 | `claim_issue` | Claim only, with optimistic locking |
 | `claim_next` | Claim highest-priority ready issue only |
-| `release_claim` | Release back to open |
+| `release_claim` | Release a claim, optionally idempotently with `if_held` |
 
 #### `start_work`
 
@@ -317,6 +317,8 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 | `actor` | string | no | Agent identity for audit trail |
+| `if_held` | boolean | no | Idempotent release-if-held mode; unassigned issues are returned unchanged |
+| `expected_assignee` | string | no | Only release when the current assignee matches this value; defaults to `actor` in `if_held` mode |
 
 ### Batch Operations
 

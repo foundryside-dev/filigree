@@ -514,6 +514,53 @@ class TestReleaseClaim:
         with pytest.raises(ValueError, match="no assignee set"):
             db.release_claim(issue.id)
 
+    def test_release_if_held_unassigned_is_noop(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+
+        released = db.release_claim(issue.id, actor="agent-1", if_held=True)
+
+        assert released.assignee == ""
+        events = db.conn.execute("SELECT event_type FROM events WHERE issue_id = ?", (issue.id,)).fetchall()
+        assert [event["event_type"] for event in events if event["event_type"] == "released"] == []
+
+    def test_release_if_held_clears_actor_claim(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-1")
+
+        released = db.release_claim(issue.id, actor="agent-1", if_held=True)
+
+        assert released.assignee == ""
+        events = db.get_recent_events(limit=10)
+        released_events = [event for event in events if event["issue_id"] == issue.id and event["event_type"] == "released"]
+        assert len(released_events) == 1
+        assert released_events[0]["old_value"] == "agent-1"
+
+    def test_release_if_held_honors_expected_assignee(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-1")
+
+        released = db.release_claim(issue.id, actor="coordinator", if_held=True, expected_assignee="agent-1")
+
+        assert released.assignee == ""
+
+    def test_release_if_held_rejects_other_assignee(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-2")
+
+        with pytest.raises(ValueError, match=r"assigned to 'agent-2'.*expected 'agent-1'"):
+            db.release_claim(issue.id, actor="agent-1", if_held=True)
+
+        assert db.get_issue(issue.id).assignee == "agent-2"
+
+    def test_release_if_held_closed_unassigned_is_noop(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Closed one")
+        db.close_issue(issue.id)
+
+        released = db.release_claim(issue.id, actor="agent-1", if_held=True)
+
+        assert released.status == "closed"
+        assert released.assignee == ""
+
     def test_release_records_event(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Event check")
         db.claim_issue(issue.id, assignee="agent-1")

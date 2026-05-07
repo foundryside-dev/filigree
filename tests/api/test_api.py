@@ -619,6 +619,40 @@ class TestClaimAPI:
         data = resp.json()
         assert data["assignee"] == ""
 
+    async def test_release_if_held_unassigned_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/release",
+            json={"actor": "agent-1", "if_held": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+
+    async def test_release_if_held_expected_assignee_loom(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+
+        resp = await client.post(
+            f"/api/loom/issues/{ids['a']}/release",
+            json={"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+
+    async def test_release_if_held_rejects_other_assignee_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-2")
+
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/release",
+            json={"actor": "agent-1", "if_held": True},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "CONFLICT"
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-2"
+
     async def test_claim_next(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         resp = await client.post(
             "/api/claim-next",

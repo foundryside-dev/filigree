@@ -291,12 +291,26 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="release_claim",
-            description="Release a claimed issue by clearing its assignee. Does NOT change status. Only succeeds if the issue has an assignee.",
+            description=(
+                "Release a claimed issue by clearing its assignee. Does NOT change status. "
+                "By default this is strict and only succeeds if the issue has an assignee. "
+                "Pass if_held=true for release-if-held cleanup: unassigned issues are a no-op, "
+                "and assigned issues are only released when held by expected_assignee or, if omitted, actor."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to release"},
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "if_held": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Idempotent release-if-held mode; unassigned issues are returned unchanged.",
+                    },
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": "Only release when the current assignee matches this value; defaults to actor in if_held mode.",
+                    },
                 },
                 "required": ["issue_id"],
             },
@@ -752,9 +766,15 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    if_held = args.get("if_held", False)
+    if not isinstance(if_held, bool):
+        return _text(ErrorResponse(error="if_held must be a boolean", code=ErrorCode.VALIDATION))
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
-        issue = tracker.release_claim(args["issue_id"], actor=actor)
+        issue = tracker.release_claim(args["issue_id"], actor=actor, if_held=if_held, expected_assignee=expected_assignee)
         _refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:

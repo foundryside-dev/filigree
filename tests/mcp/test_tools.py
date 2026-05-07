@@ -3250,6 +3250,23 @@ class TestMCPReleaseClaim:
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
 
+    async def test_release_if_held_unassigned_is_noop_via_mcp(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Not claimed")
+        result = await call_tool("release_claim", {"issue_id": issue.id, "actor": "agent-1", "if_held": True})
+        data = _parse(result)
+        assert data["issue_id"] == issue.id
+        assert data["assignee"] == ""
+
+    async def test_release_if_held_rejects_other_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Other claim")
+        mcp_db.claim_issue(issue.id, assignee="agent-2")
+
+        result = await call_tool("release_claim", {"issue_id": issue.id, "actor": "agent-1", "if_held": True})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert mcp_db.get_issue(issue.id).assignee == "agent-2"
+
     async def test_release_not_found_via_mcp(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("release_claim", {"issue_id": "mcp-nonexistent"})
         data = _parse(result)

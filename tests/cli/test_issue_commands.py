@@ -657,6 +657,46 @@ class TestReleaseCli:
         assert "id" not in data
         assert data["assignee"] == ""
 
+    def test_release_if_held_unassigned_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON release if held"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["issue_id"] == issue_id
+        assert data["assignee"] == ""
+
+    def test_release_if_held_expected_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON release expected holder"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        result = runner.invoke(
+            cli,
+            ["--actor", "coordinator", "release", issue_id, "--if-held", "--expected-assignee", "agent-1", "--json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["assignee"] == ""
+
+    def test_release_if_held_rejects_other_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON release other holder"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-2"])
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert "agent-2" in data["error"]
+
     def test_release_json_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["release", "test-nonexistent", "--json"])

@@ -720,10 +720,17 @@ def claim_next(
         refresh_summary(db)
 
 
-def _release_impl(actor: str, issue_id: str, as_json: bool) -> None:
+def _release_impl(
+    actor: str,
+    issue_id: str,
+    as_json: bool,
+    *,
+    if_held: bool = False,
+    expected_assignee: str | None = None,
+) -> None:
     with get_db() as db:
         try:
-            issue = db.release_claim(issue_id, actor=actor)
+            issue = db.release_claim(issue_id, actor=actor, if_held=if_held, expected_assignee=expected_assignee)
             if as_json:
                 click.echo(json_mod.dumps(issue_to_public(issue), indent=2, default=str))
             else:
@@ -745,20 +752,32 @@ def _release_impl(actor: str, issue_id: str, as_json: bool) -> None:
 
 @click.command("release")
 @click.argument("issue_id")
+@click.option(
+    "--if-held",
+    is_flag=True,
+    help="Idempotently release only if held by --expected-assignee or the global --actor; no-op if unassigned.",
+)
+@click.option("--expected-assignee", default=None, help="Expected current assignee for --if-held coordinator flows.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def release(ctx: click.Context, issue_id: str, as_json: bool) -> None:
+def release(ctx: click.Context, issue_id: str, if_held: bool, expected_assignee: str | None, as_json: bool) -> None:
     """Release a claimed issue by clearing its assignee."""
-    _release_impl(ctx.obj["actor"], issue_id, as_json)
+    _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee)
 
 
 @click.command("release-claim")
 @click.argument("issue_id")
+@click.option(
+    "--if-held",
+    is_flag=True,
+    help="Idempotently release only if held by --expected-assignee or the global --actor; no-op if unassigned.",
+)
+@click.option("--expected-assignee", default=None, help="Expected current assignee for --if-held coordinator flows.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def release_claim_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
+def release_claim_cmd(ctx: click.Context, issue_id: str, if_held: bool, expected_assignee: str | None, as_json: bool) -> None:
     """Release a claimed issue by clearing its assignee. Alias for `release`."""
-    _release_impl(ctx.obj["actor"], issue_id, as_json)
+    _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee)
 
 
 def _undo_impl(actor: str, issue_id: str, as_json: bool) -> None:

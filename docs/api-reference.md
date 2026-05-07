@@ -314,12 +314,23 @@ Claims the highest-priority ready issue matching the filters. Iterates ready iss
 #### `release_claim`
 
 ```python
-def release_claim(self, issue_id: str, *, actor: str = "") -> Issue
+def release_claim(
+    self,
+    issue_id: str,
+    *,
+    actor: str = "",
+    if_held: bool = False,
+    expected_assignee: str | None = None,
+) -> Issue
 ```
 
 Releases a claimed issue by clearing its assignee. Does **not** change status.
+By default this is strict and raises when the issue is already unassigned. With
+`if_held=True`, unassigned issues are returned unchanged, and assigned issues are
+only released when held by `expected_assignee` or, if omitted, `actor`.
 
-**Raises:** `ValueError` if the issue has no assignee set.
+**Raises:** `ValueError` if strict mode sees no assignee, or if `if_held=True`
+would clear a claim held by someone other than the expected holder.
 
 #### `start_work`
 

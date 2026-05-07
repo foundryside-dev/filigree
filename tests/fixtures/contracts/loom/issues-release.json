@@ -7,15 +7,15 @@
       "docs/plans/2026-04-24-2.0-federation-work-package.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
-    "updated": "2026-04-26",
+    "updated": "2026-05-07",
     "endpoint": "POST /api/loom/issues/{issue_id}/release",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape; response shape changes from IssueDict to IssueLoom."
   },
   "shape_decl": {
-    "request_type": "{actor?: str}",
+    "request_type": "{actor?: str, if_held?: bool, expected_assignee?: str}",
     "response_type": "IssueLoom",
-    "rationale": "Releases a claim. 409 CONFLICT when not claimable; 404 NOT_FOUND when the issue id does not exist."
+    "rationale": "Releases a claim. 409 CONFLICT when not claimable; 404 NOT_FOUND when the issue id does not exist. Optional if_held mode is idempotent for unassigned issues and only clears the expected holder."
   },
   "examples": [
     {
