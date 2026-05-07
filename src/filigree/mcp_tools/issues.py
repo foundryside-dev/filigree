@@ -941,7 +941,8 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
     except ValueError as e:
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        msg = str(e)
+        return _text(ErrorResponse(error=msg, code=classify_value_error(msg)))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
     _refresh_summary()

@@ -999,6 +999,17 @@ class TestStartWork:
         data = _parse(result)
         assert data["status"] == "empty"
 
+    async def test_start_next_work_invalid_target_status_is_invalid_transition(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("mcp-d6-invalid-target", type="task", priority=2)
+
+        result = await call_tool(
+            "start_next_work",
+            {"assignee": "erin", "type": "task", "target_status": "not-a-status"},
+        )
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.INVALID_TRANSITION
+
 
 class TestClaimIssue:
     async def test_claim_success(self, mcp_db: FiligreeDB) -> None:
