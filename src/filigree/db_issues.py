@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from filigree.db_base import AGE_BUCKETS, DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
 from filigree.models import Issue
-from filigree.templates import validate_field_pattern
+from filigree.templates import TransitionResult, validate_field_pattern
 from filigree.types.api import BatchFailure, ErrorCode, classify_value_error
 
 if TYPE_CHECKING:
@@ -51,6 +51,17 @@ def _validate_priority_value(priority: Any) -> None:
     if isinstance(priority, bool) or not isinstance(priority, int) or not (0 <= priority <= 4):
         msg = f"Priority must be an integer between 0 and 4, got {priority!r}"
         raise ValueError(msg)
+
+
+def _transition_data_warnings(result: TransitionResult) -> list[str]:
+    """Return the canonical soft-transition warnings for response + audit."""
+    warnings: list[str] = []
+    for warning in result.warnings:
+        if warning not in warnings:
+            warnings.append(warning)
+    if not warnings and result.enforcement == "soft" and result.missing_fields:
+        warnings.append(f"Missing recommended fields: {', '.join(result.missing_fields)}")
+    return warnings
 
 
 def _list_issue_order_by(sort_by: str, direction: str) -> str:
@@ -560,7 +571,8 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
 
         # Cache transition validation result for reuse in write phase (warnings)
-        _transition_result = None
+        _transition_result: TransitionResult | None = None
+        _transition_warnings: list[str] = []
         if status is not None and status != current.status:
             self._validate_status(status, current.type)
 
@@ -608,24 +620,15 @@ class IssuesMixin(DBMixinProtocol):
             if status is not None and status != current.status:
                 # Record soft-enforcement warnings from cached validation result
                 if _transition_result is not None:
-                    if _transition_result.warnings:
-                        for warning in _transition_result.warnings:
-                            self._record_event(
-                                issue_id,
-                                "transition_warning",
-                                actor=actor,
-                                old_value=current.status,
-                                new_value=status,
-                                comment=warning,
-                            )
-                    if _transition_result.missing_fields and _transition_result.enforcement == "soft":
+                    _transition_warnings = _transition_data_warnings(_transition_result)
+                    for warning in _transition_warnings:
                         self._record_event(
                             issue_id,
                             "transition_warning",
                             actor=actor,
                             old_value=current.status,
                             new_value=status,
-                            comment=f"Missing recommended fields: {', '.join(_transition_result.missing_fields)}",
+                            comment=warning,
                         )
 
                 self._record_event(issue_id, "status_changed", actor=actor, old_value=current.status, new_value=status)
@@ -732,7 +735,10 @@ class IssuesMixin(DBMixinProtocol):
             self.conn.rollback()
             raise
 
-        return self.get_issue(issue_id)
+        updated = self.get_issue(issue_id)
+        if _transition_warnings:
+            updated.data_warnings.extend(_transition_warnings)
+        return updated
 
     def close_issue(
         self,

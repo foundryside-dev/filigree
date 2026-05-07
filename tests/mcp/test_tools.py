@@ -314,6 +314,17 @@ class TestUpdateAndClose:
         data = _parse(result)
         assert data["status"] == "in_progress"
 
+    async def test_update_issue_surfaces_soft_transition_warning_once(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Warn me", type="bug")
+
+        result = await call_tool("update_issue", {"issue_id": issue.id, "status": "confirmed"})
+
+        data = _parse(result)
+        assert data["status"] == "confirmed"
+        assert data["data_warnings"] == ["Missing recommended fields for 'confirmed': severity"]
+        warning_events = [event for event in mcp_db.get_issue_events(issue.id) if event["event_type"] == "transition_warning"]
+        assert [event["comment"] for event in warning_events] == data["data_warnings"]
+
     async def test_update_not_found(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("update_issue", {"issue_id": "mcp-nonexistent", "title": "nope"})
         data = _parse(result)

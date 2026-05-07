@@ -189,13 +189,28 @@ class TestUpdateIssueTransitionEnforcement:
         # triage -> confirmed is soft with severity required_at confirmed
         updated = db.update_issue(issue.id, status="confirmed")
         assert updated.status == "confirmed"
-        # Check that a warning event was recorded
+        assert updated.to_dict()["data_warnings"] == ["Missing recommended fields for 'confirmed': severity"]
+        # Check that the in-band warning and durable audit event match one-to-one.
         events = db.conn.execute(
             "SELECT * FROM events WHERE issue_id = ? AND event_type = 'transition_warning'",
             (issue.id,),
         ).fetchall()
-        assert len(events) >= 1
-        assert "severity" in events[0]["comment"]
+        assert [event["comment"] for event in events] == updated.to_dict()["data_warnings"]
+
+    def test_soft_enforcement_returns_fixing_warning_once(self, db: FiligreeDB) -> None:
+        """Soft warnings for later bug states also return in-band and emit once."""
+        issue = db.create_issue("Bug", type="bug", fields={"severity": "major"})
+        db.update_issue(issue.id, status="confirmed")
+
+        updated = db.update_issue(issue.id, status="fixing")
+
+        assert updated.status == "fixing"
+        assert updated.to_dict()["data_warnings"] == ["Missing recommended fields for 'fixing': root_cause"]
+        events = db.conn.execute(
+            "SELECT * FROM events WHERE issue_id = ? AND event_type = 'transition_warning'",
+            (issue.id,),
+        ).fetchall()
+        assert [event["comment"] for event in events] == updated.to_dict()["data_warnings"]
 
     def test_atomic_transition_with_fields_succeeds(self, db: FiligreeDB) -> None:
         """WFT-FR-069: update_issue with status + fields merges fields BEFORE

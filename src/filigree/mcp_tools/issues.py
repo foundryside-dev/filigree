@@ -189,7 +189,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="update_issue",
-            description="Update an issue's status, priority, title, or custom fields. Use get_valid_transitions to see allowed status changes.",
+            description=(
+                "Update an issue's status, priority, title, or custom fields. "
+                "Use get_valid_transitions to see allowed status changes. "
+                "Soft transition warnings are returned in data_warnings."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

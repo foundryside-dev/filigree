@@ -56,6 +56,7 @@ class Issue:
     is_ready: bool = False
     children: list[str] = field(default_factory=list)
     status_category: StatusCategory = "open"
+    data_warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.status_category not in _VALID_STATUS_CATEGORIES:
@@ -69,7 +70,7 @@ class Issue:
         # here to avoid a db_base→models import cycle. A user-supplied field
         # literally named ``_fields_error`` no longer triggers a false strip.
         fields = self.fields
-        warnings: list[str] = []
+        warnings = list(self.data_warnings)
         if getattr(fields, "_filigree_corrupt", False):
             fields = {}
             warnings.append("fields data was corrupt and could not be parsed")

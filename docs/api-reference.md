@@ -188,6 +188,11 @@ Updates one or more fields on an existing issue. Only provided (non-`None`) fiel
 
 Pass `parent_id=""` to clear the parent. Self-parenting and circular parent chains are rejected.
 
+Soft workflow enforcement does not block the update. When a status change skips
+recommended fields, the returned `Issue.to_dict()["data_warnings"]` includes
+the advisory, and the same message is recorded once as a `transition_warning`
+event.
+
 **Returns:** The updated `Issue`.
 
 **Raises:**

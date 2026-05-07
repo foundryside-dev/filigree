@@ -173,6 +173,10 @@ filigree reopen <id1> <id2>                     # Reopen multiple at once
 filigree undo <id>                          # Undo last reversible action
 ```
 
+`update --json` returns the full issue projection. Soft workflow enforcement
+does not block status changes; missing recommended fields are returned in
+`data_warnings[]` and recorded once as `transition_warning` events.
+
 ### `create`
 
 Create a new issue.

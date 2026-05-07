@@ -198,6 +198,19 @@ class TestUpdateAndClose:
         assert result.exit_code == 0
         assert "in_progress" in result.output
 
+    def test_update_json_surfaces_soft_transition_warning(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Warn me", "--type", "bug", "--json"])
+        assert created.exit_code == 0
+        issue_id = json.loads(created.output)["issue_id"]
+
+        result = runner.invoke(cli, ["update", issue_id, "--status", "confirmed", "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["status"] == "confirmed"
+        assert data["data_warnings"] == ["Missing recommended fields for 'confirmed': severity"]
+
     def test_update_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["update", "test-nonexistent", "--title", "nope"])

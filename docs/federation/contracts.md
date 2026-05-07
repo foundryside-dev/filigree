@@ -115,6 +115,12 @@ vocabulary that landed in Phase C:
   `SlimIssue.id` projection field renamed to `SlimIssue.issue_id`,
   matching `SlimIssueLoom`.
 
+- **Soft-transition warnings.** Single-issue mutation responses keep
+  non-fatal workflow advisories in `data_warnings[]`. For
+  `update_issue` / `PATCH /api/loom/issues/{issue_id}`, soft enforcement
+  warnings are returned in-band and recorded once as `transition_warning`
+  events.
+
 - **Batch tools.** Issue-batch input field unified to `issue_ids` —
   `batch_update`, `batch_close`, `batch_add_label`, `batch_add_comment`.
   Observation/finding batches use `observation_ids` / `finding_ids`

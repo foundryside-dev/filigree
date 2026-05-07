@@ -88,6 +88,9 @@ class IssueLoom(TypedDict):
     their existing names — only the entity's own primary key is
     renamed per the loom vocabulary.
 
+    ``data_warnings`` contains non-fatal response warnings, including
+    soft-transition advisories returned by mutation endpoints.
+
     Used as the canonical response shape for every single-issue loom
     endpoint in Phase C3 (GET, PATCH, close, reopen, claim, release,
     claim-next, create). Endpoints with optional enrichment use the

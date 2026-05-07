@@ -62,7 +62,11 @@ class PaginatedResult(TypedDict, Generic[_T]):
 
 
 class IssueDict(TypedDict):
-    """Shape of Issue.to_dict() return value."""
+    """Shape of Issue.to_dict() return value.
+
+    ``data_warnings`` contains non-fatal response warnings such as transient
+    soft-transition advisories and parse/corruption warnings.
+    """
 
     id: str
     title: str

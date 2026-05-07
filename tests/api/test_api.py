@@ -406,6 +406,16 @@ class TestUpdateAPI:
         data = resp.json()
         assert data["status"] == "in_progress"
 
+    async def test_loom_update_surfaces_soft_transition_warning(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue = dashboard_db.db.create_issue("Warn me", type="bug")
+
+        resp = await client.patch(f"/api/loom/issues/{issue.id}", json={"status": "confirmed"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "confirmed"
+        assert data["data_warnings"] == ["Missing recommended fields for 'confirmed': severity"]
+
     async def test_update_title(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         resp = await client.patch(

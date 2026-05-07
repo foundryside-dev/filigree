@@ -136,6 +136,11 @@ Workflow guide with optional live project context. Agents use this to understand
 | `fields` | object | no | Fields to merge into existing |
 | `actor` | string | no | Agent identity for audit trail |
 
+Soft workflow enforcement does not block the update. When a status change skips
+recommended fields, the returned issue includes the advisory in
+`data_warnings[]`; the same message is recorded once as a `transition_warning`
+event.
+
 #### `close_issue`
 
 | Parameter | Type | Required | Description |
