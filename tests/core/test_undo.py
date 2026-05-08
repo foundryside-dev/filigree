@@ -414,6 +414,53 @@ class TestUndoCloseConsistency:
         assert after_undo.closed_at is None
         assert after_undo.status_category != "done"
 
+    def test_undo_close_with_reason_reverts_in_one_call(self, db: FiligreeDB) -> None:
+        """Closing with a reason and then undoing should fully revert in ONE
+        ``undo_last`` call.
+
+        Regression guard for senior-user MCP review-f finding F2: previously
+        ``close_issue(reason=...)`` wrote two events (``status_changed`` for
+        the close + ``fields_changed`` for the synthetic ``close_reason``
+        field). The first ``undo_last`` would then reverse only the field
+        change — returning ``undone: True`` while the issue stayed closed
+        — and a second ``undo_last`` was needed to actually reopen.
+        """
+        issue = db.create_issue("Undo close-with-reason")
+        db.close_issue(issue.id, reason="duplicate of foo", actor="t")
+
+        closed = db.get_issue(issue.id)
+        assert closed.status_category == "done"
+        assert closed.closed_at is not None
+        assert closed.fields.get("close_reason") == "duplicate of foo"
+
+        # Single undo must reverse status, closed_at, AND close_reason.
+        result = db.undo_last(issue.id, actor="t")
+        assert result["undone"] is True
+        assert result["event_type"] == "status_changed"
+
+        restored = db.get_issue(issue.id)
+        assert restored.status_category != "done", f"still in done category: {restored.status}"
+        assert restored.closed_at is None
+        assert "close_reason" not in restored.fields, f"close_reason should be cleared when reopening, got fields={restored.fields}"
+
+    def test_close_with_reason_writes_single_event(self, db: FiligreeDB) -> None:
+        """``close_issue(reason=...)`` must record exactly one reversible event.
+
+        The reason is preserved in the issue's ``fields`` column AND attached
+        as the ``status_changed`` event's ``comment`` for audit. Two events
+        would re-introduce the F2 footgun.
+        """
+        issue = db.create_issue("One-event close")
+        db.close_issue(issue.id, reason="dup", actor="t")
+
+        events = db.get_issue_events(issue.id)
+        # Filter to events emitted *by the close* — i.e. since the create event.
+        close_events = [e for e in events if e["event_type"] in {"status_changed", "fields_changed"}]
+        assert len(close_events) == 1, f"expected one composite close event, got {[e['event_type'] for e in close_events]}"
+        assert close_events[0]["event_type"] == "status_changed"
+        assert close_events[0]["new_value"] == "closed"
+        assert close_events[0]["comment"] == "dup", "close reason must travel on the status_changed event's comment"
+
 
 class TestUndoFields:
     """H4: Field changes must be recorded as events and be undoable."""

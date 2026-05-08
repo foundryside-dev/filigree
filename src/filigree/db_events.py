@@ -228,11 +228,24 @@ class EventsMixin(DBMixinProtocol):
                             (now, issue_id),
                         )
                     else:
-                        # Restoring to a non-done state — clear closed_at
+                        # Restoring to a non-done state — clear closed_at and any
+                        # close-only fields (e.g. ``close_reason``). Mirrors
+                        # ``reopen_issue``'s contract so undo and reopen converge
+                        # on the same shape, and lets the F2 close-with-reason
+                        # composite event reverse fully in a single undo call.
+                        from filigree.db_issues import _REOPEN_CLEAR_FIELDS
+
                         self.conn.execute(
                             "UPDATE issues SET closed_at = NULL WHERE id = ?",
                             (issue_id,),
                         )
+                        existing_fields = current.fields or {}
+                        cleaned_fields = {k: v for k, v in existing_fields.items() if k not in _REOPEN_CLEAR_FIELDS}
+                        if cleaned_fields != existing_fields:
+                            self.conn.execute(
+                                "UPDATE issues SET fields = ? WHERE id = ?",
+                                (json.dumps(cleaned_fields), issue_id),
+                            )
 
                 case "title_changed":
                     if row["old_value"] is None:

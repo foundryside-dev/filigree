@@ -714,6 +714,25 @@ class IssuesMixin(DBMixinProtocol):
         updates: list[str] = []
         params: list[Any] = []
 
+        # Detect "close-with-reason-only": a status transition into a done-category
+        # status whose fields delta consists entirely of close-only fields
+        # (currently just ``close_reason``). When detected we collapse the close
+        # into a single ``status_changed`` event carrying the reason in its
+        # ``comment`` column, and skip the redundant ``fields_changed`` event so
+        # ``undo_last`` reverses the close in one call instead of two. The fields
+        # column is still written; consumers reading ``issue.fields.close_reason``
+        # see no change.
+        # Senior-user MCP review-f finding F2.
+        _close_reason_only = False
+        _close_reason_comment = ""
+        if status is not None and status != current.status and fields is not None:
+            _delta_keys = {k for k, v in fields.items() if current.fields.get(k) != v}
+            if _delta_keys and _delta_keys.issubset(_REOPEN_CLEAR_FIELDS):
+                _target_cat = self.templates.get_category(current.type, status) or self._infer_status_category(current.type, status)
+                if _target_cat == "done":
+                    _close_reason_only = True
+                    _close_reason_comment = str(fields.get("close_reason", ""))
+
         try:
             if title is not None and title != current.title:
                 self._record_event(issue_id, "title_changed", actor=actor, old_value=current.title, new_value=title)
@@ -734,7 +753,14 @@ class IssuesMixin(DBMixinProtocol):
                             comment=warning,
                         )
 
-                self._record_event(issue_id, "status_changed", actor=actor, old_value=current.status, new_value=status)
+                self._record_event(
+                    issue_id,
+                    "status_changed",
+                    actor=actor,
+                    old_value=current.status,
+                    new_value=status,
+                    comment=_close_reason_comment,
+                )
                 updates.append("status = ?")
                 params.append(status)
 
@@ -822,13 +848,18 @@ class IssuesMixin(DBMixinProtocol):
                 # Merge into existing fields
                 merged = {**current.fields, **fields}
                 if merged != current.fields:
-                    self._record_event(
-                        issue_id,
-                        "fields_changed",
-                        actor=actor,
-                        old_value=json.dumps(current.fields),
-                        new_value=json.dumps(merged),
-                    )
+                    if not _close_reason_only:
+                        # Skip the event for the close-with-reason-only path —
+                        # the reason is already audit-trailed on the status_changed
+                        # event's ``comment``. The fields column update still runs
+                        # so ``issue.fields.close_reason`` remains readable.
+                        self._record_event(
+                            issue_id,
+                            "fields_changed",
+                            actor=actor,
+                            old_value=json.dumps(current.fields),
+                            new_value=json.dumps(merged),
+                        )
                     updates.append("fields = ?")
                     params.append(json.dumps(merged))
 
