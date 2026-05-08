@@ -21,7 +21,9 @@ class TestGetReleasesEndpoint:
         db = release_dashboard_db
         db.create_issue("Active Release", type="release")
         r2 = db.create_issue("Done Release", type="release")
-        db.close_issue(r2.id)
+        # release type only allows planning → cancelled directly; pass status
+        # explicitly because validate-transitions rejects planning → released.
+        db.close_issue(r2.id, status="cancelled")
 
         resp = await release_client.get("/api/releases")
         data = resp.json()
@@ -31,7 +33,9 @@ class TestGetReleasesEndpoint:
         db = release_dashboard_db
         db.create_issue("Active Release", type="release")
         r2 = db.create_issue("Done Release", type="release")
-        db.close_issue(r2.id)
+        # release type only allows planning → cancelled directly; pass status
+        # explicitly because validate-transitions rejects planning → released.
+        db.close_issue(r2.id, status="cancelled")
 
         resp = await release_client.get("/api/releases?include_released=true")
         data = resp.json()
@@ -41,7 +45,9 @@ class TestGetReleasesEndpoint:
         db = release_dashboard_db
         db.create_issue("Active Release", type="release")
         r2 = db.create_issue("Done Release", type="release")
-        db.close_issue(r2.id)
+        # release type only allows planning → cancelled directly; pass status
+        # explicitly because validate-transitions rejects planning → released.
+        db.close_issue(r2.id, status="cancelled")
 
         resp_default = await release_client.get("/api/releases")
         resp_explicit = await release_client.get("/api/releases?include_released=false")

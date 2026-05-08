@@ -224,6 +224,34 @@ def _normalize_assignee(value: object) -> str:
     return value.strip()
 
 
+def _check_expected_assignee(issue_id: str, expected_assignee: str | None, observed: str) -> None:
+    """Verify ``observed`` matches ``expected_assignee`` for a write-path precondition.
+
+    When ``expected_assignee`` is ``None`` (default) the check is skipped to
+    preserve the historical write-anywhere contract for callers that don't
+    opt in. When set, raises ``ValueError`` with a message shaped like the
+    heartbeat / reclaim / release-claim CONFLICT envelope so the MCP / CLI /
+    dashboard surfaces classify it as ``CONFLICT`` consistently.
+
+    The compare normalises whitespace via ``_normalize_assignee`` so callers
+    don't have to think about leading/trailing whitespace differences.
+
+    See filigree-cb980eee0d (senior-user MCP review run d, P1.1) for the
+    motivation: claim ownership was strictly enforced by heartbeat /
+    reclaim / release_claim but completely ignored by update_issue /
+    batch_update / close_issue / add_comment / add_label, so a non-claimant
+    could overwrite a held issue silently. This helper closes that gap by
+    letting all five write tools opt in to the same check.
+    """
+    if expected_assignee is None:
+        return
+    expected = _normalize_assignee(expected_assignee)
+    current = (observed or "").strip()
+    if current != expected:
+        msg = f"Cannot operate on {issue_id}: assigned to '{current}' (expected '{expected}')"
+        raise ValueError(msg)
+
+
 def _sanitize_fts_query(query: str) -> str:
     """Sanitize a search query for FTS5 MATCH syntax.
 
@@ -586,10 +614,18 @@ class IssuesMixin(DBMixinProtocol):
         parent_id: str | None = None,
         fields: dict[str, Any] | None = None,
         actor: str = "",
+        expected_assignee: str | None = None,
         _skip_transition_check: bool = False,
     ) -> Issue:
         self._check_id_prefix(issue_id)
         current = self.get_issue(issue_id)
+        # Optional claim-aware precondition: callers that opt into the check
+        # by passing expected_assignee fail with CONFLICT-shaped ValueError
+        # when the observed assignee doesn't match (mirrors heartbeat_work /
+        # release_claim / reclaim_issue). Default behaviour (None) preserves
+        # the prior write-anywhere contract for backward compatibility.
+        # filigree-cb980eee0d (P1.1).
+        _check_expected_assignee(issue_id, expected_assignee, current.assignee)
         now = _now_iso()
 
         # --- Validate all inputs BEFORE any writes to prevent partial commits ---
@@ -797,6 +833,7 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         status: str | None = None,
         fields: dict[str, Any] | None = None,
+        expected_assignee: str | None = None,
     ) -> Issue:
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -822,21 +859,12 @@ class IssuesMixin(DBMixinProtocol):
             _first_done = self.templates.get_first_state_of_category(current.type, "done")
             done_status = _first_done if _first_done is not None else "closed"
 
-        # Enforce hard gates even though close_issue skips transition graph
-        # validation. If a defined transition from current→done has hard
-        # enforcement, the required fields must be satisfied.
-        merged_fields = {**current.fields}
-        if fields:
-            merged_fields.update(fields)
-        if reason:
-            merged_fields["close_reason"] = reason
-        result = self.templates.validate_transition(current.type, current.status, done_status, merged_fields)
-        if not result.allowed and result.enforcement == "hard":
-            missing_str = ", ".join(result.missing_fields)
-            msg = f"Cannot close issue {issue_id}: hard-enforcement gate requires fields: {missing_str}"
-            raise ValueError(msg)
-
-        # Merge close_reason into fields for the update call
+        # Merge close_reason into fields for the update call. Transition
+        # validation (including hard-enforcement field gates) is delegated
+        # to update_issue so close_issue and update_issue enforce the same
+        # contract for the same target state — closing a bug from 'triage'
+        # without a defined transition now raises INVALID_TRANSITION just
+        # like update_issue(status=closed) does.
         update_fields: dict[str, Any] = {}
         if fields:
             update_fields.update(fields)
@@ -848,7 +876,7 @@ class IssuesMixin(DBMixinProtocol):
             status=done_status,
             fields=update_fields or None,
             actor=actor,
-            _skip_transition_check=True,
+            expected_assignee=expected_assignee,
         )
 
     def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
@@ -999,12 +1027,24 @@ class IssuesMixin(DBMixinProtocol):
         if_held: bool = False,
         expected_assignee: str | None = None,
         reason: str = "",
+        revert_status: bool = True,
     ) -> Issue:
         """Release a claimed issue by clearing its assignee.
 
-        Does NOT change status. Uses compare-and-swap on the observed
-        assignee so a concurrent reassignment between read and UPDATE
-        cannot be silently erased.
+        Uses compare-and-swap on the observed assignee so a concurrent
+        reassignment between read and UPDATE cannot be silently erased.
+
+        When the issue is in a wip-category status, the call also reverts
+        the status to the template-defined open-category predecessor so the
+        issue rejoins ``get_ready`` discovery instead of being orphaned in
+        wip with no assignee (filigree-cb980eee0d, P1.3 senior-user MCP
+        review). Set ``revert_status=False`` to opt out and keep the
+        legacy "release without status change" behaviour. The reverse
+        target is resolved via ``templates.get_release_target``: prefer
+        the open predecessor whose forward transition targets the current
+        wip status; fall back to the template's initial_state when no
+        direct predecessor exists. Types with no open-category state get
+        no reverse target and stay in wip.
 
         When ``if_held`` is true, the call is idempotent for release-if-held
         cleanup flows: unassigned issues are returned unchanged, and claimed
@@ -1066,6 +1106,18 @@ class IssuesMixin(DBMixinProtocol):
         except Exception:
             self.conn.rollback()
             raise
+
+        # Auto-revert wip→open so the issue rejoins discovery surfaces. The
+        # status change runs after the assignee-clear commit so a failure to
+        # find a reverse target leaves the release intact rather than rolling
+        # the whole call back. _skip_transition_check=True because we may need
+        # to walk a backward edge (e.g. fixing→confirmed, verifying→triage)
+        # that the forward graph doesn't define. (filigree-cb980eee0d, P1.3.)
+        if revert_status:
+            released = self.get_issue(issue_id)
+            target = self.templates.get_release_target(released.type, released.status)
+            if target is not None and target != released.status:
+                return self.update_issue(issue_id, status=target, actor=actor, _skip_transition_check=True)
         return self.get_issue(issue_id)
 
     def heartbeat_work(
@@ -1104,8 +1156,7 @@ class IssuesMixin(DBMixinProtocol):
         claim_expires_at = _claim_expiry(now, lease_hours)
         try:
             cursor = self.conn.execute(
-                "UPDATE issues SET last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? "
-                "WHERE id = ? AND assignee = ?",
+                "UPDATE issues SET last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
                 (now, claim_expires_at, now, issue_id, observed),
             )
             if cursor.rowcount == 0:
@@ -1469,11 +1520,17 @@ class IssuesMixin(DBMixinProtocol):
         *,
         reason: str = "",
         actor: str = "",
+        expected_assignee: str | None = None,
     ) -> tuple[list[Issue], list[BatchFailure]]:
-        """Close multiple issues with per-item error handling. Returns (closed, errors)."""
+        """Close multiple issues with per-item error handling. Returns (closed, errors).
+
+        ``expected_assignee`` is applied to every issue in the batch as a
+        single shared precondition; pass ``None`` (default) to skip the
+        check (filigree-cb980eee0d, P1.1).
+        """
         return self._batch_with_transition_errors(
             issue_ids,
-            lambda iid: self.close_issue(iid, reason=reason, actor=actor),
+            lambda iid: self.close_issue(iid, reason=reason, actor=actor, expected_assignee=expected_assignee),
         )
 
     def batch_update(
@@ -1485,8 +1542,14 @@ class IssuesMixin(DBMixinProtocol):
         assignee: str | None = None,
         fields: dict[str, Any] | None = None,
         actor: str = "",
+        expected_assignee: str | None = None,
     ) -> tuple[list[Issue], list[BatchFailure]]:
-        """Update multiple issues with the same changes. Returns (updated, errors)."""
+        """Update multiple issues with the same changes. Returns (updated, errors).
+
+        ``expected_assignee`` is applied to every issue in the batch as a
+        single shared precondition; pass ``None`` (default) to skip the
+        check (filigree-cb980eee0d, P1.1).
+        """
         return self._batch_with_transition_errors(
             issue_ids,
             lambda iid: self.update_issue(
@@ -1496,6 +1559,7 @@ class IssuesMixin(DBMixinProtocol):
                 assignee=assignee,
                 fields=fields,
                 actor=actor,
+                expected_assignee=expected_assignee,
             ),
         )
 
@@ -1504,8 +1568,12 @@ class IssuesMixin(DBMixinProtocol):
         issue_ids: list[str],
         *,
         label: str,
+        expected_assignee: str | None = None,
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]:
-        """Add the same label to multiple issues. Returns (labeled, errors)."""
+        """Add the same label to multiple issues. Returns (labeled, errors).
+
+        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
@@ -1516,12 +1584,13 @@ class IssuesMixin(DBMixinProtocol):
         for issue_id in issue_ids:
             try:
                 self.get_issue(issue_id)
-                added, _canonical = self.add_label(issue_id, label)
+                added, _canonical, _replaced = self.add_label(issue_id, label, expected_assignee=expected_assignee)
                 results.append({"id": issue_id, "status": "added" if added else "already_exists"})
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                errors.append(BatchFailure(id=issue_id, error=str(e), code=ErrorCode.VALIDATION))
+                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
     def batch_remove_label(
@@ -1529,8 +1598,12 @@ class IssuesMixin(DBMixinProtocol):
         issue_ids: list[str],
         *,
         label: str,
+        expected_assignee: str | None = None,
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]:
-        """Remove the same label from multiple issues. Returns (removed, errors)."""
+        """Remove the same label from multiple issues. Returns (removed, errors).
+
+        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
@@ -1541,12 +1614,13 @@ class IssuesMixin(DBMixinProtocol):
         for issue_id in issue_ids:
             try:
                 self.get_issue(issue_id)
-                removed, _canonical = self.remove_label(issue_id, label)
+                removed, _canonical = self.remove_label(issue_id, label, expected_assignee=expected_assignee)
                 results.append({"id": issue_id, "status": "removed" if removed else "not_found"})
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                errors.append(BatchFailure(id=issue_id, error=str(e), code=ErrorCode.VALIDATION))
+                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
     def batch_add_comment(
@@ -1555,8 +1629,12 @@ class IssuesMixin(DBMixinProtocol):
         *,
         text: str,
         author: str = "",
+        expected_assignee: str | None = None,
     ) -> tuple[list[dict[str, str | int]], list[BatchFailure]]:
-        """Add the same comment to multiple issues. Returns (commented, errors)."""
+        """Add the same comment to multiple issues. Returns (commented, errors).
+
+        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(text, str):
             msg = "text must be a string"
@@ -1570,12 +1648,13 @@ class IssuesMixin(DBMixinProtocol):
         for issue_id in issue_ids:
             try:
                 self.get_issue(issue_id)
-                comment_id = self.add_comment(issue_id, text, author=author)
+                comment_id = self.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
                 results.append({"id": issue_id, "comment_id": comment_id})
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                errors.append(BatchFailure(id=issue_id, error=str(e), code=ErrorCode.VALIDATION))
+                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
     def list_issues(

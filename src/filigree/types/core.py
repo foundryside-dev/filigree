@@ -139,6 +139,7 @@ class ObservationDict(TypedDict):
     file_path: str
     line: int | None
     source_issue_id: str
+    source_finding_id: str
     priority: int
     actor: str
     created_at: ISOTimestamp

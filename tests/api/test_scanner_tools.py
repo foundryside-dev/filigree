@@ -620,3 +620,82 @@ class TestReportFindingTool:
             )
         )
         assert data["file_created"] is False
+
+    async def test_observation_links_back_to_finding(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """report_finding creates an observation with source_finding_id linking
+        back to the finding (filigree-cb980eee0d, P1.2). The dual-write that
+        prior reviews flagged as a zombie source is now correlated.
+        """
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/cascade-link.py",
+                    "rule_id": "review-d-link",
+                    "message": "Linked observation",
+                },
+            )
+        )
+        finding_id = data["finding_id"]
+        observation_ids = data.get("observation_ids", [])
+        assert len(observation_ids) == 1
+        # The observation row carries source_finding_id pointing at the finding.
+        row = mcp_db_for_report_finding.conn.execute(
+            "SELECT source_finding_id FROM observations WHERE id = ?",
+            (observation_ids[0],),
+        ).fetchone()
+        assert row is not None
+        assert row["source_finding_id"] == finding_id
+
+    async def test_dismiss_finding_cascades_to_observation(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """dismiss_finding auto-dismisses the linked observation (P1.2)."""
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/cascade-dismiss.py",
+                    "rule_id": "review-d-dismiss",
+                    "message": "Will be dismissed",
+                },
+            )
+        )
+        finding_id = data["finding_id"]
+        observation_ids = data["observation_ids"]
+        # Observation is alive before dismiss.
+        live = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM observations WHERE id = ?", (observation_ids[0],)
+        ).fetchone()
+        assert live["c"] == 1
+        # Dismiss the finding.
+        await call_tool("dismiss_finding", {"finding_id": finding_id, "reason": "duplicate"})
+        # Observation gone, dismissal recorded.
+        live = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM observations WHERE id = ?", (observation_ids[0],)
+        ).fetchone()
+        assert live["c"] == 0
+        dismissed = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM dismissed_observations WHERE obs_id = ?", (observation_ids[0],)
+        ).fetchone()
+        assert dismissed["c"] == 1
+
+    async def test_promote_finding_cascades_to_observation(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """promote_finding auto-dismisses the linked observation (P1.2)."""
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/cascade-promote.py",
+                    "rule_id": "review-d-promote",
+                    "message": "Will be promoted",
+                },
+            )
+        )
+        finding_id = data["finding_id"]
+        observation_ids = data["observation_ids"]
+        # Promote the finding.
+        await call_tool("promote_finding", {"finding_id": finding_id})
+        # Linked observation is gone.
+        live = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM observations WHERE id = ?", (observation_ids[0],)
+        ).fetchone()
+        assert live["c"] == 0

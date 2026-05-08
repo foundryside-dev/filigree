@@ -195,7 +195,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Update an issue's status, priority, title, or custom fields. "
                 "Use get_valid_transitions to see allowed status changes. "
-                "Soft transition warnings are returned in data_warnings."
+                "Soft transition warnings are returned in data_warnings. "
+                "Pass expected_assignee for claim-aware coordination — the call returns "
+                "CONFLICT when the observed assignee doesn't match (mirrors reclaim_issue / "
+                "heartbeat_work / release_claim). Default behaviour with expected_assignee "
+                "omitted preserves the historical write-anywhere contract."
             ),
             inputSchema={
                 "type": "object",
@@ -216,20 +220,49 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "fields": {"type": "object", "description": "Fields to merge into existing fields"},
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition. When set, the call returns "
+                            "CONFLICT if the issue's observed assignee differs. Omit to "
+                            "skip the check (default; backward compatible)."
+                        ),
+                    },
                 },
                 "required": ["issue_id"],
             },
         ),
         Tool(
             name="close_issue",
-            description="Close an issue with optional reason",
+            description=(
+                "Close an issue. Routes through the same transition validator as update_issue, so the "
+                "current status must have a defined transition to the target done state. When status is "
+                "omitted, defaults to the first done-category state for the type (e.g. 'closed'); pass "
+                "status explicitly to land in an alternate done state (e.g. 'wont_fix', 'not_a_bug', "
+                "'cancelled'). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
+                "defined — walk the workflow with update_issue or pass a reachable status."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "reason": {"type": "string", "description": "Close reason"},
+                    "status": {
+                        "type": "string",
+                        "description": (
+                            "Target done-category status. Optional; defaults to first done state for the "
+                            "type. Use get_valid_transitions(issue_id) to discover reachable done states."
+                        ),
+                    },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
                     "fields": {"type": "object", "description": "Custom fields to set (e.g. root_cause for incidents)"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition. When set, the call returns "
+                            "CONFLICT if the issue's observed assignee differs."
+                        ),
+                    },
                 },
                 "required": ["issue_id"],
             },
@@ -251,11 +284,24 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="search_issues",
-            description="Search issues by title and description",
+            description=(
+                "Search issues by title and description using SQLite FTS5 with prefix matching. "
+                "FTS tokenisation splits on punctuation including hyphens — a query like "
+                "'mcp-review-d' is tokenised to ['mcp', 'review', 'd'] and the single-letter 'd' is "
+                "elided, so the literal substring is not matched. To find self-tagged work prefixed "
+                "with '[mcp-review-d]', use 'mcp review' (multi-token AND) instead, or filter "
+                "list_issues by label/cluster prefix. (filigree-cb980eee0d, P2.6.)"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query"},
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Search query. Tokens split on punctuation; tokens shorter than 2 chars "
+                            "are dropped by FTS. Use list_issues with --label-prefix for namespace search."
+                        ),
+                    },
                     "limit": {
                         "type": "integer",
                         "default": _MAX_LIST_RESULTS,
@@ -295,7 +341,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="release_claim",
             description=(
-                "Release a claimed issue by clearing its assignee. Does NOT change status. "
+                "Release a claimed issue by clearing its assignee, and (by default) revert wip-category "
+                "issues back to an open-category status so they rejoin get_ready discovery rather than "
+                "being orphaned in wip with no assignee. The reverse target is the template-defined open "
+                "predecessor of the current wip status (e.g. in_progress→open for task, fixing→confirmed "
+                "for bug); types with no open predecessor fall back to initial_state. Pass "
+                "revert_status=false to keep the legacy behaviour and leave the status unchanged. "
                 "By default this is strict and only succeeds if the issue has an assignee. "
                 "Pass if_held=true for release-if-held cleanup: unassigned issues are a no-op, "
                 "and assigned issues are only released when held by expected_assignee or, if omitted, actor."
@@ -315,6 +366,15 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Only release when the current assignee matches this value; defaults to actor in if_held mode.",
                     },
                     "reason": {"type": "string", "description": "Audit reason for releasing the claim."},
+                    "revert_status": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When true (default), wip-category issues transition back to an open-category "
+                            "predecessor on release so they rejoin discovery. Set to false to skip the "
+                            "status revert (legacy behaviour)."
+                        ),
+                    },
                 },
                 "required": ["issue_id"],
             },
@@ -497,6 +557,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "'slim' (default) returns SlimIssue items in succeeded[]; 'full' returns full PublicIssue records.",
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition applied per-item. Items "
+                            "whose observed assignee differs land in failed[] with "
+                            "code=CONFLICT."
+                        ),
+                    },
                 },
                 "required": ["issue_ids"],
             },
@@ -532,6 +600,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "'slim' (default) returns SlimIssue items in succeeded[]; 'full' returns full PublicIssue records.",
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition applied per-item. Items "
+                            "whose observed assignee differs land in failed[] with "
+                            "code=CONFLICT."
+                        ),
+                    },
                 },
                 "required": ["issue_ids"],
             },
@@ -702,6 +778,9 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         before = tracker.get_issue(args["issue_id"])
@@ -719,6 +798,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
             parent_id=args.get("parent_issue_id"),
             fields=args.get("fields"),
             actor=actor,
+            expected_assignee=expected_assignee,
         )
         _refresh_summary()
         changed = [attr for attr in _UPDATE_TRACKED_FIELDS if getattr(issue, attr) != getattr(before, attr)]
@@ -730,6 +810,8 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         msg = str(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
+        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
@@ -740,6 +822,9 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         ready_before = {i.id for i in tracker.get_ready()}
@@ -747,8 +832,10 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         issue = tracker.close_issue(
             args["issue_id"],
             reason=args.get("reason", ""),
+            status=args.get("status"),
             actor=actor,
             fields=args.get("fields"),
+            expected_assignee=expected_assignee,
         )
         _refresh_summary()
         ready_after = tracker.get_ready()
@@ -762,7 +849,10 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
-        return _text(_build_transition_error(tracker, args["issue_id"], str(e)))
+        msg = str(e)
+        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(_build_transition_error(tracker, args["issue_id"], msg))
 
 
 async def _handle_reopen_issue(arguments: dict[str, Any]) -> list[TextContent]:
@@ -850,6 +940,9 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     reason = args.get("reason", "")
     if not isinstance(reason, str):
         return _text(ErrorResponse(error="reason must be a string", code=ErrorCode.VALIDATION))
+    revert_status = args.get("revert_status", True)
+    if not isinstance(revert_status, bool):
+        return _text(ErrorResponse(error="revert_status must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         issue = tracker.release_claim(
@@ -858,6 +951,7 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
             if_held=if_held,
             expected_assignee=expected_assignee,
             reason=reason,
+            revert_status=revert_status,
         )
         _refresh_summary()
         return _text(issue_to_public(issue))
@@ -871,12 +965,30 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, HeartbeatWorkArgs)
-    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
-    if actor_err:
-        return actor_err
+    # When the caller omits actor, default the audit identity to the issue's
+    # current assignee rather than the literal string 'mcp'. The previous
+    # default ('mcp') failed the implicit holder check whenever the actual
+    # holder forgot to pass actor: the rightful holder's heartbeat would
+    # CONFLICT with "expected 'mcp'", silently letting the lease expire.
+    # (filigree-cb980eee0d, P2.5 senior-user MCP review.)
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
+    raw_actor = args.get("actor")
+    if raw_actor is None:
+        # No explicit actor — read the current holder so the audit row is
+        # attributed correctly and the holder check is a no-op (caller
+        # didn't ask for one).
+        tracker = _get_db()
+        try:
+            issue = tracker.get_issue(args["issue_id"])
+        except KeyError:
+            return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
+        actor = issue.assignee or "mcp"
+    else:
+        actor, actor_err = _validate_actor(raw_actor)
+        if actor_err:
+            return actor_err
     lease_hours = args.get("lease_hours", 48)
     lease_err = _validate_int_range(lease_hours, "lease_hours", min_val=1)
     if lease_err:
@@ -997,6 +1109,9 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
@@ -1009,6 +1124,7 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
         issue_ids,
         reason=args.get("reason", ""),
         actor=actor,
+        expected_assignee=expected_assignee,
     )
     _refresh_summary()
     ready_after = tracker.get_ready()
@@ -1041,6 +1157,9 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
@@ -1058,6 +1177,7 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
         assignee=args.get("assignee"),
         fields=u_fields,
         actor=actor,
+        expected_assignee=expected_assignee,
     )
     _refresh_summary()
     if detail == "full":

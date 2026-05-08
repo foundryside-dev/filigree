@@ -267,16 +267,27 @@ class TestUpdateIssueTransitionEnforcement:
         with pytest.raises(ValueError, match="not allowed"):
             db.update_issue(issue.id, status="verifying")  # triage -> verifying not in table
 
-    def test_close_bypasses_transition_check(self, db: FiligreeDB) -> None:
-        """close_issue works from any state (admin action)."""
+    def test_close_validates_transition(self, db: FiligreeDB) -> None:
+        """close_issue routes through update_issue's transition validator.
+
+        Bug template has no triage→closed transition, so the default done state
+        (closed) must be rejected with INVALID_TRANSITION. Use close_issue with
+        an explicit done status that *is* reachable (wont_fix), or walk the
+        workflow first.
+        """
         issue = db.create_issue("Bug", type="bug")
-        closed = db.close_issue(issue.id, reason="duplicate")
-        assert closed.status == "closed"
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id, reason="duplicate")
+        # Reachable done state from triage works.
+        closed = db.close_issue(issue.id, status="wont_fix", reason="duplicate")
+        assert closed.status == "wont_fix"
 
     def test_reopen_bypasses_transition_check(self, db: FiligreeDB) -> None:
         """Reopen works from done state back to initial."""
         issue = db.create_issue("Bug", type="bug")
-        db.close_issue(issue.id)
+        # Use a directly-reachable done state from triage; close_issue now
+        # validates transitions (filigree-cb980eee0d).
+        db.close_issue(issue.id, status="wont_fix")
         reopened = db.update_issue(issue.id, status="triage", _skip_transition_check=True)
         assert reopened.status == "triage"
 
@@ -291,10 +302,17 @@ class TestCloseIssue:
     """close_issue() accepts optional status parameter for multi-done types."""
 
     def test_close_bug_default_done_state(self, db: FiligreeDB) -> None:
-        """close_issue() without status uses first done-category state."""
+        """close_issue() without status uses first done-category state, but
+        the transition must be reachable from the current status. For bug,
+        triage → closed is not a defined transition; the agent must walk to
+        verifying first.
+        """
         issue = db.create_issue("Bug", type="bug")
+        db.update_issue(issue.id, status="confirmed", fields={"severity": "minor"})
+        db.update_issue(issue.id, status="fixing", fields={"root_cause": "redacted"})
+        db.update_issue(issue.id, status="verifying", fields={"fix_verification": "smoke test"})
         closed = db.close_issue(issue.id)
-        assert closed.status == "closed"  # 'closed' is first done state for bug
+        assert closed.status == "closed"
 
     def test_close_bug_with_specific_done_state(self, db: FiligreeDB) -> None:
         """close_issue(status='wont_fix') uses specified done state."""
@@ -317,7 +335,8 @@ class TestCloseIssue:
     def test_close_already_closed_raises(self, db: FiligreeDB) -> None:
         """close_issue() on already-closed issue raises with clear message."""
         issue = db.create_issue("Bug", type="bug")
-        db.close_issue(issue.id)
+        # Use a directly-reachable done state from triage to land in done.
+        db.close_issue(issue.id, status="wont_fix")
         with pytest.raises(ValueError, match="already closed"):
             db.close_issue(issue.id)
 
@@ -364,13 +383,15 @@ class TestCloseIssueHardEnforcement:
         assert closed.status == "closed"
         assert closed.fields["root_cause"] == "OOM in worker"
 
-    def test_close_from_non_workflow_state_skips_hard_gate(self, db: FiligreeDB) -> None:
-        """Admin override from a state with no transition to closed still works."""
-        # Bug type: closing from triage (initial state) has no defined transition
-        # to "closed" — this is the admin-override path and should still work
+    def test_close_from_non_workflow_state_rejected(self, db: FiligreeDB) -> None:
+        """Closing from a state with no transition to the default done state
+        is rejected with INVALID_TRANSITION (per the validate-transitions
+        policy). Agents should pass an explicitly reachable done status
+        instead.
+        """
         issue = db.create_issue("Bug", type="bug")
-        closed = db.close_issue(issue.id, reason="duplicate")
-        assert closed.status == "closed"
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id, reason="duplicate")
 
     def test_close_bug_from_verifying_requires_fix_verification(self, db: FiligreeDB) -> None:
         """Bug verifying→closed has hard enforcement requiring fix_verification."""
@@ -436,22 +457,58 @@ class TestClaimIssue:
             db.claim_issue(issue.id, assignee="agent-2")
 
     def test_claim_released_wip_issue_for_handoff(self, db: FiligreeDB) -> None:
+        """release_claim auto-reverts wip→open so the issue rejoins discovery
+        (filigree-cb980eee0d, P1.3). The handoff agent picks up an 'open'
+        issue and re-transitions it as part of start_work.
+        """
         issue = db.create_issue("Handoff task", type="task")
         db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
         released = db.release_claim(issue.id, actor="agent-alpha")
-        assert released.status == "in_progress"
+        assert released.status == "open"
         assert released.assignee == ""
 
         claimed = db.claim_issue(issue.id, assignee="agent-bravo", actor="agent-bravo")
 
-        assert claimed.status == "in_progress"
+        assert claimed.status == "open"
         assert claimed.assignee == "agent-bravo"
+
+    def test_release_claim_revert_status_false_preserves_legacy_behaviour(self, db: FiligreeDB) -> None:
+        """Pass revert_status=False to keep the issue in its current wip
+        status (legacy behaviour pre-P1.3).
+        """
+        issue = db.create_issue("Sticky task", type="task")
+        db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
+        released = db.release_claim(issue.id, actor="agent-alpha", revert_status=False)
+        assert released.status == "in_progress"
+        assert released.assignee == ""
+
+    def test_release_claim_reverts_bug_fixing_to_confirmed(self, db: FiligreeDB) -> None:
+        """For bug.fixing, the open predecessor is confirmed."""
+        issue = db.create_issue("Bug", type="bug")
+        db.update_issue(issue.id, status="confirmed", fields={"severity": "minor"})
+        db.start_work(issue.id, assignee="agent-x", actor="agent-x", target_status="fixing")
+        released = db.release_claim(issue.id, actor="agent-x")
+        assert released.status == "confirmed"
+
+    def test_release_claim_falls_back_to_initial_state(self, db: FiligreeDB) -> None:
+        """For bug.verifying (no open predecessor in transition graph) the
+        revert falls back to the template's initial_state (triage).
+        """
+        issue = db.create_issue("Bug", type="bug")
+        db.update_issue(issue.id, status="confirmed", fields={"severity": "minor"})
+        db.update_issue(issue.id, status="fixing", fields={"root_cause": "redacted"})
+        db.update_issue(issue.id, status="verifying", fields={"fix_verification": "manual"})
+        db.claim_issue(issue.id, assignee="agent-y")
+        released = db.release_claim(issue.id, actor="agent-y")
+        # No direct open→verifying transition exists; fall back to initial_state.
+        assert released.status == "triage"
 
 
 class TestReopenIssue:
     def test_reopen_bug_returns_to_triage(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Bug", type="bug")
-        db.close_issue(issue.id)
+        # Use directly-reachable wont_fix from triage (filigree-cb980eee0d).
+        db.close_issue(issue.id, status="wont_fix")
         reopened = db.reopen_issue(issue.id)
         assert reopened.status == "triage"
         assert reopened.closed_at is None
@@ -742,6 +799,77 @@ class TestClaimLeaseLiveness:
             )
 
 
+class TestWritePathExpectedAssignee:
+    """Optional expected_assignee precondition on write tools.
+
+    filigree-cb980eee0d (P1.1): heartbeat_work / release_claim / reclaim_issue
+    strictly enforce claim ownership; update_issue / batch_update / close_issue /
+    add_comment / add_label / remove_label previously ignored it. Each now
+    accepts an optional expected_assignee that mirrors reclaim's CONFLICT
+    behaviour. Default behaviour with expected_assignee omitted is unchanged.
+    """
+
+    def test_update_issue_skips_check_when_expected_assignee_omitted(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Default behaviour preserved")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        # No expected_assignee → write proceeds even when called by a different actor.
+        updated = db.update_issue(issue.id, priority=0, actor="other-agent")
+        assert updated.priority == 0
+
+    def test_update_issue_rejects_when_expected_assignee_mismatches(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware update")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
+            db.update_issue(issue.id, priority=0, expected_assignee="agent-other")
+
+    def test_update_issue_succeeds_when_expected_assignee_matches(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware update")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        updated = db.update_issue(issue.id, priority=0, expected_assignee="agent-holder")
+        assert updated.priority == 0
+
+    def test_close_issue_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware close")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
+            db.close_issue(issue.id, expected_assignee="agent-other")
+
+    def test_add_comment_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware comment")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
+            db.add_comment(issue.id, "note", expected_assignee="agent-other")
+
+    def test_add_label_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware label")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
+            db.add_label(issue.id, "needs-review", expected_assignee="agent-other")
+
+    def test_remove_label_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware label")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        db.add_label(issue.id, "needs-review")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
+            db.remove_label(issue.id, "needs-review", expected_assignee="agent-other")
+
+    def test_batch_update_partial_failure_on_mismatch(self, db: FiligreeDB) -> None:
+        held = db.create_issue("Held")
+        unheld = db.create_issue("Unheld")
+        db.claim_issue(held.id, assignee="agent-holder")
+        # batch_update with expected_assignee='agent-holder' should succeed for held,
+        # fail for unheld (assignee=='').
+        succeeded, failed = db.batch_update(
+            [held.id, unheld.id],
+            priority=0,
+            expected_assignee="agent-holder",
+        )
+        assert {i.id for i in succeeded} == {held.id}
+        assert {f["id"] for f in failed} == {unheld.id}
+        # The failure carries the CONFLICT-shaped message.
+        assert any("expected 'agent-holder'" in f["error"] for f in failed)
+
+
 # ---------------------------------------------------------------------------
 # Task 1.10: Category-Aware Queries
 # ---------------------------------------------------------------------------
@@ -1012,6 +1140,10 @@ class TestStatusCategory:
     def test_bug_closed_category_is_done(self, db: FiligreeDB) -> None:
         """Bug in 'closed' should have status_category='done'."""
         issue = db.create_issue("Bug", type="bug")
+        # closed is reachable only from verifying — walk the workflow.
+        db.update_issue(issue.id, status="confirmed", fields={"severity": "minor"})
+        db.update_issue(issue.id, status="fixing", fields={"root_cause": "redacted"})
+        db.update_issue(issue.id, status="verifying", fields={"fix_verification": "smoke test"})
         closed = db.close_issue(issue.id)
         d = closed.to_dict()
         assert d["status_category"] == "done"

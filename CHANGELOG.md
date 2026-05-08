@@ -9,6 +9,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **``get_blocked`` now includes wip-category issues that are stuck on
+  another non-done issue.** Previously ``get_blocked`` filtered to
+  open-category only, so an in-progress task waiting on an open
+  blocker was invisible to the "what's stuck right now" surface.
+  filigree-cb980eee0d, P2.8 senior-user MCP review.
+
+- **``add_label`` reports mutual-exclusivity displacement.** When a
+  ``review:`` namespace label silently displaces a sibling, the response
+  now carries ``label_result="replaced"``, ``replaced_labels=[...]``,
+  and a ``data_warnings`` entry naming the displaced label. Previously
+  the displacement was completely silent and the response showed
+  ``label_result="added"``. CLI emits a "(replaced: ...)" hint.
+  ``add_label`` now returns a 3-tuple ``(added, canonical, replaced)``
+  internally; the only callers were within the codebase. (filigree-cb980eee0d, P2.7)
+
+- **``PublicIssue`` emits both ``parent_id`` and ``parent_issue_id``.**
+  ``get_issue`` previously returned ``parent_id`` while ``get_ready`` and
+  ``list_issues`` returned ``parent_issue_id`` — the same value with two
+  names depending on the tool. Both names now appear on the full
+  PublicIssue shape; agents should prefer ``parent_issue_id`` for
+  consistency. ``parent_id`` is retained for backwards compatibility.
+  (filigree-cb980eee0d, P2.9)
+
+- **``get_changes`` defaults to excluding ``heartbeat`` events.**
+  With 48-hour leases and aggressive heartbeating, the catch-up firehose
+  was dominated by liveness pings. The MCP tool now filters out
+  ``heartbeat`` events by default; pass ``include_heartbeats=true``
+  (or ``type='heartbeat'`` explicitly) to see them. ``get_events_since``
+  in ``db_events`` gains an ``exclude_types: list[str] | None`` param.
+  (filigree-cb980eee0d, P2.11)
+
+- **``heartbeat_work`` defaults the audit actor to the issue's
+  current assignee** when the caller omits ``actor``. Previously the
+  MCP handler defaulted to the literal string ``'mcp'``, so the
+  rightful holder's heartbeat would CONFLICT with "expected 'mcp'"
+  whenever they forgot to pass ``actor`` — silently letting their lease
+  expire. (filigree-cb980eee0d, P2.5)
+
+- **Observations created from findings link back via ``source_finding_id``;
+  ``dismiss_finding`` and ``promote_finding`` cascade-dismiss the link.**
+  Senior-user MCP review (run d, finding P1.2) flagged that the prior fix
+  (``9af7b82``) only added the observation IDs to the
+  ``report_finding`` response — the observations themselves had no
+  structural backlink, so closing or promoting the finding left a
+  14-day zombie observation that re-appeared in ``list_observations``
+  every time. The schema now adds ``observations.source_finding_id``
+  (migration v11→v12) and an index for cascade scans;
+  ``report_finding`` populates the field, and ``update_finding`` (the
+  underlying helper for both ``dismiss_finding`` and
+  ``promote_finding``) auto-dismisses any linked observation when the
+  finding reaches a terminal status (``false_positive``, ``fixed``,
+  ``unseen_in_latest``) or is linked to an issue. The dismissal is
+  recorded in ``dismissed_observations`` for audit. (filigree-cb980eee0d)
+
+- **``release_claim`` auto-reverts wip→open by default.**
+  Senior-user MCP review (run d, finding P1.3) flagged that releasing a
+  claim while the issue was in a wip-category status (e.g.
+  ``in_progress``, ``fixing``) cleared the assignee but left the status
+  unchanged, so the issue became invisible to ``get_ready``,
+  ``get_blocked``, ``get_summary`` — orphaned in wip with no discovery
+  surface. ``release_claim`` now resolves a template-defined reverse
+  target (the open-category predecessor whose forward transition targets
+  the current wip status; e.g. ``in_progress→open`` for ``task``,
+  ``fixing→confirmed`` for ``bug``) and transitions the status back so
+  the issue rejoins ``get_ready``. Statuses with no direct open
+  predecessor (e.g. ``bug.verifying``) fall back to the template's
+  ``initial_state`` if it is open-category. Pass
+  ``release_claim(revert_status=False)`` to opt out and keep the legacy
+  "release without status change" behaviour. (filigree-cb980eee0d)
+
+- **Optional ``expected_assignee`` precondition on write tools.**
+  Senior-user MCP review (run d, finding P1.1) flagged that
+  ``heartbeat_work`` / ``release_claim`` / ``reclaim_issue`` strictly
+  enforce claim ownership while ``update_issue`` / ``batch_update`` /
+  ``close_issue`` / ``add_comment`` / ``add_label`` / ``remove_label``
+  ignored it — a non-claimant could overwrite a held issue silently.
+  Each of those tools now accepts an optional ``expected_assignee``
+  string; when set, the call returns ``CONFLICT`` (with the
+  CONFLICT-shaped ``"assigned to '<x>' (expected '<y>')"`` message) if
+  the observed assignee differs. Default behaviour with the parameter
+  omitted is unchanged for backward compatibility. Batch tools apply
+  the precondition per-item and surface failures via the standard
+  ``failed[]`` array. (filigree-cb980eee0d)
+
+### Changed
+
+- **``search_issues`` description now documents FTS tokenisation
+  behaviour.** Hyphens split tokens and tokens shorter than 2 chars are
+  elided, so ``mcp-review-d`` returns nothing while ``mcp review``
+  matches ``[mcp-review-d] Scratch task A``. (filigree-cb980eee0d, P2.6)
+
+### Changed (BREAKING)
+
+- **``close_issue`` now validates state transitions like ``update_issue``.**
+  The senior-user MCP review (run d, ``docs/plans/2026-05-06-mcp-senior-user-review-d.md``
+  finding P1.4) flagged that ``update_issue(status='closed')`` and
+  ``close_issue()`` had opposite contracts for the same target state — a
+  bug stuck in ``triage`` could be force-closed via ``close_issue`` even
+  though the bug template only allows ``triage → wont_fix``,
+  ``triage → not_a_bug``, or walking through ``confirmed → fixing →
+  verifying → closed``. ``close_issue`` previously passed
+  ``_skip_transition_check=True`` to the underlying update; that bypass
+  is now removed. The MCP/CLI/dashboard surfaces all return the same
+  ``INVALID_TRANSITION`` envelope (with ``valid_transitions`` and
+  ``hint``) for unreachable target statuses. To support legitimate
+  alternate-done closures, ``close_issue`` now exposes ``status``
+  (already in the underlying db method, but absent from MCP/CLI/dashboard
+  surfaces); pass ``close_issue(status='wont_fix')`` /
+  ``filigree close <id> --status=wont_fix`` to land in a directly
+  reachable done state when the default isn't reachable. The MCP tool
+  description and CLI help text document this. (filigree-cb980eee0d)
+
+### Added (since v2.0.0 baseline)
+
 - **``response_detail``/``--detail`` opt-in on MCP and CLI batch tools.**
   Closes a documentation/implementation gap: the agent guidance
   (``src/filigree/data/instructions.md``, the project ``CLAUDE.md`` and

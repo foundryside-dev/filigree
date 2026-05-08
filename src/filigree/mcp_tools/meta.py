@@ -53,13 +53,24 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
     tools = [
         Tool(
             name="add_comment",
-            description="Add a comment to an issue. Returns the flat updated PublicIssue plus comment_id.",
+            description=(
+                "Add a comment to an issue. Returns the flat updated PublicIssue plus comment_id. "
+                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT "
+                "when the observed assignee doesn't match (mirrors reclaim_issue / heartbeat_work)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "text": {"type": "string", "description": "Comment text"},
                     "actor": {"type": "string", "description": "Agent/user identity (used as comment author)"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition. When set, the call returns "
+                            "CONFLICT if the issue's observed assignee differs."
+                        ),
+                    },
                 },
                 "required": ["issue_id", "text"],
             },
@@ -77,24 +88,46 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="add_label",
-            description="Add a label to an issue. Returns the flat updated PublicIssue plus label and label_result.",
+            description=(
+                "Add a label to an issue. Returns the flat updated PublicIssue plus label and label_result. "
+                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT when "
+                "the observed assignee doesn't match."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "label": {"type": "string", "description": "Label to add"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition. When set, the call returns "
+                            "CONFLICT if the issue's observed assignee differs."
+                        ),
+                    },
                 },
                 "required": ["issue_id", "label"],
             },
         ),
         Tool(
             name="remove_label",
-            description="Remove a label from an issue. Returns the flat updated PublicIssue plus label and label_result.",
+            description=(
+                "Remove a label from an issue. Returns the flat updated PublicIssue plus label and label_result. "
+                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT when "
+                "the observed assignee doesn't match."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "label": {"type": "string", "description": "Label to remove"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition. When set, the call returns "
+                            "CONFLICT if the issue's observed assignee differs."
+                        ),
+                    },
                 },
                 "required": ["issue_id", "label"],
             },
@@ -123,6 +156,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "'slim' (default) returns issue ID strings in succeeded[]; 'full' returns full PublicIssue records.",
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition applied per-item. Items "
+                            "whose observed assignee differs land in failed[] with "
+                            "code=CONFLICT."
+                        ),
+                    },
                 },
                 "required": ["issue_ids", "label"],
             },
@@ -151,6 +192,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "'slim' (default) returns issue ID strings in succeeded[]; 'full' returns full PublicIssue records.",
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition applied per-item. Items "
+                            "whose observed assignee differs land in failed[] with "
+                            "code=CONFLICT."
+                        ),
+                    },
                 },
                 "required": ["issue_ids", "label"],
             },
@@ -180,13 +229,26 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "'slim' (default) returns issue ID strings in succeeded[]; 'full' returns full PublicIssue records of the commented-on issues.",
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "expected_assignee": {
+                        "type": "string",
+                        "description": (
+                            "Optional claim-aware precondition applied per-item. Items "
+                            "whose observed assignee differs land in failed[] with "
+                            "code=CONFLICT."
+                        ),
+                    },
                 },
                 "required": ["issue_ids", "text"],
             },
         ),
         Tool(
             name="get_changes",
-            description="Get events since a timestamp (for session resumption). Returns chronological event list with optional catch-up filters.",
+            description=(
+                "Get events since a timestamp (for session resumption). Returns chronological event list "
+                "with optional catch-up filters. Heartbeat events are excluded by default so the catch-up "
+                "feed isn't dominated by liveness pings; pass include_heartbeats=true (or type='heartbeat' "
+                "explicitly) to see them."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -204,6 +266,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "type": "string",
                         "enum": list(get_args(EventType)),
                         "description": "Only include events of this event type",
+                    },
+                    "include_heartbeats": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Default false — heartbeat events are excluded so the catch-up feed isn't "
+                            "dominated by liveness pings. Set true (or pass type='heartbeat') to include them."
+                        ),
                     },
                 },
                 "required": ["since"],
@@ -396,6 +466,9 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         tracker.get_issue(args["issue_id"])
@@ -406,9 +479,13 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
             args["issue_id"],
             args["text"],
             author=actor,
+            expected_assignee=expected_assignee,
         )
     except ValueError as e:
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        msg = str(e)
+        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
     issue = tracker.get_issue(args["issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
@@ -433,21 +510,36 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddLabelArgs)
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     try:
-        added, canonical = tracker.add_label(args["issue_id"], args["label"])
+        added, canonical, replaced = tracker.add_label(args["issue_id"], args["label"], expected_assignee=expected_assignee)
     except ValueError as e:
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        msg = str(e)
+        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
-    status = "added" if added else "already_exists"
+    # Mutual-exclusivity displacement was previously silent — surface it as
+    # label_result='replaced' with a replaced_labels list, plus a
+    # data_warnings entry so callers iterating warnings see it too
+    # (filigree-cb980eee0d, P2.7).
+    status = "replaced" if replaced else ("added" if added else "already_exists")
     issue = tracker.get_issue(args["issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
     response["label"] = canonical
     response["label_result"] = status
+    if replaced:
+        response["replaced_labels"] = replaced
+        warnings = list(response.get("data_warnings") or [])
+        warnings.append(f"Adding '{canonical}' displaced mutually-exclusive label(s): {', '.join(replaced)}")
+        response["data_warnings"] = warnings
     return _text(cast(LabelActionResponse, response))
 
 
@@ -455,15 +547,21 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, RemoveLabelArgs)
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     try:
-        removed, canonical = tracker.remove_label(args["issue_id"], args["label"])
+        removed, canonical = tracker.remove_label(args["issue_id"], args["label"], expected_assignee=expected_assignee)
     except ValueError as e:
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        msg = str(e)
+        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
     status = "removed" if removed else "not_found"
     issue = tracker.get_issue(args["issue_id"])
@@ -480,6 +578,9 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
     _actor, actor_err = _validate_actor(args.get("actor", "mcp"))  # validated for rejection only
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
@@ -489,7 +590,7 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_add_label(issue_ids, label=args["label"])
+    label_succeeded, label_failed = tracker.batch_add_label(issue_ids, label=args["label"], expected_assignee=expected_assignee)
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -511,6 +612,9 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
     _actor, actor_err = _validate_actor(args.get("actor", "mcp"))  # validated for rejection only
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
@@ -520,7 +624,7 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_remove_label(issue_ids, label=args["label"])
+    label_succeeded, label_failed = tracker.batch_remove_label(issue_ids, label=args["label"], expected_assignee=expected_assignee)
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -542,6 +646,9 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    expected_assignee = args.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
@@ -555,6 +662,7 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
         issue_ids,
         text=args["text"],
         author=actor,
+        expected_assignee=expected_assignee,
     )
     _refresh_summary()
     if detail == "full":
@@ -603,6 +711,16 @@ async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
     event_type = args.get("type")
     if event_type is not None and event_type not in get_args(EventType):
         return _text(ErrorResponse(error=f"Invalid event type: {event_type}", code=ErrorCode.VALIDATION))
+    # Default-exclude heartbeat events so the catch-up firehose isn't
+    # dominated by liveness pings. Callers can opt back in by passing
+    # type='heartbeat' explicitly or include_heartbeats=true to see all
+    # events. (filigree-cb980eee0d, P2.11.)
+    include_heartbeats = args.get("include_heartbeats", False)
+    if not isinstance(include_heartbeats, bool):
+        return _text(ErrorResponse(error="include_heartbeats must be a boolean", code=ErrorCode.VALIDATION))
+    exclude_types: list[str] = []
+    if not include_heartbeats and event_type != "heartbeat":
+        exclude_types.append("heartbeat")
     # Overfetch by 1 to detect has_more, matching list_issues / search_issues.
     events = tracker.get_events_since(
         since_normalized,
@@ -611,6 +729,7 @@ async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
         issue_id=args.get("issue_id"),
         label=label,
         event_type=event_type,
+        exclude_types=exclude_types or None,
     )
     has_more = len(events) > limit
     if has_more:

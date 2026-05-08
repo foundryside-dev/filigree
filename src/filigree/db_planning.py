@@ -281,19 +281,40 @@ class PlanningMixin(DBMixinProtocol):
         return self._build_issues_batch([r["id"] for r in rows])
 
     def get_blocked(self) -> list[Issue]:
-        """Issues in open-category states that have at least one non-done blocker."""
-        preds = self._resolve_open_blocker_predicates()
-        if preds is None:
+        """Issues in open- or wip-category states that have at least one non-done blocker.
+
+        Includes wip-category issues so an agent doing "what's stuck right
+        now" sees in_progress dead-ends, not just open-category waiters.
+        Done-category issues are excluded — once an issue is closed, its
+        dependencies are no longer interesting. (filigree-cb980eee0d, P2.8.)
+        """
+        # not-done predicate covers both open and wip; the blocker side stays
+        # done-only so we surface anything that isn't yet finished but is
+        # waiting on something also unfinished.
+        not_done_pred = self._category_predicate_sql(
+            "done",
+            type_col="i.type",
+            status_col="i.status",
+            include_archived=True,
+        )
+        not_done_sql, not_done_params = not_done_pred
+        blocker_done_pred = self._category_predicate_sql(
+            "done",
+            type_col="blocker.type",
+            status_col="blocker.status",
+            include_archived=True,
+        )
+        blocker_done_sql, blocker_done_params = blocker_done_pred
+        if not not_done_params and not blocker_done_params:
             return []
-        (open_sql, open_params), (blocker_done_sql, blocker_done_params) = preds
 
         rows = self.conn.execute(
             f"SELECT DISTINCT i.id FROM issues i "
             f"JOIN dependencies d ON d.issue_id = i.id "
             f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-            f"WHERE {open_sql} AND NOT ({blocker_done_sql}) "
+            f"WHERE NOT ({not_done_sql}) AND NOT ({blocker_done_sql}) "
             f"ORDER BY i.priority, i.created_at",
-            [*open_params, *blocker_done_params],
+            [*not_done_params, *blocker_done_params],
         ).fetchall()
 
         return self._build_issues_batch([r["id"] for r in rows])

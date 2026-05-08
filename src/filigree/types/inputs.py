@@ -77,13 +77,16 @@ class UpdateIssueArgs(TypedDict):
     parent_issue_id: NotRequired[str]
     fields: NotRequired[dict[str, Any]]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class CloseIssueArgs(TypedDict):
     issue_id: str
     reason: NotRequired[str]
+    status: NotRequired[str]
     actor: NotRequired[str]
     fields: NotRequired[dict[str, Any]]
+    expected_assignee: NotRequired[str]
 
 
 class ReopenIssueArgs(TypedDict):
@@ -110,6 +113,7 @@ class ReleaseClaimArgs(TypedDict):
     if_held: NotRequired[bool]
     expected_assignee: NotRequired[str]
     reason: NotRequired[str]
+    revert_status: NotRequired[bool]
 
 
 class HeartbeatWorkArgs(TypedDict):
@@ -161,6 +165,7 @@ class BatchCloseArgs(TypedDict):
     reason: NotRequired[str]
     response_detail: NotRequired[str]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class BatchUpdateArgs(TypedDict):
@@ -171,6 +176,7 @@ class BatchUpdateArgs(TypedDict):
     fields: NotRequired[dict[str, Any]]
     response_detail: NotRequired[str]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +313,7 @@ class AddCommentArgs(TypedDict):
     issue_id: str
     text: str
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class GetCommentsArgs(TypedDict):
@@ -316,11 +323,13 @@ class GetCommentsArgs(TypedDict):
 class AddLabelArgs(TypedDict):
     issue_id: str
     label: str
+    expected_assignee: NotRequired[str]
 
 
 class RemoveLabelArgs(TypedDict):
     issue_id: str
     label: str
+    expected_assignee: NotRequired[str]
 
 
 class ListLabelsArgs(TypedDict):
@@ -333,6 +342,7 @@ class BatchAddLabelArgs(TypedDict):
     label: str
     response_detail: NotRequired[str]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class BatchRemoveLabelArgs(TypedDict):
@@ -340,6 +350,7 @@ class BatchRemoveLabelArgs(TypedDict):
     label: str
     response_detail: NotRequired[str]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class BatchAddCommentArgs(TypedDict):
@@ -347,6 +358,7 @@ class BatchAddCommentArgs(TypedDict):
     text: str
     response_detail: NotRequired[str]
     actor: NotRequired[str]
+    expected_assignee: NotRequired[str]
 
 
 class GetChangesArgs(TypedDict):
@@ -356,6 +368,7 @@ class GetChangesArgs(TypedDict):
     issue_id: NotRequired[str]
     label: NotRequired[str]
     type: NotRequired[str]
+    include_heartbeats: NotRequired[bool]
 
 
 class GetMetricsArgs(TypedDict):

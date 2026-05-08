@@ -2595,9 +2595,10 @@ class TestNamespaceReservation:
     )
     def test_manual_namespace_allowed(self, db: FiligreeDB, label: str) -> None:
         issue = db.create_issue("Test")
-        added, canonical = db.add_label(issue.id, label)
+        added, canonical, replaced = db.add_label(issue.id, label)
         assert added is True
         assert canonical == label
+        assert replaced == []
 
     @pytest.mark.parametrize(
         "label",
@@ -2638,11 +2639,13 @@ class TestReviewMutualExclusivity:
         added=False — the mutual-exclusivity DELETE used to reinsert and
         falsely report added=True."""
         issue = db.create_issue("Test")
-        added1, _ = db.add_label(issue.id, "review:needed")
+        added1, _, _replaced1 = db.add_label(issue.id, "review:needed")
         assert added1 is True
-        added2, canonical = db.add_label(issue.id, "review:needed")
+        added2, canonical, replaced2 = db.add_label(issue.id, "review:needed")
         assert added2 is False
         assert canonical == "review:needed"
+        # Re-add of the same review label is a no-op — nothing displaced.
+        assert replaced2 == []
         # State invariant: still exactly one review label
         rows = db.conn.execute(
             "SELECT label FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
@@ -2654,9 +2657,12 @@ class TestReviewMutualExclusivity:
         """The idempotency short-circuit must NOT swallow real replacements."""
         issue = db.create_issue("Test")
         db.add_label(issue.id, "review:needed")
-        added, canonical = db.add_label(issue.id, "review:done")
+        added, canonical, replaced = db.add_label(issue.id, "review:done")
         assert added is True
         assert canonical == "review:done"
+        # P2.7: real replacement now reports the displaced label so callers
+        # can audit silent label changes.
+        assert replaced == ["review:needed"]
 
 
 class TestScanRunsExportImport:

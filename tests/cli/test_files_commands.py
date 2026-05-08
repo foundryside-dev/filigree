@@ -110,6 +110,9 @@ _PUBLIC_ISSUE_KEYS = frozenset(
         "priority",
         "type",
         "parent_id",
+        # Both parent_id and parent_issue_id are emitted (filigree-cb980eee0d, P2.9)
+        # to close the cross-tool naming inconsistency.
+        "parent_issue_id",
         "assignee",
         "claimed_at",
         "last_heartbeat_at",

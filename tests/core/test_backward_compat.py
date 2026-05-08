@@ -101,6 +101,9 @@ class TestEpicTypeTemplates:
 
     def test_epic_close(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Big feature", type="epic")
+        # Epic only allows in_progress→closed; close_issue now respects this
+        # (filigree-cb980eee0d, P1.4: validate-transitions policy).
+        db.update_issue(issue.id, status="in_progress")
         closed = db.close_issue(issue.id)
         assert closed.status == "closed"
 

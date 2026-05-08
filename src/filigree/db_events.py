@@ -20,6 +20,7 @@ _UNDO_CLAIM_LEASE_HOURS = 48
 def _undo_claim_expiry(now: str) -> str:
     return (datetime.fromisoformat(str(now)) + timedelta(hours=_UNDO_CLAIM_LEASE_HOURS)).isoformat()
 
+
 # ---------------------------------------------------------------------------
 # Undo constants (moved from core.py — only used by undo_last)
 # ---------------------------------------------------------------------------
@@ -116,8 +117,16 @@ class EventsMixin(DBMixinProtocol):
         issue_id: str | None = None,
         label: str | None = None,
         event_type: str | None = None,
+        exclude_types: list[str] | None = None,
     ) -> list[EventRecordWithTitle]:
-        """Get events since a given ISO timestamp, ordered chronologically."""
+        """Get events since a given ISO timestamp, ordered chronologically.
+
+        ``exclude_types`` filters out specific event types from the result
+        (e.g. ``["heartbeat"]``); takes precedence over an inclusive
+        ``event_type`` filter only when no overlap exists. The catch-up MCP
+        path defaults to excluding ``heartbeat`` so liveness pings don't
+        dominate session-resumption feeds (filigree-cb980eee0d, P2.11).
+        """
         clauses = ["e.created_at > ?"]
         params: list[object] = [since]
         if actor is not None:
@@ -132,6 +141,10 @@ class EventsMixin(DBMixinProtocol):
         if event_type is not None:
             clauses.append("e.event_type = ?")
             params.append(event_type)
+        if exclude_types:
+            placeholders = ",".join("?" for _ in exclude_types)
+            clauses.append(f"e.event_type NOT IN ({placeholders})")
+            params.extend(exclude_types)
         params.append(limit)
 
         where_sql = " AND ".join(clauses)

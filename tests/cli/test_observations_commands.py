@@ -36,6 +36,9 @@ _OBSERVE_KEYS = frozenset(
         "file_path",
         "line",
         "source_issue_id",
+        # Added v11→v12 (filigree-cb980eee0d, P1.2): link observations
+        # back to findings for cleanup cascade.
+        "source_finding_id",
         "priority",
         "actor",
         "created_at",

@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 
 from filigree.db_base import DBMixinProtocol, _normalize_iso_to_utc, _now_iso
 from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES
+from filigree.db_issues import _check_expected_assignee
 from filigree.db_observations import _expires_iso
 from filigree.types.planning import CommentRecord, StatsResult
 
@@ -31,11 +32,24 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Comments ------------------------------------------------------------
 
-    def add_comment(self, issue_id: str, text: str, *, author: str = "") -> int:
+    def add_comment(
+        self,
+        issue_id: str,
+        text: str,
+        *,
+        author: str = "",
+        expected_assignee: str | None = None,
+    ) -> int:
         if not text or not text.strip():
             msg = "Comment text cannot be empty"
             raise ValueError(msg)
         self._check_id_prefix(issue_id)
+        if expected_assignee is not None:
+            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if row is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
         now = _now_iso()
         try:
             cursor = self.conn.execute(
@@ -61,14 +75,36 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Labels --------------------------------------------------------------
 
-    def add_label(self, issue_id: str, label: str) -> tuple[bool, str]:
-        """Add label to issue. Returns (added, canonical_label).
+    def add_label(
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        expected_assignee: str | None = None,
+    ) -> tuple[bool, str, list[str]]:
+        """Add label to issue. Returns (added, canonical_label, replaced_labels).
 
         ``canonical_label`` is the stored form after normalization (strip, etc.);
         callers rendering output should use it rather than the raw argument.
+
+        ``replaced_labels`` is the list of labels that were silently removed
+        because of mutual-exclusivity rules in the same namespace (currently
+        ``review:``). When non-empty, surfaces should report the displacement
+        in their response so callers can audit silent label changes
+        (filigree-cb980eee0d, P2.7 senior-user MCP review).
+
+        ``expected_assignee`` is an optional claim-aware precondition; pass
+        ``None`` (default) to skip the check (filigree-cb980eee0d, P1.1).
         """
         self._check_id_prefix(issue_id)
+        if expected_assignee is not None:
+            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if row is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
         normalized = self._validate_label_name(label)
+        replaced: list[str] = []
         # Idempotency for review:* — the mutual-exclusivity DELETE below would
         # otherwise turn a no-op re-add into delete-then-reinsert and falsely
         # report (True, ...). Detect and short-circuit when the existing review
@@ -82,7 +118,10 @@ class MetaMixin(DBMixinProtocol):
                 ).fetchall()
             }
             if existing_review == {normalized}:
-                return False, normalized
+                return False, normalized, []
+            # Capture the set of labels we're about to displace so callers can
+            # report the silent removal (P2.7).
+            replaced = sorted(lbl for lbl in existing_review if lbl != normalized)
         try:
             # Mutual exclusivity for review: namespace
             if normalized.startswith("review:"):
@@ -98,11 +137,27 @@ class MetaMixin(DBMixinProtocol):
         except Exception:
             self.conn.rollback()
             raise
-        return cursor.rowcount > 0, normalized
+        return cursor.rowcount > 0, normalized, replaced
 
-    def remove_label(self, issue_id: str, label: str) -> tuple[bool, str]:
-        """Remove label from issue. Returns (removed, canonical_label)."""
+    def remove_label(
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        expected_assignee: str | None = None,
+    ) -> tuple[bool, str]:
+        """Remove label from issue. Returns (removed, canonical_label).
+
+        ``expected_assignee`` is an optional claim-aware precondition; pass
+        ``None`` (default) to skip the check (filigree-cb980eee0d, P1.1).
+        """
         self._check_id_prefix(issue_id)
+        if expected_assignee is not None:
+            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if row is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
         normalized = self._validate_label_name(label, allow_priority_like=True)
         try:
             cursor = self.conn.execute(

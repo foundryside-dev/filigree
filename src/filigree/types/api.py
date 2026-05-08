@@ -86,6 +86,14 @@ class PublicIssue(TypedDict):
 
     Internal/classic code may still use IssueDict with ``id``; agent-facing
     2.0 surfaces expose the entity primary key as ``issue_id``.
+
+    Both ``parent_id`` and ``parent_issue_id`` carry the same value — the
+    name was inconsistent across get_issue (parent_id) vs get_ready /
+    list_issues (parent_issue_id). To close the gap without breaking
+    existing consumers, both names are emitted; agents should prefer
+    ``parent_issue_id`` for consistency with the slim/ready shapes
+    (filigree-cb980eee0d, P2.9). ``parent_id`` is retained for backward
+    compatibility and may be removed in a future major.
     """
 
     issue_id: str
@@ -95,6 +103,7 @@ class PublicIssue(TypedDict):
     priority: int
     type: str
     parent_id: str | None
+    parent_issue_id: str | None
     assignee: str
     claimed_at: ISOTimestamp | None
     last_heartbeat_at: ISOTimestamp | None

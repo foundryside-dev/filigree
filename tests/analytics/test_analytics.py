@@ -296,7 +296,9 @@ class TestFlowMetrics:
     def test_flow_metrics_uses_type_specific_status_categories(self, db: FiligreeDB) -> None:
         """get_flow_metrics must use per-issue-type category resolution for cycle time."""
         issue = db.create_issue("Type-aware metrics", type="bug")
-        db.close_issue(issue.id)
+        # bug template has no triage→closed; use directly-reachable wont_fix
+        # (filigree-cb980eee0d, validate-transitions policy).
+        db.close_issue(issue.id, status="wont_fix")
         db.conn.execute("DELETE FROM events WHERE issue_id = ? AND event_type = 'status_changed'", (issue.id,))
         db.conn.execute(
             "INSERT INTO events (issue_id, event_type, old_value, new_value, created_at) "

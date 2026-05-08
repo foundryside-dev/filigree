@@ -50,6 +50,9 @@ class TestGenerateSummary:
         p = db.create_issue("Phase 1", type="phase", parent_id=ms.id)
         s1 = db.create_issue("Step 1", type="step", parent_id=p.id)
         db.create_issue("Step 2", type="step", parent_id=p.id)
+        # step requires walking pending → in_progress → completed
+        # (filigree-cb980eee0d, validate-transitions policy).
+        db.update_issue(s1.id, status="in_progress")
         db.close_issue(s1.id)
         summary = generate_summary(db)
         assert "Active Plans" in summary

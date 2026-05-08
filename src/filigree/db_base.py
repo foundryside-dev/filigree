@@ -237,6 +237,7 @@ class DBMixinProtocol(Protocol):
         parent_id: str | None = None,
         fields: dict[str, Any] | None = None,
         actor: str = "",
+        expected_assignee: str | None = None,
         _skip_transition_check: bool = False,
     ) -> Issue: ...
 
@@ -259,10 +260,12 @@ class DBMixinProtocol(Protocol):
 
     # -- MetaMixin -----------------------------------------------------------
 
-    def add_label(self, issue_id: str, label: str) -> tuple[bool, str]: ...
-    def remove_label(self, issue_id: str, label: str) -> tuple[bool, str]: ...
-    def batch_remove_label(self, issue_ids: list[str], *, label: str) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
-    def add_comment(self, issue_id: str, text: str, *, author: str = "") -> int: ...
+    def add_label(self, issue_id: str, label: str, *, expected_assignee: str | None = None) -> tuple[bool, str, list[str]]: ...
+    def remove_label(self, issue_id: str, label: str, *, expected_assignee: str | None = None) -> tuple[bool, str]: ...
+    def batch_remove_label(
+        self, issue_ids: list[str], *, label: str, expected_assignee: str | None = None
+    ) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
+    def add_comment(self, issue_id: str, text: str, *, author: str = "", expected_assignee: str | None = None) -> int: ...
 
     # -- PlanningMixin -------------------------------------------------------
 
@@ -297,6 +300,7 @@ class DBMixinProtocol(Protocol):
         file_path: str = "",
         line: int | None = None,
         source_issue_id: str = "",
+        source_finding_id: str = "",
         priority: int = 3,
         actor: str = "",
         auto_commit: bool = True,

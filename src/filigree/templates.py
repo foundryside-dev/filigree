@@ -642,6 +642,42 @@ class TemplateRegistry:
                 return state.name
         return None
 
+    def get_release_target(self, type_name: str, current_status: str) -> str | None:
+        """Find an open-category state that should be the post-release status.
+
+        For ``release_claim`` auto-revert (filigree-cb980eee0d, P1.3): when a
+        claim is released on a wip-category issue, return the open-category
+        predecessor whose forward transition targets ``current_status``. If
+        multiple open predecessors exist, the first one in transition order
+        wins; if none exists, returns ``None`` so the caller can leave the
+        issue in its current status (no reverse target available).
+
+        Returns ``None`` for done-category statuses (release on a done issue
+        should not transition) and for unknown types.
+        """
+        tpl = self._types.get(type_name)
+        if tpl is None:
+            return None
+        # Find which category the current status sits in.
+        states_by_name = {s.name: s for s in tpl.states}
+        current = states_by_name.get(current_status)
+        if current is None or current.category != "wip":
+            return None
+        # Walk transitions in declaration order; first open-category predecessor wins.
+        for transition in tpl.transitions:
+            if transition.to_state != current_status:
+                continue
+            predecessor = states_by_name.get(transition.from_state)
+            if predecessor is not None and predecessor.category == "open":
+                return predecessor.name
+        # No direct open predecessor — fallback to the template's initial_state
+        # if it's open-category. This handles bug.verifying (only fixing→verifying)
+        # by falling back to triage so the issue still rejoins discovery.
+        initial = states_by_name.get(tpl.initial_state)
+        if initial is not None and initial.category == "open":
+            return initial.name
+        return None
+
     # -- Validation ---------------------------------------------------------
 
     @staticmethod

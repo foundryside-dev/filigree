@@ -108,18 +108,26 @@ def add_label(label_name: str, issue_id: str, as_json: bool) -> None:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
         try:
-            added, canonical = db.add_label(issue_id, label_name)
+            added, canonical, replaced = db.add_label(issue_id, label_name)
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
-        status = "added" if added else "already_exists"
+        # Mutual-exclusivity displacement (e.g. review:* namespace) used to be
+        # silent; surface the replaced label so callers can audit
+        # (filigree-cb980eee0d, P2.7).
+        status = "replaced" if replaced else ("added" if added else "already_exists")
         if as_json:
-            click.echo(json_mod.dumps({"issue_id": issue_id, "label": canonical, "status": status}))
+            payload: dict[str, Any] = {"issue_id": issue_id, "label": canonical, "status": status}
+            if replaced:
+                payload["replaced_labels"] = replaced
+            click.echo(json_mod.dumps(payload))
         else:
-            if added:
+            if replaced:
+                click.echo(f"Added label '{canonical}' to {issue_id} (replaced: {', '.join(replaced)})")
+            elif added:
                 click.echo(f"Added label '{canonical}' to {issue_id}")
             else:
                 click.echo(f"Label '{canonical}' already on {issue_id}")

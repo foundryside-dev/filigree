@@ -33,6 +33,11 @@ def issue_to_public(issue: Issue) -> PublicIssue:
 
     Keep ``Issue.to_dict()`` internal/classic-shaped; this helper is for MCP,
     CLI JSON, and other agent-facing surfaces that promise ``issue_id``.
+
+    Emits both ``parent_id`` (legacy) and ``parent_issue_id`` (consistent
+    with slim/ready shapes) carrying the same value. Closes the
+    cross-tool naming inconsistency flagged by the senior-user MCP
+    review (filigree-cb980eee0d, P2.9).
     """
     classic = issue.to_dict()
     return PublicIssue(
@@ -43,6 +48,7 @@ def issue_to_public(issue: Issue) -> PublicIssue:
         priority=classic["priority"],
         type=classic["type"],
         parent_id=classic["parent_id"],
+        parent_issue_id=classic["parent_id"],
         assignee=classic["assignee"],
         claimed_at=classic["claimed_at"],
         last_heartbeat_at=classic["last_heartbeat_at"],

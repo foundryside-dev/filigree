@@ -115,6 +115,7 @@ class ObservationsMixin(DBMixinProtocol):
         file_path: str = "",
         line: int | None = None,
         source_issue_id: str = "",
+        source_finding_id: str = "",
         priority: int = 3,
         actor: str = "",
         auto_commit: bool = True,
@@ -194,9 +195,22 @@ class ObservationsMixin(DBMixinProtocol):
         try:
             self.conn.execute(
                 "INSERT INTO observations (id, summary, detail, file_id, file_path, line, "
-                "source_issue_id, priority, actor, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (obs_id, summary_stripped, detail, file_id, file_path, line, source_issue_id, priority, actor, now, expires),
+                "source_issue_id, source_finding_id, priority, actor, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    obs_id,
+                    summary_stripped,
+                    detail,
+                    file_id,
+                    file_path,
+                    line,
+                    source_issue_id,
+                    source_finding_id,
+                    priority,
+                    actor,
+                    now,
+                    expires,
+                ),
             )
             if auto_commit:
                 self.conn.commit()
@@ -250,6 +264,7 @@ class ObservationsMixin(DBMixinProtocol):
             "file_path": file_path,
             "line": line,
             "source_issue_id": source_issue_id,
+            "source_finding_id": source_finding_id,
             "priority": priority,
             "actor": actor,
             "created_at": now,

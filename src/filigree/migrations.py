@@ -536,6 +536,26 @@ def migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
     add_index(conn, "idx_issues_claim_expires_at", "issues", ["claim_expires_at"])
 
 
+def migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """v11 -> v12: Link observations to findings for cleanup cascade.
+
+    The senior-user MCP review (run d, P1.2) flagged that
+    ``report_finding`` auto-creates a parallel observation but neither
+    ``dismiss_finding`` nor ``promote_finding`` cleans it up — every
+    triaged finding leaves a 14-day zombie observation. The new
+    ``source_finding_id`` column lets the finding-side lifecycle
+    cascade-dismiss the linked observation. The default ``''`` matches
+    legacy rows so existing reads stay valid; new finding-spawned
+    observations populate it. (filigree-cb980eee0d)
+
+    Changes:
+      - observations: add source_finding_id (TEXT DEFAULT '')
+      - observations: add index on source_finding_id for cascade scans
+    """
+    add_column(conn, "observations", "source_finding_id", "TEXT", "''")
+    add_index(conn, "idx_observations_source_finding", "observations", ["source_finding_id"])
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -547,6 +567,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     8: migrate_v8_to_v9,
     9: migrate_v9_to_v10,
     10: migrate_v10_to_v11,
+    11: migrate_v11_to_v12,
 }
 
 

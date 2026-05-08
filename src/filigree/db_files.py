@@ -696,6 +696,10 @@ class FilesMixin(DBMixinProtocol):
                         detail=obs_detail,
                         file_path=path,
                         line=f.get("line_start"),
+                        # Link the observation back to the finding so
+                        # dismiss_finding / promote_finding can cascade-clean
+                        # the scratchpad note (filigree-cb980eee0d, P1.2).
+                        source_finding_id=finding_id,
                         priority=self._SEVERITY_TO_PRIORITY.get(f.get("severity", "info"), 3),
                         actor=f"scanner:{scan_source}",
                         auto_commit=False,
@@ -1042,6 +1046,23 @@ class FilesMixin(DBMixinProtocol):
                     (file_id, normalized_issue_id, now),
                 )
 
+            # Cascade-dismiss any observation linked to this finding when the
+            # finding reaches a terminal lifecycle state (dismissed, fixed,
+            # promoted to issue) so the agent triage queue doesn't accumulate
+            # zombie scratchpad notes for findings that have already been
+            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) status='open' or
+            # 'acknowledged' are not terminal — leave the observation alone.
+            terminal_statuses = {"false_positive", "fixed", "unseen_in_latest"}
+            should_cascade = (status is not None and status in terminal_statuses) or normalized_issue_id is not None
+            if should_cascade:
+                self._cascade_dismiss_observations_for_finding(
+                    finding_id,
+                    actor="system",
+                    reason=dismiss_reason
+                    or (f"finding promoted to {normalized_issue_id}" if normalized_issue_id else f"finding marked {status}"),
+                    now=now,
+                )
+
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -1051,6 +1072,37 @@ class FilesMixin(DBMixinProtocol):
             msg = f"Finding not found after update: {finding_id}"
             raise KeyError(msg)
         return self._build_scan_finding(updated).to_dict()
+
+    def _cascade_dismiss_observations_for_finding(
+        self,
+        finding_id: str,
+        *,
+        actor: str,
+        reason: str,
+        now: str,
+    ) -> None:
+        """Dismiss observations linked to ``finding_id`` via source_finding_id.
+
+        Inserts dismissal audit rows and deletes the live observations in a
+        single statement pair, matching the contract of
+        ``dismiss_observation``. Caller commits as part of the surrounding
+        transaction. (filigree-cb980eee0d, P1.2.)
+        """
+        rows = self.conn.execute(
+            "SELECT id, summary FROM observations WHERE source_finding_id = ?",
+            (finding_id,),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            self.conn.execute(
+                "INSERT INTO dismissed_observations (obs_id, summary, actor, reason, dismissed_at) VALUES (?, ?, ?, ?, ?)",
+                (row["id"], row["summary"], actor, reason, now),
+            )
+        self.conn.execute(
+            "DELETE FROM observations WHERE source_finding_id = ?",
+            (finding_id,),
+        )
 
     def clean_stale_findings(
         self,

@@ -97,11 +97,17 @@ class TestClaimLeaseSchema:
     def test_migration_adds_claim_lease_columns(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
-        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+        # Pin to v10 so we exercise the v10→v11 migration directly, not just
+        # CURRENT_SCHEMA_VERSION-1 (which drifts as new migrations land).
+        conn.execute("PRAGMA user_version = 10")
         conn.execute("DROP INDEX IF EXISTS idx_issues_claim_expires_at")
         conn.execute("ALTER TABLE issues DROP COLUMN claimed_at")
         conn.execute("ALTER TABLE issues DROP COLUMN last_heartbeat_at")
         conn.execute("ALTER TABLE issues DROP COLUMN claim_expires_at")
+        # Also remove v11→v12 columns so the migration runner can re-add them
+        # cleanly along the way.
+        conn.execute("DROP INDEX IF EXISTS idx_observations_source_finding")
+        conn.execute("ALTER TABLE observations DROP COLUMN source_finding_id")
         conn.commit()
 
         apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
@@ -1678,8 +1684,14 @@ class TestMigrateV6ToV7:
         v6_db.rollback()
 
     def test_schema_matches_fresh(self, v6_db: sqlite3.Connection, tmp_path: Path) -> None:
-        """Migrated schema matches fresh SCHEMA_SQL for observation tables."""
-        apply_pending_migrations(v6_db, 7)
+        """Migrated schema matches fresh SCHEMA_SQL for observation tables.
+
+        Migrates a v6 fixture all the way to CURRENT_SCHEMA_VERSION before
+        comparing to the fresh schema; otherwise newer migrations
+        (e.g. v11→v12 source_finding_id) make the comparison fail because
+        SCHEMA_SQL is always at the latest version.
+        """
+        apply_pending_migrations(v6_db, CURRENT_SCHEMA_VERSION)
 
         fresh = _make_db(tmp_path, "fresh.db")
         fresh.executescript(SCHEMA_SQL)

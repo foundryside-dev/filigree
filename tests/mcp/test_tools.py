@@ -446,6 +446,9 @@ class TestPlan:
         ms = mcp_db.create_issue("Milestone", type="milestone")
         p = mcp_db.create_issue("Phase 1", type="phase", parent_id=ms.id)
         s = mcp_db.create_issue("Step 1", type="step", parent_id=p.id)
+        # step requires walking pending → in_progress → completed
+        # (filigree-cb980eee0d, validate-transitions policy).
+        mcp_db.update_issue(s.id, status="in_progress")
         mcp_db.close_issue(s.id)
         result = await call_tool("get_plan", {"milestone_id": ms.id})
         data = _parse(result)
@@ -1120,16 +1123,20 @@ class TestClaimIssue:
         assert data["code"] == ErrorCode.CONFLICT
 
     async def test_claim_released_wip_issue_for_handoff(self, mcp_db: FiligreeDB) -> None:
+        """release_claim auto-reverts wip→open (filigree-cb980eee0d, P1.3),
+        so the released issue is in 'open' and the handoff agent picks up
+        from the open state.
+        """
         issue = mcp_db.create_issue("MCP handoff", type="task")
         await call_tool("start_work", {"issue_id": issue.id, "assignee": "agent-alpha"})
         released = _parse(await call_tool("release_claim", {"issue_id": issue.id, "actor": "agent-alpha"}))
-        assert released["status"] == "in_progress"
+        assert released["status"] == "open"
         assert released["assignee"] == ""
 
         result = await call_tool("claim_issue", {"issue_id": issue.id, "assignee": "agent-bravo"})
 
         data = _parse(result)
-        assert data["status"] == "in_progress"
+        assert data["status"] == "open"
         assert data["assignee"] == "agent-bravo"
 
     async def test_claim_closed_issue_is_invalid_transition(self, mcp_db: FiligreeDB) -> None:

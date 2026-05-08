@@ -15,6 +15,9 @@ class TestGetPlan:
         s1 = db.create_issue("Step 1", type="step", parent_id=p1.id, fields={"sequence": 1})
         db.create_issue("Step 2", type="step", parent_id=p1.id, fields={"sequence": 2})
         db.create_issue("Step 3", type="step", parent_id=p2.id, fields={"sequence": 1})
+        # step requires walking pending → in_progress → completed (validate-transitions
+        # policy, filigree-cb980eee0d).
+        db.update_issue(s1.id, status="in_progress")
         db.close_issue(s1.id)
 
         plan = db.get_plan(ms.id)

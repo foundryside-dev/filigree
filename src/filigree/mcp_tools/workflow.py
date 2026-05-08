@@ -77,9 +77,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="get_type_info",
-            description=(
-                "compatibility alias for get_template; returns the same canonical full workflow definition."
-            ),
+            description=("compatibility alias for get_template; returns the same canonical full workflow definition."),
             inputSchema={
                 "type": "object",
                 "properties": {

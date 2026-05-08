@@ -412,9 +412,12 @@ def create_classic_router() -> APIRouter:
         reason = _validate_body_string_field(body, "reason", default="")
         if not isinstance(reason, str):
             return reason
+        status_field = body.get("status")
+        if status_field is not None and not isinstance(status_field, str):
+            return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
-            issue = db.close_issue(issue_id, reason=reason, actor=actor, fields=fields)
+            issue = db.close_issue(issue_id, reason=reason, status=status_field, actor=actor, fields=fields)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:
@@ -1149,10 +1152,13 @@ def create_loom_router() -> APIRouter:
         reason = _validate_body_string_field(body, "reason", default="")
         if not isinstance(reason, str):
             return reason
+        status_field = body.get("status")
+        if status_field is not None and not isinstance(status_field, str):
+            return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
-            issue = db.close_issue(issue_id, reason=reason, actor=actor, fields=fields)
+            issue = db.close_issue(issue_id, reason=reason, status=status_field, actor=actor, fields=fields)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:

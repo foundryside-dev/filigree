@@ -215,22 +215,24 @@ CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id);
 -- ---- Observations (agent scratchpad) ------------------------------------
 
 CREATE TABLE IF NOT EXISTS observations (
-    id              TEXT PRIMARY KEY,
-    summary         TEXT NOT NULL,
-    detail          TEXT DEFAULT '',
-    file_id         TEXT REFERENCES file_records(id) ON DELETE SET NULL,
-    file_path       TEXT DEFAULT '',
-    line            INTEGER,
-    source_issue_id TEXT DEFAULT '',
-    priority        INTEGER DEFAULT 3 CHECK (priority BETWEEN 0 AND 4),
-    actor           TEXT DEFAULT '',
-    created_at      TEXT NOT NULL,
-    expires_at      TEXT NOT NULL
+    id                TEXT PRIMARY KEY,
+    summary           TEXT NOT NULL,
+    detail            TEXT DEFAULT '',
+    file_id           TEXT REFERENCES file_records(id) ON DELETE SET NULL,
+    file_path         TEXT DEFAULT '',
+    line              INTEGER,
+    source_issue_id   TEXT DEFAULT '',
+    source_finding_id TEXT DEFAULT '',
+    priority          INTEGER DEFAULT 3 CHECK (priority BETWEEN 0 AND 4),
+    actor             TEXT DEFAULT '',
+    created_at        TEXT NOT NULL,
+    expires_at        TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_observations_priority ON observations(priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_observations_expires ON observations(expires_at);
 CREATE INDEX IF NOT EXISTS idx_observations_file_id ON observations(file_id);
+CREATE INDEX IF NOT EXISTS idx_observations_source_finding ON observations(source_finding_id);
 -- Dedup contract: coalesce(line, -1) means NULL lines map to -1.
 -- An observation with line=NULL and line=-1 are considered duplicates.
 -- This is intentional — line=-1 is not a valid line number.
@@ -454,4 +456,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
