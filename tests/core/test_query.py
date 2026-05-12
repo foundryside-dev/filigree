@@ -551,6 +551,16 @@ class TestFTS5SpecialCharacters:
         done_results = {i.id for i in db.search_issues("[mcp-review-e]", status_category="done")}
         assert done_results == {closed.id, archived.id}
 
+    def test_search_status_category_filter_applies_before_pagination(self, db: FiligreeDB) -> None:
+        for i in range(205):
+            issue = db.create_issue(f"[overflow-tag] closed work {i:03d}", type="task")
+            db.close_issue(issue.id)
+        live = db.create_issue("[overflow-tag] live target", type="task")
+
+        results = db.search_issues("[overflow-tag]", limit=1, status_category="open")
+
+        assert [issue.id for issue in results] == [live.id]
+
 
 class TestCountSearchResults:
     """filigree-af817d0cf3: count_search_results unit tests."""
@@ -600,3 +610,13 @@ class TestCountSearchResults:
         db.create_issue("Normal issue")
         count = db.count_search_results("@#$%^&()")
         assert count == 0
+
+    def test_literal_self_tag_count_matches_search_results(self, db: FiligreeDB) -> None:
+        target = db.create_issue("[mcp-review-e] Scratch task A", type="task")
+        db.create_issue("Unrelated work")
+
+        results = db.search_issues("mcp-review-e")
+        count = db.count_search_results("mcp-review-e")
+
+        assert [issue.id for issue in results] == [target.id]
+        assert count == len(results)

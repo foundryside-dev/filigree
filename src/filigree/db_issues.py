@@ -1985,7 +1985,7 @@ class IssuesMixin(DBMixinProtocol):
 
     def count_search_results(self, query: str) -> int:
         """Return the total number of issues matching a search query."""
-        fts_query = _sanitize_fts_query(query)
+        fts_query = "" if _query_uses_literal_substring(query) else _sanitize_fts_query(query)
         if not fts_query:
             pattern = _escape_like(query)
             row = self.conn.execute(
@@ -2033,20 +2033,18 @@ class IssuesMixin(DBMixinProtocol):
         restricts the result set so agents searching for live work don't
         get archived results back. Senior-user MCP review run e P2.7.
         """
-        # Resolve the requested category to a row-level predicate. The
-        # category resolver is per-(type, status) so we filter post-fetch
-        # to keep the SQL portable across the FTS / LIKE branches below.
-        category_filter: StatusCategory | None = None
+        category_sql = ""
+        category_params: list[str] = []
         if status_category is not None:
             if status_category not in ("open", "wip", "done"):
                 msg = f"Invalid status_category: {status_category!r}. Valid: open, wip, done."
                 raise ValueError(msg)
-            category_filter = status_category
-
-        # Effective fetch limit: when category filtering is requested we
-        # over-fetch to a safe ceiling and trim post-filter so the limit
-        # still matches caller expectations after rows are dropped.
-        fetch_limit = max(limit * 4, 200) if category_filter is not None else limit
+            category_sql, category_params = self._category_predicate_sql(
+                status_category,
+                type_col="i.type",
+                status_col="i.status",
+                include_archived=status_category == "done",
+            )
 
         use_like_substring = _query_uses_literal_substring(query)
         fts_query = "" if use_like_substring else _sanitize_fts_query(query)
@@ -2054,20 +2052,32 @@ class IssuesMixin(DBMixinProtocol):
         rows: list[Any]
         if not fts_query:
             pattern = _escape_like(query)
+            where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
+            params: list[Any] = [pattern, pattern]
+            if category_sql:
+                where = f"{where} AND ({category_sql})"
+                params.extend(category_params)
+            params.extend([limit, offset])
             rows = self.conn.execute(
-                "SELECT id, type, status FROM issues "
-                "WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                "SELECT i.id, i.type, i.status FROM issues i "
+                f"WHERE {where} "
                 "ORDER BY priority, created_at LIMIT ? OFFSET ?",
-                (pattern, pattern, fetch_limit, offset),
+                params,
             ).fetchall()
         else:
             try:
+                where = "issues_fts MATCH ?"
+                params = [fts_query]
+                if category_sql:
+                    where = f"{where} AND ({category_sql})"
+                    params.extend(category_params)
+                params.extend([limit, offset])
                 rows = self.conn.execute(
                     "SELECT i.id, i.type, i.status FROM issues i "
                     "JOIN issues_fts ON issues_fts.rowid = i.rowid "
-                    "WHERE issues_fts MATCH ? "
+                    f"WHERE {where} "
                     "ORDER BY issues_fts.rank LIMIT ? OFFSET ?",
-                    (fts_query, fetch_limit, offset),
+                    params,
                 ).fetchall()
             except sqlite3.OperationalError as exc:
                 if "no such table" not in str(exc) and "no such module" not in str(exc):
@@ -2077,13 +2087,17 @@ class IssuesMixin(DBMixinProtocol):
                     exc,
                 )
                 pattern = _escape_like(query)
+                where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
+                params = [pattern, pattern]
+                if category_sql:
+                    where = f"{where} AND ({category_sql})"
+                    params.extend(category_params)
+                params.extend([limit, offset])
                 rows = self.conn.execute(
-                    "SELECT id, type, status FROM issues "
-                    "WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                    "SELECT i.id, i.type, i.status FROM issues i "
+                    f"WHERE {where} "
                     "ORDER BY priority, created_at LIMIT ? OFFSET ?",
-                    (pattern, pattern, fetch_limit, offset),
+                    params,
                 ).fetchall()
 
-        if category_filter is not None:
-            rows = [r for r in rows if self._resolve_status_category(r["type"], r["status"]) == category_filter][:limit]
         return self._build_issues_batch([r["id"] for r in rows])
