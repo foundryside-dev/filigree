@@ -344,20 +344,18 @@ class WorkflowMixin(DBMixinProtocol):
         for active-type / undeclared-state pairs; ``validate_issue()``
         surfaces the schema error (filigree-c9af813900).
 
-        ``"archived"`` is the synthetic terminal status written by
-        ``archive_closed`` and is not present in any workflow template.
-        Classify it as ``"done"`` so ``is_ready``, ``status_category``, and
-        every list/record consumer see archived rows as terminal — without
-        this special-case the template lookup misses, the active-type
-        branch returns ``"open"``, and archived issues surface as ready
-        open work in ``list_issues`` / ``get_issue`` record output.
-        Senior-user MCP review run e P2.10.
+        When ``archive_closed`` writes the synthetic ``"archived"`` status and
+        no active template declares that state, classify it as ``"done"`` so
+        ``is_ready``, ``status_category``, and every list/record consumer see
+        archived rows as terminal. Explicit template categories take
+        precedence, so projects can use a real workflow state named
+        ``archived`` without being overridden.
         """
-        if status == "archived":
-            return "done"
         cat = self.templates.get_category(issue_type, status)
         if cat is not None:
             return cat
+        if status == "archived":
+            return "done"
         if self.templates.get_type(issue_type) is not None:
             return "open"
         return self._infer_status_category(issue_type, status)
@@ -464,12 +462,14 @@ class WorkflowMixin(DBMixinProtocol):
 
         # Check field values against pattern constraints (surfaces non-compliant legacy data)
         for fs in tpl.fields_schema:
-            if fs.pattern is None:
-                continue
             value = issue.fields.get(fs.name)
             err = validate_field_pattern(fs, value)
             if err is not None:
                 warnings.append(err)
+            if fs.type == "enum" and fs.options and value is not None:
+                str_value = str(value)
+                if str_value and str_value not in fs.options:
+                    warnings.append(f"Field '{fs.name}' value '{str_value}' is not a valid option. Valid options: {', '.join(fs.options)}")
 
         # Check upcoming requirements: fields needed for next transitions
         transitions = self.templates.get_valid_transitions(issue.type, issue.status, issue.fields)

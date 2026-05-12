@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from filigree.core import FiligreeDB
-from filigree.templates import TransitionOption, ValidationResult
+from filigree.templates import StateDefinition, TransitionOption, TypeTemplate, ValidationResult
 from filigree.types.api import ErrorCode
 from tests._db_factory import make_db
 
@@ -1523,6 +1523,20 @@ class TestValidateIssue:
         assert result.valid is False
         assert any("not_a_real_state" in e for e in result.errors)
 
+    def test_invalid_enum_field_value_emits_warning(self, db: FiligreeDB) -> None:
+        """Imported/legacy enum values must be reported by validate_issue()."""
+        issue = db.create_issue("Bug", type="bug")
+        db.conn.execute(
+            "UPDATE issues SET fields = ? WHERE id = ?",
+            (json.dumps({"severity": "catastrophic"}), issue.id),
+        )
+        db.conn.commit()
+
+        result = db.validate_issue(issue.id)
+
+        assert result.valid is True
+        assert any("severity" in w and "not a valid option" in w for w in result.warnings)
+
 
 class TestInferStatusCategoryFallback:
     """Bug filigree-5c1605d349: name-only fallback must cover every built-in done state.
@@ -1530,6 +1544,29 @@ class TestInferStatusCategoryFallback:
     Exercised whenever ``_resolve_status_category`` can't find a ``(type, state)`` in
     the active registry — e.g. pack disabled after issues in it were created.
     """
+
+    def test_active_template_archived_state_category_wins(self, db: FiligreeDB) -> None:
+        """A real template state named ``archived`` must not be forced to done."""
+        tpl = TypeTemplate(
+            type="live_archive",
+            display_name="Live Archive",
+            description="",
+            pack="test",
+            states=(
+                StateDefinition(name="archived", category="open"),
+                StateDefinition(name="closed", category="done"),
+            ),
+            initial_state="archived",
+            transitions=(),
+            fields_schema=(),
+        )
+        db.templates._register_type(tpl)
+
+        issue = db.create_issue("Active archive", type="live_archive")
+        hydrated = db.get_issue(issue.id)
+
+        assert hydrated.status == "archived"
+        assert hydrated.status_category == "open"
 
     def test_builtin_release_released_is_done(self) -> None:
         """``release`` pack's ``released`` state must classify as done even when disabled."""
