@@ -133,6 +133,22 @@ def observe_cmd(
 @click.option("--no-limit", "no_limit", is_flag=True, help="Return all results without cap")
 @click.option("--file-path", default="", help="Filter by substring in file path")
 @click.option("--file-id", default="", help="Filter by exact file ID")
+@click.option("--actor", default="", help="Filter by exact actor (e.g. your agent name)")
+@click.option("--priority-min", type=int, default=None, help="Only observations with priority >= this value")
+@click.option("--priority-max", type=int, default=None, help="Only observations with priority <= this value")
+@click.option("--older-than-hours", type=int, default=None, help="Only observations created more than N hours ago")
+@click.option(
+    "--sort-by",
+    type=click.Choice(["priority", "created_at", "expires_at"]),
+    default="priority",
+    help="Sort field (default: priority)",
+)
+@click.option(
+    "--direction",
+    type=click.Choice(["asc", "desc"]),
+    default="asc",
+    help="Sort direction (default: asc)",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def list_observations_cmd(
     limit: int,
@@ -140,6 +156,12 @@ def list_observations_cmd(
     no_limit: bool,
     file_path: str,
     file_id: str,
+    actor: str,
+    priority_min: int | None,
+    priority_max: int | None,
+    older_than_hours: int | None,
+    sort_by: str,
+    direction: str,
     as_json: bool,
 ) -> None:
     """List pending observations with optional filtering."""
@@ -153,7 +175,19 @@ def list_observations_cmd(
                 offset=offset,
                 file_path=file_path,
                 file_id=file_id,
+                actor=actor,
+                priority_min=priority_min,
+                priority_max=priority_max,
+                older_than_hours=older_than_hours,
+                sort_by=sort_by,
+                direction=direction,
             )
+        except ValueError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         except sqlite3.Error as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))

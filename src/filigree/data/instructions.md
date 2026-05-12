@@ -35,14 +35,22 @@ faster and return structured data. Key tools:
 
 Observations are fire-and-forget notes that expire after 14 days. Use `list_issues --label=from-observation` to find promoted observations.
 
-**Observations are ambient.** While doing other work, use `observe` whenever you
-notice something worth noting — a code smell, a potential bug, a missing test, a
-design concern. Don't stop what you're doing; just fire off the observation and
-carry on. They're ideal for "I don't have time to investigate this right now, but
-I want to come back to it." Include `file_path` and `line` when relevant so the
-observation is anchored to code. At session end, skim `list_observations` and
-either `dismiss_observation` (not worth tracking) or `promote_observation`
-(deserves an issue) for anything that's accumulated.
+**Observations are ambient — for *incidental* defects only.** Use `observe` when
+you notice something *outside the scope of your current task* while working on
+something else: a code smell in a neighbouring file, a stale TODO, a missing
+test for an edge case you happened to spot. Don't stop what you're doing; fire
+off the observation and carry on. Include `file_path` and `line` when relevant.
+At session end, skim `list_observations` and either `dismiss_observation` or
+`promote_observation` for anything that's accumulated.
+
+**You fix bugs in your currently defined scope. You do NOT use observations to
+finish work prematurely.** If a defect, gap, or follow-up belongs to your
+current task, you own it — handle it as part of that task: fix it now, expand
+the task's scope, file a proper issue with a dependency, or surface it to the
+user. Filing it as an observation and closing the task is *not* completing the
+task; it is shipping known-broken work and hiding the debt in a 14-day
+expiring scratchpad. The test is "would I have noticed this even if I weren't
+working on this task?" If no, it's task scope, not an observation.
 
 Fall back to CLI (`filigree <command>`) when MCP is unavailable.
 

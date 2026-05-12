@@ -54,6 +54,7 @@ from filigree.types.inputs import (
     ListIssuesArgs,
     ReclaimIssueArgs,
     ReleaseClaimArgs,
+    ReleaseMyClaimsArgs,
     ReopenIssueArgs,
     SearchIssuesArgs,
     StartNextWorkArgs,
@@ -402,6 +403,59 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             },
         ),
         Tool(
+            name="release_my_claims",
+            description=(
+                "Bulk-release every live claim held by ``actor`` in one call — designed for "
+                "end-of-session cleanup. Discovers all issues whose assignee == actor "
+                "(optionally narrowed by ``label`` and/or ``label_prefix``), then releases "
+                "each via release_claim(if_held=True). Done-category issues are skipped "
+                "(their assignee is audit trail, not a live claim). Returns "
+                "BatchResponse[SlimIssue] with succeeded[] (released) and failed[] "
+                "(per-issue errors). Pair this with the ``cluster:*`` label convention: "
+                "tag your scratch with ``cluster:my-session`` at create time, then call "
+                "release_my_claims(actor='my-session', label_prefix='cluster:') at session end."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "description": "Agent identity whose claims should be released. Required.",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Restrict to issues carrying this exact label.",
+                    },
+                    "label_prefix": {
+                        "type": "string",
+                        "description": "Restrict to issues with a label starting with this prefix (must include trailing colon, e.g. 'cluster:').",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, list the issues that would be released without making changes.",
+                    },
+                    "revert_status": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Forwarded to release_claim per-item; true reverts wip→open so released issues rejoin discovery.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Audit reason recorded on each release event.",
+                    },
+                    "response_detail": {
+                        "type": "string",
+                        "enum": ["slim", "full"],
+                        "default": "slim",
+                        "description": "'slim' (default) returns SlimIssue items in succeeded[]; 'full' returns full PublicIssue records.",
+                    },
+                },
+                "required": ["actor"],
+            },
+        ),
+        Tool(
             name="heartbeat_work",
             description=(
                 "Refresh claim liveness metadata for a claimed issue. "
@@ -654,6 +708,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "search_issues": _handle_search_issues,
         "claim_issue": _handle_claim_issue,
         "release_claim": _handle_release_claim,
+        "release_my_claims": _handle_release_my_claims,
         "heartbeat_work": _handle_heartbeat_work,
         "get_stale_claims": _handle_get_stale_claims,
         "reclaim_issue": _handle_reclaim_issue,
@@ -1006,6 +1061,70 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.CONFLICT))
+
+
+async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextContent]:
+    """Bulk-release every live claim held by ``actor`` in one call.
+
+    Designed for end-of-session cleanup: tag scratch with ``cluster:my-session``
+    at create time, then release_my_claims(actor='my-session',
+    label_prefix='cluster:') at session end. (F4 — review-h.)
+    """
+    from filigree.mcp_server import _get_db, _refresh_summary
+
+    args = _parse_args(arguments, ReleaseMyClaimsArgs)
+    raw_actor = args.get("actor", "")
+    if not isinstance(raw_actor, str) or not raw_actor.strip():
+        return _text(ErrorResponse(error="actor is required and must be a non-empty string", code=ErrorCode.VALIDATION))
+    actor = raw_actor.strip()
+    label = args.get("label")
+    if label is not None and not isinstance(label, str):
+        return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
+    label_prefix = args.get("label_prefix")
+    if label_prefix is not None and not isinstance(label_prefix, str):
+        return _text(ErrorResponse(error="label_prefix must be a string", code=ErrorCode.VALIDATION))
+    dry_run = args.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return _text(ErrorResponse(error="dry_run must be a boolean", code=ErrorCode.VALIDATION))
+    revert_status = args.get("revert_status", True)
+    if not isinstance(revert_status, bool):
+        return _text(ErrorResponse(error="revert_status must be a boolean", code=ErrorCode.VALIDATION))
+    reason = args.get("reason", "")
+    if not isinstance(reason, str):
+        return _text(ErrorResponse(error="reason must be a string", code=ErrorCode.VALIDATION))
+    detail = parse_response_detail(args.get("response_detail"))
+    if isinstance(detail, dict):
+        return _text(detail)
+
+    tracker = _get_db()
+    try:
+        released, failed = tracker.release_my_claims(
+            actor=actor,
+            label=label,
+            label_prefix=label_prefix,
+            dry_run=dry_run,
+            revert_status=revert_status,
+            reason=reason,
+        )
+    except ValueError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+    if not dry_run:
+        _refresh_summary()
+    if detail == "full":
+        full_payload: dict[str, Any] = {
+            "succeeded": [issue_to_public(i) for i in released],
+            "failed": failed,
+        }
+        if dry_run:
+            full_payload["dry_run"] = True
+        return _text(full_payload)
+    slim_payload: dict[str, Any] = {
+        "succeeded": [_slim_issue(i) for i in released],
+        "failed": failed,
+    }
+    if dry_run:
+        slim_payload["dry_run"] = True
+    return _text(slim_payload)
 
 
 async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]:

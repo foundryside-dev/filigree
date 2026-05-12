@@ -898,7 +898,16 @@ class IssuesMixin(DBMixinProtocol):
         rage-close from any state, skipping the template's transition
         table — this is the documented escape hatch for cleanup
         flows that intentionally bypass the workflow.
-        Senior-user MCP review run e P1.3.
+
+        When ``status`` is omitted, the close target defaults to the first
+        done-category state for the type. If that default is unreachable
+        from the current status but exactly one done-category state IS
+        reachable, the close auto-resolves to that target and emits a
+        ``data_warning``. Ambiguous cases (multiple done targets, none
+        matching the default) still surface INVALID_TRANSITION so the
+        caller picks. This makes mixed-type cleanup (e.g. ``batch_close``
+        on milestone/phase/step in their initial states) succeed without
+        ``force=True``. Senior-user MCP review run h F1.
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -912,6 +921,7 @@ class IssuesMixin(DBMixinProtocol):
             msg = f"Issue {issue_id} is already closed (status: '{current.status}', closed_at: {current.closed_at})"
             raise ValueError(msg)
 
+        auto_resolved_done: str | None = None
         if status is not None:
             # Validate that the requested status is a done-category state
             target_category = self.templates.get_category(current.type, status)
@@ -920,9 +930,26 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
             done_status = status
         else:
-            # Default to first done-category state
+            # Default to first done-category state.
             _first_done = self.templates.get_first_state_of_category(current.type, "done")
             done_status = _first_done if _first_done is not None else "closed"
+            # If the default isn't reachable from the current state but exactly one
+            # done state IS reachable, auto-resolve to that — this lets mixed-type
+            # cleanup (e.g. batch_close on milestone/phase/step in 'pending', bug in
+            # 'triage' with a single dismissal path, …) succeed without forcing the
+            # caller to issue per-type batches or set force=True. Ambiguous cases
+            # (multiple reachable done states, none matching the default) fall
+            # through to update_issue and surface INVALID_TRANSITION with a
+            # valid_transitions echo so the caller picks explicitly.
+            if not force:
+                reachable_done = [
+                    opt.to
+                    for opt in self.templates.get_valid_transitions(current.type, current.status, current.fields)
+                    if opt.category == "done"
+                ]
+                if done_status not in reachable_done and len(reachable_done) == 1:
+                    auto_resolved_done = reachable_done[0]
+                    done_status = auto_resolved_done
 
         # Merge close_reason into fields for the update call. Transition
         # validation (including hard-enforcement field gates) is delegated
@@ -936,7 +963,7 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
-        return self.update_issue(
+        updated = self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
@@ -944,6 +971,15 @@ class IssuesMixin(DBMixinProtocol):
             expected_assignee=expected_assignee,
             _skip_transition_check=force,
         )
+        if auto_resolved_done is not None:
+            warning = (
+                f"close_issue auto-resolved target status to {auto_resolved_done!r} "
+                f"(template default unreachable from {current.status!r}); "
+                f"pass status= explicitly to override"
+            )
+            if warning not in updated.data_warnings:
+                updated.data_warnings.append(warning)
+        return updated
 
     def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
@@ -1185,6 +1221,92 @@ class IssuesMixin(DBMixinProtocol):
             if target is not None and target != released.status:
                 return self.update_issue(issue_id, status=target, actor=actor, _skip_transition_check=True)
         return self.get_issue(issue_id)
+
+    def release_my_claims(
+        self,
+        *,
+        actor: str,
+        label: str | None = None,
+        label_prefix: str | None = None,
+        dry_run: bool = False,
+        revert_status: bool = True,
+        reason: str = "",
+    ) -> tuple[list[Issue], list[BatchFailure]]:
+        """Bulk-release every live claim held by ``actor``.
+
+        Discovers all issues whose ``assignee == actor`` (optionally narrowed
+        by ``label`` and/or ``label_prefix``) and releases each via
+        ``release_claim(if_held=True)``. Done-category issues are skipped —
+        a closed issue still carries assignee for audit but isn't an active
+        claim, and releasing it would clobber the audit signal that ``X
+        closed this``.
+
+        Designed for end-of-session cleanup: a reviewer can tag their scratch
+        with a cluster label (``cluster:mcp-review-h``) and call
+        ``release_my_claims(actor="mcp-review-h", label_prefix="cluster:")``
+        to drop everything they're holding in one shot. Senior-user MCP
+        review run h F4.
+
+        Args:
+            actor: The agent identity whose claims should be released. Required.
+            label: Restrict to issues carrying this exact label.
+            label_prefix: Restrict to issues with a label starting with this
+                prefix (must include trailing colon, e.g. ``"cluster:"``).
+            dry_run: If True, return the set of issues that *would* be released
+                without making any changes. Each item lands in ``succeeded[]``
+                with its current state.
+            revert_status: Forwarded to ``release_claim`` per-item; True (default)
+                reverts wip-category issues to their open predecessor.
+            reason: Audit reason recorded on each ``released`` event.
+
+        Returns:
+            ``(released, failures)`` — released is the list of issues whose
+            claim was actually cleared (or would be in dry_run mode); failures
+            is the list of per-issue errors (e.g. a concurrent reassignment
+            that broke the compare-and-swap).
+        """
+        if not actor or not actor.strip():
+            msg = "actor is required for release_my_claims"
+            raise ValueError(msg)
+        if label_prefix is not None and not label_prefix.endswith(":"):
+            msg = f"label_prefix must include a trailing colon (got {label_prefix!r})"
+            raise ValueError(msg)
+        normalized_actor = actor.strip()
+
+        # Discover candidates. assignee filter is exact match; label / label_prefix
+        # are passed through to list_issues' own filter plumbing.
+        candidates = self.list_issues(
+            assignee=normalized_actor,
+            label=label,
+            label_prefix=label_prefix,
+            limit=10_000_000,
+        )
+        # Exclude done-category — those aren't live claims, they're audit
+        # trail. Releasing them would erase the "X closed this" signal.
+        live = [issue for issue in candidates if self._resolve_status_category(issue.type, issue.status) != "done"]
+
+        released: list[Issue] = []
+        failures: list[BatchFailure] = []
+        for issue in live:
+            if dry_run:
+                released.append(issue)
+                continue
+            try:
+                result = self.release_claim(
+                    issue.id,
+                    actor=normalized_actor,
+                    if_held=True,
+                    revert_status=revert_status,
+                    reason=reason,
+                )
+                released.append(result)
+            except (ValueError, KeyError) as exc:
+                msg = str(exc)
+                code = ErrorCode.CONFLICT if "expected" in msg and "assigned to" in msg else ErrorCode.VALIDATION
+                if isinstance(exc, KeyError):
+                    code = ErrorCode.NOT_FOUND
+                failures.append(BatchFailure(id=issue.id, error=msg, code=code))
+        return released, failures
 
     def heartbeat_work(
         self,

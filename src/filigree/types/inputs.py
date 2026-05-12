@@ -118,6 +118,16 @@ class ReleaseClaimArgs(TypedDict):
     revert_status: NotRequired[bool]
 
 
+class ReleaseMyClaimsArgs(TypedDict):
+    actor: str
+    label: NotRequired[str]
+    label_prefix: NotRequired[str]
+    dry_run: NotRequired[bool]
+    revert_status: NotRequired[bool]
+    reason: NotRequired[str]
+    response_detail: NotRequired[str]
+
+
 class HeartbeatWorkArgs(TypedDict):
     issue_id: str
     actor: NotRequired[str]
@@ -646,6 +656,9 @@ class ReportFindingArgs(TypedDict):
     line_start: NotRequired[int]
     line_end: NotRequired[int]
     category: NotRequired[str]
+    actor: NotRequired[str]
+    create_observation: NotRequired[bool]
+    response_detail: NotRequired[str]
 
 
 class TriggerScanBatchArgs(TypedDict):
@@ -685,6 +698,12 @@ class ListObservationsArgs(TypedDict):
     no_limit: NotRequired[bool]
     file_path: NotRequired[str]
     file_id: NotRequired[str]
+    actor: NotRequired[str]
+    priority_min: NotRequired[int]
+    priority_max: NotRequired[int]
+    older_than_hours: NotRequired[int]
+    sort_by: NotRequired[str]
+    direction: NotRequired[str]
 
 
 class DismissObservationArgs(TypedDict):
@@ -732,6 +751,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "search_issues": SearchIssuesArgs,
     "claim_issue": ClaimIssueArgs,
     "release_claim": ReleaseClaimArgs,
+    "release_my_claims": ReleaseMyClaimsArgs,
     "heartbeat_work": HeartbeatWorkArgs,
     "get_stale_claims": GetStaleClaimsArgs,
     "reclaim_issue": ReclaimIssueArgs,

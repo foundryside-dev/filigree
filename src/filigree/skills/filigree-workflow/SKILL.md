@@ -202,23 +202,50 @@ without breaking flow.
 
 ### When to Observe
 
-Use `observe` (MCP) or `filigree observe` (CLI) whenever you notice something in
-passing that doesn't warrant stopping your current task. The core use case is:
-"I don't have time to investigate this right now, but I want to come back to it."
-Examples:
+Observations are for **incidental** defects — things you notice *in passing*
+while working on something else, that fall *outside the scope of your current
+task*. The core use case is: "I don't have time to investigate this right now,
+but I want to come back to it."
 
-- A code smell or design concern in a file you're reading
-- A missing test for an edge case you spotted
-- A potential bug that isn't related to your current work
+Examples of good observations:
+
+- A code smell in a neighbouring file you happened to read
+- A missing test for an edge case unrelated to what you're changing
+- A potential bug in a module you're not touching
 - A TODO or FIXME that looks stale
 - A dependency that might be outdated
 
 **Always include `file_path` and `line`** when the observation is about specific code.
 This anchors it for whoever triages it later.
 
-**Don't observe things that are clearly issues.** If you're confident something is a
-bug or a needed feature, create an issue directly. Observations are for "hmm, this
-might be worth looking at" — the uncertain middle ground.
+### When NOT to Observe
+
+**You fix bugs in your currently defined scope. You do NOT use observations to
+finish work prematurely.**
+
+If you're working on task X and you notice that your implementation of X has a
+gap, a missed edge case, an untested branch, a known shortcoming, or a piece of
+follow-up that "should really be done too" — that is **task scope, not an
+observation**. You own it. Handle it one of these ways instead:
+
+- **Fix it now** as part of the current task. (Default.)
+- **Expand the task** (or split a sub-task) and address it in this work stream.
+- **File a proper issue** with a dependency on the current task, so the gap is
+  visible in the work record before you close.
+- **Surface it to the user** if it changes the shape of what you're delivering.
+
+Filing your own task's deficiencies as observations and closing the task is
+**not** completing the task. It is shipping known-broken work and hiding the
+debt in a 14-day expiring scratchpad — where it will quietly rot, get
+auto-dismissed, and never be addressed. The work record must reflect what is
+actually outstanding.
+
+**The test:** *"Would I have noticed this even if I weren't working on this
+task?"* If yes → observation. If no → it's part of the work, fix it.
+
+**Don't observe things that are clearly issues either.** If you're confident
+something is a bug or a needed feature, create an issue directly. Observations
+are for "hmm, this might be worth looking at" — the uncertain middle ground.
 
 ### Triage Workflow
 
@@ -272,5 +299,6 @@ filigree search "from-observation"         # Search with context
 | "This task is bigger than expected" | Create sub-tasks, add deps |
 | "I'm done" | Comment, close with reason, check `ready` |
 | "Something changed while I worked" | `filigree changes --since <timestamp>` |
-| "I noticed something odd in this file" | `observe` with file_path and line — keep working |
+| "I noticed something odd in a file I'm passing through" | `observe` with file_path and line — keep working |
+| "I noticed a gap in the work I'm currently doing" | Fix it, expand the task, or file a proper issue — **do not** observe it |
 | "These observations are piling up" | `list_observations`, then dismiss or promote each |

@@ -15,7 +15,6 @@ from typing import Any
 from mcp.types import TextContent, Tool
 
 from filigree.core import VALID_SEVERITIES
-from filigree.db_files import scan_finding_observation_summary
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
@@ -40,18 +39,18 @@ def _report_finding_observation_ids(
     tracker: Any,
     *,
     file_id: str,
-    path: str,
-    line_start: int | None,
-    message: str,
+    finding_id: str,
 ) -> list[str]:
-    """Find observation IDs created by the agent report_finding shortcut."""
-    summary = scan_finding_observation_summary("agent", path, line_start, message)
+    """Find observation IDs paired with a given finding.
+
+    Uses the ``source_finding_id`` foreign-key set on the observation at
+    creation time. Previously this matched on summary + line + the literal
+    ``scanner:agent`` actor; that meant changing the observation actor (e.g.
+    to attribute a real agent identity per F3) would break the lookup. The
+    FK is the durable correlation.
+    """
     observations = tracker.list_observations(file_id=file_id, limit=10000)
-    return [
-        observation["id"]
-        for observation in observations
-        if observation["summary"] == summary and observation.get("line") == line_start and observation.get("actor") == "scanner:agent"
-    ]
+    return [observation["id"] for observation in observations if observation.get("source_finding_id") == finding_id]
 
 
 def register(
@@ -70,8 +69,15 @@ def register(
             description=(
                 "Report a single code finding (bug, smell, security issue) discovered by the agent. "
                 "Auto-registers the file if not already tracked. No scanner config needed — "
-                "one call, one finding, zero ceremony. Returns the flat ScanFinding record plus ingest metadata, "
-                "including any observation_id created for triage."
+                "one call, one finding, zero ceremony. Returns the flat ScanFinding record plus "
+                "an ``observation_id`` when a paired triage observation was created. "
+                "**Side effect:** by default a paired observation is auto-created so the finding "
+                "shows up in ``list_observations`` for triage; pass ``create_observation=false`` "
+                "to skip. Pass ``actor`` to attribute the report to a specific agent identity "
+                "(otherwise the observation is recorded as ``scanner:agent``). "
+                "Pass ``response_detail='full'`` for the legacy batch-style stats "
+                "(``findings_created`` / ``findings_updated`` / ``file_created`` / "
+                "``observations_created`` / ``observations_failed``)."
             ),
             inputSchema={
                 "type": "object",
@@ -88,6 +94,34 @@ def register(
                     "line_start": {"type": "integer", "minimum": 1, "description": "Start line number"},
                     "line_end": {"type": "integer", "minimum": 1, "description": "End line number"},
                     "category": {"type": "string", "description": "Optional grouping category"},
+                    "actor": {
+                        "type": "string",
+                        "description": (
+                            "Agent identity for audit attribution. When set, the paired "
+                            "observation's ``actor`` field uses this value instead of the "
+                            "default ``scanner:agent``."
+                        ),
+                    },
+                    "create_observation": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When true (default), a paired observation is auto-created so the "
+                            "finding shows up in ``list_observations`` for triage. Set false to "
+                            "skip — promote_finding / dismiss_finding then have nothing to clean "
+                            "up on the observation side."
+                        ),
+                    },
+                    "response_detail": {
+                        "type": "string",
+                        "enum": ["slim", "full"],
+                        "default": "slim",
+                        "description": (
+                            "'slim' (default) returns the flat ScanFinding plus ``finding_result`` "
+                            "and ``observation_id`` (if a paired observation was created). 'full' "
+                            "additionally includes the batch-style ingest stats."
+                        ),
+                    },
                 },
                 "required": ["file_path", "rule_id", "message"],
             },
@@ -316,13 +350,25 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     if args.get("category"):
         finding["metadata"] = {"category": args["category"]}
 
+    actor_raw = args.get("actor", "")
+    actor = actor_raw.strip() if isinstance(actor_raw, str) else ""
+    create_observation = args.get("create_observation", True)
+    if not isinstance(create_observation, bool):
+        return _text(ErrorResponse(error="'create_observation' must be a boolean", code=ErrorCode.VALIDATION))
+    response_detail_raw = args.get("response_detail", "slim")
+    if response_detail_raw not in ("slim", "full"):
+        return _text(
+            ErrorResponse(error="'response_detail' must be 'slim' or 'full'", code=ErrorCode.VALIDATION),
+        )
+
     tracker = _get_db()
     try:
         result = tracker.process_scan_results(
             scan_source="agent",
             findings=[finding],
             scan_run_id="",
-            create_observations=True,
+            create_observations=create_observation,
+            observation_actor=actor,
         )
     except (ValueError, sqlite3.Error) as exc:
         _logger.error("report_finding failed: %s", exc)
@@ -343,25 +389,25 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     if finding_record is None:
         return _text(ErrorResponse(error="Reported finding was not found after ingestion", code=ErrorCode.IO))
 
-    observation_ids = _report_finding_observation_ids(
-        tracker,
-        file_id=file_record.id,
-        path=normalized_path,
-        line_start=line_start,
-        message=message,
+    observation_ids = (
+        _report_finding_observation_ids(tracker, file_id=file_record.id, finding_id=finding_record["id"]) if create_observation else []
     )
     response: dict[str, Any] = {
         **finding_to_mcp(finding_record),
         "finding_result": "created" if result["findings_created"] else "updated",
-        "findings_created": result["findings_created"],
-        "findings_updated": result["findings_updated"],
-        "file_created": result["files_created"] > 0,
-        "observations_created": result["observations_created"],
-        "observations_failed": result["observations_failed"],
-        "observation_ids": observation_ids,
     }
     if observation_ids:
         response["observation_id"] = observation_ids[0]
+    if response_detail_raw == "full":
+        # Legacy batch-style stats — useful when a caller wants the ingest summary
+        # numbers (e.g. for multi-finding ingestion). Slim default drops these
+        # because for a single-finding write they're constants that read like noise.
+        response["findings_created"] = result["findings_created"]
+        response["findings_updated"] = result["findings_updated"]
+        response["file_created"] = result["files_created"] > 0
+        response["observations_created"] = result["observations_created"]
+        response["observations_failed"] = result["observations_failed"]
+        response["observation_ids"] = observation_ids
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
     return _text(response)

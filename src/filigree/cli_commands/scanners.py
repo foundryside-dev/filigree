@@ -613,12 +613,34 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
 
 @click.command("report-finding")
 @click.option("--file", "file_path", default=None, help="Path to JSON file with finding (default: stdin)")
+@click.option(
+    "--actor",
+    default="",
+    help="Agent identity for the paired observation (default: scanner:agent)",
+)
+@click.option(
+    "--no-observation",
+    "no_observation",
+    is_flag=True,
+    help="Skip auto-creating a paired observation for triage.",
+)
+@click.option(
+    "--response-detail",
+    "response_detail",
+    type=click.Choice(["slim", "full"]),
+    default="slim",
+    help="'slim' (default) drops batch-ingest stats; 'full' keeps the legacy keys.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def report_finding_cmd(file_path: str | None, as_json: bool) -> None:
+def report_finding_cmd(file_path: str | None, actor: str, no_observation: bool, response_detail: str, as_json: bool) -> None:
     """Report a single code finding (bug, smell, security issue) from JSON via stdin or --file.
 
     The JSON must be an object with at minimum: path, rule_id, message.
     Optional fields: severity (default: info), line_start, line_end, category.
+
+    By default a paired observation is auto-created so the finding shows up in
+    list-observations for triage. Pass ``--no-observation`` to skip. Pass
+    ``--actor`` to attribute the report to a specific agent identity.
     """
     # Resolve the project up front so a foreign-database refusal surfaces as
     # NOT_INITIALIZED rather than getting masked by a downstream --file path
@@ -723,13 +745,15 @@ def report_finding_cmd(file_path: str | None, as_json: bool) -> None:
         finding_record["metadata"] = {"category": finding["category"]}
 
     observation_ids: list[str] = []
+    create_observation = not no_observation
     with get_db() as tracker:
         try:
             result = tracker.process_scan_results(
                 scan_source="agent",
                 findings=[finding_record],
                 scan_run_id="",
-                create_observations=True,
+                create_observations=create_observation,
+                observation_actor=actor.strip(),
             )
         except ValueError as exc:
             # Mirrors the HTTP route at dashboard_routes/files.py: a ValueError
@@ -743,27 +767,30 @@ def report_finding_cmd(file_path: str | None, as_json: bool) -> None:
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
         file_record = tracker.register_file(finding_record["path"])
-        observation_ids = _report_finding_observation_ids(
-            tracker,
-            file_id=file_record.id,
-            path=finding_record["path"],
-            line_start=line_start,
-            message=message,
-        )
+        if create_observation and result["new_finding_ids"]:
+            observation_ids = _report_finding_observation_ids(
+                tracker,
+                file_id=file_record.id,
+                finding_id=result["new_finding_ids"][0],
+            )
 
     response: dict[str, Any] = {
         "status": "created" if result["findings_created"] else "updated",
-        "findings_created": result["findings_created"],
-        "findings_updated": result["findings_updated"],
-        "file_created": result["files_created"] > 0,
-        "observations_created": result["observations_created"],
-        "observations_failed": result["observations_failed"],
-        "observation_ids": observation_ids,
     }
     if result["new_finding_ids"]:
         response["finding_id"] = result["new_finding_ids"][0]
     if observation_ids:
         response["observation_id"] = observation_ids[0]
+    if response_detail == "full":
+        # Legacy batch-style stats — useful when piping into scripts that
+        # expect the ingest summary. Default slim drops these as noise for
+        # the single-finding-write case (F3 — review-h).
+        response["findings_created"] = result["findings_created"]
+        response["findings_updated"] = result["findings_updated"]
+        response["file_created"] = result["files_created"] > 0
+        response["observations_created"] = result["observations_created"]
+        response["observations_failed"] = result["observations_failed"]
+        response["observation_ids"] = observation_ids
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
 

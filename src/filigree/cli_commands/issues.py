@@ -815,6 +815,78 @@ def release_claim_cmd(
     _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
 
 
+@click.command("release-my-claims")
+@click.option("--label", default=None, help="Restrict to issues carrying this exact label.")
+@click.option("--label-prefix", default=None, help="Restrict to issues with a label starting with this prefix (must end with ':').")
+@click.option("--dry-run", is_flag=True, help="List the issues that would be released without making changes.")
+@click.option(
+    "--no-revert-status",
+    "no_revert_status",
+    is_flag=True,
+    help="Do NOT revert wip-category issues back to an open predecessor on release.",
+)
+@click.option("--reason", default="", help="Audit reason recorded on each release event.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def release_my_claims_cmd(
+    ctx: click.Context,
+    label: str | None,
+    label_prefix: str | None,
+    dry_run: bool,
+    no_revert_status: bool,
+    reason: str,
+    as_json: bool,
+) -> None:
+    """Bulk-release every live claim held by --actor.
+
+    Designed for end-of-session cleanup. Tag scratch with --label or --label-prefix
+    to restrict; pair with the cluster:* convention to release just one session's
+    worth of claims at a time.
+    """
+    actor = ctx.obj.get("actor") or ""
+    if not actor.strip():
+        if as_json:
+            click.echo(json_mod.dumps({"error": "release-my-claims requires --actor", "code": ErrorCode.VALIDATION}))
+        else:
+            click.echo("Error: release-my-claims requires --actor", err=True)
+        sys.exit(1)
+    with get_db() as db:
+        try:
+            released, failures = db.release_my_claims(
+                actor=actor,
+                label=label,
+                label_prefix=label_prefix,
+                dry_run=dry_run,
+                revert_status=not no_revert_status,
+                reason=reason,
+            )
+        except ValueError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        if as_json:
+            payload: dict[str, Any] = {
+                "succeeded": [issue_to_public(i) for i in released],
+                "failed": list(failures),
+            }
+            if dry_run:
+                payload["dry_run"] = True
+            click.echo(json_mod.dumps(payload, indent=2, default=str))
+            return
+        verb = "would release" if dry_run else "released"
+        click.echo(f"{verb} {len(released)} claim(s) for actor {actor!r}")
+        for issue in released:
+            click.echo(f"  {issue.id} [{issue.type}] {issue.title}")
+        if failures:
+            click.echo(f"{len(failures)} failure(s):", err=True)
+            for fail in failures:
+                click.echo(f"  {fail['id']}: {fail['error']}", err=True)
+        if not dry_run:
+            refresh_summary(db)
+
+
 @click.command("heartbeat-work")
 @click.argument("issue_id")
 @click.option("--expected-assignee", default=None, help="Expected current assignee; defaults to global --actor.")
@@ -1156,6 +1228,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(claim_next)
     cli.add_command(release)
     cli.add_command(release_claim_cmd)
+    cli.add_command(release_my_claims_cmd)
     cli.add_command(heartbeat_work_cmd)
     cli.add_command(stale_claims_cmd)
     cli.add_command(stale_claims_cmd, "get-stale-claims")

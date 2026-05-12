@@ -456,6 +456,7 @@ class TestReportFindingTool:
                     "line_start": 42,
                     "line_end": 45,
                     "category": "security",
+                    "response_detail": "full",
                 },
             )
         )
@@ -478,6 +479,7 @@ class TestReportFindingTool:
                     "file_path": "src/utils/format.py",
                     "rule_id": "unused-import",
                     "message": "Module imported but never used",
+                    "response_detail": "full",
                 },
             )
         )
@@ -560,6 +562,7 @@ class TestReportFindingTool:
                     "rule_id": "test-rule",
                     "message": f"Finding with severity {severity}",
                     "severity": severity,
+                    "response_detail": "full",
                 },
             )
         )
@@ -573,6 +576,7 @@ class TestReportFindingTool:
             "file_path": "src/core.py",
             "rule_id": "duplicate-rule",
             "message": "First report",
+            "response_detail": "full",
         }
         first = _parse(await call_tool("report_finding", args))
         assert first["finding_result"] == "created"
@@ -616,10 +620,86 @@ class TestReportFindingTool:
                     "file_path": "src/existing.py",
                     "rule_id": "existing-rule",
                     "message": "Finding on pre-existing file",
+                    "response_detail": "full",
                 },
             )
         )
         assert data["file_created"] is False
+
+    async def test_slim_default_drops_batch_stats(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """Default response_detail='slim' drops batch-ingest stats keys (F3 — review-h).
+
+        Slim keeps the flat ScanFinding + finding_result + observation_id (when
+        a paired observation was created); 'full' adds findings_created etc.
+        """
+        slim = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/slim.py",
+                    "rule_id": "slim-rule",
+                    "message": "Slim default response check",
+                },
+            )
+        )
+        assert slim["finding_result"] == "created"
+        assert "finding_id" in slim
+        assert "observation_id" in slim  # paired observation auto-created by default
+        for noisy in (
+            "findings_created",
+            "findings_updated",
+            "file_created",
+            "observations_created",
+            "observations_failed",
+            "observation_ids",
+        ):
+            assert noisy not in slim, f"slim response unexpectedly carries {noisy!r}"
+
+    async def test_create_observation_false_skips_pairing(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """When create_observation=false, the paired observation is not auto-created
+        and observation_id is absent from the response (F3 — review-h).
+        """
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/no-obs.py",
+                    "rule_id": "no-obs-rule",
+                    "message": "Finding without paired observation",
+                    "create_observation": False,
+                },
+            )
+        )
+        assert data["finding_result"] == "created"
+        assert "observation_id" not in data
+        # Confirm no observation row references this finding.
+        row = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE source_finding_id = ?",
+            (data["finding_id"],),
+        ).fetchone()
+        assert row[0] == 0
+
+    async def test_actor_attribution_on_observation(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """When actor is passed, the paired observation's actor field records it
+        instead of the default 'scanner:agent' (F3 — review-h).
+        """
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/actor.py",
+                    "rule_id": "actor-rule",
+                    "message": "Finding with explicit actor",
+                    "actor": "my-agent-007",
+                },
+            )
+        )
+        obs_id = data["observation_id"]
+        row = mcp_db_for_report_finding.conn.execute(
+            "SELECT actor FROM observations WHERE id = ?",
+            (obs_id,),
+        ).fetchone()
+        assert row["actor"] == "my-agent-007"
 
     async def test_observation_links_back_to_finding(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """report_finding creates an observation with source_finding_id linking
@@ -633,6 +713,7 @@ class TestReportFindingTool:
                     "file_path": "src/cascade-link.py",
                     "rule_id": "review-d-link",
                     "message": "Linked observation",
+                    "response_detail": "full",
                 },
             )
         )
@@ -656,6 +737,7 @@ class TestReportFindingTool:
                     "file_path": "src/cascade-dismiss.py",
                     "rule_id": "review-d-dismiss",
                     "message": "Will be dismissed",
+                    "response_detail": "full",
                 },
             )
         )
@@ -687,6 +769,7 @@ class TestReportFindingTool:
                     "file_path": "src/cascade-promote.py",
                     "rule_id": "review-d-promote",
                     "message": "Will be promoted",
+                    "response_detail": "full",
                 },
             )
         )

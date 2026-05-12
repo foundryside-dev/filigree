@@ -64,7 +64,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="list_observations",
-            description="List pending observations with optional filtering by file path or file ID. Automatically sweeps expired observations.",
+            description=(
+                "List pending observations with optional filtering by file, actor, priority, "
+                "or age. Automatically sweeps expired observations. Useful for session-end "
+                "triage: pass actor=<your-name> to see only your own observations, or "
+                "older_than_hours=48 to surface stale items."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -82,6 +87,36 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "file_path": {"type": "string", "description": "Filter by substring in file path"},
                     "file_id": {"type": "string", "description": "Filter by exact file ID"},
+                    "actor": {"type": "string", "description": "Filter by exact actor (e.g. your agent name)"},
+                    "priority_min": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Only observations with priority >= this value (0=critical, 4=backlog)",
+                    },
+                    "priority_max": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Only observations with priority <= this value (0=critical, 4=backlog)",
+                    },
+                    "older_than_hours": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Only observations created more than N hours ago (use with sort_by=created_at to surface stale items)",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["priority", "created_at", "expires_at"],
+                        "default": "priority",
+                        "description": "Sort field. Default 'priority' (ascending = critical first); 'created_at' to triage by age.",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["asc", "desc"],
+                        "default": "asc",
+                        "description": "Sort direction. Default 'asc' (lowest priority number first, oldest first).",
+                    },
                 },
             },
         ),
@@ -271,7 +306,15 @@ async def _handle_list_observations(arguments: dict[str, Any]) -> list[TextConte
             offset=offset,
             file_path=args.get("file_path", ""),
             file_id=args.get("file_id", ""),
+            actor=args.get("actor", ""),
+            priority_min=args.get("priority_min"),
+            priority_max=args.get("priority_max"),
+            older_than_hours=args.get("older_than_hours"),
+            sort_by=args.get("sort_by", "priority"),
+            direction=args.get("direction", "asc"),
         )
+    except ValueError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except sqlite3.Error as e:
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     observations, has_more = _apply_has_more(observations, effective_limit)

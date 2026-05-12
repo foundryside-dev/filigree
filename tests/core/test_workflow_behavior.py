@@ -305,17 +305,38 @@ class TestUpdateIssueTransitionEnforcement:
         delegated to update_issue with no transition check; the post-fix
         path validates by default and only bypasses when force is set.
         Senior-user MCP review run e P1.3.
+
+        Note: bug from triage has two reachable done states (wont_fix, not_a_bug),
+        so F1 auto-resolve correctly declines to pick — the close still fails
+        without force. force=True then bypasses the validator entirely and
+        lands in the default done state (template's first done-category state)
+        for both types. Senior-user MCP review run h F1.
         """
         bug = db.create_issue("Bug A", type="bug")
-        milestone = db.create_issue("Milestone X", type="milestone")
-        # No force → both items fail with INVALID_TRANSITION.
-        _, errors = db.batch_close([bug.id, milestone.id], reason="cleanup")
+        bug_b = db.create_issue("Bug B", type="bug")
+        # No force, no explicit status → both bugs have ambiguous done targets
+        # from triage (wont_fix vs not_a_bug), so auto-resolve declines and the
+        # close fails with INVALID_TRANSITION.
+        _, errors = db.batch_close([bug.id, bug_b.id], reason="cleanup")
         assert len(errors) == 2
         assert all(e["code"] == ErrorCode.INVALID_TRANSITION for e in errors)
-        # With force → both items reach a done state.
-        closed, errors = db.batch_close([bug.id, milestone.id], reason="cleanup", force=True)
+        # With force → both items reach the template default done state.
+        closed, errors = db.batch_close([bug.id, bug_b.id], reason="cleanup", force=True)
         assert len(closed) == 2
         assert errors == []
+
+    def test_batch_close_auto_resolves_unique_done(self, db: FiligreeDB) -> None:
+        """When exactly one done state is reachable from the current status and
+        the template default is unreachable, batch_close auto-resolves to the
+        unique target. Senior-user MCP review run h F1.
+        """
+        milestone = db.create_issue("Milestone X", type="milestone")
+        phase = db.create_issue("Phase X", type="phase")
+        closed, errors = db.batch_close([milestone.id, phase.id], reason="cleanup")
+        assert len(errors) == 0
+        by_id = {r.id: r for r in closed}
+        assert by_id[milestone.id].status == "cancelled"
+        assert by_id[phase.id].status == "skipped"
 
     def test_reopen_bypasses_transition_check(self, db: FiligreeDB) -> None:
         """Reopen works from done state back to initial."""
@@ -374,6 +395,49 @@ class TestCloseIssue:
         db.close_issue(issue.id, status="wont_fix")
         with pytest.raises(ValueError, match="already closed"):
             db.close_issue(issue.id)
+
+    def test_close_phase_in_pending_auto_resolves_to_skipped(self, db: FiligreeDB) -> None:
+        """When the default done state is unreachable but exactly one done state is
+        reachable from the current status, close_issue auto-resolves to that target.
+        This makes mixed-type cleanup work without force=True. (F1 — review-h.)
+        """
+        issue = db.create_issue("Phase", type="phase")
+        closed = db.close_issue(issue.id, reason="cleanup")
+        assert closed.status == "skipped"
+        assert any("auto-resolved" in w for w in closed.data_warnings)
+        assert closed.fields["close_reason"] == "cleanup"
+
+    def test_close_step_in_pending_auto_resolves_to_skipped(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Step", type="step")
+        closed = db.close_issue(issue.id)
+        assert closed.status == "skipped"
+        assert any("auto-resolved" in w for w in closed.data_warnings)
+
+    def test_close_milestone_in_planning_auto_resolves_to_cancelled(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Milestone", type="milestone")
+        closed = db.close_issue(issue.id, reason="abandoned")
+        assert closed.status == "cancelled"
+        assert any("auto-resolved" in w for w in closed.data_warnings)
+
+    def test_close_bug_triage_ambiguous_still_fails(self, db: FiligreeDB) -> None:
+        """Bug in triage has two reachable done states (wont_fix, not_a_bug); the
+        default 'closed' is not reachable. Auto-resolve should NOT pick one
+        arbitrarily — surface INVALID_TRANSITION so the caller picks explicitly.
+        """
+        issue = db.create_issue("Bug", type="bug")
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id)
+
+    def test_close_explicit_status_skips_auto_resolve(self, db: FiligreeDB) -> None:
+        """When status is passed explicitly, auto-resolve is bypassed and the
+        explicit choice is honored (and no auto-resolve warning is emitted).
+        """
+        issue = db.create_issue("Phase", type="phase")
+        # 'completed' isn't reachable from pending; passing it would normally fail
+        # through update_issue's transition check. So pass 'skipped' explicitly.
+        closed = db.close_issue(issue.id, status="skipped")
+        assert closed.status == "skipped"
+        assert not any("auto-resolved" in w for w in closed.data_warnings)
 
 
 class TestCloseIssueHardEnforcement:
@@ -537,6 +601,88 @@ class TestClaimIssue:
         released = db.release_claim(issue.id, actor="agent-y")
         # No direct open→verifying transition exists; fall back to initial_state.
         assert released.status == "triage"
+
+
+class TestReleaseMyClaims:
+    """Bulk release every live claim held by a given actor. F4 — review-h."""
+
+    def test_releases_all_claims_for_actor(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A", type="task")
+        b = db.create_issue("B", type="task")
+        c = db.create_issue("C", type="task")  # held by someone else
+        db.start_work(a.id, assignee="me", actor="me")
+        db.start_work(b.id, assignee="me", actor="me")
+        db.start_work(c.id, assignee="other", actor="other")
+        released, failed = db.release_my_claims(actor="me")
+        assert {r.id for r in released} == {a.id, b.id}
+        assert failed == []
+        # The other-held claim is untouched.
+        held = db.get_issue(c.id)
+        assert held.assignee == "other"
+        # Released claims reverted wip→open and rejoin discovery.
+        for issue in released:
+            assert issue.assignee == ""
+            assert issue.status == "open"
+
+    def test_label_filter_narrows_the_set(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A", type="task", labels=["cluster:session-h"])
+        b = db.create_issue("B", type="task")
+        db.start_work(a.id, assignee="me", actor="me")
+        db.start_work(b.id, assignee="me", actor="me")
+        released, _failed = db.release_my_claims(actor="me", label="cluster:session-h")
+        assert {r.id for r in released} == {a.id}
+        # B is still held by 'me' — outside the label scope.
+        held = db.get_issue(b.id)
+        assert held.assignee == "me"
+
+    def test_label_prefix_filter(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A", type="task", labels=["cluster:session-h"])
+        b = db.create_issue("B", type="task", labels=["cluster:session-h"])
+        c = db.create_issue("C", type="task", labels=["unrelated"])
+        for issue in (a, b, c):
+            db.start_work(issue.id, assignee="me", actor="me")
+        released, _failed = db.release_my_claims(actor="me", label_prefix="cluster:")
+        assert {r.id for r in released} == {a.id, b.id}
+
+    def test_label_prefix_requires_trailing_colon(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="trailing colon"):
+            db.release_my_claims(actor="me", label_prefix="cluster")
+
+    def test_actor_required(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="actor"):
+            db.release_my_claims(actor="")
+        with pytest.raises(ValueError, match="actor"):
+            db.release_my_claims(actor="   ")
+
+    def test_dry_run_makes_no_changes(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A", type="task")
+        db.start_work(a.id, assignee="me", actor="me")
+        released, _failed = db.release_my_claims(actor="me", dry_run=True)
+        assert len(released) == 1
+        # The actual claim is still held.
+        held = db.get_issue(a.id)
+        assert held.assignee == "me"
+        assert held.status == "in_progress"
+
+    def test_skips_done_category_issues(self, db: FiligreeDB) -> None:
+        """A closed issue still carries assignee as audit trail — release_my_claims
+        does NOT clobber it. Otherwise the audit signal 'X closed this' is lost.
+        """
+        a = db.create_issue("A", type="task")
+        db.start_work(a.id, assignee="me", actor="me")
+        db.close_issue(a.id, reason="done", actor="me")
+        # Now assignee=me, status=closed (done category). Release should skip.
+        released, _failed = db.release_my_claims(actor="me")
+        assert released == []
+        # The audit trail is preserved.
+        still_audited = db.get_issue(a.id)
+        assert still_audited.assignee == "me"
+        assert still_audited.status == "closed"
+
+    def test_empty_when_nothing_held(self, db: FiligreeDB) -> None:
+        released, failed = db.release_my_claims(actor="ghost")
+        assert released == []
+        assert failed == []
 
 
 class TestReopenIssue:

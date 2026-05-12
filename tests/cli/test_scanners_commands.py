@@ -303,7 +303,13 @@ class TestReportFindingCommand:
         original = os.getcwd()
         os.chdir(str(initialized_project))
         try:
-            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            # Pass --response-detail=full to keep the legacy batch-stats keys
+            # (F3 — review-h switched the CLI default to 'slim' too).
+            result = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full"],
+                input=_REPORT_FINDING_JSON,
+            )
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
             assert _REPORT_FINDING_KEYS.issubset(set(data.keys()))
@@ -316,6 +322,32 @@ class TestReportFindingCommand:
         finally:
             os.chdir(original)
 
+    def test_report_finding_slim_default_drops_batch_stats(self, initialized_project: Path) -> None:
+        """CLI default is now slim — batch stats absent without --response-detail=full."""
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            # Slim keeps status / finding_id / observation_id.
+            assert data["status"] == "created"
+            assert "finding_id" in data
+            assert "observation_id" in data
+            # And drops the batch ingest stats.
+            for noisy in (
+                "findings_created",
+                "findings_updated",
+                "file_created",
+                "observations_created",
+                "observations_failed",
+                "observation_ids",
+            ):
+                assert noisy not in data, f"slim CLI response unexpectedly carries {noisy!r}"
+        finally:
+            os.chdir(original)
+
     def test_report_finding_file_option(self, initialized_project: Path) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -323,7 +355,7 @@ class TestReportFindingCommand:
         finding_file = initialized_project / "finding.json"
         finding_file.write_text(_REPORT_FINDING_JSON)
         try:
-            result = runner.invoke(cli, ["report-finding", "--file", "finding.json", "--json"])
+            result = runner.invoke(cli, ["report-finding", "--file", "finding.json", "--json", "--response-detail", "full"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
             assert _REPORT_FINDING_KEYS.issubset(set(data.keys()))
@@ -342,8 +374,15 @@ class TestReportFindingCommand:
         finding_file = initialized_project / "finding_b.json"
         finding_file.write_text(finding_b)
         try:
-            stdin_result = runner.invoke(cli, ["report-finding", "--json"], input=finding_a)
-            file_result = runner.invoke(cli, ["report-finding", "--file", "finding_b.json", "--json"])
+            stdin_result = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full"],
+                input=finding_a,
+            )
+            file_result = runner.invoke(
+                cli,
+                ["report-finding", "--file", "finding_b.json", "--json", "--response-detail", "full"],
+            )
             assert stdin_result.exit_code == 0, stdin_result.output
             assert file_result.exit_code == 0, file_result.output
             stdin_data = json.loads(stdin_result.output)
@@ -400,7 +439,7 @@ class TestReportFindingCommand:
         os.chdir(str(initialized_project))
         alias_json = json.dumps({"file_path": "src/bar.py", "rule_id": "r", "message": "m"})
         try:
-            result = runner.invoke(cli, ["report-finding", "--json"], input=alias_json)
+            result = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=alias_json)
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
             assert data["findings_created"] == 1

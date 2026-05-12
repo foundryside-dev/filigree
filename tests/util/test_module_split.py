@@ -62,7 +62,8 @@ def test_mcp_tools_total_count() -> None:
     # Scanner module needs include_legacy=True to include all legacy aliases.
     tools, _ = scanners.register(include_legacy=True)
     total += len(tools)
-    assert total == 101, f"Expected 101 tools total, got {total}"
+    # +1 in review-h: release_my_claims (F4 bulk end-of-session cleanup).
+    assert total == 102, f"Expected 102 tools total, got {total}"
 
 
 def test_mcp_backward_compat_imports() -> None:

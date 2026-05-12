@@ -617,6 +617,7 @@ class FilesMixin(DBMixinProtocol):
         stats: ScanIngestResult,
         seen_finding_ids: dict[str, list[str]],
         create_observations: bool,
+        observation_actor: str = "",
     ) -> None:
         """Upsert a single finding (dedup on file_id + scan_source + rule_id + line_start)."""
         severity = f.get("severity", "info")
@@ -701,7 +702,7 @@ class FilesMixin(DBMixinProtocol):
                         # the scratchpad note (filigree-cb980eee0d, P1.2).
                         source_finding_id=finding_id,
                         priority=self._SEVERITY_TO_PRIORITY.get(f.get("severity", "info"), 3),
-                        actor=f"scanner:{scan_source}",
+                        actor=observation_actor or f"scanner:{scan_source}",
                         auto_commit=False,
                     )
                     stats["observations_created"] += 1
@@ -784,6 +785,7 @@ class FilesMixin(DBMixinProtocol):
         mark_unseen: bool = False,
         create_observations: bool = False,
         complete_scan_run: bool = True,
+        observation_actor: str = "",
     ) -> ScanIngestResult:
         """Ingest scan results: create/update file records and findings.
 
@@ -796,7 +798,11 @@ class FilesMixin(DBMixinProtocol):
         ``false_positive`` are left alone).
 
         When *create_observations* is ``True``, each new finding is promoted to
-        an observation for triage tracking.
+        an observation for triage tracking. Pass *observation_actor* to set the
+        observation's ``actor`` field — required for ``report_finding`` callers
+        that want to attribute the finding to a specific agent rather than the
+        default ``scanner:{scan_source}`` (F3 — review-h). Empty string falls
+        back to the default.
 
         When *complete_scan_run* is ``False`` and a *scan_run_id* is provided,
         the scan run status is NOT transitioned to ``completed``.  Use this for
@@ -845,6 +851,7 @@ class FilesMixin(DBMixinProtocol):
                     stats=stats,
                     seen_finding_ids=seen_finding_ids,
                     create_observations=create_observations,
+                    observation_actor=observation_actor,
                 )
 
             if mark_unseen:

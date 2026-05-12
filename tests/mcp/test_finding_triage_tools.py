@@ -88,6 +88,7 @@ class TestReportFindingTool:
                     "message": "Agent spotted a follow-up risk",
                     "severity": "medium",
                     "line_start": 7,
+                    "response_detail": "full",
                 },
             )
         )

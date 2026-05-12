@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from filigree.db_base import DBMixinProtocol, _begin_immediate, _escape_like, _now_iso
 from filigree.db_files import _normalize_scan_path
@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_DAYS = 14
 STALE_THRESHOLD_HOURS = 48
+
+_LIST_OBSERVATIONS_SORT_COLUMNS = frozenset({"priority", "created_at", "expires_at"})
+_LIST_OBSERVATIONS_DIRECTIONS = frozenset({"asc", "desc"})
 
 
 def _alive_clause(sweep: bool, now_iso: str) -> tuple[str, str, tuple[str, ...]]:
@@ -278,6 +281,12 @@ class ObservationsMixin(DBMixinProtocol):
         offset: int = 0,
         file_path: str = "",
         file_id: str = "",
+        actor: str = "",
+        priority_min: int | None = None,
+        priority_max: int | None = None,
+        older_than_hours: int | None = None,
+        sort_by: str = "priority",
+        direction: str = "asc",
     ) -> list[ObservationDict]:
         """List pending observations with optional filtering.
 
@@ -286,29 +295,73 @@ class ObservationsMixin(DBMixinProtocol):
         back to ``WHERE expires_at > ?`` so expired rows are still excluded
         from results — otherwise a suppressed sweep error would surface
         expired rows as live.
-        ``file_path`` filtering uses substring matching (LIKE), not exact match.
-        ``file_id`` filtering uses exact FK match (more precise than path LIKE).
+
+        Filters:
+          - ``file_path``: substring match (LIKE)
+          - ``file_id``: exact FK match (more precise than path LIKE)
+          - ``actor``: exact actor string match (e.g. ``"mcp-review-h"``)
+          - ``priority_min`` / ``priority_max``: inclusive bounds (0..4)
+          - ``older_than_hours``: only observations created more than N hours ago
+
+        Sort:
+          - ``sort_by``: one of ``"priority"`` (default), ``"created_at"``, ``"expires_at"``
+          - ``direction``: ``"asc"`` (default) or ``"desc"``
+
+        Sort fields and direction are whitelisted before interpolation so the
+        SQL can't be poisoned by caller input.
         """
+        if sort_by not in _LIST_OBSERVATIONS_SORT_COLUMNS:
+            msg = f"sort_by must be one of {sorted(_LIST_OBSERVATIONS_SORT_COLUMNS)}, got {sort_by!r}"
+            raise ValueError(msg)
+        if direction not in _LIST_OBSERVATIONS_DIRECTIONS:
+            msg = f"direction must be one of {sorted(_LIST_OBSERVATIONS_DIRECTIONS)}, got {direction!r}"
+            raise ValueError(msg)
+        if priority_min is not None and not (0 <= priority_min <= 4):
+            msg = f"priority_min must be between 0 and 4, got {priority_min}"
+            raise ValueError(msg)
+        if priority_max is not None and not (0 <= priority_max <= 4):
+            msg = f"priority_max must be between 0 and 4, got {priority_max}"
+            raise ValueError(msg)
+        if older_than_hours is not None and older_than_hours < 0:
+            msg = f"older_than_hours must be >= 0, got {older_than_hours}"
+            raise ValueError(msg)
+
         _, swept_ok = self._sweep_expired_observations()
-        alive_frag, alive_where, alive_params = _alive_clause(swept_ok, _now_iso())
+        now_iso = _now_iso()
+
+        clauses: list[str] = []
+        params: list[Any] = []
         if file_id:
-            # Direct FK query — more precise than path LIKE.
-            rows = self.conn.execute(
-                f"SELECT * FROM observations WHERE file_id = ?{alive_frag} ORDER BY priority ASC, created_at ASC LIMIT ? OFFSET ?",
-                (file_id, *alive_params, limit, offset),
-            ).fetchall()
+            clauses.append("file_id = ?")
+            params.append(file_id)
         elif file_path:
-            file_path = _normalize_scan_path(file_path) or file_path
-            rows = self.conn.execute(
-                f"SELECT * FROM observations WHERE file_path LIKE ? ESCAPE '\\'{alive_frag} "
-                "ORDER BY priority ASC, created_at ASC LIMIT ? OFFSET ?",
-                (_escape_like(file_path), *alive_params, limit, offset),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"SELECT * FROM observations{alive_where} ORDER BY priority ASC, created_at ASC LIMIT ? OFFSET ?",
-                (*alive_params, limit, offset),
-            ).fetchall()
+            normalized = _normalize_scan_path(file_path) or file_path
+            clauses.append("file_path LIKE ? ESCAPE '\\'")
+            params.append(_escape_like(normalized))
+        if actor:
+            clauses.append("actor = ?")
+            params.append(actor)
+        if priority_min is not None:
+            clauses.append("priority >= ?")
+            params.append(priority_min)
+        if priority_max is not None:
+            clauses.append("priority <= ?")
+            params.append(priority_max)
+        if older_than_hours is not None:
+            cutoff = (datetime.now(UTC) - timedelta(hours=older_than_hours)).isoformat()
+            clauses.append("created_at <= ?")
+            params.append(cutoff)
+        if not swept_ok:
+            clauses.append("expires_at > ?")
+            params.append(now_iso)
+
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        # sort_by / direction whitelisted above — safe to interpolate.
+        order_sql = f" ORDER BY {sort_by} {direction.upper()}, created_at ASC"
+        rows = self.conn.execute(
+            f"SELECT * FROM observations{where_sql}{order_sql} LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
         return [cast(ObservationDict, dict(row)) for row in rows]
 
     def get_observations_by_ids(self, obs_ids: list[str]) -> list[ObservationDict]:

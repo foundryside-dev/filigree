@@ -294,6 +294,67 @@ class TestListObservations:
         assert len(result) == 1
         assert result[0]["summary"] == "windows path bug"
 
+    def test_list_filter_by_actor(self, db: FiligreeDB) -> None:
+        db.create_observation("alpha note", actor="alpha")
+        db.create_observation("beta note", actor="beta")
+        db.create_observation("alpha note 2", actor="alpha")
+        result = db.list_observations(actor="alpha")
+        summaries = sorted(r["summary"] for r in result)
+        assert summaries == ["alpha note", "alpha note 2"]
+
+    def test_list_filter_by_priority_range(self, db: FiligreeDB) -> None:
+        db.create_observation("p0", priority=0)
+        db.create_observation("p2", priority=2)
+        db.create_observation("p4", priority=4)
+        result = db.list_observations(priority_min=1, priority_max=3)
+        assert len(result) == 1
+        assert result[0]["summary"] == "p2"
+
+    def test_list_filter_older_than_hours(self, db: FiligreeDB) -> None:
+        old = db.create_observation("ancient")
+        db.create_observation("fresh")
+        # Backdate the first observation by 100 hours
+        from datetime import UTC, datetime, timedelta
+
+        old_dt = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
+        db.conn.execute("UPDATE observations SET created_at = ? WHERE id = ?", (old_dt, old["id"]))
+        db.conn.commit()
+        result = db.list_observations(older_than_hours=48)
+        assert len(result) == 1
+        assert result[0]["summary"] == "ancient"
+
+    def test_list_sort_by_created_at_desc(self, db: FiligreeDB) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        first = db.create_observation("first")
+        db.create_observation("second")
+        # Backdate the first so created_at ordering is deterministic
+        backdated = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        db.conn.execute("UPDATE observations SET created_at = ? WHERE id = ?", (backdated, first["id"]))
+        db.conn.commit()
+        result = db.list_observations(sort_by="created_at", direction="desc")
+        assert [r["summary"] for r in result[:2]] == ["second", "first"]
+
+    def test_list_invalid_sort_by_raises(self, db: FiligreeDB) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="sort_by must be"):
+            db.list_observations(sort_by="evil; DROP TABLE observations")
+
+    def test_list_invalid_direction_raises(self, db: FiligreeDB) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="direction must be"):
+            db.list_observations(direction="sideways")
+
+    def test_list_actor_and_priority_compose(self, db: FiligreeDB) -> None:
+        db.create_observation("alpha-p1", actor="alpha", priority=1)
+        db.create_observation("alpha-p3", actor="alpha", priority=3)
+        db.create_observation("beta-p1", actor="beta", priority=1)
+        result = db.list_observations(actor="alpha", priority_max=1)
+        assert len(result) == 1
+        assert result[0]["summary"] == "alpha-p1"
+
     def test_list_sweeps_expired(self, db: FiligreeDB) -> None:
         """Expired observations are auto-removed on list and logged to audit trail."""
         obs = db.create_observation("Will expire")
