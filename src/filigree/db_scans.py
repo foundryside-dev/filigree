@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import deque
+from pathlib import Path
 from typing import Any, get_args
 
 from filigree.db_base import DBMixinProtocol, _begin_immediate, _now_iso
@@ -41,6 +43,7 @@ class ScansMixin(DBMixinProtocol):
         api_url: str = "",
         log_path: str = "",
     ) -> ScanRunDict:
+        self._validate_scan_log_path(log_path)
         now = _now_iso()
         existing = self.conn.execute("SELECT id FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
         if existing:
@@ -88,6 +91,7 @@ class ScansMixin(DBMixinProtocol):
         ``trigger_scan`` invocations can both pass the cooldown check and
         both spawn a scanner for the same file.
         """
+        self._validate_scan_log_path(log_path)
         _begin_immediate(self.conn, "reserve_scan_run")
         try:
             blocking = self.check_scan_cooldown(scanner_name, file_path)
@@ -137,6 +141,7 @@ class ScansMixin(DBMixinProtocol):
         the row exists from :meth:`reserve_scan_run`, this fills in the
         process-specific fields.
         """
+        self._validate_scan_log_path(log_path)
         now = _now_iso()
         self.conn.execute(
             "UPDATE scan_runs SET pid = ?, log_path = ?, updated_at = ? WHERE id = ?",
@@ -290,19 +295,12 @@ class ScansMixin(DBMixinProtocol):
                         )
         log_tail: list[str] = []
         if run["log_path"]:
-            # Log paths are stored relative to the project root. Prefer the
-            # explicit ``project_root`` set by from_filigree_dir/from_conf.
-            # Fall back to ``db_path.parent.parent`` only for legacy callers
-            # that constructed ``FiligreeDB(path)`` directly without declaring
-            # a root (the legacy ``.filigree/filigree.db`` layout). Custom
-            # ``.filigree.conf`` DB locations would otherwise resolve logs
-            # against the wrong directory.
-            project_root = self.project_root if self.project_root is not None else self.db_path.parent.parent
-            log_path = project_root / run["log_path"]
-            if log_path.is_file():
+            log_path, warning = self._resolve_scan_log_path(run["log_path"])
+            if warning:
+                run["data_warnings"].append(warning)
+            elif log_path is not None and log_path.is_file():
                 try:
-                    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                    log_tail = lines[-log_lines:] if len(lines) > log_lines else lines
+                    log_tail = self._read_log_tail(log_path, log_lines)
                 except OSError as exc:
                     logger.warning("Could not read log file %s: %s", run["log_path"], exc)
         result = ScanRunStatusDict(
@@ -316,6 +314,43 @@ class ScansMixin(DBMixinProtocol):
                 f"status for the remaining {len(run['file_paths']) - 1} file(s) is not tracked individually"
             )
         return result
+
+    def _scan_project_root(self) -> Path:
+        """Return the project root used for resolving scan log paths."""
+        # Prefer the explicit ``project_root`` set by from_filigree_dir/from_conf.
+        # Fall back to ``db_path.parent.parent`` only for legacy direct-path
+        # construction in the classic ``.filigree/filigree.db`` layout.
+        return self.project_root if self.project_root is not None else self.db_path.parent.parent
+
+    def _validate_scan_log_path(self, log_path: str) -> None:
+        """Reject caller-supplied scan log paths that would escape the project."""
+        if not log_path:
+            return
+        _, warning = self._resolve_scan_log_path(log_path)
+        if warning:
+            raise ValueError(f"log_path must be project-relative and stay inside the project root: {log_path!r}")
+
+    def _resolve_scan_log_path(self, log_path: str) -> tuple[Path | None, str | None]:
+        """Resolve a persisted scan log path without trusting stored data."""
+        raw = Path(log_path)
+        if raw.is_absolute():
+            return None, f"Ignored invalid log_path outside project root: {log_path}"
+        project_root = self._scan_project_root().resolve(strict=False)
+        resolved = (project_root / raw).resolve(strict=False)
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            return None, f"Ignored invalid log_path outside project root: {log_path}"
+        return resolved, None
+
+    @staticmethod
+    def _read_log_tail(log_path: Path, log_lines: int) -> list[str]:
+        """Stream a bounded line tail without loading the full log into memory."""
+        tail: deque[str] = deque(maxlen=log_lines)
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                tail.append(line.rstrip("\r\n"))
+        return list(tail)
 
     @staticmethod
     def _safe_json_list(raw: str | None, field: str, run_id: str) -> tuple[list[str], str | None]:

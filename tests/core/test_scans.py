@@ -40,6 +40,17 @@ class TestCreateScanRun:
                 file_ids=["f-1"],
             )
 
+    def test_create_rejects_log_path_outside_project(self, db: FiligreeDB, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="log_path must be project-relative"):
+            db.create_scan_run(
+                scan_run_id="test-run-1",
+                scanner_name="codex",
+                scan_source="codex",
+                file_paths=["src/main.py"],
+                file_ids=["f-1"],
+                log_path=str(tmp_path / "outside.log"),
+            )
+
 
 class TestUpdateScanRunStatus:
     def test_transition_pending_to_running(self, db: FiligreeDB) -> None:
@@ -234,6 +245,72 @@ class TestGetScanStatus:
             d.close()
 
         assert status["log_tail"] == ["line one", "line two", "line three"]
+
+    @pytest.mark.parametrize("stored_path", ["absolute", "traversal"])
+    def test_invalid_persisted_log_path_is_not_read(self, tmp_path: Path, stored_path: str) -> None:
+        project_root = tmp_path / "proj"
+        project_root.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do not leak\n")
+        log_path = str(secret) if stored_path == "absolute" else "../secret.txt"
+        db_dir = tmp_path / "storage" / "db"
+        db_dir.mkdir(parents=True)
+        d = FiligreeDB(db_dir / "track.db", prefix="test", project_root=project_root)
+        d.initialize()
+        try:
+            d.create_scan_run(
+                scan_run_id="bad-log",
+                scanner_name="codex",
+                scan_source="codex",
+                file_paths=["a.py"],
+                file_ids=["f-1"],
+            )
+            d.conn.execute("UPDATE scan_runs SET log_path = ? WHERE id = ?", (log_path, "bad-log"))
+            d.conn.commit()
+
+            status = d.get_scan_status("bad-log")
+        finally:
+            d.close()
+
+        assert status["log_tail"] == []
+        assert any("log_path" in warning and "outside project root" in warning for warning in status["data_warnings"])
+
+    def test_log_tail_streams_without_reading_full_file(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        project_root = db.project_root if db.project_root is not None else db.db_path.parent.parent
+        log_path = project_root / "scan.log"
+        log_path.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
+        db.create_scan_run(
+            scan_run_id="stream-log",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["src/main.py"],
+            file_ids=["f-1"],
+            log_path="scan.log",
+        )
+
+        def fail_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == log_path:
+                raise AssertionError("get_scan_status must stream log tails instead of read_text()")
+            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        original_read_text = Path.read_text
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+        status = db.get_scan_status("stream-log", log_lines=3)
+
+        assert status["log_tail"] == ["line 7", "line 8", "line 9"]
+
+    def test_set_spawn_info_rejects_log_path_outside_project(self, db: FiligreeDB, tmp_path: Path) -> None:
+        db.create_scan_run(
+            scan_run_id="spawn-log",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["src/main.py"],
+            file_ids=["f-1"],
+        )
+
+        with pytest.raises(ValueError, match="log_path must be project-relative"):
+            db.set_scan_run_spawn_info("spawn-log", pid=123, log_path=str(tmp_path / "outside.log"))
 
     def test_dead_pid_already_completed_race(self, db: FiligreeDB) -> None:
         """When another codepath completes the run before dead-PID auto-fail, re-read succeeds."""
