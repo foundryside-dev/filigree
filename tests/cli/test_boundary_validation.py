@@ -93,6 +93,16 @@ class TestCLIActorValidation:
         result = runner.invoke(cli, ["create", "Test"])
         assert result.exit_code == 0
 
+    def test_nested_command_json_actor_error_emits_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Nested command --json must be visible to group-level actor validation."""
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["--actor", "   ", "templates", "reload", "--json"])
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["code"] == ErrorCode.VALIDATION
+        assert "actor must not be empty" in payload["error"]
+
 
 class TestCLIPriorityEnvelopeEmission:
     """2b.3a: --priority out-of-range with --json emits the 2.0 flat envelope.

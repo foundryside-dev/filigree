@@ -74,32 +74,38 @@ def _wants_json() -> bool:
 
 
 def _detect_json_via_parse(group: click.Group, raw_args: list[str]) -> bool:
-    """Reparse ``raw_args`` with Click to determine if the subcommand has ``--json``.
+    """Reparse ``raw_args`` with Click to determine if any command has ``--json``.
 
     ``resilient_parsing=True`` skips option callbacks (notably the
     ``--actor`` validator we may be running inside) and tolerates
     missing required args. Click 9 collapses ``protected_args`` into
     ``args``, so the helper concatenates both for forward compatibility.
-    Nested groups are not currently used by filigree but are guarded
-    against — a sub-group has no ``--json`` of its own, so returning
-    False there is correct under today's surface.
     """
-    with click.Context(group, resilient_parsing=True) as group_ctx:
-        group.parse_args(group_ctx, raw_args)
+
+    def remaining_args(ctx: click.Context) -> list[str]:
         with warnings.catch_warnings():
             # Click 8.x emits DeprecationWarning on protected_args access; the
             # getattr keeps us correct after Click 9 removes the attribute.
             warnings.simplefilter("ignore", DeprecationWarning)
-            protected = list(getattr(group_ctx, "protected_args", None) or [])
-        sub_tokens = protected + list(group_ctx.args)
-        if not sub_tokens:
-            return False
-        sub_cmd = group.get_command(group_ctx, sub_tokens[0])
-        if sub_cmd is None or isinstance(sub_cmd, click.Group):
-            return False
-        with click.Context(sub_cmd, parent=group_ctx, resilient_parsing=True) as sub_ctx:
-            sub_cmd.parse_args(sub_ctx, sub_tokens[1:])
-            return bool(sub_ctx.params.get("as_json", False))
+            protected = list(getattr(ctx, "protected_args", None) or [])
+        return protected + list(ctx.args)
+
+    def parse_command(command: click.Command, args: list[str], parent: click.Context | None = None) -> bool:
+        with click.Context(command, parent=parent, resilient_parsing=True) as ctx:
+            command.parse_args(ctx, args)
+            if bool(ctx.params.get("as_json", False)):
+                return True
+            if not isinstance(command, click.Group):
+                return False
+            sub_tokens = remaining_args(ctx)
+            if not sub_tokens:
+                return False
+            sub_cmd = command.get_command(ctx, sub_tokens[0])
+            if sub_cmd is None:
+                return False
+            return parse_command(sub_cmd, sub_tokens[1:], ctx)
+
+    return parse_command(group, raw_args)
 
 
 def _emit_startup_failure(exc: Exception, code: ErrorCode, *, human_prefix: str = "") -> None:
