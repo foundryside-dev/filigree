@@ -60,6 +60,15 @@ class TestGetReleasesSummary:
         # R1 + R2 + R3 + auto-seeded Future = 4 total
         assert len(result) == 4
 
+    def test_include_released_returns_more_than_default_page(self, release_db: FiligreeDB) -> None:
+        db = release_db
+        release_ids = {db.create_issue(f"R{i:03d}", type="release").id for i in range(105)}
+
+        result = db.get_releases_summary(include_released=True)
+
+        returned_ids = {entry["id"] for entry in result}
+        assert release_ids <= returned_ids
+
     def test_rolled_back_release_is_included_in_active(self, release_db: FiligreeDB) -> None:
         db = release_db
         r = db.create_issue("R1", type="release")

@@ -902,7 +902,8 @@ class PlanningMixin(DBMixinProtocol):
     # -- Release tree --------------------------------------------------------
 
     def get_releases_summary(self, *, include_released: bool = False) -> list[ReleaseSummaryItem]:
-        releases = self.list_issues(type="release")
+        rows = self.conn.execute("SELECT id FROM issues WHERE type = 'release' ORDER BY priority, created_at").fetchall()
+        releases = self._build_issues_batch([row["id"] for row in rows])
         if not include_released:
             # Note: rolled_back is category "wip", so it IS included (intentional —
             # a rolled-back release needs attention, it is not "finished")
