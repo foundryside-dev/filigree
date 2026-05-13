@@ -80,6 +80,30 @@ class TestWorkflowCli:
         assert result.exit_code == 1
         assert "Unknown type" in result.output
 
+    def test_blocked_json_include_blockers_hydrates_blocker_context(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        with get_db() as db:
+            blocked = db.create_issue("Blocked")
+            blocker = db.create_issue("Blocker", priority=1, type="bug")
+            db.add_dependency(blocked.id, blocker.id)
+
+        result = runner.invoke(cli, ["blocked", "--json", "--include-blockers"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        item = data["items"][0]
+        assert item["issue_id"] == blocked.id
+        assert item["blocked_by"] == [blocker.id]
+        assert item["blockers"] == [
+            {
+                "issue_id": blocker.id,
+                "title": "Blocker",
+                "status": "triage",
+                "priority": 1,
+                "type": "bug",
+            }
+        ]
+
     def test_transitions_shows_valid_states(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Transitions test"])

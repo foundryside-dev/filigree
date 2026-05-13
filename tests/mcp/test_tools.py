@@ -468,6 +468,27 @@ class TestReadyAndBlocked:
         expected_keys = {"issue_id", "title", "status", "priority", "type", "blocked_by"}
         assert set(data["items"][0].keys()) == expected_keys
 
+    async def test_get_blocked_include_blockers_hydrates_blocker_context(self, mcp_db: FiligreeDB) -> None:
+        a = mcp_db.create_issue("Blocked")
+        b = mcp_db.create_issue("Blocker", priority=1, type="bug")
+        mcp_db.add_dependency(a.id, b.id)
+
+        result = await call_tool("get_blocked", {"include_blockers": True})
+
+        data = _parse(result)
+        item = data["items"][0]
+        assert item["issue_id"] == a.id
+        assert item["blocked_by"] == [b.id]
+        assert item["blockers"] == [
+            {
+                "issue_id": b.id,
+                "title": "Blocker",
+                "status": "triage",
+                "priority": 1,
+                "type": "bug",
+            }
+        ]
+
 
 class TestPlan:
     async def test_get_plan(self, mcp_db: FiligreeDB) -> None:

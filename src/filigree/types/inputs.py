@@ -445,6 +445,10 @@ class GetReadyArgs(TypedDict):
     include_context: NotRequired[bool]
 
 
+class GetBlockedArgs(TypedDict):
+    include_blockers: NotRequired[bool]
+
+
 class GetPlanArgs(TypedDict):
     milestone_id: str
 
@@ -826,6 +830,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "add_dependency": AddDependencyArgs,
     "remove_dependency": RemoveDependencyArgs,
     "get_ready": GetReadyArgs,
+    "get_blocked": GetBlockedArgs,
     "get_plan": GetPlanArgs,
     "create_plan": CreatePlanArgs,
     "create_plan_from_file": CreatePlanFromFileArgs,

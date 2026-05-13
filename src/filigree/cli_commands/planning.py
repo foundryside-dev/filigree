@@ -144,25 +144,45 @@ def get_ready(as_json: bool, include_context: bool) -> None:
     _ready_impl(as_json, include_context)
 
 
-def _blocked_impl(as_json: bool) -> None:
+def _blocked_issue_item(issue: Any, blockers_by_id: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "issue_id": issue.id,
+        "title": issue.title,
+        "status": issue.status,
+        "priority": issue.priority,
+        "type": issue.type,
+        "blocked_by": issue.blocked_by,
+    }
+    if blockers_by_id is not None:
+        item["blockers"] = [blockers_by_id[blocker_id] for blocker_id in issue.blocked_by if blocker_id in blockers_by_id]
+    return item
+
+
+def _blocked_impl(as_json: bool, include_blockers: bool) -> None:
     with get_db() as db:
         issues = db.get_blocked()
+        blockers_by_id: dict[str, dict[str, Any]] | None = None
+        if include_blockers:
+            blockers_by_id = {}
+            blocker_ids = {blocker_id for issue in issues for blocker_id in issue.blocked_by}
+            for blocker_id in blocker_ids:
+                try:
+                    blocker = db.get_issue(blocker_id)
+                except KeyError:
+                    continue
+                blockers_by_id[blocker_id] = {
+                    "issue_id": blocker.id,
+                    "title": blocker.title,
+                    "status": blocker.status,
+                    "priority": blocker.priority,
+                    "type": blocker.type,
+                }
 
         if as_json:
             click.echo(
                 json_mod.dumps(
                     {
-                        "items": [
-                            {
-                                "issue_id": i.id,
-                                "title": i.title,
-                                "status": i.status,
-                                "priority": i.priority,
-                                "type": i.type,
-                                "blocked_by": i.blocked_by,
-                            }
-                            for i in issues
-                        ],
+                        "items": [_blocked_issue_item(i, blockers_by_id=blockers_by_id) for i in issues],
                         "has_more": False,
                     },
                     indent=2,
@@ -179,16 +199,18 @@ def _blocked_impl(as_json: bool) -> None:
 
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def blocked(as_json: bool) -> None:
+@click.option("--include-blockers", is_flag=True, help="Include slim blocker records in JSON output")
+def blocked(as_json: bool, include_blockers: bool) -> None:
     """Show blocked issues."""
-    _blocked_impl(as_json)
+    _blocked_impl(as_json, include_blockers)
 
 
 @click.command("get-blocked")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def get_blocked(as_json: bool) -> None:
+@click.option("--include-blockers", is_flag=True, help="Include slim blocker records in JSON output")
+def get_blocked(as_json: bool, include_blockers: bool) -> None:
     """Show blocked issues. Alias for `blocked`."""
-    _blocked_impl(as_json)
+    _blocked_impl(as_json, include_blockers)
 
 
 def _plan_impl(milestone_id: str, as_json: bool) -> None:

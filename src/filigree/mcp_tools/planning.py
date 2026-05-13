@@ -22,7 +22,6 @@ from filigree.mcp_tools.common import (
 from filigree.mcp_tools.payloads import critical_path_node_to_mcp, plan_tree_to_mcp
 from filigree.types.api import (
     BatchResponse,
-    BlockedIssue,
     CriticalPathMcpNode,
     CriticalPathResponse,
     DependencyActionResponse,
@@ -97,8 +96,20 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="get_blocked",
-            description="Get all blocked issues with their blocker lists",
-            inputSchema={"type": "object", "properties": {}},
+            description=(
+                "Get all blocked issues with their blocker ID lists. "
+                "Pass include_blockers=true to hydrate blocker title/status/priority/type context."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "include_blockers": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include slim blocker records under blockers[].",
+                    },
+                },
+            },
         ),
         Tool(
             name="get_plan",
@@ -394,9 +405,33 @@ async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_get_blocked(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db
 
+    include_blockers = arguments.get("include_blockers", False)
+    if not isinstance(include_blockers, bool):
+        return _text(ErrorResponse(error="include_blockers must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     issues = tracker.get_blocked()
-    items = [BlockedIssue(**_slim_issue(i), blocked_by=i.blocked_by) for i in issues]
+    blockers_by_id = {}
+    if include_blockers:
+        blocker_ids = {blocker_id for issue in issues for blocker_id in issue.blocked_by}
+        for blocker_id in blocker_ids:
+            try:
+                blockers_by_id[blocker_id] = _slim_issue(tracker.get_issue(blocker_id))
+            except KeyError:
+                continue
+    items: list[dict[str, Any]] = []
+    for issue in issues:
+        slim = _slim_issue(issue)
+        item: dict[str, Any] = {
+            "issue_id": slim["issue_id"],
+            "title": slim["title"],
+            "status": slim["status"],
+            "priority": slim["priority"],
+            "type": slim["type"],
+            "blocked_by": issue.blocked_by,
+        }
+        if include_blockers:
+            item["blockers"] = [blockers_by_id[blocker_id] for blocker_id in issue.blocked_by if blocker_id in blockers_by_id]
+        items.append(item)
     return _text(_list_response(items, has_more=False))
 
 

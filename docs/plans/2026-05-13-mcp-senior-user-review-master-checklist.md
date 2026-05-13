@@ -252,11 +252,16 @@ product match those decisions.
   and consistent enough for history consumers; finding archival or expiry is
   defined.
 
-- [ ] **Hydrate blockers and context where agents need one-call triage.**
+- [x] **Hydrate blockers and context where agents need one-call triage.**
   Source: H7 plus earlier ready-context findings.
+  Tracker: `filigree-ce6d88e269` is closed.
   Problem: `get_blocked` returns blocker IDs without titles/statuses, requiring
   N follow-up calls.
   Ship criterion: add `include_blockers=true` or an equivalent slim context mode.
+  Resolution: MCP `get_blocked(include_blockers=true)` and CLI
+  `blocked/get-blocked --include-blockers --json` preserve the existing
+  `blocked_by` ID list and add `blockers[]` slim records with blocker issue ID,
+  title, status, priority, and type.
 
 - [ ] **Resolve the requirement-type documentation mismatch.**
   Source: H11.

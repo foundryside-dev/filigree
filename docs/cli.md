@@ -310,7 +310,14 @@ Search issues by title and description (uses FTS5 full-text search).
 
 ### `blocked`
 
-Show all blocked issues with their blocker lists.
+Show all blocked issues with their blocker ID lists. JSON output stays slim by
+default; pass `--include-blockers` with `--json` to add slim blocker records
+under `blockers[]`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--json` | flag | Output `{items, has_more}` |
+| `--include-blockers` | flag | Add blocker issue ID/title/status/priority/type records to JSON items |
 
 ### `critical-path`
 

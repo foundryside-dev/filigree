@@ -181,18 +181,26 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 | Tool | Description |
 |------|-------------|
 | `get_ready` | Unassigned open-category issues with no blockers, sorted by priority |
-| `get_blocked` | Blocked issues with their blocker lists |
+| `get_blocked` | Blocked issues with their blocker lists, optionally hydrated with blocker context |
 | `get_critical_path` | Longest dependency chain |
 
 `get_ready` returns slim five-key issue items by default. Pass
 `include_context=true` to add `parent_issue_id` and `parent_title` to each item.
-`get_blocked` and `get_critical_path` take no required parameters.
+`get_blocked` returns blocker IDs by default. Pass `include_blockers=true` to
+add slim blocker records under `blockers[]` while preserving `blocked_by`.
+`get_critical_path` takes no required parameters.
 
 #### `get_ready`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `include_context` | boolean | no | Include parent issue ID/title on each ready item |
+
+#### `get_blocked`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `include_blockers` | boolean | no | Include slim blocker records under `blockers[]` |
 
 ### Dependencies
 
