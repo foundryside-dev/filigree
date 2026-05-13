@@ -4,6 +4,7 @@ Most data commands support `--json` for machine-readable output (`--json` is sup
 
 ## Contents
 
+- [ID and Relationship Names](#id-and-relationship-names)
 - [Setup](#setup)
 - [Automation and Server](#automation-and-server)
 - [Creating and Updating](#creating-and-updating)
@@ -50,6 +51,16 @@ Every short-form CLI command has a permanent verb-noun alias that matches the co
 | `undo` | `undo-last` |
 
 The short forms are stable — no deprecation cycle.
+
+## ID and Relationship Names
+
+CLI JSON follows the MCP 2.0 public vocabulary: issue primary keys are
+`issue_id`, hierarchy links are `parent_issue_id`, and dependency edges are
+described as the blocked issue depending on the blocking issue. Full issue
+JSON still includes legacy `parent_id` with the same value for compatibility;
+new automation should read `parent_issue_id`. The `--parent` flag remains
+stable, and `create`, `list`/`list-issues`, and `update`/`update-issue` also
+accept `--parent-issue-id` as the canonical long-form spelling.
 
 ```bash
 filigree --actor bot-1 create "Title"   # Set actor identity
@@ -193,7 +204,7 @@ Create a new issue.
 | `--priority` | 0-4 | `2` | Priority level (0=critical, 4=backlog) |
 | `-d`, `--description` | string | `""` | Issue description |
 | `-l`, `--label` | string | — | Label (repeatable) |
-| `--parent` | string | — | Parent issue ID |
+| `--parent`, `--parent-issue-id` | string | — | Parent issue ID |
 | `--dep` | string | — | Dependency issue ID (repeatable) |
 | `--field` | key=value | — | Custom field (repeatable) |
 | `--notes` | string | `""` | Additional notes |
@@ -213,7 +224,7 @@ Update an existing issue.
 | `--notes` | string | New notes |
 | `--field` | key=value | Custom field (repeatable) |
 | `--design` | string | New design field (shorthand for `--field design=...`) |
-| `--parent` | string | New parent issue ID (empty string to clear) |
+| `--parent`, `--parent-issue-id` | string | New parent issue ID (empty string to clear) |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `close`
@@ -285,7 +296,7 @@ List issues with optional filters.
 | `--priority` | 0-4 | Filter by priority |
 | `--assignee` | string | Filter by assignee |
 | `--label` | string | Filter by label |
-| `--parent` | string | Filter by parent issue ID |
+| `--parent`, `--parent-issue-id` | string | Filter by parent issue ID |
 | `--limit` | integer | Max results (default 100) |
 | `--offset` | integer | Skip first N results |
 

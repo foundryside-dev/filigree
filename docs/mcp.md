@@ -87,6 +87,15 @@ Workflow guide with optional live project context. Agents use this to understand
 | `reopen_issue` | Reopen a closed issue to the last non-done status before closure |
 | `undo_last` | Undo most recent reversible action |
 
+#### Relationship naming
+
+MCP 2.0 public issue payloads use `issue_id` for the issue primary key and
+`parent_issue_id` for hierarchy links. Full issue payloads also include
+`parent_id` as a compatibility alias with the same value; new callers should
+read `parent_issue_id`. Dependency edges use directional names:
+`from_issue_id` is the issue that is blocked, and `to_issue_id` is the issue
+that blocks it.
+
 #### `get_issue`
 
 | Parameter | Type | Required | Description |

@@ -120,6 +120,27 @@ class TestCliPublicIssueVocabulary:
         assert item["issue_id"] == issue_id
         assert "id" not in item
 
+    def test_parent_issue_id_cli_aliases_are_public_vocabulary(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        parent_id = _extract_id(runner.invoke(cli, ["create", "Parent"]).output)
+
+        created = runner.invoke(cli, ["create", "Child", "--parent-issue-id", parent_id, "--json"])
+
+        assert created.exit_code == 0
+        child = json.loads(created.output)
+        assert child["parent_issue_id"] == parent_id
+        assert child["parent_id"] == parent_id
+
+        listed = runner.invoke(cli, ["list", "--parent-issue-id", parent_id, "--json"])
+        assert listed.exit_code == 0
+        assert [item["issue_id"] for item in json.loads(listed.output)["items"]] == [child["issue_id"]]
+
+        updated = runner.invoke(cli, ["update", child["issue_id"], "--parent-issue-id", "", "--json"])
+        assert updated.exit_code == 0
+        data = json.loads(updated.output)
+        assert data["parent_issue_id"] is None
+        assert data["parent_id"] is None
+
     def test_start_next_work_json_uses_issue_id(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         created = runner.invoke(cli, ["create", "Public start next", "--type", "task", "--priority", "0"])

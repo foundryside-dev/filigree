@@ -113,6 +113,22 @@ Returns the current database schema version (from SQLite `PRAGMA user_version`).
 
 ---
 
+## ID and Relationship Vocabulary
+
+The Python core keeps the stored dataclass names: `Issue.id` and
+`Issue.parent_id`. MCP and CLI JSON expose the agent-facing 2.0 vocabulary:
+`issue_id` for issue primary keys and `parent_issue_id` for hierarchy links.
+Full public issue payloads also include `parent_id` as a compatibility alias
+with the same value; new callers should prefer `parent_issue_id`, and
+`parent_id` may be removed from public wire payloads in a future major.
+
+Dependency APIs describe the edge direction explicitly. In MCP, `from_issue_id`
+is the issue that is blocked, and `to_issue_id` is the issue that blocks it.
+The Python core uses the same relationship as `issue_id` depends on
+`depends_on_id`.
+
+---
+
 ### CRUD Methods
 
 #### `create_issue`

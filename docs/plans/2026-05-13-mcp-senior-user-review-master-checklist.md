@@ -188,7 +188,7 @@ product match those decisions.
   derived from the live MCP tool registry input schemas, and docs/tool-count
   drift is pinned by a registry-backed test against `docs/mcp.md`.
 
-- [ ] **Finish ID and relationship naming consistency.**
+- [x] **Finish ID and relationship naming consistency.**
   Source: A2/A15, B4/B17, C4, D9/D14, E15, G6/G10.
   Problem: prior major `id`/`issue_id` holes were fixed, but G still reports
   `parent_id` versus `parent_issue_id` and several dependency parameter naming
@@ -196,6 +196,11 @@ product match those decisions.
   Ship criterion: issue relationships use one public vocabulary
   (`parent_issue_id`, `from_issue_id`, `to_issue_id`, etc.) with temporary
   aliases and explicit deprecation notes where needed.
+  Resolution: MCP and CLI docs now name the canonical public vocabulary:
+  `issue_id`, `parent_issue_id`, `from_issue_id`, and `to_issue_id`, while
+  preserving full-payload `parent_id` as a compatibility alias. CLI
+  `create`, `list`/`list-issues`, and `update`/`update-issue` accept
+  `--parent-issue-id` alongside stable `--parent`.
 
 - [ ] **Normalize common response envelopes without losing useful slim paths.**
   Source: A14, B7, C3, D12/D14/D15, E14/E19/E21/E22, F4, G11, H5/H8/H9/H13/H14/H17.
