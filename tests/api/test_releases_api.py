@@ -258,6 +258,24 @@ class TestReleasesRobustnessAgainstCorruptData:
         # The corrupt release should appear, just without ordering preference
         assert any(entry["id"] == r.id for entry in releases)
 
+    async def test_overlong_semver_digits_do_not_crash_list(
+        self, release_client: AsyncClient, release_dashboard_db: FiligreeDB
+    ) -> None:
+        db = release_dashboard_db
+        r = db.create_issue("Huge Semver", type="release", fields={"version": "v1.0.0"})
+        overlong_version = "v" + ("9" * 5000) + ".0.0"
+        db.conn.execute(
+            "UPDATE issues SET fields = ? WHERE id = ?",
+            (json.dumps({"version": overlong_version}), r.id),
+        )
+        db.conn.commit()
+
+        resp = await release_client.get("/api/releases")
+
+        assert resp.status_code == 200
+        releases = resp.json()["releases"]
+        assert any(entry["id"] == r.id for entry in releases)
+
     async def test_unrelated_valueerror_returns_500_not_false_not_a_release(
         self, release_client: AsyncClient, release_dashboard_db: FiligreeDB
     ) -> None:

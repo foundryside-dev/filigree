@@ -33,6 +33,13 @@ _NON_SEMVER_KEY: _SemverSortKey = (1, 0, 0, 0)
 _FUTURE_KEY: _SemverSortKey = (2, 0, 0, 0)
 
 
+def _match_to_semver_key(match: re.Match[str]) -> _SemverSortKey | None:
+    try:
+        return (0, int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+    except (OverflowError, ValueError):
+        return None
+
+
 def _semver_sort_key(release: ReleaseSummaryItem) -> _SemverSortKey:
     """Extract a tagged sort key ``(kind, major, minor, patch)`` from a release.
 
@@ -65,10 +72,14 @@ def _semver_sort_key(release: ReleaseSummaryItem) -> _SemverSortKey:
     if version:
         m = _SEMVER_STRICT_RE.match(version)
         if m:
-            return (0, int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            key = _match_to_semver_key(m)
+            if key is not None:
+                return key
         m = _SEMVER_LOOSE_RE.search(version)
         if m:
-            return (0, int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+            key = _match_to_semver_key(m)
+            if key is not None:
+                return key
 
     # 4. Title-based Future detection (backward compat)
     if title.strip().lower() == "future":
@@ -78,7 +89,9 @@ def _semver_sort_key(release: ReleaseSummaryItem) -> _SemverSortKey:
     if title:
         m = _SEMVER_LOOSE_RE.search(title)
         if m:
-            return (0, int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+            key = _match_to_semver_key(m)
+            if key is not None:
+                return key
 
     # 6. Non-semver fallback (between semver and Future)
     return _NON_SEMVER_KEY
