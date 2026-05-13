@@ -94,9 +94,9 @@ def _parse_issue_timestamp(raw: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _validate_lease_hours(value: int) -> None:
+def _validate_lease_hours(value: int, *, name: str = "lease_hours") -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        msg = "lease_hours must be a positive integer"
+        msg = f"{name} must be a positive integer"
         raise ValueError(msg)
 
 
@@ -1376,11 +1376,19 @@ class IssuesMixin(DBMixinProtocol):
             raise
         return self.get_issue(issue_id)
 
-    def get_stale_claims(self, *, stale_after_hours: int = DEFAULT_CLAIM_LEASE_HOURS) -> list[Issue]:
-        """Return assigned, non-done issues whose ownership appears abandoned."""
+    def get_stale_claims(
+        self,
+        *,
+        stale_after_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
+        expires_within_hours: int | None = None,
+    ) -> list[Issue]:
+        """Return assigned, non-done issues whose ownership appears abandoned or near expiry."""
         _validate_lease_hours(stale_after_hours)
+        if expires_within_hours is not None:
+            _validate_lease_hours(expires_within_hours, name="expires_within_hours")
         now = datetime.now(UTC)
         cutoff = now - timedelta(hours=stale_after_hours)
+        expiry_cutoff = now + timedelta(hours=expires_within_hours) if expires_within_hours is not None else None
 
         pred_sql, pred_params = self._category_predicate_sql("done", type_col="i.type", status_col="i.status")
         rows = self.conn.execute(
@@ -1396,7 +1404,7 @@ class IssuesMixin(DBMixinProtocol):
         for row in rows:
             expires_at = _parse_issue_timestamp(row["claim_expires_at"])
             if expires_at is not None:
-                if expires_at <= now:
+                if expires_at <= now or (expiry_cutoff is not None and expires_at <= expiry_cutoff):
                     stale_ids.append(row["id"])
                 continue
 

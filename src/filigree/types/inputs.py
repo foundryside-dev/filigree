@@ -137,6 +137,7 @@ class HeartbeatWorkArgs(TypedDict):
 
 class GetStaleClaimsArgs(TypedDict):
     stale_after_hours: NotRequired[int]
+    expires_within_hours: NotRequired[int]
 
 
 class ReclaimIssueArgs(TypedDict):

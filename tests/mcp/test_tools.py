@@ -1274,6 +1274,39 @@ class TestClaimLeaseTools:
         data = _parse(result)
         assert [item["issue_id"] for item in data["items"]] == [issue.id]
 
+    async def test_get_stale_claims_can_include_near_expiry_leases(self, mcp_db: FiligreeDB) -> None:
+        soon = mcp_db.create_issue("Expires soon MCP", priority=0)
+        later = mcp_db.create_issue("Expires later MCP", priority=0)
+        expired = mcp_db.create_issue("Expired MCP", priority=0)
+        mcp_db.claim_issue(soon.id, assignee="agent-soon")
+        mcp_db.claim_issue(later.id, assignee="agent-later")
+        mcp_db.claim_issue(expired.id, assignee="agent-expired")
+        now = datetime.now(UTC)
+        soon_at = (now + timedelta(hours=1)).isoformat()
+        later_at = (now + timedelta(hours=5)).isoformat()
+        expired_at = (now - timedelta(hours=1)).isoformat()
+        mcp_db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (soon_at, soon_at, soon.id),
+        )
+        mcp_db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (later_at, later_at, later.id),
+        )
+        mcp_db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (expired_at, expired_at, expired.id),
+        )
+        mcp_db.conn.commit()
+
+        default_result = await call_tool("get_stale_claims", {})
+        proactive_result = await call_tool("get_stale_claims", {"expires_within_hours": 2})
+
+        default_data = _parse(default_result)
+        proactive_data = _parse(proactive_result)
+        assert [item["issue_id"] for item in default_data["items"]] == [expired.id]
+        assert [item["issue_id"] for item in proactive_data["items"]] == [soon.id, expired.id]
+
     async def test_reclaim_issue_transfers_expected_holder(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Reclaim MCP")
         mcp_db.claim_issue(issue.id, assignee="agent-old")

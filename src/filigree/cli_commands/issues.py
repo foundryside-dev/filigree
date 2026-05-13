@@ -1023,13 +1023,23 @@ def heartbeat_work_cmd(
 
 @click.command("stale-claims")
 @click.option("--stale-after-hours", default=48, type=int, help="Legacy assignment age threshold.")
+@click.option(
+    "--expires-within-hours",
+    type=int,
+    default=None,
+    help="Also include active explicit leases expiring within this many hours.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def stale_claims_cmd(stale_after_hours: int, as_json: bool) -> None:
+def stale_claims_cmd(stale_after_hours: int, expires_within_hours: int | None, as_json: bool) -> None:
     """List assigned issues whose claim liveness is stale."""
     _range_check_int(stale_after_hours, "stale_after_hours", min_val=1, max_val=8760, as_json=as_json)
+    _range_check_int(expires_within_hours, "expires_within_hours", min_val=1, max_val=8760, as_json=as_json)
     with get_db() as db:
         try:
-            issues = db.get_stale_claims(stale_after_hours=stale_after_hours)
+            issues = db.get_stale_claims(
+                stale_after_hours=stale_after_hours,
+                expires_within_hours=expires_within_hours,
+            )
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))

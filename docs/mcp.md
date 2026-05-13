@@ -384,10 +384,12 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `stale_after_hours` | integer | no | Age threshold for legacy assignments without explicit lease metadata (default 48) |
+| `expires_within_hours` | integer | no | Also include active explicit leases expiring within this many hours |
 
 Returns a `ListResponse[IssueDict]` containing assigned, non-done issues whose
 `claim_expires_at` is in the past, plus legacy assigned rows older than the
-threshold.
+threshold. Pass `expires_within_hours` to also surface active leases that are
+close enough to expiry for proactive heartbeating.
 
 #### `reclaim_issue`
 

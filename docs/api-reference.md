@@ -366,12 +366,15 @@ def get_stale_claims(
     self,
     *,
     stale_after_hours: int = 48,
+    expires_within_hours: int | None = None,
 ) -> list[Issue]
 ```
 
 Returns assigned, non-done issues with expired `claim_expires_at` values. Legacy
 assigned rows without explicit lease metadata fall back to `last_heartbeat_at`,
-`claimed_at`, or `updated_at` and are stale when older than the threshold.
+`claimed_at`, or `updated_at` and are stale when older than the threshold. Pass
+`expires_within_hours` to include active explicit leases expiring soon enough
+for proactive heartbeating.
 
 #### `reclaim_issue`
 

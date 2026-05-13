@@ -591,6 +591,47 @@ class TestClaimCli:
         data = json.loads(result.output)
         assert [item["issue_id"] for item in data["items"]] == [issue_id]
 
+    def test_stale_claims_json_can_include_near_expiry_leases(
+        self, cli_in_project: tuple[CliRunner, Path]
+    ) -> None:
+        runner, _ = cli_in_project
+        soon_id = _extract_id(runner.invoke(cli, ["create", "Expires soon CLI", "-p", "0"]).output)
+        later_id = _extract_id(runner.invoke(cli, ["create", "Expires later CLI", "-p", "0"]).output)
+        expired_id = _extract_id(runner.invoke(cli, ["create", "Expired CLI", "-p", "0"]).output)
+        runner.invoke(cli, ["claim", soon_id, "--assignee", "agent-soon"])
+        runner.invoke(cli, ["claim", later_id, "--assignee", "agent-later"])
+        runner.invoke(cli, ["claim", expired_id, "--assignee", "agent-expired"])
+        now = datetime.now(UTC)
+        soon_at = (now + timedelta(hours=1)).isoformat()
+        later_at = (now + timedelta(hours=5)).isoformat()
+        expired_at = (now - timedelta(hours=1)).isoformat()
+        from filigree.cli_common import get_db
+
+        with get_db() as db:
+            db.conn.execute(
+                "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+                (soon_at, soon_at, soon_id),
+            )
+            db.conn.execute(
+                "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+                (later_at, later_at, later_id),
+            )
+            db.conn.execute(
+                "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+                (expired_at, expired_at, expired_id),
+            )
+            db.conn.commit()
+
+        default_result = runner.invoke(cli, ["stale-claims", "--json"])
+        proactive_result = runner.invoke(cli, ["stale-claims", "--expires-within-hours", "2", "--json"])
+
+        assert default_result.exit_code == 0
+        assert proactive_result.exit_code == 0
+        default_data = json.loads(default_result.output)
+        proactive_data = json.loads(proactive_result.output)
+        assert [item["issue_id"] for item in default_data["items"]] == [expired_id]
+        assert [item["issue_id"] for item in proactive_data["items"]] == [soon_id, expired_id]
+
     def test_reclaim_issue_json_transfers_expected_holder(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Reclaim CLI"])

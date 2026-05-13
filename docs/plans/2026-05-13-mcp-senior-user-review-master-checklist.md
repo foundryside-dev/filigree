@@ -325,8 +325,11 @@ product match those decisions.
   when another actor holds the claim. Source: H15.
   Resolution: the implemented decision is conflict. Tests cover held-by-other
   behavior so cleanup cannot silently release another actor's claim.
-- [ ] Add `get_stale_claims(expires_within_hours=...)` if proactive
+- [x] Add `get_stale_claims(expires_within_hours=...)` if proactive
   heartbeating is a supported workflow. Source: E23.
+  Resolution: core, MCP, and CLI now support the opt-in window while the
+  default stale-claims behavior continues to report only expired leases and
+  old legacy assignments.
 - [x] Add optional issue events to file timelines if file-centered history is a
   first-class workflow. Source: A16/B18.
   Resolution: file timelines support `include_issue_events` and

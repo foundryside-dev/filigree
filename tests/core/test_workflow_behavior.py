@@ -941,6 +941,44 @@ class TestClaimLeaseLiveness:
 
         assert [issue.id for issue in stale] == [legacy.id, expired.id]
 
+    def test_stale_claims_can_include_near_expiry_leases(self, db: FiligreeDB) -> None:
+        soon = db.create_issue("Expires soon", priority=0)
+        later = db.create_issue("Expires later", priority=0)
+        expired = db.create_issue("Already expired", priority=0)
+        closed = db.create_issue("Closed soon", priority=0)
+        db.claim_issue(soon.id, assignee="agent-soon")
+        db.claim_issue(later.id, assignee="agent-later")
+        db.claim_issue(expired.id, assignee="agent-expired")
+        db.claim_issue(closed.id, assignee="agent-closed")
+        now = datetime.now(UTC)
+        soon_at = (now + timedelta(hours=1)).isoformat()
+        later_at = (now + timedelta(hours=5)).isoformat()
+        expired_at = (now - timedelta(hours=1)).isoformat()
+        db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (soon_at, soon_at, soon.id),
+        )
+        db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (later_at, later_at, later.id),
+        )
+        db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (expired_at, expired_at, expired.id),
+        )
+        db.conn.execute(
+            "UPDATE issues SET claim_expires_at = ?, last_heartbeat_at = ? WHERE id = ?",
+            (soon_at, soon_at, closed.id),
+        )
+        db.conn.commit()
+        db.close_issue(closed.id)
+
+        default_stale = db.get_stale_claims()
+        proactive = db.get_stale_claims(expires_within_hours=2)
+
+        assert [issue.id for issue in default_stale] == [expired.id]
+        assert [issue.id for issue in proactive] == [soon.id, expired.id]
+
     def test_reclaim_issue_transfers_only_expected_holder_and_records_reason(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Reclaim me")
         db.claim_issue(issue.id, assignee="agent-old")

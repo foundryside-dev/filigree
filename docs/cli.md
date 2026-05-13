@@ -470,11 +470,14 @@ treated as the expected holder; coordinators can pass `--expected-assignee`.
 ### `stale-claims`
 
 List assigned, non-done issues whose explicit claim lease has expired, plus
-legacy assigned issues older than the threshold.
+legacy assigned issues older than the threshold. Pass `--expires-within-hours`
+to also include active leases that are close enough to expiry for proactive
+heartbeating.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `--stale-after-hours` | integer | Legacy assignment age threshold (default 48) |
+| `--expires-within-hours` | integer | Include active explicit leases expiring within this many hours |
 
 ### `reclaim`
 

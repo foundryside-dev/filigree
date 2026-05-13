@@ -497,7 +497,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "minimum": 1,
                         "default": 48,
                         "description": "Age threshold for legacy assignments without explicit claim expiry.",
-                    }
+                    },
+                    "expires_within_hours": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8760,
+                        "description": "Also include active explicit leases expiring within this many hours.",
+                    },
                 },
             },
         ),
@@ -1186,12 +1192,19 @@ async def _handle_get_stale_claims(arguments: dict[str, Any]) -> list[TextConten
 
     args = _parse_args(arguments, GetStaleClaimsArgs)
     stale_after_hours = args.get("stale_after_hours", 48)
+    expires_within_hours = args.get("expires_within_hours")
     stale_err = _validate_int_range(stale_after_hours, "stale_after_hours", min_val=1)
     if stale_err:
         return stale_err
+    expiry_err = _validate_int_range(expires_within_hours, "expires_within_hours", min_val=1, max_val=8760)
+    if expiry_err:
+        return expiry_err
     tracker = _get_db()
     try:
-        issues = tracker.get_stale_claims(stale_after_hours=stale_after_hours)
+        issues = tracker.get_stale_claims(
+            stale_after_hours=stale_after_hours,
+            expires_within_hours=expires_within_hours,
+        )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     return _text(_list_response([issue_to_public(issue) for issue in issues], has_more=False))
