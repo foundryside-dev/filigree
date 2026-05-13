@@ -34,6 +34,47 @@ from filigree.types.workflow import (
     TypeListItem,
 )
 
+_ENTITY_ID_TOOL_FIELDS: dict[str, set[str]] = {
+    "issue": {
+        "issue_id",
+        "issue_ids",
+        "from_issue_id",
+        "to_issue_id",
+        "parent_issue_id",
+        "milestone_id",
+        "phase_id",
+        "step_id",
+        "old_depends_on_id",
+        "new_depends_on_id",
+        "source_issue_id",
+    },
+    "observation": {"observation_id", "observation_ids"},
+    "scan_finding": {"finding_id", "finding_ids", "source_finding_id"},
+    "file_record": {"file_id", "file_ids"},
+    "annotation": {"annotation_id", "annotation_ids"},
+}
+
+
+def _tool_property_names(tool: Tool) -> set[str]:
+    schema = tool.inputSchema
+    if not isinstance(schema, dict):
+        return set()
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return set()
+    return {name for name in properties if isinstance(name, str)}
+
+
+def derive_entity_id_tool_acceptance(tools: list[Tool]) -> dict[str, list[str]]:
+    """Map each entity ID family to live tools that accept that family."""
+    accepted: dict[str, set[str]] = {entity: set() for entity in _ENTITY_ID_TOOL_FIELDS}
+    for tool in tools:
+        prop_names = _tool_property_names(tool)
+        for entity, fields in _ENTITY_ID_TOOL_FIELDS.items():
+            if prop_names & fields:
+                accepted[entity].add(tool.name)
+    return {entity: sorted(names) for entity, names in accepted.items()}
+
 
 def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
     """Return (tool_definitions, handler_map) for workflow-domain tools."""
@@ -193,10 +234,11 @@ async def _handle_get_workflow_statuses(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
+    from filigree.mcp_server import _all_tools, _get_db
 
     tracker = _get_db()
     prefix = tracker.prefix
+    accepted_by_entity = derive_entity_id_tool_acceptance(_all_tools)
     return _text(
         SchemaResponse(
             project_prefix=prefix,
@@ -206,91 +248,35 @@ async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
                     "prefix": f"{prefix}-",
                     "primary_key": "issue_id",
                     "example": f"{prefix}-<hash>",
-                    "accepted_by_tools": [
-                        "get_issue",
-                        "list_issues",
-                        "update_issue",
-                        "close_issue",
-                        "reopen_issue",
-                        "start_work",
-                        "claim_issue",
-                        "release_claim",
-                        "heartbeat_work",
-                        "get_stale_claims",
-                        "reclaim_issue",
-                        "add_comment",
-                        "get_comments",
-                        "add_label",
-                        "remove_label",
-                        "get_issue_events",
-                        "get_issue_files",
-                        "get_valid_transitions",
-                        "validate_issue",
-                        "add_dependency",
-                        "remove_dependency",
-                        "add_file_association",
-                        "get_issue_annotations",
-                        "list_attention_annotations",
-                    ],
+                    "accepted_by_tools": accepted_by_entity["issue"],
                 },
                 "observation": {
                     "entity": "observation",
                     "prefix": f"{prefix}-obs-",
                     "primary_key": "observation_id",
                     "example": f"{prefix}-obs-<hash>",
-                    "accepted_by_tools": [
-                        "dismiss_observation",
-                        "promote_observation",
-                        "batch_dismiss_observations",
-                        "batch_promote_observations",
-                    ],
+                    "accepted_by_tools": accepted_by_entity["observation"],
                 },
                 "scan_finding": {
                     "entity": "scan_finding",
                     "prefix": f"{prefix}-sf-",
                     "primary_key": "finding_id",
                     "example": f"{prefix}-sf-<hash>",
-                    "accepted_by_tools": [
-                        "get_finding",
-                        "update_finding",
-                        "batch_update_findings",
-                        "promote_finding",
-                        "dismiss_finding",
-                    ],
+                    "accepted_by_tools": accepted_by_entity["scan_finding"],
                 },
                 "file_record": {
                     "entity": "file_record",
                     "prefix": f"{prefix}-f-",
                     "primary_key": "file_id",
                     "example": f"{prefix}-f-<hash>",
-                    "accepted_by_tools": [
-                        "get_file",
-                        "delete_file_record",
-                        "get_file_timeline",
-                        "get_issue_files",
-                        "add_file_association",
-                        "list_findings",
-                        "list_observations",
-                        "annotate_file",
-                        "get_file_annotations",
-                    ],
+                    "accepted_by_tools": accepted_by_entity["file_record"],
                 },
                 "annotation": {
                     "entity": "annotation",
                     "prefix": f"{prefix}-ann-",
                     "primary_key": "annotation_id",
                     "example": f"{prefix}-ann-<hash>",
-                    "accepted_by_tools": [
-                        "get_annotation",
-                        "update_annotation",
-                        "resolve_annotation",
-                        "supersede_annotation",
-                        "promote_annotation",
-                        "carry_forward_annotation",
-                        "link_annotation",
-                        "unlink_annotation",
-                        "list_annotations",
-                    ],
+                    "accepted_by_tools": accepted_by_entity["annotation"],
                 },
             },
         )

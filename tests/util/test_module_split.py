@@ -1,5 +1,6 @@
 """Verify mixin-based FiligreeDB composition and MCP tool module split."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,16 @@ def test_mcp_tools_total_count() -> None:
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
     assert total == 105, f"Expected 105 tools total, got {total}"
+
+
+def test_mcp_docs_tool_count_matches_registry() -> None:
+    """docs/mcp.md headline count must match the live tool registry."""
+    from filigree.mcp_server import _all_tools
+
+    docs_text = Path("docs/mcp.md").read_text(encoding="utf-8")
+    match = re.search(r"server provides (\d+) tools", docs_text)
+    assert match is not None, "docs/mcp.md must include the MCP tool count"
+    assert int(match.group(1)) == len(_all_tools)
 
 
 def test_mcp_backward_compat_imports() -> None:

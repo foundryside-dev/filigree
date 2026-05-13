@@ -463,6 +463,10 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `explain_status` | Status transitions and required fields |
 | `reload_templates` | Refresh templates from disk |
 
+`get_schema.entity_id_prefixes.*.accepted_by_tools` is derived from the live MCP
+tool registry. The docs headline tool count is pinned by tests against the same
+registry so new tools cannot silently drift from the published reference.
+
 #### `get_type_info`
 
 Compatibility alias for `get_template`; returns the same canonical workflow definition.

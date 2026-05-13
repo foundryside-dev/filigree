@@ -1427,6 +1427,42 @@ class TestResource:
         assert "get_file" in prefixes["file_record"]["accepted_by_tools"]
         assert "delete_file_record" in prefixes["file_record"]["accepted_by_tools"]
 
+    async def test_get_schema_accepted_tools_are_derived_from_live_registry(self, mcp_db: FiligreeDB) -> None:
+        field_map = {
+            "issue": {
+                "issue_id",
+                "issue_ids",
+                "from_issue_id",
+                "to_issue_id",
+                "parent_issue_id",
+                "milestone_id",
+                "phase_id",
+                "step_id",
+                "old_depends_on_id",
+                "new_depends_on_id",
+                "source_issue_id",
+            },
+            "observation": {"observation_id", "observation_ids"},
+            "scan_finding": {"finding_id", "finding_ids", "source_finding_id"},
+            "file_record": {"file_id", "file_ids"},
+            "annotation": {"annotation_id", "annotation_ids"},
+        }
+        expected: dict[str, list[str]] = {entity: [] for entity in field_map}
+        for tool in await list_tools():
+            props = tool.inputSchema.get("properties", {}) if isinstance(tool.inputSchema, dict) else {}
+            prop_names = set(props) if isinstance(props, dict) else set()
+            for entity, fields in field_map.items():
+                if prop_names & fields:
+                    expected[entity].append(tool.name)
+
+        data = _parse(await call_tool("get_schema", {}))
+        actual = {
+            entity: schema["accepted_by_tools"]
+            for entity, schema in data["entity_id_prefixes"].items()
+        }
+
+        assert actual == {entity: sorted(set(tools)) for entity, tools in expected.items()}
+
     async def test_get_mcp_status_reports_compatible_database(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name for tool in await list_tools()}
         assert "get_mcp_status" in tools

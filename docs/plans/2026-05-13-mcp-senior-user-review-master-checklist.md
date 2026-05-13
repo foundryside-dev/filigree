@@ -153,13 +153,16 @@ product match those decisions.
   bracket/hyphen actor prefixes; changes support multi-value actor/type/category
   filters or sensible heartbeat separation.
 
-- [ ] **Keep MCP self-discovery and docs generated from the live registry.**
+- [x] **Keep MCP self-discovery and docs generated from the live registry.**
   Source: D/E/F/G schema drift findings, H11, G10.
   Tracker: `filigree-b48cd07e68` is open P2.
   Problem: `get_schema.entity_id_prefixes.*.accepted_by_tools`, docs, tool
   counts, and docstrings have repeatedly drifted from live tools.
   Ship criterion: generated docs/schema come from the tool registry, and tests
   pin key counts and accepted-by-tool mappings.
+  Resolution: `get_schema.entity_id_prefixes.*.accepted_by_tools` is now
+  derived from the live MCP tool registry input schemas, and docs/tool-count
+  drift is pinned by a registry-backed test against `docs/mcp.md`.
 
 - [ ] **Finish ID and relationship naming consistency.**
   Source: A2/A15, B4/B17, C4, D9/D14, E15, G6/G10.
