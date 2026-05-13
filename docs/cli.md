@@ -1014,6 +1014,7 @@ filigree trigger-scan-batch <scanner> <file1> <file2>
 filigree get-scan-status <scan-run-id>
 filigree preview-scan <scanner> <file-path>
 filigree report-finding --file finding.json
+filigree report-finding --file finding.json --create-observation
 cat finding.json | filigree report-finding   # Read from stdin
 ```
 
@@ -1061,12 +1062,13 @@ Preview the shell command a scanner would run (without executing it).
 
 ### `report-finding`
 
-Ingest a finding in loom-shape JSON format. Reads from stdin by default; `--file` overrides. This agent-shortcut path also creates an observation for triage, so JSON output includes `observations_created`, `observations_failed`, `observation_ids`, and `observation_id` when one was created.
+Ingest a finding in loom-shape JSON format. Reads from stdin by default; `--file` overrides. This agent-shortcut path writes a single finding by default. Use `--create-observation` to also create a linked triage observation; full JSON output then includes `observations_created`, `observations_failed`, `observation_ids`, and `observation_id` when one was created.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `--file` | path | JSON finding file (optional; reads from stdin if omitted) |
 | `--api-url` | string | Dashboard URL override |
+| `--create-observation` | flag | Also create a linked triage observation |
 
 ## Data Management
 

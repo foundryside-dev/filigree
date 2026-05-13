@@ -330,9 +330,9 @@ class TestReportFindingCommand:
             assert data["findings_created"] == 1
             assert data["file_created"] is True
             assert "finding_id" in data
-            assert data["observations_created"] == 1
-            assert isinstance(data["observation_id"], str)
-            assert data["observation_ids"] == [data["observation_id"]]
+            assert data["observations_created"] == 0
+            assert "observation_id" not in data
+            assert data["observation_ids"] == []
         finally:
             os.chdir(original)
 
@@ -345,10 +345,10 @@ class TestReportFindingCommand:
             result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            # Slim keeps status / finding_id / observation_id.
+            # Slim keeps status / finding_id only; paired observations are opt-in.
             assert data["status"] == "created"
             assert "finding_id" in data
-            assert "observation_id" in data
+            assert "observation_id" not in data
             # And drops the batch ingest stats.
             for noisy in (
                 "findings_created",
@@ -374,6 +374,24 @@ class TestReportFindingCommand:
             data = json.loads(result.output)
             assert _REPORT_FINDING_KEYS.issubset(set(data.keys()))
             assert data["findings_created"] == 1
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_create_observation_opt_in(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full", "--create-observation"],
+                input=_REPORT_FINDING_JSON,
+            )
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["observations_created"] == 1
+            assert isinstance(data["observation_id"], str)
+            assert data["observation_ids"] == [data["observation_id"]]
         finally:
             os.chdir(original)
 

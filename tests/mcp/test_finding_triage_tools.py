@@ -78,7 +78,7 @@ class TestListFindingsTool:
 
 
 class TestReportFindingTool:
-    async def test_report_finding_returns_created_observation_id(self, mcp_db: FiligreeDB) -> None:
+    async def test_report_finding_default_does_not_create_observation(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
                 "report_finding",
@@ -89,6 +89,28 @@ class TestReportFindingTool:
                     "severity": "medium",
                     "line_start": 7,
                     "response_detail": "full",
+                },
+            )
+        )
+
+        observations = mcp_db.list_observations(file_path="src/report_target.py")
+        assert observations == []
+        assert data["observations_created"] == 0
+        assert "observation_id" not in data
+        assert data["observation_ids"] == []
+
+    async def test_report_finding_can_create_observation_when_requested(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/report_target.py",
+                    "rule_id": "agent-noted-risk",
+                    "message": "Agent spotted a follow-up risk",
+                    "severity": "medium",
+                    "line_start": 7,
+                    "response_detail": "full",
+                    "create_observation": True,
                 },
             )
         )

@@ -629,8 +629,8 @@ class TestReportFindingTool:
     async def test_slim_default_drops_batch_stats(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """Default response_detail='slim' drops batch-ingest stats keys (F3 — review-h).
 
-        Slim keeps the flat ScanFinding + finding_result + observation_id (when
-        a paired observation was created); 'full' adds findings_created etc.
+        Slim keeps the flat ScanFinding + finding_result; 'full' adds
+        findings_created etc. Paired observations are explicit opt-in.
         """
         slim = _parse(
             await call_tool(
@@ -644,7 +644,7 @@ class TestReportFindingTool:
         )
         assert slim["finding_result"] == "created"
         assert "finding_id" in slim
-        assert "observation_id" in slim  # paired observation auto-created by default
+        assert "observation_id" not in slim
         for noisy in (
             "findings_created",
             "findings_updated",
@@ -655,10 +655,8 @@ class TestReportFindingTool:
         ):
             assert noisy not in slim, f"slim response unexpectedly carries {noisy!r}"
 
-    async def test_create_observation_false_skips_pairing(self, mcp_db_for_report_finding: FiligreeDB) -> None:
-        """When create_observation=false, the paired observation is not auto-created
-        and observation_id is absent from the response (F3 — review-h).
-        """
+    async def test_default_skips_pairing(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """By default, report_finding creates only the finding (ADR-007)."""
         data = _parse(
             await call_tool(
                 "report_finding",
@@ -666,7 +664,6 @@ class TestReportFindingTool:
                     "file_path": "src/no-obs.py",
                     "rule_id": "no-obs-rule",
                     "message": "Finding without paired observation",
-                    "create_observation": False,
                 },
             )
         )
@@ -691,6 +688,7 @@ class TestReportFindingTool:
                     "rule_id": "actor-rule",
                     "message": "Finding with explicit actor",
                     "actor": "my-agent-007",
+                    "create_observation": True,
                 },
             )
         )
@@ -714,6 +712,7 @@ class TestReportFindingTool:
                     "rule_id": "review-d-link",
                     "message": "Linked observation",
                     "response_detail": "full",
+                    "create_observation": True,
                 },
             )
         )
@@ -738,6 +737,7 @@ class TestReportFindingTool:
                     "rule_id": "review-d-dismiss",
                     "message": "Will be dismissed",
                     "response_detail": "full",
+                    "create_observation": True,
                 },
             )
         )
@@ -770,6 +770,7 @@ class TestReportFindingTool:
                     "rule_id": "review-d-promote",
                     "message": "Will be promoted",
                     "response_detail": "full",
+                    "create_observation": True,
                 },
             )
         )

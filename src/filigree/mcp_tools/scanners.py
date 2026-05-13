@@ -71,9 +71,9 @@ def register(
                 "Auto-registers the file if not already tracked. No scanner config needed — "
                 "one call, one finding, zero ceremony. Returns the flat ScanFinding record plus "
                 "an ``observation_id`` when a paired triage observation was created. "
-                "**Side effect:** by default a paired observation is auto-created so the finding "
-                "shows up in ``list_observations`` for triage; pass ``create_observation=false`` "
-                "to skip. Pass ``actor`` to attribute the report to a specific agent identity "
+                "Paired observations are explicit: pass ``create_observation=true`` when the "
+                "finding should also show up in ``list_observations`` for triage. Pass ``actor`` "
+                "to attribute the report to a specific agent identity "
                 "(otherwise the observation is recorded as ``scanner:agent``). "
                 "Pass ``response_detail='full'`` for the legacy batch-style stats "
                 "(``findings_created`` / ``findings_updated`` / ``file_created`` / "
@@ -104,12 +104,11 @@ def register(
                     },
                     "create_observation": {
                         "type": "boolean",
-                        "default": True,
+                        "default": False,
                         "description": (
-                            "When true (default), a paired observation is auto-created so the "
-                            "finding shows up in ``list_observations`` for triage. Set false to "
-                            "skip — promote_finding / dismiss_finding then have nothing to clean "
-                            "up on the observation side."
+                            "When true, explicitly create a paired observation so the finding "
+                            "shows up in ``list_observations`` for triage. Default false creates "
+                            "only the finding."
                         ),
                     },
                     "response_detail": {
@@ -352,7 +351,7 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
 
     actor_raw = args.get("actor", "")
     actor = actor_raw.strip() if isinstance(actor_raw, str) else ""
-    create_observation = args.get("create_observation", True)
+    create_observation = args.get("create_observation", False)
     if not isinstance(create_observation, bool):
         return _text(ErrorResponse(error="'create_observation' must be a boolean", code=ErrorCode.VALIDATION))
     response_detail_raw = args.get("response_detail", "slim")

@@ -76,7 +76,7 @@ product match those decisions.
   deferred by ADR-011, so session cleanup is represented through actor/source
   issue filters and explicit batch triage.
 
-- [ ] **Make `report_finding` side effects explicit, traceable, and slim.**
+- [x] **Make `report_finding` side effects explicit, traceable, and slim.**
   Source: D2, E1, F3, G5, H3, H12.
   Decision: [ADR-007](../architecture/decisions/ADR-007-report-finding-semantics.md)
   defines `report_finding` as a manual single-finding write by default, with
@@ -93,6 +93,10 @@ product match those decisions.
   opt-in or otherwise explicitly requested, keep linked observation cleanup
   transactional, and return a slim finding result plus optional
   `observation_id`.
+  Resolution: `report_finding` now writes only a finding by default. Paired
+  observations require `create_observation=true` in MCP or
+  `--create-observation` in CLI, actor attribution is preserved for opted-in
+  observations, and the default response remains slim.
 
 - [ ] **Define the end-of-session cleanup story for mixed-type scratch work.**
   Source: E3, F2/F6, H1, H4.

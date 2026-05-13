@@ -636,13 +636,20 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
 @click.option(
     "--actor",
     default="",
-    help="Agent identity for the paired observation (default: scanner:agent)",
+    help="Agent identity for the paired observation when --create-observation is used.",
+)
+@click.option(
+    "--create-observation",
+    "create_observation",
+    is_flag=True,
+    help="Also create a paired observation for triage.",
 )
 @click.option(
     "--no-observation",
     "no_observation",
     is_flag=True,
-    help="Skip auto-creating a paired observation for triage.",
+    hidden=True,
+    help="Deprecated no-op; report-finding no longer creates observations by default.",
 )
 @click.option(
     "--response-detail",
@@ -652,15 +659,22 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
     help="'slim' (default) drops batch-ingest stats; 'full' keeps the legacy keys.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def report_finding_cmd(file_path: str | None, actor: str, no_observation: bool, response_detail: str, as_json: bool) -> None:
+def report_finding_cmd(
+    file_path: str | None,
+    actor: str,
+    create_observation: bool,
+    no_observation: bool,
+    response_detail: str,
+    as_json: bool,
+) -> None:
     """Report a single code finding (bug, smell, security issue) from JSON via stdin or --file.
 
     The JSON must be an object with at minimum: path, rule_id, message.
     Optional fields: severity (default: info), line_start, line_end, category.
 
-    By default a paired observation is auto-created so the finding shows up in
-    list-observations for triage. Pass ``--no-observation`` to skip. Pass
-    ``--actor`` to attribute the report to a specific agent identity.
+    By default only the finding is written. Pass ``--create-observation`` to
+    also create a paired observation for list-observations triage. Pass
+    ``--actor`` to attribute that observation to a specific agent identity.
     """
     # Resolve the project up front so a foreign-database refusal surfaces as
     # NOT_INITIALIZED rather than getting masked by a downstream --file path
@@ -765,14 +779,14 @@ def report_finding_cmd(file_path: str | None, actor: str, no_observation: bool, 
         finding_record["metadata"] = {"category": finding["category"]}
 
     observation_ids: list[str] = []
-    create_observation = not no_observation
+    create_paired_observation = create_observation and not no_observation
     with get_db() as tracker:
         try:
             result = tracker.process_scan_results(
                 scan_source="agent",
                 findings=[finding_record],
                 scan_run_id="",
-                create_observations=create_observation,
+                create_observations=create_paired_observation,
                 observation_actor=actor.strip(),
             )
         except ValueError as exc:
@@ -787,7 +801,7 @@ def report_finding_cmd(file_path: str | None, actor: str, no_observation: bool, 
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
         file_record = tracker.register_file(finding_record["path"])
-        if create_observation and result["new_finding_ids"]:
+        if create_paired_observation and result["new_finding_ids"]:
             observation_ids = _report_finding_observation_ids(
                 tracker,
                 file_id=file_record.id,

@@ -12,20 +12,18 @@ analysis, not a new product decision pass.
 ## Executive Summary
 
 Several checklist items are implemented but still unchecked in the master list.
-The remaining high-risk gaps are concentrated in four places:
+The remaining high-risk gaps are concentrated in two places:
 
-1. Strict unknown MCP parameter rejection is not implemented.
-2. ADR-008 claim-aware write defaults are not implemented; claim checks remain
+1. ADR-008 claim-aware write defaults are not implemented; claim checks remain
    opt-in through `expected_assignee`.
-3. `report_finding` still auto-creates paired observations by default, contrary
-   to ADR-007.
-4. MCP self-discovery/schema metadata is still hand-maintained rather than
+2. MCP self-discovery/schema metadata is still hand-maintained rather than
    generated from the live tool registry.
 
 The strongest completed areas are schema-mismatch fail-closed behavior,
 stale-claim discovery and `release_my_claims`, archived-status hydration,
 file-timeline issue events, `get_summary(format="json")`, observation list
-filters, and stats field normalization.
+filters, stats field normalization, strict unknown MCP parameter rejection, and
+ADR-007 `report_finding` default side-effect behavior.
 
 ## Status Key
 
@@ -41,7 +39,7 @@ filters, and stats field normalization.
 | Strict unknown MCP parameter rejection | Done | `call_tool()` now derives accepted parameter names from each registered tool's `inputSchema.properties` and rejects unknown keys before handler dispatch (`src/filigree/mcp_server.py`). Regression coverage in `tests/mcp/test_boundary_validation.py` verifies single and multiple unknown keys return `ErrorResponse(code=VALIDATION)` naming the tool and bad parameter(s), while unknown tools still return `NOT_FOUND`. | None. |
 | Schema-mismatch hard stop and binary diagnostics | Partial, mostly done | MCP degraded mode short-circuits all normal calls except `get_mcp_status` to `SCHEMA_MISMATCH` (`src/filigree/mcp_server.py:453`). Runtime drift is rechecked on every call (`src/filigree/mcp_server.py:475`). Tests cover warm degraded mode and structured errors (`tests/test_schema_mismatch.py:111`). `get_mcp_status_payload()` includes schema versions and `filigree_dir` (`src/filigree/mcp_server.py:159`). | Add binary/path/source diagnostics for the actual executing binary or venv/tool install pair. Current diagnostic does not identify the executable that produced the warning. |
 | Observation triage and session cleanup filters | Done for 2.0 scope | MCP/CLI list filters now cover actor, file, source issue, priority, age, sort, and direction (`src/filigree/mcp_tools/observations.py`; `src/filigree/cli_commands/observations.py`). Schema v13 adds durable `observation_links` snapshots. Core/MCP/CLI expose `link_observation`, `batch_link_observations`, and `promote_observations_to_issue`, with regression coverage in `tests/core/test_observations.py`, `tests/mcp/test_observations.py`, and `tests/cli/test_observations_commands.py`. | Future first-class session/run IDs remain deferred by ADR-011; filter-by-session should be revisited if that model lands. |
-| `report_finding` side effects explicit, traceable, slim | Partial, ADR mismatch remains | The surface documents the side effect, has `actor`, `response_detail`, and `observation_id` (`src/filigree/mcp_tools/scanners.py:68`). But `create_observation` defaults to `True` in schema and handler (`src/filigree/mcp_tools/scanners.py:105`; `src/filigree/mcp_tools/scanners.py:355`), and CLI help says a paired observation is auto-created by default. Linked-observation cleanup exists on finding terminal status or promotion (`src/filigree/db_files.py:1059`). | Flip paired observation creation to explicit opt-in, or revise ADR/checklist. Preserve slim response and actor attribution. |
+| `report_finding` side effects explicit, traceable, slim | Done | MCP and CLI now default to a slim single-finding response. Paired observation creation is explicit opt-in via `create_observation=true` or `--create-observation`; actor attribution is preserved for opted-in observations; linked-observation cleanup still follows finding terminal status or promotion (`src/filigree/mcp_tools/scanners.py`; `src/filigree/cli_commands/scanners.py`; `src/filigree/db_files.py`). Focused coverage lives in `tests/api/test_scanner_tools.py`, `tests/mcp/test_finding_triage_tools.py`, and `tests/cli/test_scanners_commands.py`. | None. |
 | End-of-session cleanup story for mixed scratch work | Partial | `release_my_claims` exists with actor, label, label-prefix, dry-run, revert-status, and reason (`src/filigree/db_issues.py:1225`; `uv run filigree release-my-claims --help`). `archive` exists with age and label scoping (`uv run filigree archive --help`) and has a tight-window guard in MCP (`src/filigree/mcp_tools/meta.py:867`). | Cleanup is fragmented across release claims, archive, batch observation operations, clean-stale-findings, and delete-file-record. There is no single documented session cleanup recipe spanning claims, observations, findings, files, and scratch issues. |
 | Stale-claim and handoff discovery | Done, with one P3 extension left | `get_stale_claims` selects assigned non-done issues and respects claim expiry (`src/filigree/db_issues.py:1371`). `release_my_claims` discovers live claims by actor and skips done-category issues (`src/filigree/db_issues.py:1235`). CLI exposes both `get-stale-claims` and `release-my-claims`. | Only the proactive near-expiry extension remains (`expires_within_hours`), tracked as P3 polish. |
 
@@ -104,7 +102,7 @@ Keep as active gaps:
 - Strict unknown MCP parameter rejection. **Resolved 2026-05-14:** dispatcher-level registry-derived validation now rejects unknown keys before handler dispatch.
 - Schema-mismatch binary diagnostics.
 - Observation duplicate/link/merge dispositions. **Resolved 2026-05-14:** `observation_links`, `link_observation`, `batch_link_observations`, and `promote_observations_to_issue` landed with CLI/MCP/docs/tests.
-- ADR-007 `report_finding` default side effect change.
+- ADR-007 `report_finding` default side effect change. **Resolved 2026-05-14:** paired observation creation is explicit opt-in and default responses remain slim.
 - Mixed scratch cleanup documentation/orchestration.
 - ADR-008 actor-as-default claim-aware writes.
 - CLI parity for `get_changes` filters.

@@ -705,7 +705,7 @@ Relationships are `relevant_to`, `must_consider`, `evidence_for`, `explains`,
 | `trigger_scan_batch` | Trigger a scanner across multiple files in one call |
 | `get_scan_status` | Live status + log tail for a `scan_run_id` |
 | `preview_scan` | Preview the command a scan would execute, without spawning a process |
-| `report_finding` | Report a single agent-discovered finding and disclose any triage observation it creates |
+| `report_finding` | Report a single agent-discovered finding, with explicit opt-in paired observation creation |
 
 #### `list_scanners`
 
@@ -760,12 +760,16 @@ Returns the exact command that *would* be executed, without spawning anything. U
 | `line_start` | integer | no | Start line (≥ 1) |
 | `line_end` | integer | no | End line (≥ 1) |
 | `category` | string | no | Optional grouping category |
+| `actor` | string | no | Agent identity for paired observation attribution |
+| `create_observation` | boolean | no | Create a linked triage observation (default `false`) |
+| `response_detail` | enum | no | `slim` (default) or `full` |
 
 The agent-shortcut path: report a finding without standing up a scanner config.
-Auto-registers the file if needed. Because this path also creates an
-observation for triage, the response includes `observations_created`,
-`observations_failed`, `observation_ids`, and `observation_id` when one was
-created.
+Auto-registers the file if needed. By default the response is a slim single
+finding result with no batch counters. Pass `create_observation=true` to also
+create a linked triage observation; full responses then include
+`observations_created`, `observations_failed`, `observation_ids`, and
+`observation_id` when one was created.
 
 **Workflow:**
 1. `list_scanners` — discover available scanners
