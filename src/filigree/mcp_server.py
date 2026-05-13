@@ -264,6 +264,33 @@ _all_tools.extend(_tools)
 _all_handlers.update(_handlers)
 
 
+def _allowed_tool_arguments(tool: Tool) -> set[str]:
+    schema = tool.inputSchema
+    if not isinstance(schema, dict):
+        return set()
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return set()
+    return {key for key in properties if isinstance(key, str)}
+
+
+_tool_argument_names: dict[str, set[str]] = {tool.name: _allowed_tool_arguments(tool) for tool in _all_tools}
+
+
+def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse | None:
+    if not isinstance(arguments, dict):
+        return ErrorResponse(error=f"Arguments for {tool_name} must be an object", code=ErrorCode.VALIDATION)
+    allowed = _tool_argument_names.get(tool_name, set())
+    unknown = sorted(key for key in arguments if isinstance(key, str) and key not in allowed)
+    if not unknown:
+        return None
+    unknown_label = ", ".join(unknown)
+    return ErrorResponse(
+        error=f"Unknown parameter(s) for {tool_name}: {unknown_label}",
+        code=ErrorCode.VALIDATION,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
@@ -494,6 +521,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         from filigree.mcp_tools.common import _text as _common_text
 
         return _common_text({"error": f"Unknown tool: {name}", "code": ErrorCode.NOT_FOUND})
+    unknown_argument_error = _unknown_argument_error(name, arguments)
+    if unknown_argument_error is not None:
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text(unknown_argument_error)
 
     # Serialise tool execution per-DB. The MCP SDK dispatches tool calls
     # concurrently; the shared ``sqlite3.Connection`` on ``FiligreeDB`` has

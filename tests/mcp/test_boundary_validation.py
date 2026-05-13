@@ -23,6 +23,31 @@ class TestMCPActorValidation:
         assert data["code"] == ErrorCode.VALIDATION
         assert "control" in data["error"].lower()
 
+
+class TestMCPUnknownParameterValidation:
+    async def test_unknown_parameter_rejected_before_handler(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("create_issue", {"title": "Test", "priority_min": 1})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "create_issue" in data["error"]
+        assert "priority_min" in data["error"]
+
+    async def test_multiple_unknown_parameters_are_named(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("list_issues", {"limit": 5, "priority_min": 1, "include_files": True})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "list_issues" in data["error"]
+        assert "include_files" in data["error"]
+        assert "priority_min" in data["error"]
+
+    async def test_unknown_parameter_does_not_mask_unknown_tool(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("not_a_tool", {"surprise": True})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.NOT_FOUND
+
     async def test_create_issue_strips_actor(self, mcp_db: FiligreeDB) -> None:
         """Valid actor with whitespace should succeed (stripped)."""
         result = await call_tool("create_issue", {"title": "Stripped", "actor": "  bot  "})

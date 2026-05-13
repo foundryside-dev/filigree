@@ -30,7 +30,7 @@ product match those decisions.
 
 ### P1 - must implement or explicitly defer
 
-- [ ] **Implement strict unknown MCP parameter rejection.**
+- [x] **Implement strict unknown MCP parameter rejection.**
   Source: G1.
   Decision: [ADR-006](../architecture/decisions/ADR-006-mcp-unknown-parameter-validation.md)
   chooses strict `VALIDATION` errors for unknown MCP parameters.
@@ -41,6 +41,10 @@ product match those decisions.
   soft-warning compromise.
   Ship criterion: every MCP tool rejects unknown parameters with `VALIDATION`,
   naming the unknown parameter and target tool.
+  Resolution: `call_tool()` now validates arguments against the registered
+  tool schema before handler dispatch, returning `VALIDATION` with the target
+  tool and unknown key names. Regression coverage pins single-key,
+  multi-key, and unknown-tool precedence behavior.
 
 - [ ] **Implement schema-mismatch hard stop and binary diagnostics.**
   Source: E5, F1, H18, plus earlier A17/C7.
