@@ -222,12 +222,12 @@ product match those decisions.
   transition readiness fields have a single documented meaning and regression
   coverage.
 
-- [ ] **Resolve archive and done-status model consistently.**
+- [x] **Resolve archive and done-status model consistently.**
   Source: E10, G3, G4, H1, H18.
   Decision: [ADR-010](../architecture/decisions/ADR-010-archived-status-model.md)
   defines archived work as outside active workflow and never ready/open in
   public behavior.
-  Tracker: `filigree-aec52efb9b` is open P2.
+  Tracker: `filigree-aec52efb9b` is closed.
   Problem: archived items have appeared as open/ready in record hydration while
   query surfaces special-case them; cleanup and stale-claim tools need a clear
   done/archived category model.
@@ -236,6 +236,11 @@ product match those decisions.
   Ship criterion: archived records are excluded from active ready/blocked/search
   and stale-claim discovery by default, record hydration never reports them as
   open/ready, and stats/filtering expose archived state consistently.
+  Resolution: archived records resolve to `status_category="done"` for public
+  hydration and stats, archived blockers do not keep dependents blocked, and
+  stale-claim discovery excludes done-category rows. Raw unfiltered search
+  remains an all-history lookup by design; live-work search uses
+  `status_category="open"` and excludes archived history at the DB layer.
 
 - [ ] **Improve plan-editing and plan-read ergonomics.**
   Source: A6/A7, B8, D16/D18, E20/E21, G6/G7/G9, H9.
