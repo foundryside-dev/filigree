@@ -12,6 +12,12 @@ from filigree.cli import cli
 from filigree.cli_common import get_db
 
 
+def _assert_validation_envelope(output: str) -> None:
+    data = json.loads(output)
+    assert data["code"] == "VALIDATION"
+    assert data["error"]
+
+
 def test_annotate_list_get_and_resolve_json(initialized_project: Path) -> None:
     runner = CliRunner()
     source = initialized_project / "src" / "cli_ann.py"
@@ -55,6 +61,27 @@ def test_annotate_list_get_and_resolve_json(initialized_project: Path) -> None:
         )
         assert resolved.exit_code == 0, resolved.output
         assert json.loads(resolved.output)["status"] == "resolved"
+    finally:
+        os.chdir(original)
+
+
+def test_annotation_cli_invalid_options_emit_json_envelopes(initialized_project: Path) -> None:
+    runner = CliRunner()
+    original = os.getcwd()
+    os.chdir(initialized_project)
+    try:
+        cases = [
+            ["annotate-file", "x.py", "note", "--intent", "bad", "--json"],
+            ["list-annotations", "--limit", "0", "--json"],
+            ["list-annotations", "--offset", "-1", "--json"],
+            ["list-annotations", "--status", "bad", "--json"],
+            ["get-annotation", "test-ann-missing", "--detail", "bad", "--json"],
+        ]
+
+        for args in cases:
+            result = runner.invoke(cli, args)
+            assert result.exit_code == 1, f"{args}: {result.output}"
+            _assert_validation_envelope(result.output)
     finally:
         os.chdir(original)
 

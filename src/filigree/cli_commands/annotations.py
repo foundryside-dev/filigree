@@ -17,6 +17,8 @@ from filigree.core import (
 )
 from filigree.types.api import ErrorCode
 
+_ANCHOR_STATES = ("current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing")
+
 
 def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> None:
     if as_json:
@@ -26,11 +28,22 @@ def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> None:
     sys.exit(1)
 
 
-def _annotation_detail(value: str, *, as_json: bool) -> str:
-    if value in {"summary", "full"}:
+def _validate_choice(value: str | None, name: str, choices: set[str] | frozenset[str] | tuple[str, ...], *, as_json: bool) -> str | None:
+    if value is None or value in choices:
         return value
-    _emit_error("detail must be 'summary' or 'full'", ErrorCode.VALIDATION, as_json=as_json)
+    _emit_error(f"{name} must be one of: {', '.join(sorted(choices))}", ErrorCode.VALIDATION, as_json=as_json)
     raise AssertionError("unreachable")
+
+
+def _validate_min_int(value: int, name: str, minimum: int, *, as_json: bool) -> int:
+    if value >= minimum:
+        return value
+    _emit_error(f"{name} must be >= {minimum}, got {value}", ErrorCode.VALIDATION, as_json=as_json)
+    raise AssertionError("unreachable")
+
+
+def _annotation_detail(value: str, *, as_json: bool) -> str:
+    return _validate_choice(value, "detail", ("summary", "full"), as_json=as_json) or "summary"
 
 
 def _parse_links(raw_links: tuple[str, ...], *, as_json: bool) -> list[dict[str, str]]:
@@ -62,7 +75,7 @@ def _handle_annotation_exception(exc: Exception, *, as_json: bool) -> None:
 @click.option("--line", "line_start", default=None, type=int, help="1-based line number")
 @click.option("--line-end", default=None, type=int, help="1-based ending line number")
 @click.option("--context-summary", default="", help="What you were doing when making the note")
-@click.option("--intent", default="breadcrumb", type=click.Choice(sorted(VALID_ANNOTATION_INTENTS)))
+@click.option("--intent", default="breadcrumb")
 @click.option("--critical", is_flag=True, help="Mark as critical attention context")
 @click.option("--link", "links", multiple=True, help="target_type:target_id:relationship")
 @click.option("--session-ref", default="", help="Opaque session/run provenance")
@@ -82,6 +95,7 @@ def annotate_file_cmd(
     as_json: bool,
 ) -> None:
     """Create a shared annotation on a project file."""
+    intent = _validate_choice(intent, "intent", VALID_ANNOTATION_INTENTS, as_json=as_json) or "breadcrumb"
     parsed_links = _parse_links(links, as_json=as_json)
     with get_db() as db:
         try:
@@ -110,21 +124,17 @@ def annotate_file_cmd(
 @click.option("--file", "file_path", default=None, help="Filter by file path")
 @click.option("--file-id", default=None, help="Filter by file ID")
 @click.option("--issue-id", default=None, help="Filter by linked issue ID")
-@click.option("--target-type", default=None, type=click.Choice(sorted(VALID_ANNOTATION_TARGET_TYPES)))
+@click.option("--target-type", default=None)
 @click.option("--target-id", default=None)
-@click.option("--relationship", default=None, type=click.Choice(sorted(VALID_ANNOTATION_RELATIONSHIPS)))
+@click.option("--relationship", default=None)
 @click.option("--actor", default=None)
-@click.option("--intent", default=None, type=click.Choice(sorted(VALID_ANNOTATION_INTENTS)))
+@click.option("--intent", default=None)
 @click.option("--critical/--not-critical", default=None)
-@click.option("--status", default=None, type=click.Choice(sorted(VALID_ANNOTATION_STATUSES)))
-@click.option(
-    "--anchor-state",
-    default=None,
-    type=click.Choice(["current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing"]),
-)
-@click.option("--detail", default="summary", type=click.Choice(["summary", "full"]))
-@click.option("--limit", default=100, type=click.IntRange(min=1))
-@click.option("--offset", default=0, type=click.IntRange(min=0))
+@click.option("--status", default=None)
+@click.option("--anchor-state", default=None)
+@click.option("--detail", default="summary")
+@click.option("--limit", default=100, type=int)
+@click.option("--offset", default=0, type=int)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def list_annotations_cmd(
     file_path: str | None,
@@ -144,6 +154,14 @@ def list_annotations_cmd(
     as_json: bool,
 ) -> None:
     """List annotations."""
+    target_type = _validate_choice(target_type, "target_type", VALID_ANNOTATION_TARGET_TYPES, as_json=as_json)
+    relationship = _validate_choice(relationship, "relationship", VALID_ANNOTATION_RELATIONSHIPS, as_json=as_json)
+    intent = _validate_choice(intent, "intent", VALID_ANNOTATION_INTENTS, as_json=as_json)
+    status = _validate_choice(status, "status", VALID_ANNOTATION_STATUSES, as_json=as_json)
+    anchor_state = _validate_choice(anchor_state, "anchor_state", _ANCHOR_STATES, as_json=as_json)
+    detail = _annotation_detail(detail, as_json=as_json)
+    limit = _validate_min_int(limit, "limit", 1, as_json=as_json)
+    offset = _validate_min_int(offset, "offset", 0, as_json=as_json)
     with get_db() as db:
         try:
             result = db.list_annotations(
@@ -158,7 +176,7 @@ def list_annotations_cmd(
                 critical=critical,
                 status=status,
                 anchor_state=anchor_state,
-                response_detail=_annotation_detail(detail, as_json=as_json),
+                response_detail=detail,
                 limit=limit,
                 offset=offset,
             )
@@ -175,13 +193,14 @@ def list_annotations_cmd(
 
 @click.command("get-annotation")
 @click.argument("annotation_id")
-@click.option("--detail", default="full", type=click.Choice(["summary", "full"]))
+@click.option("--detail", default="full")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def get_annotation_cmd(annotation_id: str, detail: str, as_json: bool) -> None:
     """Get an annotation."""
+    detail = _annotation_detail(detail, as_json=as_json)
     with get_db() as db:
         try:
-            annotation = db.get_annotation(annotation_id, response_detail=_annotation_detail(detail, as_json=as_json))
+            annotation = db.get_annotation(annotation_id, response_detail=detail)
         except (KeyError, ValueError, sqlite3.Error) as exc:
             _handle_annotation_exception(exc, as_json=as_json)
         if as_json:
