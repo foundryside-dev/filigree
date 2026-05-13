@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import math
 import os
 import shlex
 import socket
@@ -58,13 +59,12 @@ def _tokens_contain_args(tokens: list[str], required_args: tuple[str, ...]) -> b
     return False
 
 
-def _matches_expected_process(tokens: list[str], *, expected_cmd: str, required_args: tuple[str, ...] = ()) -> bool:
-    """Return True when argv tokens identify the expected process shape."""
+def _expected_process_arg_candidates(tokens: list[str], *, expected_cmd: str) -> list[list[str]]:
+    """Return argv tails that follow a matching expected process command."""
     if not tokens:
-        return False
+        return []
 
     expected = expected_cmd.lower()
-    required_args = tuple(arg.strip().lower() for arg in required_args)
     candidates: list[list[str]] = []
 
     executable = Path(tokens[0]).name.lower()
@@ -84,6 +84,32 @@ def _matches_expected_process(tokens: list[str], *, expected_cmd: str, required_
             if first_arg == expected or first_arg_stem == expected:
                 candidates.append(tokens[2:])
 
+    return candidates
+
+
+def _effective_option_value(tokens: list[str], option: str) -> str | None:
+    """Return the last value for a repeated argv option, matching common CLI parsing."""
+    option_lower = option.lower()
+    prefix = f"{option_lower}="
+    effective: str | None = None
+    i = 0
+    while i < len(tokens):
+        token = tokens[i].strip()
+        lowered = token.lower()
+        if lowered == option_lower:
+            effective = tokens[i + 1].strip() if i + 1 < len(tokens) else None
+            i += 2
+            continue
+        if lowered.startswith(prefix):
+            effective = token[len(option) + 1 :].strip()
+        i += 1
+    return effective
+
+
+def _matches_expected_process(tokens: list[str], *, expected_cmd: str, required_args: tuple[str, ...] = ()) -> bool:
+    """Return True when argv tokens identify the expected process shape."""
+    required_args = tuple(arg.strip().lower() for arg in required_args)
+    candidates = _expected_process_arg_candidates(tokens, expected_cmd=expected_cmd)
     return any(_tokens_contain_args(candidate, required_args) for candidate in candidates)
 
 
@@ -219,9 +245,14 @@ def read_pid_file(pid_file: Path) -> PidInfo | None:
                 raw_ts = data.get("startup_ts")
                 if raw_ts is not None:
                     try:
-                        info["startup_ts"] = float(raw_ts)
+                        startup_ts = float(raw_ts)
                     except (TypeError, ValueError):
                         logger.debug("PID file %s: ignoring non-numeric startup_ts %r", pid_file, raw_ts)
+                    else:
+                        if math.isfinite(startup_ts):
+                            info["startup_ts"] = startup_ts
+                        else:
+                            logger.debug("PID file %s: ignoring non-finite startup_ts %r", pid_file, raw_ts)
                 return info
             # Valid JSON but wrong shape — don't fall through to legacy parser
             if isinstance(data, dict):
@@ -359,6 +390,12 @@ def verify_pid_ownership(
     # is_pid_alive() then reading cmdline in separate steps.
     tokens = _read_os_command_line(info["pid"])
     if tokens:
+        if isinstance(recorded_port, int) and recorded_port > 0:
+            required_lower = tuple(arg.strip().lower() for arg in required_args)
+            for candidate in _expected_process_arg_candidates(tokens, expected_cmd=expected_cmd):
+                if _tokens_contain_args(candidate, required_lower) and _effective_option_value(candidate, "--port") == str(recorded_port):
+                    return True
+            return False
         return _matches_expected_process(tokens, expected_cmd=expected_cmd, required_args=effective_required)
 
     # Cmdline unreadable — process may be dead or in a constrained environment.

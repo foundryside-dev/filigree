@@ -266,6 +266,15 @@ class TestPidLifecycle:
         assert info["pid"] == 1234
         assert "port" not in info, "float port must not be silently truncated"
 
+    def test_read_pid_ignores_non_finite_startup_ts(self, tmp_path: Path) -> None:
+        """Non-finite startup_ts must not keep dead dashboards in startup grace forever."""
+        pid_file = tmp_path / "ephemeral.pid"
+        pid_file.write_text('{"pid": 1234, "cmd": "filigree dashboard", "startup_ts": 1e999}')
+        info = read_pid_file(pid_file)
+        assert info is not None
+        assert info["pid"] == 1234
+        assert "startup_ts" not in info
+
     def test_is_pid_alive_for_self(self) -> None:
         assert is_pid_alive(os.getpid()) is True
 
@@ -393,6 +402,16 @@ class TestPidLifecycle:
             lambda _pid: ["/usr/bin/filigree", "dashboard", "--no-browser", "--port", "8401"],
         )
         assert verify_pid_ownership(pid_file, expected_cmd="filigree", required_args=("dashboard",)) is True
+
+    def test_verify_pid_ownership_rejects_when_effective_port_differs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Repeated --port uses the last value; an earlier matching token is not ownership proof."""
+        pid_file = tmp_path / "ephemeral.pid"
+        write_pid_file(pid_file, os.getpid(), cmd="filigree dashboard", port=8401)
+        monkeypatch.setattr(
+            "filigree.ephemeral._read_os_command_line",
+            lambda _pid: ["/usr/bin/filigree", "dashboard", "--port", "8401", "--port", "8923"],
+        )
+        assert verify_pid_ownership(pid_file, expected_cmd="filigree", required_args=("dashboard",)) is False
 
     def test_verify_pid_ownership_fallback_accepts_record_with_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """filigree-403dd029c3: when OS argv is unavailable, the PID-file fallback must
