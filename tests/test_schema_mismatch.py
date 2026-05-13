@@ -179,6 +179,16 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     payload = _json.loads(result[0].text)
     assert payload["code"] == "SCHEMA_MISMATCH"
 
+    status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))
+    status_payload = _json.loads(status_result[0].text)
+    assert status_payload["status"] == "schema_mismatch"
+    runtime = status_payload["runtime"]
+    assert runtime["python_executable"]
+    assert runtime["python_executable_resolved"]
+    assert runtime["entrypoint"] is not None
+    assert runtime["module_file"].endswith("mcp_server.py")
+    assert runtime["install_context"] in {"venv", "uv_tool", "system_or_unknown"}
+
 
 def test_mcp_server_logs_degraded_warning_on_v_plus_one(
     v_plus_one_project: Path,

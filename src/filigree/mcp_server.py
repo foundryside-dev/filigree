@@ -140,6 +140,44 @@ def _refresh_summary() -> None:
             )
 
 
+def _find_venv_root(executable: Path) -> Path | None:
+    candidates = [executable]
+    try:
+        resolved = executable.resolve()
+    except OSError:
+        resolved = None
+    if resolved is not None and resolved != executable:
+        candidates.append(resolved)
+
+    for candidate in candidates:
+        for parent in (candidate.parent, *candidate.parents):
+            if (parent / "pyvenv.cfg").is_file():
+                return parent
+    return None
+
+
+def _runtime_diagnostics() -> dict[str, str | None]:
+    executable = Path(sys.executable)
+    try:
+        resolved = executable.resolve()
+    except OSError:
+        resolved = executable
+    module_file = Path(__file__).resolve()
+    venv_root = _find_venv_root(executable)
+    install_context = "system_or_unknown"
+    if venv_root is not None:
+        install_context = "uv_tool" if ".local/share/uv/tools" in str(venv_root) else "venv"
+    return {
+        "python_executable": sys.executable,
+        "python_executable_resolved": str(resolved),
+        "entrypoint": sys.argv[0] if sys.argv else None,
+        "module_file": str(module_file),
+        "package_root": str(module_file.parent),
+        "venv_root": str(venv_root) if venv_root is not None else None,
+        "install_context": install_context,
+    }
+
+
 def _safe_path(raw: str) -> Path:
     """Resolve a user-supplied path safely within the project root.
 
@@ -178,6 +216,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": str(_schema_mismatch),
             "guidance": format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
         }
 
     if _db_open_error is not None:
@@ -191,6 +230,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": str(_db_open_error),
             "guidance": "Run `filigree doctor` for diagnosis.",
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
         }
 
     if active_db is None:
@@ -204,6 +244,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": "Database not initialized",
             "guidance": "Run `filigree init` in the project, then restart MCP.",
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
         }
 
     try:
@@ -219,6 +260,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": str(exc),
             "guidance": "Run `filigree doctor` for diagnosis.",
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
         }
 
     compatible = database_version <= installed
@@ -232,6 +274,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "error": None if compatible else f"Database schema v{database_version} is newer than installed v{installed}",
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+        "runtime": _runtime_diagnostics(),
     }
 
 

@@ -511,7 +511,7 @@ transitions, initial state, and fields schema.
 
 #### `get_mcp_status`
 
-No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, and `guidance`. This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
+No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, and `runtime`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
 
 ### Analytics
 

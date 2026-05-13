@@ -46,8 +46,9 @@ product match those decisions.
   tool and unknown key names. Regression coverage pins single-key,
   multi-key, and unknown-tool precedence behavior.
 
-- [ ] **Implement schema-mismatch hard stop and binary diagnostics.**
+- [x] **Implement schema-mismatch hard stop and binary diagnostics.**
   Source: E5, F1, H18, plus earlier A17/C7.
+  Tracker: `filigree-092758141c` is closed.
   Decision: [ADR-004](../architecture/decisions/ADR-004-schema-mismatch-policy.md)
   treats true `SCHEMA_MISMATCH` as a hard write-safety boundary.
   Problem: docs say `SCHEMA_MISMATCH` should make most tools return an error,
@@ -59,6 +60,12 @@ product match those decisions.
   Ship criterion: write tools fail closed under true mismatch, `get_mcp_status`
   remains available, compatible drift is not called `SCHEMA_MISMATCH`, and
   session-start diagnostics identify the binary/schema pair producing warnings.
+  Resolution: degraded-mode startup now leaves only `get_mcp_status` callable;
+  all other MCP tool calls return structured `SCHEMA_MISMATCH`. The status
+  payload includes `runtime` diagnostics for the executing Python binary,
+  resolved binary path, entrypoint, module file, package root, venv root, and
+  install context, with warm-degraded regression coverage in
+  `tests/test_schema_mismatch.py`.
 
 - [x] **Provide first-class observation triage and session cleanup filters.**
   Source: B19, D10, H2, H4.
