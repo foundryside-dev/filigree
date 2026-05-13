@@ -144,3 +144,31 @@ class TestAnnotationMcpMutationTools:
             )
         )
         assert carried["link"]["target_id"] == new_issue.id
+
+    async def test_carry_forward_requires_active_source_link(self, mcp_db: FiligreeDB) -> None:
+        root = _project_root(mcp_db)
+        (root / "flow.py").write_text("one\n")
+        linked_issue = mcp_db.create_issue("Linked")
+        unrelated_issue = mcp_db.create_issue("Unrelated")
+        new_issue = mcp_db.create_issue("New")
+        annotation = mcp_db.annotate_file(
+            "flow.py",
+            "Original",
+            line_start=1,
+            critical=True,
+            links=[{"target_type": "issue", "target_id": linked_issue.id, "relationship": "must_consider"}],
+        )
+
+        result = await call_tool(
+            "carry_forward_annotation",
+            {
+                "annotation_id": annotation["annotation_id"],
+                "from_target_id": unrelated_issue.id,
+                "to_target_id": new_issue.id,
+                "reason": "phase two",
+            },
+        )
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "not actively linked" in data["error"]

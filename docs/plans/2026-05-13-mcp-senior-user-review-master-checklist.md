@@ -283,12 +283,17 @@ product match those decisions.
   Ship criterion: file/finding writes carry actor identity consistently in
   operational history events and public records where relevant.
 
-- [ ] **Validate annotation handoff operations against real links.**
+- [x] **Validate annotation handoff operations against real links.**
   Source: G8.
+  Tracker: `filigree-e5d493733c` is closed.
   Problem: `carry_forward_annotation` can acknowledge a source target that was
   not actually linked, creating misleading handoff history.
   Ship criterion: carry-forward validates an active link to `from_target_id` or
   fails with an actionable `VALIDATION` error.
+  Resolution: `carry_forward_annotation` now requires the annotation to already
+  be linked to `from_target_id` as `must_consider` before writing the new link
+  or acknowledgement. MCP surfaces a `VALIDATION` envelope for unrelated source
+  targets.
 
 ### P3 - polish, but should be triaged before release cut
 

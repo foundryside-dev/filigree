@@ -1019,6 +1019,10 @@ JSON list output uses `{items, has_more, next_offset?}`. `--detail summary` is
 the default for list commands; `--detail full` includes provenance, links, and
 audit events.
 
+`carry-forward-annotation` requires the annotation to already be linked to
+`--from` as `must_consider`; otherwise it fails instead of acknowledging an
+unrelated issue.
+
 #### `annotate-file`
 
 | Parameter | Type | Description |

@@ -736,7 +736,7 @@ to `summary`; pass `full` to include provenance, links, and audit events.
 | `resolve_annotation` | Resolve an annotation with audit trail |
 | `supersede_annotation` | Supersede one annotation with another |
 | `promote_annotation` | Create an issue or observation and add a `promoted_to` link |
-| `carry_forward_annotation` | Add a `must_consider` link to a new issue and acknowledge the old warning |
+| `carry_forward_annotation` | Add a `must_consider` link to a new issue and acknowledge an existing source warning |
 | `link_annotation` / `unlink_annotation` | Manage typed target links |
 | `get_file_annotations` | List annotations for a file |
 | `get_issue_annotations` | List annotations linked to an issue or epic |
@@ -759,6 +759,10 @@ to `summary`; pass `full` to include provenance, links, and audit events.
 V1 link targets are `issue`, `file`, `finding`, and `observation`.
 Relationships are `relevant_to`, `must_consider`, `evidence_for`, `explains`,
 `created_from`, and `promoted_to`.
+
+`carry_forward_annotation` requires the annotation to already be linked to
+`from_target_id` as `must_consider`; otherwise it returns a `VALIDATION` error
+instead of acknowledging an unrelated issue.
 
 ### Scanning
 

@@ -1083,6 +1083,21 @@ class AnnotationsMixin(DBMixinProtocol):
         self._get_annotation_row(annotation_id)
         self._validate_annotation_link_target("issue", from_target_id)
         self._validate_annotation_link_target("issue", to_target_id)
+        source_link = self.conn.execute(
+            """
+            SELECT 1
+            FROM annotation_links l
+            WHERE l.annotation_id = ?
+              AND l.target_type = 'issue'
+              AND l.target_id = ?
+              AND l.relationship = 'must_consider'
+            LIMIT 1
+            """,
+            (annotation_id, from_target_id),
+        ).fetchone()
+        if source_link is None:
+            msg = f"Annotation {annotation_id} is not actively linked to issue {from_target_id} with relationship must_consider"
+            raise ValueError(msg)
         now = _now_iso()
         try:
             link = self._insert_annotation_link(

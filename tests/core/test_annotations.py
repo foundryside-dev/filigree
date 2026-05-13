@@ -197,6 +197,36 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_carry_forward_requires_active_source_link(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "src.py").write_text("x = 1\n")
+            linked_issue = db.create_issue("Linked")
+            unrelated_issue = db.create_issue("Unrelated")
+            new_issue = db.create_issue("New")
+            annotation = db.annotate_file(
+                "src.py",
+                "Must survive closeout.",
+                line_start=1,
+                critical=True,
+                links=[{"target_type": "issue", "target_id": linked_issue.id, "relationship": "must_consider"}],
+            )
+
+            with pytest.raises(ValueError, match="not actively linked"):
+                db.carry_forward_annotation(
+                    annotation["annotation_id"],
+                    from_target_id=unrelated_issue.id,
+                    to_target_id=new_issue.id,
+                    reason="Still relevant",
+                    actor="tester",
+                )
+
+            assert [w["annotation_id"] for w in db.get_annotation_closeout_warnings(linked_issue.id)] == [annotation["annotation_id"]]
+            assert db.get_annotation_closeout_warnings(unrelated_issue.id) == []
+            assert db.get_annotation_closeout_warnings(new_issue.id) == []
+        finally:
+            db.close()
+
     def test_promote_annotation_keeps_active_by_default_and_links_target(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:
