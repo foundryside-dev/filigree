@@ -97,6 +97,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             sys.exit(3)
         try:
             new_version = db.get_schema_version()
+            opened_prefix = db.prefix
         finally:
             db.close()
         if old_version is not None and new_version > old_version:
@@ -107,11 +108,10 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
         # not overwrite an existing custom anchor.
         if not conf_path.exists():
             project_name = config.get("name") or cwd.name
-            project_prefix = config.get("prefix") or cwd.name
             backfill_conf: dict[str, object] = {
                 "version": CONF_VERSION,
                 "project_name": project_name,
-                "prefix": project_prefix,
+                "prefix": opened_prefix,
                 "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}",
             }
             conf_mode = config.get("mode")

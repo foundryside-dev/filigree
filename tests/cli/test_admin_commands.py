@@ -749,6 +749,37 @@ class TestInitConfBackfill:
         assert data["db"]
         assert data["project_name"]
 
+    def test_init_existing_missing_config_backfills_opened_db_prefix(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB
+
+        project_root = tmp_path / "myproj"
+        project_root.mkdir()
+        filigree_dir = project_root / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+
+        seed = FiligreeDB(filigree_dir / DB_FILENAME, prefix="myproj")
+        seed.initialize()
+        issue = seed.create_issue("legacy issue")
+        seed.close()
+
+        monkeypatch.chdir(project_root)
+
+        result = cli_runner.invoke(cli, ["init"])
+
+        assert result.exit_code == 0, result.output
+        conf = project_root / CONF_FILENAME
+        data = json.loads(conf.read_text())
+        assert data["prefix"] == "myproj"
+
+        update = cli_runner.invoke(cli, ["update", issue.id, "--title", "renamed", "--json"])
+        assert update.exit_code == 0, update.output
+        assert json.loads(update.output)["title"] == "renamed"
+
     def test_init_existing_preserves_custom_conf(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
         cli_runner.invoke(cli, ["init"])
