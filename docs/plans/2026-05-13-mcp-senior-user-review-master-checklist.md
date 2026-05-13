@@ -284,13 +284,18 @@ product match those decisions.
   available when the requirements pack is enabled; live MCP registry coverage
   pins that wording.
 
-- [ ] **Thread actor identity through file/finding write events.**
+- [x] **Thread actor identity through file/finding write events.**
   Source: H3 and current tracker cleanup.
-  Tracker: `filigree-564438a17e` is open P2.
+  Tracker: `filigree-564438a17e` is closed.
   Problem: manual findings and file/finding write events need durable actor
   attribution.
   Ship criterion: file/finding writes carry actor identity consistently in
   operational history events and public records where relevant.
+  Resolution: schema v14 adds `created_by`/`updated_by` to file records and
+  findings, plus `actor` to file associations and file metadata events. MCP and
+  CLI file/finding write surfaces accept or inherit actor identity, finding
+  triage updates preserve it in public records, and file timelines expose it on
+  finding, association, and metadata events.
 
 - [x] **Validate annotation handoff operations against real links.**
   Source: G8.

@@ -12,12 +12,12 @@ File shapes:
   NOTE: MCP returns raw list; CLI normalizes to ListResponse.
 - add-file-association: {"status": "created"}
 - register-file: FileRecordDict — {id, path, language, file_type, first_seen, updated_at, metadata, data_warnings}
-- delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations}
+- delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations, actor}
 
 Finding shapes:
 - list-findings items: PublicScanFinding
   keys: finding_id, file_id, severity, status, scan_source, rule_id, message, suggestion,
-        scan_run_id, line_start, line_end, issue_id, seen_count, first_seen, updated_at,
+        scan_run_id, line_start, line_end, issue_id, seen_count, created_by, updated_by, first_seen, updated_at,
         last_seen_at, metadata, data_warnings
 - get-finding: ScanFindingDict (same)
 - update-finding: ScanFindingDict (same)
@@ -48,7 +48,20 @@ from tests._seeds import SeededProject
 # Canonical MCP key-sets
 # ---------------------------------------------------------------------------
 
-_FILE_RECORD_KEYS = frozenset({"file_id", "path", "language", "file_type", "first_seen", "updated_at", "metadata", "data_warnings"})
+_FILE_RECORD_KEYS = frozenset(
+    {
+        "file_id",
+        "path",
+        "language",
+        "file_type",
+        "created_by",
+        "updated_by",
+        "first_seen",
+        "updated_at",
+        "metadata",
+        "data_warnings",
+    }
+)
 
 # EnrichedFileItem = FileRecordDict + extra fields
 _ENRICHED_FILE_ITEM_KEYS = _FILE_RECORD_KEYS | frozenset({"summary", "associations_count", "observation_count"})
@@ -60,7 +73,9 @@ _TIMELINE_FINDING_ENTRY_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"finding_i
 _TIMELINE_ASSOC_ENTRY_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"assoc_id"})
 _TIMELINE_ISSUE_EVENT_KEYS = _TIMELINE_ENTRY_BASE_KEYS | frozenset({"event_id", "issue_id"})
 
-_ISSUE_FILE_ASSOC_KEYS = frozenset({"assoc_id", "file_id", "issue_id", "assoc_type", "created_at", "file_path", "file_language"})
+_ISSUE_FILE_ASSOC_KEYS = frozenset(
+    {"assoc_id", "file_id", "issue_id", "assoc_type", "actor", "created_at", "file_path", "file_language"}
+)
 
 _SCAN_FINDING_KEYS = frozenset(
     {
@@ -77,6 +92,8 @@ _SCAN_FINDING_KEYS = frozenset(
         "line_end",
         "issue_id",
         "seen_count",
+        "created_by",
+        "updated_by",
         "first_seen",
         "updated_at",
         "last_seen_at",
@@ -1097,6 +1114,20 @@ class TestPromoteFindingHonoursGlobalActor:
             events = json.loads(events_result.output)["items"]
             created_event = next(event for event in events if event["event_type"] == "created")
             assert created_event["actor"] == "bot-1", f"global --actor was dropped; created.actor={created_event['actor']!r}"
+        finally:
+            os.chdir(original)
+
+    def test_global_actor_is_recorded_on_finding_update(self, initialized_project_with_finding: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project_with_finding.path))
+        try:
+            finding_id = initialized_project_with_finding.finding_id
+            result = runner.invoke(cli, ["--actor", "triager-1", "update-finding", finding_id, "--status", "acknowledged", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["finding_id"] == finding_id
+            assert data["updated_by"] == "triager-1"
         finally:
             os.chdir(original)
 

@@ -147,6 +147,8 @@ class FilesMixin(DBMixinProtocol):
             path=row["path"],
             language=row["language"] or "",
             file_type=row["file_type"] or "",
+            created_by=row["created_by"] or "",
+            updated_by=row["updated_by"] or "",
             first_seen=row["first_seen"],
             updated_at=row["updated_at"],
             metadata=self._parse_metadata(row["metadata"], f"file_record:{row['id']}"),
@@ -168,6 +170,8 @@ class FilesMixin(DBMixinProtocol):
             line_end=row["line_end"],
             issue_id=row["issue_id"],
             seen_count=row["seen_count"] or 1,
+            created_by=row["created_by"] or "",
+            updated_by=row["updated_by"] or "",
             first_seen=row["first_seen"],
             updated_at=row["updated_at"],
             last_seen_at=row["last_seen_at"],
@@ -183,6 +187,7 @@ class FilesMixin(DBMixinProtocol):
         language: str = "",
         file_type: str = "",
         metadata: dict[str, Any] | None = None,
+        actor: str = "",
     ) -> FileRecord:
         """Register a file or update it if already registered (upsert by path).
 
@@ -236,6 +241,8 @@ class FilesMixin(DBMixinProtocol):
                 return self.get_file(existing["id"])
             updates.append("updated_at = ?")
             params.append(now)
+            updates.append("updated_by = ?")
+            params.append(actor)
             params.append(existing["id"])
             try:
                 self.conn.execute(
@@ -245,9 +252,9 @@ class FilesMixin(DBMixinProtocol):
                 for field, old_val, new_val in changes:
                     self.conn.execute(
                         "INSERT INTO file_events "
-                        "(file_id, event_type, field, old_value, new_value, created_at) "
-                        "VALUES (?, 'file_metadata_update', ?, ?, ?, ?)",
-                        (existing["id"], field, old_val, new_val, now),
+                        "(file_id, event_type, field, old_value, new_value, actor, created_at) "
+                        "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
+                        (existing["id"], field, old_val, new_val, actor, now),
                     )
                 self.conn.commit()
             except Exception:
@@ -259,8 +266,10 @@ class FilesMixin(DBMixinProtocol):
         stored_language = language or inferred_language
         try:
             self.conn.execute(
-                "INSERT INTO file_records (id, path, language, file_type, first_seen, updated_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, file_type, now, now, json.dumps(metadata or {})),
+                "INSERT INTO file_records "
+                "(id, path, language, file_type, created_by, updated_by, first_seen, updated_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (file_id, path, stored_language, file_type, actor, actor, now, now, json.dumps(metadata or {})),
             )
             self.conn.commit()
         except Exception:
@@ -283,7 +292,7 @@ class FilesMixin(DBMixinProtocol):
             return None
         return self._build_file_record(row)
 
-    def delete_file_record(self, file_id: str, *, force: bool = False) -> DeleteFileRecordResult:
+    def delete_file_record(self, file_id: str, *, force: bool = False, actor: str = "") -> DeleteFileRecordResult:
         """Delete a file record and file-domain dependent rows.
 
         Refuses by default when the file still has issue associations or
@@ -339,6 +348,7 @@ class FilesMixin(DBMixinProtocol):
             "deleted_associations": deleted_associations,
             "deleted_file_events": file_events,
             "unlinked_observations": observations,
+            "actor": actor,
         }
 
     def list_files(
@@ -577,14 +587,15 @@ class FilesMixin(DBMixinProtocol):
         infer_language: bool,
         now: str,
         stats: ScanIngestResult,
+        actor: str,
     ) -> str:
         """Create or update a file record, returning its id."""
         inferred_language = _infer_language_from_path(path) if infer_language else ""
         existing_file = self.conn.execute("SELECT id, language FROM file_records WHERE path = ?", (path,)).fetchone()
         if existing_file is not None:
             file_id: str = existing_file["id"]
-            update_parts = ["updated_at = ?"]
-            update_params: list[Any] = [now]
+            update_parts = ["updated_at = ?", "updated_by = ?"]
+            update_params: list[Any] = [now, actor]
             current_language = existing_file["language"] or ""
             next_language = language or (inferred_language if not current_language else "")
             if next_language:
@@ -600,8 +611,9 @@ class FilesMixin(DBMixinProtocol):
             file_id = self._generate_unique_id("file_records", "f")
             stored_language = language or inferred_language
             self.conn.execute(
-                "INSERT INTO file_records (id, path, language, first_seen, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, now, now),
+                "INSERT INTO file_records (id, path, language, created_by, updated_by, first_seen, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (file_id, path, stored_language, actor, actor, now, now),
             )
             stats["files_created"] += 1
         return file_id
@@ -618,6 +630,7 @@ class FilesMixin(DBMixinProtocol):
         seen_finding_ids: dict[str, list[str]],
         create_observations: bool,
         observation_actor: str = "",
+        actor: str = "",
     ) -> None:
         """Upsert a single finding (dedup on file_id + scan_source + rule_id + line_start)."""
         severity = f.get("severity", "info")
@@ -651,6 +664,7 @@ class FilesMixin(DBMixinProtocol):
                 scan_run_id=scan_run_id,
                 now=now,
                 stats=stats,
+                actor=actor,
             )
             seen_finding_ids.setdefault(file_id, []).append(existing_finding["id"])
         else:
@@ -659,8 +673,8 @@ class FilesMixin(DBMixinProtocol):
                 "INSERT INTO scan_findings "
                 "(id, file_id, scan_source, rule_id, severity, status, message, "
                 "suggestion, scan_run_id, "
-                "line_start, line_end, first_seen, updated_at, last_seen_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "line_start, line_end, created_by, updated_by, first_seen, updated_at, last_seen_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     finding_id,
                     file_id,
@@ -672,6 +686,8 @@ class FilesMixin(DBMixinProtocol):
                     scan_run_id,
                     line_start,
                     f.get("line_end"),
+                    actor,
+                    actor,
                     now,
                     now,
                     now,
@@ -728,6 +744,7 @@ class FilesMixin(DBMixinProtocol):
         scan_run_id: str,
         now: str,
         stats: ScanIngestResult,
+        actor: str,
     ) -> None:
         """Update an already-existing finding with new scan data."""
         existing_run_id = existing_finding["scan_run_id"] or ""
@@ -739,6 +756,7 @@ class FilesMixin(DBMixinProtocol):
             "UPDATE scan_findings SET message = ?, severity = ?, line_end = ?, "
             "suggestion = ?, scan_run_id = ?, metadata = ?, "
             "seen_count = seen_count + 1, updated_at = ?, last_seen_at = ?, "
+            "updated_by = ?, "
             "status = CASE WHEN status IN ('fixed', 'unseen_in_latest') THEN 'open' ELSE status END "
             "WHERE id = ?",
             (
@@ -750,6 +768,7 @@ class FilesMixin(DBMixinProtocol):
                 json.dumps(f.get("metadata") or {}),
                 now,
                 now,
+                actor,
                 existing_finding["id"],
             ),
         )
@@ -762,6 +781,7 @@ class FilesMixin(DBMixinProtocol):
         scan_source: str,
         seen_finding_ids: dict[str, list[str]],
         now: str,
+        actor: str,
     ) -> None:
         """Mark findings not in current batch as unseen_in_latest."""
         terminal = tuple(TERMINAL_FINDING_STATUSES)
@@ -769,11 +789,11 @@ class FilesMixin(DBMixinProtocol):
         for fid, fids in seen_finding_ids.items():
             placeholders = ",".join("?" * len(fids))
             conn.execute(
-                f"UPDATE scan_findings SET status = 'unseen_in_latest', updated_at = ? "
+                f"UPDATE scan_findings SET status = 'unseen_in_latest', updated_at = ?, updated_by = ? "
                 f"WHERE file_id = ? AND scan_source = ? "
                 f"AND status NOT IN ({terminal_ph}) "
                 f"AND id NOT IN ({placeholders})",
-                [now, fid, scan_source, *terminal, *fids],
+                [now, actor, fid, scan_source, *terminal, *fids],
             )
 
     def process_scan_results(
@@ -828,6 +848,7 @@ class FilesMixin(DBMixinProtocol):
         warnings = self._validate_scan_findings(findings, scan_source)
 
         now = _now_iso()
+        actor = observation_actor or f"scanner:{scan_source}"
         stats = ScanIngestResult(
             files_created=0,
             files_updated=0,
@@ -849,6 +870,7 @@ class FilesMixin(DBMixinProtocol):
                     infer_language="language" not in f,
                     now=now,
                     stats=stats,
+                    actor=actor,
                 )
                 self._upsert_finding(
                     f=f,
@@ -860,6 +882,7 @@ class FilesMixin(DBMixinProtocol):
                     seen_finding_ids=seen_finding_ids,
                     create_observations=create_observations,
                     observation_actor=observation_actor,
+                    actor=actor,
                 )
 
             if mark_unseen:
@@ -868,6 +891,7 @@ class FilesMixin(DBMixinProtocol):
                     scan_source=scan_source,
                     seen_finding_ids=seen_finding_ids,
                     now=now,
+                    actor=actor,
                 )
 
             # Accumulate findings_count on the scan_run row per batch.
@@ -974,6 +998,7 @@ class FilesMixin(DBMixinProtocol):
         status: FindingStatus | None = None,
         issue_id: str | None = None,
         dismiss_reason: str | None = None,
+        actor: str = "",
     ) -> ScanFindingDict:
         """Update finding status and/or linked issue.
 
@@ -1047,6 +1072,8 @@ class FilesMixin(DBMixinProtocol):
         now = _now_iso()
         updates.append("updated_at = ?")
         params.append(now)
+        updates.append("updated_by = ?")
+        params.append(actor)
         params.extend([finding_id, file_id])
 
         try:
@@ -1057,8 +1084,9 @@ class FilesMixin(DBMixinProtocol):
 
             if normalized_issue_id:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, created_at) VALUES (?, ?, 'bug_in', ?)",
-                    (file_id, normalized_issue_id, now),
+                    "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, actor, created_at) "
+                    "VALUES (?, ?, 'bug_in', ?, ?)",
+                    (file_id, normalized_issue_id, actor, now),
                 )
 
             # Cascade-dismiss any observation linked to this finding when the
@@ -1072,7 +1100,7 @@ class FilesMixin(DBMixinProtocol):
             if should_cascade:
                 self._cascade_dismiss_observations_for_finding(
                     finding_id,
-                    actor="system",
+                    actor=actor or "system",
                     reason=dismiss_reason
                     or (f"finding promoted to {normalized_issue_id}" if normalized_issue_id else f"finding marked {status}"),
                     now=now,
@@ -1151,8 +1179,8 @@ class FilesMixin(DBMixinProtocol):
                 params,
             ).fetchall()
             cursor = self.conn.execute(
-                f"UPDATE scan_findings SET status = 'fixed', updated_at = ? WHERE {where}",
-                [now, *params],
+                f"UPDATE scan_findings SET status = 'fixed', updated_at = ?, updated_by = ? WHERE {where}",
+                [now, actor, *params],
             )
             for row in fixed_rows:
                 self._cascade_dismiss_observations_for_finding(
@@ -1408,7 +1436,7 @@ class FilesMixin(DBMixinProtocol):
         if existing_issue_row is not None:
             issue = self.get_issue(existing_issue_row["id"])
             try:
-                self.update_finding(finding_id, issue_id=issue.id)
+                self.update_finding(finding_id, issue_id=issue.id, actor=actor)
             except (KeyError, ValueError, sqlite3.Error):
                 warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id}, but relinking failed")
             warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id} (returning existing)")
@@ -1457,7 +1485,7 @@ class FilesMixin(DBMixinProtocol):
             actor=actor,
         )
         try:
-            self.update_finding(finding_id, issue_id=issue.id)
+            self.update_finding(finding_id, issue_id=issue.id, actor=actor)
         except (KeyError, ValueError, sqlite3.Error):
             warnings.append(f"Created issue {issue.id}, but linking finding {finding_id} failed")
 
@@ -1548,6 +1576,8 @@ class FilesMixin(DBMixinProtocol):
         file_id: str,
         issue_id: str,
         assoc_type: AssocType,
+        *,
+        actor: str = "",
     ) -> None:
         """Link a file to an issue. Idempotent (duplicates ignored)."""
         if assoc_type not in VALID_ASSOC_TYPES:
@@ -1561,8 +1591,8 @@ class FilesMixin(DBMixinProtocol):
         now = _now_iso()
         try:
             self.conn.execute(
-                "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, created_at) VALUES (?, ?, ?, ?)",
-                (file_id, issue_id, assoc_type, now),
+                "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, actor, created_at) VALUES (?, ?, ?, ?, ?)",
+                (file_id, issue_id, assoc_type, actor, now),
             )
             self.conn.commit()
         except Exception:
@@ -1584,6 +1614,7 @@ class FilesMixin(DBMixinProtocol):
                 "file_id": r["file_id"],
                 "issue_id": r["issue_id"],
                 "assoc_type": r["assoc_type"],
+                "actor": r["actor"] or "",
                 "created_at": r["created_at"],
                 "issue_title": r["issue_title"],
                 "issue_status": r["issue_status"],
@@ -1606,6 +1637,7 @@ class FilesMixin(DBMixinProtocol):
                 "file_id": r["file_id"],
                 "issue_id": r["issue_id"],
                 "assoc_type": r["assoc_type"],
+                "actor": r["actor"] or "",
                 "created_at": r["created_at"],
                 "file_path": r["file_path"],
                 "file_language": r["file_language"],
@@ -1699,20 +1731,23 @@ class FilesMixin(DBMixinProtocol):
         SELECT 'finding_created' AS type, first_seen AS timestamp,
                id AS source_id,
                json_object('scan_source', scan_source, 'rule_id', rule_id,
-                           'severity', severity, 'message', message) AS data_json
+                           'severity', severity, 'message', message,
+                           'actor', created_by) AS data_json
         FROM scan_findings WHERE file_id = ?
         UNION ALL
         SELECT 'finding_updated' AS type, updated_at AS timestamp,
                id AS source_id,
                json_object('scan_source', scan_source, 'rule_id', rule_id,
-                           'severity', severity, 'status', status) AS data_json
+                           'severity', severity, 'status', status,
+                           'actor', updated_by) AS data_json
         FROM scan_findings WHERE file_id = ? AND updated_at != first_seen
         UNION ALL
         SELECT 'association_created' AS type, fa.created_at AS timestamp,
                CAST(fa.id AS TEXT) AS source_id,
                json_object('issue_id', fa.issue_id,
                            'issue_title', COALESCE(i.title, ''),
-                           'assoc_type', fa.assoc_type) AS data_json
+                           'assoc_type', fa.assoc_type,
+                           'actor', fa.actor) AS data_json
         FROM file_associations fa
         LEFT JOIN issues i ON fa.issue_id = i.id
         WHERE fa.file_id = ?
@@ -1720,7 +1755,8 @@ class FilesMixin(DBMixinProtocol):
         SELECT 'file_metadata_update' AS type, created_at AS timestamp,
                CAST(id AS TEXT) AS source_id,
                json_object('field', field, 'old_value', old_value,
-                           'new_value', new_value) AS data_json
+                           'new_value', new_value,
+                           'actor', actor) AS data_json
         FROM file_events WHERE file_id = ?
         {issue_events_sql}
     )

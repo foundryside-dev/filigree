@@ -1015,7 +1015,7 @@ class TestMigrateV2ToV3:
 
     def test_schema_matches_fresh(self, v2_db: sqlite3.Connection, tmp_path: Path) -> None:
         """Migrated schema matches fresh SCHEMA_SQL for scan_findings table."""
-        apply_pending_migrations(v2_db, 3)
+        apply_pending_migrations(v2_db, CURRENT_SCHEMA_VERSION)
 
         fresh = _make_db(tmp_path, "fresh.db")
         fresh.executescript(SCHEMA_SQL)

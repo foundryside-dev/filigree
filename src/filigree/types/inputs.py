@@ -578,6 +578,7 @@ class GetFileArgs(TypedDict):
 class DeleteFileRecordArgs(TypedDict):
     file_id: str
     force: NotRequired[bool]
+    actor: NotRequired[str]
 
 
 class GetFileTimelineArgs(TypedDict):
@@ -596,6 +597,7 @@ class AddFileAssociationArgs(TypedDict):
     file_id: str
     issue_id: str
     assoc_type: AssocType
+    actor: NotRequired[str]
 
 
 class RegisterFileArgs(TypedDict):
@@ -603,6 +605,7 @@ class RegisterFileArgs(TypedDict):
     language: NotRequired[str]
     file_type: NotRequired[str]
     metadata: NotRequired[dict[str, Any]]
+    actor: NotRequired[str]
 
 
 class TriggerScanArgs(TypedDict):
@@ -630,12 +633,14 @@ class UpdateFindingArgs(TypedDict):
     finding_id: str
     status: NotRequired[FindingStatus]
     issue_id: NotRequired[str]
+    actor: NotRequired[str]
 
 
 class BatchUpdateFindingsArgs(TypedDict):
     finding_ids: list[str]
     status: FindingStatus
     response_detail: NotRequired[str]
+    actor: NotRequired[str]
 
 
 class PromoteFindingArgs(TypedDict):
@@ -649,6 +654,7 @@ class DismissFindingArgs(TypedDict):
     finding_id: str
     reason: NotRequired[str]
     status: NotRequired[str]
+    actor: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------

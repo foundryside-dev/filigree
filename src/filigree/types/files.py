@@ -20,6 +20,7 @@ class FileAssociation(TypedDict):
     file_id: str
     issue_id: str
     assoc_type: AssocType
+    actor: str
     created_at: ISOTimestamp
     issue_title: str | None
     issue_status: str | None
@@ -32,6 +33,7 @@ class IssueFileAssociation(TypedDict):
     file_id: str
     issue_id: str
     assoc_type: AssocType
+    actor: str
     created_at: ISOTimestamp
     file_path: str
     file_language: str | None
@@ -95,6 +97,7 @@ class DeleteFileRecordResult(TypedDict):
     deleted_associations: int
     deleted_file_events: int
     unlinked_observations: int
+    actor: str
 
 
 class ScanRunRecord(TypedDict):

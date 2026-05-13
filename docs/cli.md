@@ -925,6 +925,8 @@ Associate a tracked file with an issue.
 | `issue-id` | string | Issue ID (positional) |
 | `assoc-type` | string | Association type (positional) |
 
+Records the global `--actor` on the association.
+
 ### `register-file`
 
 Register a source file in the file inventory.
@@ -936,6 +938,9 @@ Register a source file in the file inventory.
 | `--file-type` | string | File type classification |
 | `--metadata` | JSON string | Extra metadata |
 
+Records the global `--actor` in `created_by`/`updated_by`; metadata update
+timeline events include the same actor.
+
 ### `delete-file-record`
 
 Delete a tracked file record. By default, this refuses records that still have issue associations or open findings. Use `--force` to cascade file associations and findings.
@@ -944,6 +949,8 @@ Delete a tracked file record. By default, this refuses records that still have i
 |-----------|------|-------------|
 | `file-id` | string | File record ID (positional) |
 | `--force` | flag | Cascade associations and open findings |
+
+JSON output echoes the global `--actor` that performed the deletion.
 
 ### `list-findings`
 
@@ -976,6 +983,8 @@ Update a finding's status or linked issue.
 | `--status` | string | New status |
 | `--issue-id` | string | Link to issue |
 
+Records the global `--actor` in the finding's `updated_by` field.
+
 ### `promote-finding`
 
 Promote a finding to an observation.
@@ -994,6 +1003,8 @@ Dismiss a finding (marks as not worth tracking).
 | `finding-id` | string | Finding ID (positional) |
 | `--reason` | string | Dismissal reason |
 
+Records the global `--actor` in the finding's `updated_by` field.
+
 ### `batch-update-findings`
 
 Update multiple findings in one call.
@@ -1002,6 +1013,8 @@ Update multiple findings in one call.
 |-----------|------|-------------|
 | `finding-ids` | string... | Finding IDs (positional, multiple) |
 | `--status` | string | New status (required) |
+
+Records the global `--actor` in each updated finding's `updated_by` field.
 
 ### Annotations
 

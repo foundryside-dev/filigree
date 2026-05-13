@@ -125,6 +125,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "default": False,
                         "description": "Cascade associations and open findings",
                     },
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["file_id"],
             },
@@ -153,6 +154,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "enum": sorted(VALID_ASSOC_TYPES),
                         "description": "Association type",
                     },
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["file_id", "issue_id", "assoc_type"],
             },
@@ -167,6 +169,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "language": {"type": "string", "description": "Optional language hint"},
                     "file_type": {"type": "string", "description": "Optional file type tag"},
                     "metadata": {"type": "object", "description": "Optional metadata map"},
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["path"],
             },
@@ -208,6 +211,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "finding_id": {"type": "string", "description": "Finding ID"},
                     "status": {"type": "string", "enum": sorted(VALID_FINDING_STATUSES), "description": "New finding status"},
                     "issue_id": {"type": "string", "description": "Issue ID to link"},
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["finding_id"],
             },
@@ -235,6 +239,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "default": "slim",
                         "description": "'slim' (default) returns finding ID strings in succeeded[]; 'full' returns full ScanFindingDict records.",
                     },
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["finding_ids", "status"],
             },
@@ -288,6 +293,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "or 'no longer present' (unseen_in_latest)."
                         ),
                     },
+                    "actor": {"type": "string", "description": "Actor identity for audit attribution"},
                 },
                 "required": ["finding_id"],
             },
@@ -390,12 +396,15 @@ async def _handle_delete_file_record(arguments: dict[str, Any]) -> list[TextCont
     tracker = _get_db()
     file_id = args.get("file_id", "")
     force = args.get("force", False)
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     if not isinstance(file_id, str) or not file_id.strip():
         return _text(ErrorResponse(error="file_id is required", code=ErrorCode.VALIDATION))
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
     try:
-        result = tracker.delete_file_record(file_id, force=force)
+        result = tracker.delete_file_record(file_id, force=force, actor=actor)
     except KeyError:
         return _text(ErrorResponse(error=f"File not found: {file_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
@@ -474,6 +483,9 @@ async def _handle_add_file_association(arguments: dict[str, Any]) -> list[TextCo
     file_id = args.get("file_id", "")
     issue_id = args.get("issue_id", "")
     assoc_type = args.get("assoc_type", "")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
 
     if not isinstance(file_id, str) or not file_id.strip():
         return _text(ErrorResponse(error="file_id is required", code=ErrorCode.VALIDATION))
@@ -493,7 +505,7 @@ async def _handle_add_file_association(arguments: dict[str, Any]) -> list[TextCo
         return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
 
     try:
-        tracker.add_file_association(file_id, issue_id, assoc_type)
+        tracker.add_file_association(file_id, issue_id, assoc_type, actor=actor)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     return _text({"status": "created"})
@@ -508,6 +520,9 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
     language = args.get("language", "")
     file_type = args.get("file_type", "")
     metadata = args.get("metadata")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
 
     if not isinstance(raw_path, str) or not raw_path.strip():
         return _text(ErrorResponse(error="path is required", code=ErrorCode.VALIDATION))
@@ -534,6 +549,7 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
             language=language or "",
             file_type=file_type or "",
             metadata=metadata,
+            actor=actor,
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
@@ -607,12 +623,15 @@ async def _handle_update_finding(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
     status = args.get("status")
     issue_id = args.get("issue_id")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     if status is None and issue_id is None:
         return _text(ErrorResponse(error="At least one of status or issue_id must be provided", code=ErrorCode.VALIDATION))
 
     tracker = _get_db()
     try:
-        updated = tracker.update_finding(finding_id, status=status, issue_id=issue_id)
+        updated = tracker.update_finding(finding_id, status=status, issue_id=issue_id, actor=actor)
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
@@ -626,6 +645,9 @@ async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextC
     args = _parse_args(arguments, BatchUpdateFindingsArgs)
     finding_ids = args.get("finding_ids", [])
     status = args.get("status", "")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     if not isinstance(finding_ids, list) or not finding_ids:
         return _text(ErrorResponse(error="finding_ids must be a non-empty list", code=ErrorCode.VALIDATION))
     if not isinstance(status, str) or not status.strip():
@@ -647,7 +669,7 @@ async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextC
     errors: list[BatchFailure] = []
     for fid in finding_ids:
         try:
-            record = tracker.update_finding(fid, status=status)
+            record = tracker.update_finding(fid, status=status, actor=actor)
             updated_ids.append(fid)
             if detail == "full":
                 updated_records.append(finding_to_mcp(record))
@@ -716,6 +738,9 @@ async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
 
     reason = args.get("reason")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     # P3.13: allow callers to pick an alternate dismissal status. The default
     # preserves the legacy shape (false_positive). Validate against the
     # subset that makes sense for "dismiss" — promotion to 'open' would
@@ -738,7 +763,7 @@ async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent
 
     tracker = _get_db()
     try:
-        updated = tracker.update_finding(finding_id, status=status, dismiss_reason=reason or None)
+        updated = tracker.update_finding(finding_id, status=status, dismiss_reason=reason or None, actor=actor)
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:

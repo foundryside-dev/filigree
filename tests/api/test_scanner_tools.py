@@ -698,6 +698,8 @@ class TestReportFindingTool:
             (obs_id,),
         ).fetchone()
         assert row["actor"] == "my-agent-007"
+        assert data["created_by"] == "my-agent-007"
+        assert data["updated_by"] == "my-agent-007"
 
     async def test_observation_links_back_to_finding(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """report_finding creates an observation with source_finding_id linking

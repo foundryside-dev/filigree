@@ -100,6 +100,8 @@ class FileRecordDict(TypedDict):
     path: str
     language: str
     file_type: str
+    created_by: str
+    updated_by: str
     first_seen: ISOTimestamp
     updated_at: ISOTimestamp
     metadata: dict[str, Any]
@@ -122,6 +124,8 @@ class ScanFindingDict(TypedDict):
     line_end: int | None
     issue_id: str | None
     seen_count: int
+    created_by: str
+    updated_by: str
     first_seen: ISOTimestamp
     updated_at: ISOTimestamp
     last_seen_at: ISOTimestamp | None

@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS file_records (
     path        TEXT NOT NULL UNIQUE,
     language    TEXT DEFAULT '',
     file_type   TEXT DEFAULT '',
+    created_by  TEXT DEFAULT '',
+    updated_by  TEXT DEFAULT '',
     first_seen  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     metadata    TEXT DEFAULT '{}'
@@ -147,6 +149,8 @@ CREATE TABLE IF NOT EXISTS scan_findings (
     line_start    INTEGER,
     line_end      INTEGER,
     seen_count    INTEGER DEFAULT 1,
+    created_by    TEXT DEFAULT '',
+    updated_by    TEXT DEFAULT '',
     first_seen    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     last_seen_at  TEXT,
@@ -168,6 +172,7 @@ CREATE TABLE IF NOT EXISTS file_associations (
     file_id     TEXT NOT NULL REFERENCES file_records(id),
     issue_id    TEXT NOT NULL REFERENCES issues(id),
     assoc_type  TEXT NOT NULL,
+    actor       TEXT DEFAULT '',
     created_at  TEXT NOT NULL,
     UNIQUE(file_id, issue_id, assoc_type),
     CHECK (assoc_type IN ('bug_in', 'task_for', 'scan_finding', 'mentioned_in'))
@@ -207,6 +212,7 @@ CREATE TABLE IF NOT EXISTS file_events (
     field       TEXT NOT NULL,
     old_value   TEXT DEFAULT '',
     new_value   TEXT DEFAULT '',
+    actor       TEXT DEFAULT '',
     created_at  TEXT NOT NULL
 );
 
@@ -479,4 +485,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14

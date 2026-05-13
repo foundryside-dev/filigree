@@ -122,6 +122,8 @@ class FileRecord:
     path: str
     language: str = ""
     file_type: str = ""
+    created_by: str = ""
+    updated_by: str = ""
     first_seen: ISOTimestamp = _EMPTY_TS
     updated_at: ISOTimestamp = _EMPTY_TS
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -138,6 +140,8 @@ class FileRecord:
             path=self.path,
             language=self.language,
             file_type=self.file_type,
+            created_by=self.created_by,
+            updated_by=self.updated_by,
             first_seen=self.first_seen,
             updated_at=self.updated_at,
             metadata=metadata,
@@ -160,6 +164,8 @@ class ScanFinding:
     line_end: int | None = None
     issue_id: str | None = None
     seen_count: int = 1
+    created_by: str = ""
+    updated_by: str = ""
     first_seen: ISOTimestamp = _EMPTY_TS
     updated_at: ISOTimestamp = _EMPTY_TS
     last_seen_at: ISOTimestamp | None = None
@@ -192,6 +198,8 @@ class ScanFinding:
             line_end=self.line_end,
             issue_id=self.issue_id,
             seen_count=self.seen_count,
+            created_by=self.created_by,
+            updated_by=self.updated_by,
             first_seen=self.first_seen,
             updated_at=self.updated_at,
             last_seen_at=self.last_seen_at,

@@ -682,6 +682,7 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `file_id` | string | yes | File ID |
 | `issue_id` | string | yes | Issue ID |
 | `assoc_type` | enum | yes | `bug_in`, `task_for`, `scan_finding`, `mentioned_in` |
+| `actor` | string | no | Actor identity recorded on the association |
 
 #### `register_file`
 
@@ -691,6 +692,7 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `language` | string | no | Optional language hint |
 | `file_type` | string | no | Optional file type tag |
 | `metadata` | object | no | Optional metadata map |
+| `actor` | string | no | Actor identity recorded on the file record or metadata event |
 
 #### `delete_file_record`
 
@@ -698,6 +700,11 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 |-----------|------|----------|-------------|
 | `file_id` | string | yes | File ID |
 | `force` | boolean | no | Cascade associations and open findings (default false) |
+| `actor` | string | no | Actor identity echoed in the deletion result |
+
+Finding records include `created_by` and `updated_by`. Finding timeline events
+include the relevant actor; `update_finding`, `batch_update_findings`, and
+`dismiss_finding` accept `actor` for triage attribution.
 
 ### Agent Context Notes
 

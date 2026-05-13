@@ -48,6 +48,20 @@ class TestRegisterFile:
         assert f.language == "python"
         assert f.id.startswith("test-f-")
 
+    def test_register_file_records_actor_on_record_and_metadata_event(self, db: FiligreeDB) -> None:
+        created = db.register_file("src/owned.py", language="python", actor="scanner-a")
+
+        assert created.to_dict()["created_by"] == "scanner-a"
+        assert created.to_dict()["updated_by"] == "scanner-a"
+
+        updated = db.register_file("src/owned.py", metadata={"owner": "team-a"}, actor="curator-b")
+        timeline = db.get_file_timeline(updated.id, event_type="file_metadata_update")
+
+        assert updated.to_dict()["created_by"] == "scanner-a"
+        assert updated.to_dict()["updated_by"] == "curator-b"
+        assert timeline["results"][0]["data"]["actor"] == "curator-b"
+        assert timeline["results"][0]["data"]["field"] == "metadata"
+
     def test_register_file_infers_known_language_when_missing(self, db: FiligreeDB) -> None:
         py = db.register_file("src/main.py")
         md = db.register_file("docs/readme.md")
@@ -307,6 +321,23 @@ class TestProcessScanResults:
         )
         assert result["files_created"] >= 1
         assert result["findings_created"] >= 1
+
+    def test_ingest_and_update_preserve_finding_actor_attribution(self, db: FiligreeDB) -> None:
+        result = db.process_scan_results(
+            scan_source="agent",
+            observation_actor="agent-a",
+            findings=[{"path": "src/main.py", "rule_id": "A1", "severity": "low", "message": "m"}],
+        )
+        finding_id = result["new_finding_ids"][0]
+        created = db.get_finding(finding_id)
+
+        assert created["created_by"] == "agent-a"
+        assert created["updated_by"] == "agent-a"
+
+        updated = db.update_finding(finding_id, status="acknowledged", actor="reviewer-b")
+
+        assert updated["created_by"] == "agent-a"
+        assert updated["updated_by"] == "reviewer-b"
 
     def test_ingest_upserts_existing_finding(self, db: FiligreeDB) -> None:
         finding = {

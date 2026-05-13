@@ -278,7 +278,9 @@ def get_issue_files_cmd(issue_id: str, as_json: bool) -> None:
 @click.argument("issue_id")
 @click.argument("assoc_type", type=click.Choice(sorted(VALID_ASSOC_TYPES)))
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def add_file_association_cmd(
+    ctx: click.Context,
     file_id: str,
     issue_id: str,
     assoc_type: str,
@@ -319,7 +321,7 @@ def add_file_association_cmd(
             sys.exit(1)
 
         try:
-            db.add_file_association(file_id, issue_id, cast(AssocType, assoc_type))
+            db.add_file_association(file_id, issue_id, cast(AssocType, assoc_type), actor=ctx.obj["actor"])
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
@@ -345,7 +347,9 @@ def add_file_association_cmd(
 @click.option("--file-type", default=None, help="Optional file type tag")
 @click.option("--metadata", default=None, help="Optional metadata as JSON object string")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def register_file_cmd(
+    ctx: click.Context,
     path: str,
     language: str | None,
     file_type: str | None,
@@ -393,6 +397,7 @@ def register_file_cmd(
                 language=language or "",
                 file_type=file_type or "",
                 metadata=parsed_metadata,
+                actor=ctx.obj["actor"],
             )
         except ValueError as e:
             if as_json:
@@ -417,11 +422,12 @@ def register_file_cmd(
 @click.argument("file_id")
 @click.option("--force", is_flag=True, help="Cascade associations and open findings")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def delete_file_record_cmd(file_id: str, force: bool, as_json: bool) -> None:
+@click.pass_context
+def delete_file_record_cmd(ctx: click.Context, file_id: str, force: bool, as_json: bool) -> None:
     """Delete a file record. Refuses linked/open-finding records unless --force is passed."""
     with get_db() as db:
         try:
-            result = db.delete_file_record(file_id, force=force)
+            result = db.delete_file_record(file_id, force=force, actor=ctx.obj["actor"])
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"File not found: {file_id}", "code": ErrorCode.NOT_FOUND}))
@@ -578,7 +584,9 @@ def get_finding_cmd(finding_id: str, as_json: bool) -> None:
 )
 @click.option("--issue-id", default=None, help="Issue ID to link")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def update_finding_cmd(
+    ctx: click.Context,
     finding_id: str,
     status: str | None,
     issue_id: str | None,
@@ -598,6 +606,7 @@ def update_finding_cmd(
                 finding_id,
                 status=cast(FindingStatus, status) if status is not None else None,
                 issue_id=issue_id,
+                actor=ctx.obj["actor"],
             )
         except KeyError:
             if as_json:
@@ -692,11 +701,17 @@ def promote_finding_cmd(
 @click.argument("finding_id")
 @click.option("--reason", default=None, help="Optional reason for dismissal")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def dismiss_finding_cmd(finding_id: str, reason: str | None, as_json: bool) -> None:
+@click.pass_context
+def dismiss_finding_cmd(ctx: click.Context, finding_id: str, reason: str | None, as_json: bool) -> None:
     """Dismiss a finding by marking it as false_positive."""
     with get_db() as db:
         try:
-            updated = db.update_finding(finding_id, status="false_positive", dismiss_reason=reason or None)
+            updated = db.update_finding(
+                finding_id,
+                status="false_positive",
+                dismiss_reason=reason or None,
+                actor=ctx.obj["actor"],
+            )
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Finding not found: {finding_id}", "code": ErrorCode.NOT_FOUND}))
@@ -739,7 +754,9 @@ def dismiss_finding_cmd(finding_id: str, reason: str | None, as_json: bool) -> N
     help="JSON shape for succeeded[]: 'slim' (default, finding ID strings) or 'full' (ScanFindingDict records).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def batch_update_findings_cmd(
+    ctx: click.Context,
     finding_ids: tuple[str, ...],
     status: str,
     response_detail: str,
@@ -754,7 +771,7 @@ def batch_update_findings_cmd(
 
         for fid in raw_ids:
             try:
-                record = db.update_finding(fid, status=cast(FindingStatus, status))
+                record = db.update_finding(fid, status=cast(FindingStatus, status), actor=ctx.obj["actor"])
                 updated_ids.append(fid)
                 if response_detail == "full":
                     updated_records.append(finding_to_mcp(record))

@@ -588,6 +588,16 @@ def migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
     add_index(conn, "idx_observation_links_issue", "observation_links", ["issue_id", "linked_at"])
 
 
+def migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """v13 -> v14: Persist actor attribution for file/finding writes."""
+    add_column(conn, "file_records", "created_by", "TEXT", "''")
+    add_column(conn, "file_records", "updated_by", "TEXT", "''")
+    add_column(conn, "scan_findings", "created_by", "TEXT", "''")
+    add_column(conn, "scan_findings", "updated_by", "TEXT", "''")
+    add_column(conn, "file_associations", "actor", "TEXT", "''")
+    add_column(conn, "file_events", "actor", "TEXT", "''")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -601,6 +611,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     10: migrate_v10_to_v11,
     11: migrate_v11_to_v12,
     12: migrate_v12_to_v13,
+    13: migrate_v13_to_v14,
 }
 
 

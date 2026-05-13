@@ -216,6 +216,8 @@ class TestScanFindingToDictStability:
             "line_end",
             "issue_id",
             "seen_count",
+            "created_by",
+            "updated_by",
             "first_seen",
             "updated_at",
             "last_seen_at",

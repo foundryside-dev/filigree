@@ -494,10 +494,13 @@ def register_file(
     language: str = "",
     file_type: str = "",
     metadata: dict[str, Any] | None = None,
+    actor: str = "",
 ) -> FileRecord
 ```
 
-Upserts a file record by project-relative path and returns the resulting `FileRecord`.
+Upserts a file record by project-relative path and returns the resulting
+`FileRecord`. File records expose `created_by` and `updated_by`; metadata
+update events in file timelines include the actor.
 
 #### `list_files`
 
@@ -526,7 +529,7 @@ Returns one file record by ID.
 #### `delete_file_record`
 
 ```python
-def delete_file_record(self, file_id: str, *, force: bool = False) -> dict[str, Any]
+def delete_file_record(self, file_id: str, *, force: bool = False, actor: str = "") -> dict[str, Any]
 ```
 
 Deletes a file record plus file-domain cleanup rows. Without `force`, refuses records that still have issue associations or non-terminal findings; with `force`, cascades associations and findings and unlinks observations from the deleted file.
@@ -564,10 +567,13 @@ def add_file_association(
     file_id: str,
     issue_id: str,
     assoc_type: str,
+    *,
+    actor: str = "",
 ) -> None
 ```
 
-Creates an idempotent file<->issue association.
+Creates an idempotent file<->issue association. Association records and
+association timeline events include the actor.
 
 ---
 
