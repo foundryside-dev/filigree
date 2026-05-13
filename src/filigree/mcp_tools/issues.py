@@ -200,10 +200,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Update an issue's status, priority, title, or custom fields. "
                 "Use get_valid_transitions to see allowed status changes. "
                 "Soft transition warnings are returned in data_warnings. "
-                "Pass expected_assignee for claim-aware coordination — the call returns "
-                "CONFLICT when the observed assignee doesn't match (mirrors reclaim_issue / "
-                "heartbeat_work / release_claim). Default behaviour with expected_assignee "
-                "omitted preserves the historical write-anywhere contract."
+                "When actor is present and the issue is held, actor is the default expected holder. "
+                "Pass expected_assignee for coordinator overrides; mismatches return CONFLICT."
             ),
             inputSchema={
                 "type": "object",
@@ -227,9 +225,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition. When set, the call returns "
-                            "CONFLICT if the issue's observed assignee differs. Omit to "
-                            "skip the check (default; backward compatible)."
+                            "Claim-aware precondition. When omitted and actor is present on a "
+                            "held issue, actor is the default expected holder. Set explicitly for "
+                            "coordinator compare-and-swap overrides."
                         ),
                     },
                 },
@@ -264,8 +262,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition. When set, the call returns "
-                            "CONFLICT if the issue's observed assignee differs."
+                            "Claim-aware precondition. When omitted and actor is present on a "
+                            "held issue, actor is the default expected holder. Set explicitly for "
+                            "coordinator compare-and-swap overrides."
                         ),
                     },
                     "force": {
@@ -636,9 +635,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition applied per-item. Items "
-                            "whose observed assignee differs land in failed[] with "
-                            "code=CONFLICT."
+                            "Claim-aware precondition applied per-item. When omitted and actor "
+                            "is present on a held issue, actor is the default expected holder. "
+                            "Mismatches land in failed[] with code=CONFLICT."
                         ),
                     },
                     "force": {
@@ -687,9 +686,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition applied per-item. Items "
-                            "whose observed assignee differs land in failed[] with "
-                            "code=CONFLICT."
+                            "Claim-aware precondition applied per-item. When omitted and actor "
+                            "is present on a held issue, actor is the default expected holder. "
+                            "Mismatches land in failed[] with code=CONFLICT."
                         ),
                     },
                 },
@@ -895,7 +894,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         msg = str(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
-        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+        if "assigned to" in msg and "expected" in msg:
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
@@ -939,7 +938,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         msg = str(e)
-        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+        if "assigned to" in msg and "expected" in msg:
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(_build_transition_error(tracker, args["issue_id"], msg))
 

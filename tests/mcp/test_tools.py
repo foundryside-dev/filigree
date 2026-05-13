@@ -319,6 +319,34 @@ class TestUpdateAndClose:
         data = _parse(result)
         assert data["status"] == "in_progress"
 
+    async def test_update_issue_defaults_expected_assignee_to_actor_for_held_issue(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware update")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool("update_issue", {"issue_id": issue.id, "priority": 0, "actor": "other-agent"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert "assigned to 'agent-holder'" in data["error"]
+        assert "expected 'other-agent'" in data["error"]
+
+    async def test_update_issue_explicit_expected_assignee_overrides_actor_default(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware update")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool(
+            "update_issue",
+            {
+                "issue_id": issue.id,
+                "priority": 0,
+                "actor": "coordinator",
+                "expected_assignee": "agent-holder",
+            },
+        )
+
+        data = _parse(result)
+        assert data["priority"] == 0
+
     async def test_update_issue_surfaces_soft_transition_warning_once(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Warn me", type="bug")
 
@@ -564,6 +592,17 @@ class TestLabels:
         assert data["label_result"] == "added"
         assert data["label"] == "urgent"
         assert "urgent" in data["labels"]
+
+    async def test_add_label_defaults_expected_assignee_to_actor_for_held_issue(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware label")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool("add_label", {"issue_id": issue.id, "label": "needs-review", "actor": "other-agent"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert "assigned to 'agent-holder'" in data["error"]
+        assert "expected 'other-agent'" in data["error"]
 
     async def test_add_label_rejects_reserved_type_name(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Labelable")

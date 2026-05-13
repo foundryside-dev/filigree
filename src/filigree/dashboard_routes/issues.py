@@ -40,6 +40,12 @@ _ISSUES_LIST_PAGE_SIZE = 1000
 _MISSING = object()
 
 
+def _classify_issue_write_error(message: str) -> ErrorCode:
+    if "assigned to" in message and "expected" in message:
+        return ErrorCode.CONFLICT
+    return classify_value_error(message)
+
+
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
     """Return every issue in the DB by paginating list_issues.
 
@@ -125,6 +131,9 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
     actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
     if actor_err:
         return actor_err
+    expected_assignee = body.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
     priority = _validate_priority_field(body)
     if not isinstance(priority, int) and priority is not None:
         return priority  # JSONResponse error
@@ -135,6 +144,9 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
     status = _validate_body_string_field(body, "status", default=None)
     if status is not None and not isinstance(status, str):
         return status
+    expected_assignee = body.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
     return {
         "issue_ids": issue_ids,
         "status": status,
@@ -142,6 +154,7 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
         "assignee": body.get("assignee"),
         "fields": body.get("fields"),
         "actor": actor,
+        "expected_assignee": expected_assignee,
     }
 
 
@@ -167,7 +180,10 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
     actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
     if actor_err:
         return actor_err
-    return {"issue_ids": issue_ids, "reason": reason, "actor": actor}
+    expected_assignee = body.get("expected_assignee")
+    if expected_assignee is not None and not isinstance(expected_assignee, str):
+        return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
+    return {"issue_ids": issue_ids, "reason": reason, "actor": actor, "expected_assignee": expected_assignee}
 
 
 def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
@@ -356,6 +372,9 @@ def create_classic_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         body.pop("actor", None)
         priority = _validate_priority_field(body)
         if isinstance(priority, JSONResponse):
@@ -387,13 +406,14 @@ def create_classic_router() -> APIRouter:
                 parent_id=parent_id,
                 fields=body.get("fields"),
                 actor=actor,
+                expected_assignee=expected_assignee,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = classify_value_error(str(e))
+            code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
@@ -406,6 +426,9 @@ def create_classic_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         # default="" with allow_null=False means the helper returns str on
         # success and JSONResponse on type error; narrow on `not isinstance
         # str` so mypy keeps the `str` branch through the close call.
@@ -417,13 +440,20 @@ def create_classic_router() -> APIRouter:
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
-            issue = db.close_issue(issue_id, reason=reason, status=status_field, actor=actor, fields=fields)
+            issue = db.close_issue(
+                issue_id,
+                reason=reason,
+                status=status_field,
+                actor=actor,
+                fields=fields,
+                expected_assignee=expected_assignee,
+            )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = classify_value_error(str(e))
+            code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
@@ -472,7 +502,8 @@ def create_classic_router() -> APIRouter:
         try:
             comment_id = db.add_comment(issue_id, text, author=author)
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            code = _classify_issue_write_error(str(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         # Fetch just the single comment to get the real created_at timestamp
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
@@ -1094,6 +1125,9 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         body.pop("actor", None)
         priority = _validate_priority_field(body)
         if isinstance(priority, JSONResponse):
@@ -1125,13 +1159,14 @@ def create_loom_router() -> APIRouter:
                 parent_id=parent_id,
                 fields=body.get("fields"),
                 actor=actor,
+                expected_assignee=expected_assignee,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = classify_value_error(str(e))
+            code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue_to_loom(issue))
 
@@ -1147,6 +1182,9 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         # See classic close handler: narrow on `not isinstance str`
         # to keep mypy's str-branch through the close call.
         reason = _validate_body_string_field(body, "reason", default="")
@@ -1158,13 +1196,20 @@ def create_loom_router() -> APIRouter:
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
-            issue = db.close_issue(issue_id, reason=reason, status=status_field, actor=actor, fields=fields)
+            issue = db.close_issue(
+                issue_id,
+                reason=reason,
+                status=status_field,
+                actor=actor,
+                fields=fields,
+                expected_assignee=expected_assignee,
+            )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = classify_value_error(str(e))
+            code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
@@ -1292,7 +1337,8 @@ def create_loom_router() -> APIRouter:
         try:
             comment_id = db.add_comment(issue_id, text, author=author)
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            code = _classify_issue_write_error(str(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)

@@ -225,14 +225,21 @@ def _normalize_assignee(value: object) -> str:
     return value.strip()
 
 
-def _check_expected_assignee(issue_id: str, expected_assignee: str | None, observed: str) -> None:
+def _check_expected_assignee(
+    issue_id: str,
+    expected_assignee: str | None,
+    observed: str,
+    *,
+    actor: str = "",
+) -> None:
     """Verify ``observed`` matches ``expected_assignee`` for a write-path precondition.
 
-    When ``expected_assignee`` is ``None`` (default) the check is skipped to
-    preserve the historical write-anywhere contract for callers that don't
-    opt in. When set, raises ``ValueError`` with a message shaped like the
-    heartbeat / reclaim / release-claim CONFLICT envelope so the MCP / CLI /
-    dashboard surfaces classify it as ``CONFLICT`` consistently.
+    When ``expected_assignee`` is omitted but ``actor`` is present and the issue
+    is currently held, the actor becomes the expected holder by default
+    (ADR-008). Actorless writes to held issues remain permissive for local/manual
+    workflows. When set or derived, raises ``ValueError`` with a message shaped
+    like the heartbeat / reclaim / release-claim CONFLICT envelope so the MCP /
+    CLI / dashboard surfaces classify it as ``CONFLICT`` consistently.
 
     The compare normalises whitespace via ``_normalize_assignee`` so callers
     don't have to think about leading/trailing whitespace differences.
@@ -244,10 +251,14 @@ def _check_expected_assignee(issue_id: str, expected_assignee: str | None, obser
     could overwrite a held issue silently. This helper closes that gap by
     letting all five write tools opt in to the same check.
     """
+    current = (observed or "").strip()
+    if expected_assignee is None:
+        if not actor.strip() or not current:
+            return
+        expected_assignee = actor
     if expected_assignee is None:
         return
     expected = _normalize_assignee(expected_assignee)
-    current = (observed or "").strip()
     if current != expected:
         msg = f"Cannot operate on {issue_id}: assigned to '{current}' (expected '{expected}')"
         raise ValueError(msg)
@@ -642,13 +653,10 @@ class IssuesMixin(DBMixinProtocol):
     ) -> Issue:
         self._check_id_prefix(issue_id)
         current = self.get_issue(issue_id)
-        # Optional claim-aware precondition: callers that opt into the check
-        # by passing expected_assignee fail with CONFLICT-shaped ValueError
-        # when the observed assignee doesn't match (mirrors heartbeat_work /
-        # release_claim / reclaim_issue). Default behaviour (None) preserves
-        # the prior write-anywhere contract for backward compatibility.
-        # filigree-cb980eee0d (P1.1).
-        _check_expected_assignee(issue_id, expected_assignee, current.assignee)
+        # Claim-aware precondition: explicit expected_assignee still behaves
+        # like a compare-and-swap guard, while ADR-008 defaults the expected
+        # holder to actor when actor is present and the issue is held.
+        _check_expected_assignee(issue_id, expected_assignee, current.assignee, actor=actor)
         now = _now_iso()
 
         # --- Validate all inputs BEFORE any writes to prevent partial commits ---
@@ -1691,7 +1699,8 @@ class IssuesMixin(DBMixinProtocol):
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = classify_value_error(str(e))
+                msg = str(e)
+                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
                 err = BatchFailure(id=issue_id, error=str(e), code=code)
                 if code == ErrorCode.INVALID_TRANSITION:
                     try:
@@ -1714,8 +1723,8 @@ class IssuesMixin(DBMixinProtocol):
         """Close multiple issues with per-item error handling. Returns (closed, errors).
 
         ``expected_assignee`` is applied to every issue in the batch as a
-        single shared precondition; pass ``None`` (default) to skip the
-        check (filigree-cb980eee0d, P1.1).
+        single shared precondition. When omitted and ``actor`` is present,
+        held issues default the expected holder to actor (ADR-008).
 
         ``force=True`` skips the template transition validator on every
         item — same escape hatch as ``close_issue(force=True)``. Use only
@@ -1747,8 +1756,8 @@ class IssuesMixin(DBMixinProtocol):
         """Update multiple issues with the same changes. Returns (updated, errors).
 
         ``expected_assignee`` is applied to every issue in the batch as a
-        single shared precondition; pass ``None`` (default) to skip the
-        check (filigree-cb980eee0d, P1.1).
+        single shared precondition. When omitted and ``actor`` is present,
+        held issues default the expected holder to actor (ADR-008).
         """
         return self._batch_with_transition_errors(
             issue_ids,
@@ -1768,11 +1777,13 @@ class IssuesMixin(DBMixinProtocol):
         issue_ids: list[str],
         *,
         label: str,
+        actor: str = "",
         expected_assignee: str | None = None,
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]:
         """Add the same label to multiple issues. Returns (labeled, errors).
 
-        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        ``expected_assignee`` is applied per-item. When omitted and ``actor``
+        is present, held issues default the expected holder to actor (ADR-008).
         """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
@@ -1784,7 +1795,12 @@ class IssuesMixin(DBMixinProtocol):
         for issue_id in issue_ids:
             try:
                 self.get_issue(issue_id)
-                added, _canonical, _replaced = self.add_label(issue_id, label, expected_assignee=expected_assignee)
+                added, _canonical, _replaced = self.add_label(
+                    issue_id,
+                    label,
+                    actor=actor,
+                    expected_assignee=expected_assignee,
+                )
                 results.append({"id": issue_id, "status": "added" if added else "already_exists"})
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
@@ -1798,11 +1814,13 @@ class IssuesMixin(DBMixinProtocol):
         issue_ids: list[str],
         *,
         label: str,
+        actor: str = "",
         expected_assignee: str | None = None,
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]:
         """Remove the same label from multiple issues. Returns (removed, errors).
 
-        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        ``expected_assignee`` is applied per-item. When omitted and ``actor``
+        is present, held issues default the expected holder to actor (ADR-008).
         """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
@@ -1814,7 +1832,12 @@ class IssuesMixin(DBMixinProtocol):
         for issue_id in issue_ids:
             try:
                 self.get_issue(issue_id)
-                removed, _canonical = self.remove_label(issue_id, label, expected_assignee=expected_assignee)
+                removed, _canonical = self.remove_label(
+                    issue_id,
+                    label,
+                    actor=actor,
+                    expected_assignee=expected_assignee,
+                )
                 results.append({"id": issue_id, "status": "removed" if removed else "not_found"})
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
@@ -1833,7 +1856,8 @@ class IssuesMixin(DBMixinProtocol):
     ) -> tuple[list[dict[str, str | int]], list[BatchFailure]]:
         """Add the same comment to multiple issues. Returns (commented, errors).
 
-        ``expected_assignee`` is applied per-item (filigree-cb980eee0d, P1.1).
+        ``expected_assignee`` is applied per-item. When omitted and ``author``
+        is present, held issues default the expected holder to author (ADR-008).
         """
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(text, str):

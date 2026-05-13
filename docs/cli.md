@@ -178,6 +178,9 @@ filigree undo <id>                          # Undo last reversible action
 `update --json` returns the full issue projection. Soft workflow enforcement
 does not block status changes; missing recommended fields are returned in
 `data_warnings[]` and recorded once as `transition_warning` events.
+Claim-aware writes use the global `--actor` as the expected holder for assigned
+issues. Editing another actor's held issue fails with `CONFLICT` unless the
+command has an explicit coordinator override such as `--expected-assignee`.
 
 ### `create`
 
@@ -211,6 +214,7 @@ Update an existing issue.
 | `--field` | key=value | Custom field (repeatable) |
 | `--design` | string | New design field (shorthand for `--field design=...`) |
 | `--parent` | string | New parent issue ID (empty string to clear) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `close`
 
@@ -220,6 +224,7 @@ Close one or more issues. Accepts multiple IDs.
 |-----------|------|-------------|
 | `ids` | string... | One or more issue IDs (positional, variadic) |
 | `--reason` | string | Close reason |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 When using `--json`, the output includes `succeeded`, `failed`, and
 `newly_unblocked`. Closed issues with active critical `must_consider`
@@ -352,6 +357,7 @@ filigree remove-label <id> backend
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `text` | string | Comment text (positional) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `get-comments`
 
@@ -367,6 +373,7 @@ filigree remove-label <id> backend
 |-----------|------|-------------|
 | `label` | string | Label name (positional, first) |
 | `id` | string | Issue ID (positional, second) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `remove-label`
 
@@ -374,6 +381,7 @@ filigree remove-label <id> backend
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `label` | string | Label name (positional) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ## Atomic Claiming
 
@@ -502,6 +510,7 @@ Update multiple issues with the same changes.
 | `--priority` | 0-4 | New priority |
 | `--assignee` | string | New assignee |
 | `--field` | key=value | Custom field (repeatable) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `batch-close`
 
@@ -511,6 +520,7 @@ Close multiple issues.
 |-----------|------|-------------|
 | `ids` | string... | Issue IDs (positional, multiple) |
 | `--reason` | string | Close reason |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `batch-add-label`
 
@@ -520,6 +530,7 @@ Add the same label to multiple issues.
 |-----------|------|-------------|
 | `label` | string | Label name (positional) |
 | `ids` | string... | Issue IDs (positional, multiple) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `batch-add-comment`
 
@@ -529,6 +540,7 @@ Add the same comment to multiple issues.
 |-----------|------|-------------|
 | `text` | string | Comment text (positional) |
 | `ids` | string... | Issue IDs (positional, multiple) |
+| `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ## Planning
 

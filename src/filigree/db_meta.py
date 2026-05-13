@@ -44,12 +44,11 @@ class MetaMixin(DBMixinProtocol):
             msg = "Comment text cannot be empty"
             raise ValueError(msg)
         self._check_id_prefix(issue_id)
-        if expected_assignee is not None:
-            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-            if row is None:
-                msg = f"Issue not found: {issue_id}"
-                raise KeyError(msg)
-            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
+        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        if row is None:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+        _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=author)
         now = _now_iso()
         try:
             cursor = self.conn.execute(
@@ -80,6 +79,7 @@ class MetaMixin(DBMixinProtocol):
         issue_id: str,
         label: str,
         *,
+        actor: str = "",
         expected_assignee: str | None = None,
     ) -> tuple[bool, str, list[str]]:
         """Add label to issue. Returns (added, canonical_label, replaced_labels).
@@ -93,16 +93,16 @@ class MetaMixin(DBMixinProtocol):
         in their response so callers can audit silent label changes
         (filigree-cb980eee0d, P2.7 senior-user MCP review).
 
-        ``expected_assignee`` is an optional claim-aware precondition; pass
-        ``None`` (default) to skip the check (filigree-cb980eee0d, P1.1).
+        ``expected_assignee`` is a claim-aware precondition. When omitted and
+        ``actor`` is present, held issues default the expected holder to actor
+        (ADR-008).
         """
         self._check_id_prefix(issue_id)
-        if expected_assignee is not None:
-            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-            if row is None:
-                msg = f"Issue not found: {issue_id}"
-                raise KeyError(msg)
-            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
+        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        if row is None:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+        _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=actor)
         normalized = self._validate_label_name(label)
         replaced: list[str] = []
         # Idempotency for review:* — the mutual-exclusivity DELETE below would
@@ -144,20 +144,21 @@ class MetaMixin(DBMixinProtocol):
         issue_id: str,
         label: str,
         *,
+        actor: str = "",
         expected_assignee: str | None = None,
     ) -> tuple[bool, str]:
         """Remove label from issue. Returns (removed, canonical_label).
 
-        ``expected_assignee`` is an optional claim-aware precondition; pass
-        ``None`` (default) to skip the check (filigree-cb980eee0d, P1.1).
+        ``expected_assignee`` is a claim-aware precondition. When omitted and
+        ``actor`` is present, held issues default the expected holder to actor
+        (ADR-008).
         """
         self._check_id_prefix(issue_id)
-        if expected_assignee is not None:
-            row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-            if row is None:
-                msg = f"Issue not found: {issue_id}"
-                raise KeyError(msg)
-            _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "")
+        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        if row is None:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+        _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=actor)
         normalized = self._validate_label_name(label, allow_priority_like=True)
         try:
             cursor = self.conn.execute(

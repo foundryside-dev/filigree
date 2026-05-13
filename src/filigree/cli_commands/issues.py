@@ -414,6 +414,7 @@ def _update_impl(
     parent: str | None,
     design: str | None,
     field: tuple[str, ...],
+    expected_assignee: str | None,
     as_json: bool,
 ) -> None:
     _range_check_int(priority, "priority", min_val=0, max_val=4, as_json=as_json)
@@ -447,6 +448,7 @@ def _update_impl(
                 parent_id=parent,
                 fields=fields,
                 actor=actor,
+                expected_assignee=expected_assignee,
             )
             if as_json:
                 click.echo(json_mod.dumps(issue_to_public(issue), indent=2, default=str))
@@ -460,7 +462,8 @@ def _update_impl(
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                code = classify_value_error(str(e))
+                msg = str(e)
+                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
@@ -480,6 +483,7 @@ def _update_impl(
 @click.option("--parent", default=None, help="New parent issue ID (empty string to clear)")
 @click.option("--design", default=None, help="New design field")
 @click.option("--field", "-f", multiple=True, help="Custom field as key=value (repeatable)")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def update(
@@ -494,10 +498,25 @@ def update(
     parent: str | None,
     design: str | None,
     field: tuple[str, ...],
+    expected_assignee: str | None,
     as_json: bool,
 ) -> None:
     """Update an issue."""
-    _update_impl(ctx.obj["actor"], issue_id, status, priority, title, assignee, description, notes, parent, design, field, as_json)
+    _update_impl(
+        ctx.obj["actor"],
+        issue_id,
+        status,
+        priority,
+        title,
+        assignee,
+        description,
+        notes,
+        parent,
+        design,
+        field,
+        expected_assignee,
+        as_json,
+    )
 
 
 @click.command("update-issue")
@@ -511,6 +530,7 @@ def update(
 @click.option("--parent", default=None, help="New parent issue ID (empty string to clear)")
 @click.option("--design", default=None, help="New design field")
 @click.option("--field", "-f", multiple=True, help="Custom field as key=value (repeatable)")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def update_issue_cmd(
@@ -525,10 +545,25 @@ def update_issue_cmd(
     parent: str | None,
     design: str | None,
     field: tuple[str, ...],
+    expected_assignee: str | None,
     as_json: bool,
 ) -> None:
     """Update an issue. Alias for `update`."""
-    _update_impl(ctx.obj["actor"], issue_id, status, priority, title, assignee, description, notes, parent, design, field, as_json)
+    _update_impl(
+        ctx.obj["actor"],
+        issue_id,
+        status,
+        priority,
+        title,
+        assignee,
+        description,
+        notes,
+        parent,
+        design,
+        field,
+        expected_assignee,
+        as_json,
+    )
 
 
 @click.command()
@@ -552,9 +587,18 @@ def update_issue_cmd(
         "for cleanup flows that intentionally skip the workflow."
     ),
 )
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def close(ctx: click.Context, issue_ids: tuple[str, ...], reason: str, status: str | None, force: bool, as_json: bool) -> None:
+def close(
+    ctx: click.Context,
+    issue_ids: tuple[str, ...],
+    reason: str,
+    status: str | None,
+    force: bool,
+    expected_assignee: str | None,
+    as_json: bool,
+) -> None:
     """Close one or more issues."""
     with get_db() as db:
         succeeded: list[dict[str, Any]] = []
@@ -563,7 +607,14 @@ def close(ctx: click.Context, issue_ids: tuple[str, ...], reason: str, status: s
         for issue_id in issue_ids:
             try:
                 annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
-                issue = db.close_issue(issue_id, reason=reason, status=status, actor=ctx.obj["actor"], force=force)
+                issue = db.close_issue(
+                    issue_id,
+                    reason=reason,
+                    status=status,
+                    actor=ctx.obj["actor"],
+                    expected_assignee=expected_assignee,
+                    force=force,
+                )
                 if as_json:
                     item: dict[str, Any] = {
                         "issue_id": issue.id,
@@ -587,9 +638,11 @@ def close(ctx: click.Context, issue_ids: tuple[str, ...], reason: str, status: s
                 if not as_json:
                     click.echo(f"Not found: {issue_id}", err=True)
             except ValueError as e:
-                errors.append({"id": issue_id, "error": str(e), "code": classify_value_error(str(e))})
+                msg = str(e)
+                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
+                errors.append({"id": issue_id, "error": msg, "code": code})
                 if not as_json:
-                    click.echo(str(e), err=True)
+                    click.echo(msg, err=True)
         if as_json:
             # Stage 2B task 2b.3c: when the call was ``close <id>`` with a
             # single id and it failed, emit the flat 2.0 envelope instead

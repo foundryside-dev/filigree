@@ -336,12 +336,14 @@ class GetCommentsArgs(TypedDict):
 class AddLabelArgs(TypedDict):
     issue_id: str
     label: str
+    actor: NotRequired[str]
     expected_assignee: NotRequired[str]
 
 
 class RemoveLabelArgs(TypedDict):
     issue_id: str
     label: str
+    actor: NotRequired[str]
     expected_assignee: NotRequired[str]
 
 

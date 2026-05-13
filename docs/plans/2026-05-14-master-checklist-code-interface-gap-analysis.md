@@ -12,18 +12,17 @@ analysis, not a new product decision pass.
 ## Executive Summary
 
 Several checklist items are implemented but still unchecked in the master list.
-The remaining high-risk gaps are concentrated in two places:
+The remaining high-risk gap is concentrated in one place:
 
-1. ADR-008 claim-aware write defaults are not implemented; claim checks remain
-   opt-in through `expected_assignee`.
-2. MCP self-discovery/schema metadata is still hand-maintained rather than
+1. MCP self-discovery/schema metadata is still hand-maintained rather than
    generated from the live tool registry.
 
 The strongest completed areas are schema-mismatch fail-closed behavior,
 stale-claim discovery and `release_my_claims`, archived-status hydration,
 file-timeline issue events, `get_summary(format="json")`, observation list
-filters, stats field normalization, strict unknown MCP parameter rejection, and
-ADR-007 `report_finding` default side-effect behavior.
+filters, stats field normalization, strict unknown MCP parameter rejection,
+ADR-007 `report_finding` default side-effect behavior, and ADR-008
+claim-aware write defaults.
 
 ## Status Key
 
@@ -47,7 +46,7 @@ ADR-007 `report_finding` default side-effect behavior.
 
 | Checklist item | Current status | Evidence | Remaining work |
 |---|---:|---|---|
-| Claim-aware writes hard to misuse | Not done | `_check_expected_assignee()` explicitly skips the check when `expected_assignee is None` (`src/filigree/db_issues.py:228`). MCP docs say omitted `expected_assignee` preserves write-anywhere behavior (`src/filigree/mcp_tools/issues.py:198`). Tests assert a different actor can update a held issue when the precondition is omitted (`tests/core/test_workflow_behavior.py:984`). | Implement ADR-008: when `actor` is present and issue is held, default expected holder to `actor`; require explicit override for cross-claim writes. |
+| Claim-aware writes hard to misuse | Done | `_check_expected_assignee()` now derives the expected holder from `actor` when `expected_assignee` is omitted and the issue is held (`src/filigree/db_issues.py`). Issue update/close, comments, labels, and batch write paths pass actor/author through, and MCP/API/CLI surfaces classify holder mismatches as `CONFLICT`. Regression coverage in `tests/core/test_workflow_behavior.py` verifies actor defaults, actorless local writes, explicit coordinator overrides, and batch partial conflicts; `tests/mcp/test_tools.py` covers public MCP conflict/override behavior. | None. |
 | Live-work search and catch-up filters | Partial and interface-drifted | Search supports bracket/hyphen literal fallback and `status_category` (`src/filigree/db_issues.py:2015`; `uv run filigree search --help`). MCP `get_changes` supports actor, issue, label, type, after-event-id, and heartbeat exclusion (`src/filigree/mcp_tools/meta.py:252`). CLI `get-changes` only exposes `since`, `limit`, and `after-event-id` (`src/filigree/cli_commands/planning.py:472`). | Add multi-value filters if still desired, and bring CLI catch-up filters to parity with MCP. |
 | MCP self-discovery and docs generated from live registry | Not done | `get_schema` hand-codes `accepted_by_tools` lists in `src/filigree/mcp_tools/workflow.py:195`. Tests check only presence of selected values, not registry-derived completeness (`tests/mcp/test_tools.py:1367`). | Generate `accepted_by_tools`, docs counts, and schema metadata from the live registry, then pin drift tests. |
 | ID and relationship naming consistency | Partial | Public issue payload emits both `parent_id` and `parent_issue_id` for compatibility (`src/filigree/issue_payloads.py:22`). Dependency tools use `from_issue_id`/`to_issue_id` (`src/filigree/mcp_tools/planning.py:72`). | Complete deprecation story for legacy `parent_id` and any remaining mixed naming in CLI/API docs. |
@@ -104,7 +103,7 @@ Keep as active gaps:
 - Observation duplicate/link/merge dispositions. **Resolved 2026-05-14:** `observation_links`, `link_observation`, `batch_link_observations`, and `promote_observations_to_issue` landed with CLI/MCP/docs/tests.
 - ADR-007 `report_finding` default side effect change. **Resolved 2026-05-14:** paired observation creation is explicit opt-in and default responses remain slim.
 - Mixed scratch cleanup documentation/orchestration.
-- ADR-008 actor-as-default claim-aware writes.
+- ADR-008 actor-as-default claim-aware writes. **Resolved 2026-05-14:** held issue writes default expected holder to actor/author and return `CONFLICT` on mismatch.
 - CLI parity for `get_changes` filters.
 - Registry-generated MCP schema/docs.
 - Remaining response-envelope normalization.

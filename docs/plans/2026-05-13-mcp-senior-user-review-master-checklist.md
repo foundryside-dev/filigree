@@ -126,18 +126,23 @@ product match those decisions.
 
 ### P2 - significant friction to resolve for a polished ship
 
-- [ ] **Make claim-aware writes hard to misuse.**
+- [x] **Make claim-aware writes hard to misuse.**
   Source: D1, E2, G2, H "works well" notes.
   Decision: [ADR-008](../architecture/decisions/ADR-008-claim-aware-write-defaults.md)
   makes actor-scoped claim safety the default for writes to held issues.
-  Problem: `expected_assignee` landed and works, but G says the default remains
-  opt-in; writes to held work still succeed unless the agent knows the flag.
+  Prior problem: `expected_assignee` landed and worked, but G found the default
+  remained opt-in; writes to held work still succeeded unless the agent knew the
+  flag.
   Locked outcome: when `actor` is present and the issue is held, the default
   expected holder is `actor`; editing someone else's held work requires an
   explicit override.
   Ship criterion: apply the actor-as-default precondition consistently to
   claim-aware write tools, return `CONFLICT` on mismatch, document override
   semantics, and keep error messages naming observed and expected holders.
+  Resolution: issue update/close, comments, labels, and batch write paths now
+  default the expected holder to `actor`/comment `author` when the target issue
+  is held. Explicit `expected_assignee` remains the coordinator override, and
+  conflict responses name both observed and expected holders.
 
 - [ ] **Fix live-work search and catch-up filters.**
   Source: D6, D11, E7/E8, G4, H4.

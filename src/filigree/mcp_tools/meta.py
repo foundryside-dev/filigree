@@ -55,8 +55,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="add_comment",
             description=(
                 "Add a comment to an issue. Returns the flat updated PublicIssue plus comment_id. "
-                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT "
-                "when the observed assignee doesn't match (mirrors reclaim_issue / heartbeat_work)."
+                "When actor is present and the issue is held, actor is the default expected holder. "
+                "Pass expected_assignee for coordinator overrides; mismatches return CONFLICT."
             ),
             inputSchema={
                 "type": "object",
@@ -67,8 +67,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition. When set, the call returns "
-                            "CONFLICT if the issue's observed assignee differs."
+                            "Claim-aware precondition. When omitted and actor is present on a "
+                            "held issue, actor is the default expected holder. Set explicitly for "
+                            "coordinator compare-and-swap overrides."
                         ),
                     },
                 },
@@ -90,19 +91,21 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="add_label",
             description=(
                 "Add a label to an issue. Returns the flat updated PublicIssue plus label and label_result. "
-                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT when "
-                "the observed assignee doesn't match."
+                "When actor is present and the issue is held, actor is the default expected holder. "
+                "Pass expected_assignee for coordinator overrides; mismatches return CONFLICT."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "label": {"type": "string", "description": "Label to add"},
+                    "actor": {"type": "string", "description": "Agent/user identity for claim-aware write safety"},
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition. When set, the call returns "
-                            "CONFLICT if the issue's observed assignee differs."
+                            "Claim-aware precondition. When omitted and actor is present on a "
+                            "held issue, actor is the default expected holder. Set explicitly for "
+                            "coordinator compare-and-swap overrides."
                         ),
                     },
                 },
@@ -113,19 +116,21 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="remove_label",
             description=(
                 "Remove a label from an issue. Returns the flat updated PublicIssue plus label and label_result. "
-                "Pass expected_assignee for claim-aware coordination — the call returns CONFLICT when "
-                "the observed assignee doesn't match."
+                "When actor is present and the issue is held, actor is the default expected holder. "
+                "Pass expected_assignee for coordinator overrides; mismatches return CONFLICT."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "label": {"type": "string", "description": "Label to remove"},
+                    "actor": {"type": "string", "description": "Agent/user identity for claim-aware write safety"},
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition. When set, the call returns "
-                            "CONFLICT if the issue's observed assignee differs."
+                            "Claim-aware precondition. When omitted and actor is present on a "
+                            "held issue, actor is the default expected holder. Set explicitly for "
+                            "coordinator compare-and-swap overrides."
                         ),
                     },
                 },
@@ -159,9 +164,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition applied per-item. Items "
-                            "whose observed assignee differs land in failed[] with "
-                            "code=CONFLICT."
+                            "Claim-aware precondition applied per-item. When omitted and actor "
+                            "is present on a held issue, actor is the default expected holder. "
+                            "Mismatches land in failed[] with code=CONFLICT."
                         ),
                     },
                 },
@@ -195,9 +200,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition applied per-item. Items "
-                            "whose observed assignee differs land in failed[] with "
-                            "code=CONFLICT."
+                            "Claim-aware precondition applied per-item. When omitted and actor "
+                            "is present on a held issue, actor is the default expected holder. "
+                            "Mismatches land in failed[] with code=CONFLICT."
                         ),
                     },
                 },
@@ -232,9 +237,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "expected_assignee": {
                         "type": "string",
                         "description": (
-                            "Optional claim-aware precondition applied per-item. Items "
-                            "whose observed assignee differs land in failed[] with "
-                            "code=CONFLICT."
+                            "Claim-aware precondition applied per-item. When omitted and actor "
+                            "is present on a held issue, actor is the default expected holder. "
+                            "Mismatches land in failed[] with code=CONFLICT."
                         ),
                     },
                 },
@@ -510,7 +515,7 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
         )
     except ValueError as e:
         msg = str(e)
-        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+        if "assigned to" in msg and "expected" in msg:
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
@@ -537,6 +542,9 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddLabelArgs)
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
@@ -546,10 +554,15 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     try:
-        added, canonical, replaced = tracker.add_label(args["issue_id"], args["label"], expected_assignee=expected_assignee)
+        added, canonical, replaced = tracker.add_label(
+            args["issue_id"],
+            args["label"],
+            actor=actor,
+            expected_assignee=expected_assignee,
+        )
     except ValueError as e:
         msg = str(e)
-        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+        if "assigned to" in msg and "expected" in msg:
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
@@ -574,6 +587,9 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, RemoveLabelArgs)
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
@@ -583,10 +599,15 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     try:
-        removed, canonical = tracker.remove_label(args["issue_id"], args["label"], expected_assignee=expected_assignee)
+        removed, canonical = tracker.remove_label(
+            args["issue_id"],
+            args["label"],
+            actor=actor,
+            expected_assignee=expected_assignee,
+        )
     except ValueError as e:
         msg = str(e)
-        if expected_assignee is not None and "assigned to" in msg and "expected" in msg:
+        if "assigned to" in msg and "expected" in msg:
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
@@ -602,7 +623,7 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, BatchAddLabelArgs)
-    _actor, actor_err = _validate_actor(args.get("actor", "mcp"))  # validated for rejection only
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     expected_assignee = args.get("expected_assignee")
@@ -617,7 +638,12 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_add_label(issue_ids, label=args["label"], expected_assignee=expected_assignee)
+    label_succeeded, label_failed = tracker.batch_add_label(
+        issue_ids,
+        label=args["label"],
+        actor=actor,
+        expected_assignee=expected_assignee,
+    )
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -636,7 +662,7 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
     from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, BatchRemoveLabelArgs)
-    _actor, actor_err = _validate_actor(args.get("actor", "mcp"))  # validated for rejection only
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     expected_assignee = args.get("expected_assignee")
@@ -651,7 +677,12 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_remove_label(issue_ids, label=args["label"], expected_assignee=expected_assignee)
+    label_succeeded, label_failed = tracker.batch_remove_label(
+        issue_ids,
+        label=args["label"],
+        actor=actor,
+        expected_assignee=expected_assignee,
+    )
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(

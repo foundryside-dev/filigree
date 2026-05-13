@@ -18,9 +18,10 @@ from filigree.types.api import ErrorCode
 @click.command("add-comment")
 @click.argument("issue_id")
 @click.argument("text")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def add_comment(ctx: click.Context, issue_id: str, text: str, as_json: bool) -> None:
+def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee: str | None, as_json: bool) -> None:
     """Add a comment to an issue."""
     with get_db() as db:
         # Prefix check first — db.get_issue() ignores prefix on reads, so a
@@ -43,10 +44,11 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, as_json: bool) -> 
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
         try:
-            comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"])
+            comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"], expected_assignee=expected_assignee)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -87,8 +89,10 @@ def get_comments(issue_id: str, as_json: bool) -> None:
 @click.command("add-label")
 @click.argument("label_name")
 @click.argument("issue_id")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def add_label(label_name: str, issue_id: str, as_json: bool) -> None:
+@click.pass_context
+def add_label(ctx: click.Context, label_name: str, issue_id: str, expected_assignee: str | None, as_json: bool) -> None:
     """Add a label to an issue. Usage: add-label <label> <issue_id>"""
     with get_db() as db:
         # Prefix check before existence precheck — see filigree-f8861115a9.
@@ -109,10 +113,16 @@ def add_label(label_name: str, issue_id: str, as_json: bool) -> None:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
         try:
-            added, canonical, replaced = db.add_label(issue_id, label_name)
+            added, canonical, replaced = db.add_label(
+                issue_id,
+                label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -138,8 +148,10 @@ def add_label(label_name: str, issue_id: str, as_json: bool) -> None:
 @click.command("remove-label")
 @click.argument("issue_id")
 @click.argument("label_name")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def remove_label(issue_id: str, label_name: str, as_json: bool) -> None:
+@click.pass_context
+def remove_label(ctx: click.Context, issue_id: str, label_name: str, expected_assignee: str | None, as_json: bool) -> None:
     """Remove a label from an issue."""
     with get_db() as db:
         # Prefix check before existence precheck — see filigree-f8861115a9.
@@ -160,10 +172,16 @@ def remove_label(issue_id: str, label_name: str, as_json: bool) -> None:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
         try:
-            removed, canonical = db.remove_label(issue_id, label_name)
+            removed, canonical = db.remove_label(
+                issue_id,
+                label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -300,6 +318,7 @@ def get_issue_events_cmd(issue_id: str, limit: int, as_json: bool) -> None:
 @click.option("--priority", "-p", default=None, type=click.IntRange(0, 4), help="New priority")
 @click.option("--assignee", default=None, help="New assignee")
 @click.option("--field", "-f", multiple=True, help="Custom field as key=value (repeatable)")
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option(
     "--detail",
     "response_detail",
@@ -316,6 +335,7 @@ def batch_update(
     priority: int | None,
     assignee: str | None,
     field: tuple[str, ...],
+    expected_assignee: str | None,
     response_detail: str,
     as_json: bool,
 ) -> None:
@@ -341,6 +361,7 @@ def batch_update(
             assignee=assignee,
             fields=fields,
             actor=ctx.obj["actor"],
+            expected_assignee=expected_assignee,
         )
         if as_json:
             if response_detail == "full":
@@ -389,6 +410,7 @@ def batch_update(
     default=False,
     help=("Bypass the template transition validator on every item. Use only for cleanup flows that intentionally skip the workflow."),
 )
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def batch_close(
@@ -397,6 +419,7 @@ def batch_close(
     reason: str,
     response_detail: str,
     force: bool,
+    expected_assignee: str | None,
     as_json: bool,
 ) -> None:
     """Close multiple issues with per-item error reporting."""
@@ -406,6 +429,7 @@ def batch_close(
             list(issue_ids),
             reason=reason,
             actor=ctx.obj["actor"],
+            expected_assignee=expected_assignee,
             force=force,
         )
 
@@ -456,11 +480,25 @@ def batch_close(
     default="slim",
     help="JSON shape for succeeded[]: 'slim' (default, issue ID strings) or 'full' (PublicIssue records).",
 )
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def batch_add_label(label_name: str, issue_ids: tuple[str, ...], response_detail: str, as_json: bool) -> None:
+@click.pass_context
+def batch_add_label(
+    ctx: click.Context,
+    label_name: str,
+    issue_ids: tuple[str, ...],
+    response_detail: str,
+    expected_assignee: str | None,
+    as_json: bool,
+) -> None:
     """Add the same label to multiple issues."""
     with get_db() as db:
-        labeled, errors = db.batch_add_label(list(issue_ids), label=label_name)
+        labeled, errors = db.batch_add_label(
+            list(issue_ids),
+            label=label_name,
+            actor=ctx.obj["actor"],
+            expected_assignee=expected_assignee,
+        )
 
         if as_json:
             if response_detail == "full":
@@ -501,11 +539,25 @@ def batch_add_label(label_name: str, issue_ids: tuple[str, ...], response_detail
     default="slim",
     help="JSON shape for succeeded[]: 'slim' (default, issue ID strings) or 'full' (PublicIssue records).",
 )
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def batch_remove_label(label_name: str, issue_ids: tuple[str, ...], response_detail: str, as_json: bool) -> None:
+@click.pass_context
+def batch_remove_label(
+    ctx: click.Context,
+    label_name: str,
+    issue_ids: tuple[str, ...],
+    response_detail: str,
+    expected_assignee: str | None,
+    as_json: bool,
+) -> None:
     """Remove the same label from multiple issues."""
     with get_db() as db:
-        removed, errors = db.batch_remove_label(list(issue_ids), label=label_name)
+        removed, errors = db.batch_remove_label(
+            list(issue_ids),
+            label=label_name,
+            actor=ctx.obj["actor"],
+            expected_assignee=expected_assignee,
+        )
 
         if as_json:
             if response_detail == "full":
@@ -546,6 +598,7 @@ def batch_remove_label(label_name: str, issue_ids: tuple[str, ...], response_det
     default="slim",
     help="JSON shape for succeeded[]: 'slim' (default, issue ID strings) or 'full' (PublicIssue records of the commented-on issues).",
 )
+@click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def batch_add_comment(
@@ -553,6 +606,7 @@ def batch_add_comment(
     text: str,
     issue_ids: tuple[str, ...],
     response_detail: str,
+    expected_assignee: str | None,
     as_json: bool,
 ) -> None:
     """Add the same comment to multiple issues."""
@@ -561,6 +615,7 @@ def batch_add_comment(
             list(issue_ids),
             text=text,
             author=ctx.obj["actor"],
+            expected_assignee=expected_assignee,
         )
 
         if as_json:

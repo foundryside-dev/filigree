@@ -181,6 +181,7 @@ def update_issue(
     parent_id: str | None = None,
     fields: dict[str, Any] | None = None,
     actor: str = "",
+    expected_assignee: str | None = None,
 ) -> Issue
 ```
 
@@ -192,6 +193,12 @@ Soft workflow enforcement does not block the update. When a status change skips
 recommended fields, the returned `Issue.to_dict()["data_warnings"]` includes
 the advisory, and the same message is recorded once as a `transition_warning`
 event.
+
+When `actor` is present and the issue is held, claim-aware write safety defaults
+the expected holder to `actor`. Pass `expected_assignee` for coordinator
+compare-and-swap writes against another observed holder. Mismatches raise
+`ValueError` naming both holders and surface as `CONFLICT` on API/MCP/CLI
+boundaries.
 
 **Returns:** The updated `Issue`.
 
@@ -210,6 +217,7 @@ def close_issue(
     actor: str = "",
     status: str | None = None,
     fields: dict[str, Any] | None = None,
+    expected_assignee: str | None = None,
 ) -> Issue
 ```
 
@@ -440,6 +448,8 @@ def batch_close(
     *,
     reason: str = "",
     actor: str = "",
+    expected_assignee: str | None = None,
+    force: bool = False,
 ) -> tuple[list[Issue], list[dict[str, str]]]
 ```
 
@@ -459,6 +469,7 @@ def batch_update(
     assignee: str | None = None,
     fields: dict[str, Any] | None = None,
     actor: str = "",
+    expected_assignee: str | None = None,
 ) -> tuple[list[Issue], list[dict[str, str]]]
 ```
 
@@ -703,6 +714,7 @@ def add_comment(
     text: str,
     *,
     author: str = "",
+    expected_assignee: str | None = None,
 ) -> int
 ```
 
@@ -727,18 +739,32 @@ Returns all comments on an issue, ordered chronologically. Each dict contains `i
 #### `add_label`
 
 ```python
-def add_label(self, issue_id: str, label: str) -> bool
+def add_label(
+    self,
+    issue_id: str,
+    label: str,
+    *,
+    actor: str = "",
+    expected_assignee: str | None = None,
+) -> tuple[bool, str, list[str]]
 ```
 
-Adds a label to an issue. **Returns:** `True` if added, `False` if already present.
+Adds a label to an issue. **Returns:** `(added, canonical_label, replaced_labels)`.
 
 #### `remove_label`
 
 ```python
-def remove_label(self, issue_id: str, label: str) -> bool
+def remove_label(
+    self,
+    issue_id: str,
+    label: str,
+    *,
+    actor: str = "",
+    expected_assignee: str | None = None,
+) -> tuple[bool, str]
 ```
 
-Removes a label from an issue. **Returns:** `True` if removed, `False` if not found.
+Removes a label from an issue. **Returns:** `(removed, canonical_label)`.
 
 ---
 

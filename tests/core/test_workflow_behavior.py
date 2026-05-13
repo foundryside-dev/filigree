@@ -981,20 +981,44 @@ class TestClaimLeaseLiveness:
 
 
 class TestWritePathExpectedAssignee:
-    """Optional expected_assignee precondition on write tools.
+    """Claim-aware preconditions on write tools.
 
     filigree-cb980eee0d (P1.1): heartbeat_work / release_claim / reclaim_issue
     strictly enforce claim ownership; update_issue / batch_update / close_issue /
     add_comment / add_label / remove_label previously ignored it. Each now
-    accepts an optional expected_assignee that mirrors reclaim's CONFLICT
-    behaviour. Default behaviour with expected_assignee omitted is unchanged.
+    accepts expected_assignee and defaults the expected holder to actor when an
+    actor is present and the issue is held (ADR-008).
     """
 
-    def test_update_issue_skips_check_when_expected_assignee_omitted(self, db: FiligreeDB) -> None:
-        issue = db.create_issue("Default behaviour preserved")
+    def test_update_issue_defaults_expected_assignee_to_actor_for_held_issue(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Actor default")
         db.claim_issue(issue.id, assignee="agent-holder")
-        # No expected_assignee → write proceeds even when called by a different actor.
-        updated = db.update_issue(issue.id, priority=0, actor="other-agent")
+
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'other-agent'"):
+            db.update_issue(issue.id, priority=0, actor="other-agent")
+
+    def test_update_issue_actor_default_succeeds_for_current_holder(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Actor default")
+        db.claim_issue(issue.id, assignee="agent-holder")
+
+        updated = db.update_issue(issue.id, priority=0, actor="agent-holder")
+
+        assert updated.priority == 0
+
+    def test_update_issue_explicit_expected_assignee_overrides_actor_default(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Coordinator override")
+        db.claim_issue(issue.id, assignee="agent-holder")
+
+        updated = db.update_issue(issue.id, priority=0, actor="coordinator", expected_assignee="agent-holder")
+
+        assert updated.priority == 0
+
+    def test_update_issue_without_actor_remains_permissive(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Actorless local update")
+        db.claim_issue(issue.id, assignee="agent-holder")
+
+        updated = db.update_issue(issue.id, priority=0)
+
         assert updated.priority == 0
 
     def test_update_issue_rejects_when_expected_assignee_mismatches(self, db: FiligreeDB) -> None:
@@ -1015,11 +1039,23 @@ class TestWritePathExpectedAssignee:
         with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
             db.close_issue(issue.id, expected_assignee="agent-other")
 
+    def test_close_issue_defaults_expected_assignee_to_actor_for_held_issue(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware close")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'other-agent'"):
+            db.close_issue(issue.id, actor="other-agent")
+
     def test_add_comment_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Claim-aware comment")
         db.claim_issue(issue.id, assignee="agent-holder")
         with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
             db.add_comment(issue.id, "note", expected_assignee="agent-other")
+
+    def test_add_comment_defaults_expected_assignee_to_author_for_held_issue(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware comment")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'other-agent'"):
+            db.add_comment(issue.id, "note", author="other-agent")
 
     def test_add_label_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Claim-aware label")
@@ -1027,12 +1063,25 @@ class TestWritePathExpectedAssignee:
         with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
             db.add_label(issue.id, "needs-review", expected_assignee="agent-other")
 
+    def test_add_label_defaults_expected_assignee_to_actor_for_held_issue(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware label")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'other-agent'"):
+            db.add_label(issue.id, "needs-review", actor="other-agent")
+
     def test_remove_label_rejects_unexpected_holder(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Claim-aware label")
         db.claim_issue(issue.id, assignee="agent-holder")
         db.add_label(issue.id, "needs-review")
         with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'agent-other'"):
             db.remove_label(issue.id, "needs-review", expected_assignee="agent-other")
+
+    def test_remove_label_defaults_expected_assignee_to_actor_for_held_issue(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Claim-aware label")
+        db.claim_issue(issue.id, assignee="agent-holder")
+        db.add_label(issue.id, "needs-review")
+        with pytest.raises(ValueError, match=r"assigned to 'agent-holder'.*expected 'other-agent'"):
+            db.remove_label(issue.id, "needs-review", actor="other-agent")
 
     def test_batch_update_partial_failure_on_mismatch(self, db: FiligreeDB) -> None:
         held = db.create_issue("Held")
@@ -1049,6 +1098,39 @@ class TestWritePathExpectedAssignee:
         assert {f["id"] for f in failed} == {unheld.id}
         # The failure carries the CONFLICT-shaped message.
         assert any("expected 'agent-holder'" in f["error"] for f in failed)
+
+    def test_batch_update_defaults_expected_assignee_to_actor_per_held_item(self, db: FiligreeDB) -> None:
+        held_by_actor = db.create_issue("Held by actor")
+        held_by_other = db.create_issue("Held by other")
+        unheld = db.create_issue("Unheld")
+        db.claim_issue(held_by_actor.id, assignee="agent-holder")
+        db.claim_issue(held_by_other.id, assignee="agent-other")
+
+        succeeded, failed = db.batch_update(
+            [held_by_actor.id, held_by_other.id, unheld.id],
+            priority=0,
+            actor="agent-holder",
+        )
+
+        assert {i.id for i in succeeded} == {held_by_actor.id, unheld.id}
+        assert {f["id"] for f in failed} == {held_by_other.id}
+        assert failed[0]["code"] == ErrorCode.CONFLICT
+        assert "expected 'agent-holder'" in failed[0]["error"]
+
+    def test_batch_close_defaults_expected_assignee_to_actor_per_held_item(self, db: FiligreeDB) -> None:
+        held_by_actor = db.create_issue("Held by actor")
+        held_by_other = db.create_issue("Held by other")
+        db.claim_issue(held_by_actor.id, assignee="agent-holder")
+        db.claim_issue(held_by_other.id, assignee="agent-other")
+
+        succeeded, failed = db.batch_close(
+            [held_by_actor.id, held_by_other.id],
+            actor="agent-holder",
+        )
+
+        assert {i.id for i in succeeded} == {held_by_actor.id}
+        assert {f["id"] for f in failed} == {held_by_other.id}
+        assert failed[0]["code"] == ErrorCode.CONFLICT
 
 
 # ---------------------------------------------------------------------------

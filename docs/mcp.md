@@ -135,11 +135,17 @@ Workflow guide with optional live project context. Agents use this to understand
 | `parent_issue_id` | string | no | New parent (empty string to clear) |
 | `fields` | object | no | Fields to merge into existing |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 Soft workflow enforcement does not block the update. When a status change skips
 recommended fields, the returned issue includes the advisory in
 `data_warnings[]`; the same message is recorded once as a `transition_warning`
 event.
+
+Claim-aware write safety is on by default when `actor` is present: if the issue
+is held, the observed assignee must match `actor`. Coordinator flows that
+intentionally edit another actor's held issue can pass `expected_assignee` with
+the observed holder; mismatches return `CONFLICT` and name both holders.
 
 #### `close_issue`
 
@@ -149,6 +155,7 @@ event.
 | `reason` | string | no | Close reason |
 | `fields` | object | no | Extra fields to set while closing (for enforced workflows) |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 When an issue has active `critical=true` annotations linked with
 `relationship="must_consider"`, `close_issue` still closes the issue but returns
@@ -218,6 +225,7 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 | `issue_id` | string | yes | Issue ID |
 | `text` | string | yes | Comment text |
 | `actor` | string | no | Used as comment author |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 #### `get_comments`
 
@@ -231,6 +239,8 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 | `label` | string | yes | Label name |
+| `actor` | string | no | Agent identity for claim-aware write safety |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 ### Search
 
@@ -404,6 +414,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `fields` | object | no | Fields to merge |
 | `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 #### `batch_close`
 
@@ -413,6 +424,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `reason` | string | no | Close reason |
 | `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 #### `batch_add_label`
 
@@ -422,6 +434,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `label` | string | yes | Label to add |
 | `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 #### `batch_add_comment`
 
@@ -431,6 +444,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `text` | string | yes | Comment text |
 | `response_detail` | `"slim" \| "full"` | no | Default `"slim"` |
 | `actor` | string | no | Agent identity for audit trail |
+| `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
 ### Templates and Workflow
 
