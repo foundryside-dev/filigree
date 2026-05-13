@@ -74,20 +74,7 @@ def get_template_cmd(type_name: str, as_json: bool) -> None:
     Verb-noun alias for ``templates --type=<type>`` mirroring the MCP
     ``get_template`` tool.
     """
-    with get_db() as db:
-        tpl = db.get_template(type_name)
-        if tpl is None:
-            _emit_error(f"Unknown template: {type_name}", ErrorCode.NOT_FOUND, as_json=as_json)
-        if as_json:
-            click.echo(json_mod.dumps(dict(tpl), indent=2))
-            return
-        click.echo(f"{tpl['display_name']} ({tpl['type']})")
-        click.echo(f"  {tpl['description']}")
-        click.echo("\n  Fields:")
-        for f in tpl["fields_schema"]:
-            required_at = f.get("required_at") or []
-            req = f" (required at: {', '.join(required_at)})" if required_at else ""
-            click.echo(f"    {f['name']}: {f['type']}{req} — {f['description']}")
+    _type_info_impl(type_name, as_json)
 
 
 def _workflow_statuses_impl(as_json: bool) -> None:

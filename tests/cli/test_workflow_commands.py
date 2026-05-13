@@ -320,6 +320,13 @@ class TestWorkflowCli:
         assert "states" in payload
         assert "initial_state" in payload
 
+    def test_get_template_human_output_shows_full_workflow(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["get-template", "task"])
+        assert result.exit_code == 0
+        assert "States:" in result.output
+        assert "Transitions:" in result.output
+
     def test_type_info_json_matches_get_template_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
 
