@@ -339,7 +339,7 @@ def get_critical_path(as_json: bool) -> None:
 
 
 @click.command("create-plan")
-@click.option("--file", "file_path", default=None, type=click.Path(exists=True), help="JSON file (stdin if omitted)")
+@click.option("--file", "file_path", default=None, type=click.Path(), help="JSON file (stdin if omitted)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def create_plan(ctx: click.Context, file_path: str | None, as_json: bool) -> None:

@@ -761,6 +761,15 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "VALIDATION"
         assert "JSON" in data["error"] or "json" in data["error"].lower()
 
+    def test_create_plan_missing_file_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project_root = cli_in_project
+        missing_path = project_root / "definitely-missing-plan.json"
+        result = runner.invoke(cli, ["create-plan", "--file", str(missing_path), "--json"])
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert str(missing_path) in data["error"]
+
     def test_create_plan_top_level_list_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["create-plan", "--json"], input=json.dumps([1, 2, 3]))
