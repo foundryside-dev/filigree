@@ -74,6 +74,12 @@ def _emit_error(msg: str, code: Any, *, as_json: bool, details: dict[str, Any] |
     sys.exit(1)
 
 
+def _mark_reserved_scan_failed(tracker: Any, scan_run_id: str, error_message: str) -> None:
+    """Best-effort terminalization for a reserved run after post-spawn tracking fails."""
+    with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
+        tracker.update_scan_run_status(scan_run_id, "failed", error_message=error_message)
+
+
 # ---------------------------------------------------------------------------
 # list-scanners
 # ---------------------------------------------------------------------------
@@ -205,6 +211,11 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) 
         except (sqlite3.Error, KeyError, ValueError) as exc:
             with contextlib.suppress(OSError):
                 proc.kill()
+            _mark_reserved_scan_failed(
+                tracker,
+                scan_run_id,
+                f"Scanner process terminated after DB tracking failed: {exc}",
+            )
             _emit_error(
                 f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
                 ErrorCode.IO,
@@ -429,6 +440,11 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             except (sqlite3.Error, KeyError, ValueError) as exc:
                 with contextlib.suppress(OSError):
                     proc.kill()
+                _mark_reserved_scan_failed(
+                    tracker,
+                    entry["scan_run_id"],
+                    f"Scanner process terminated after DB tracking failed: {exc}",
+                )
                 spawn_errors.append({"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"})
                 continue
             entry["log_rel"] = log_rel
@@ -592,6 +608,7 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
         "command_string": shlex.join(cmd),
         "valid": cmd_err is None,
         "validation_error": cmd_err,
+        **cfg.risk_metadata(),
     }
 
     if as_json:
@@ -602,6 +619,9 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
     click.echo(f"File: {file_path}")
     click.echo(f"Command: {preview['command_string']}")
     click.echo(f"Valid: {preview['valid']}")
+    click.echo(f"Requires approval: {preview['requires_approval']}")
+    click.echo(f"May send contents: {preview['may_send_contents']}")
+    click.echo(f"Risk: {preview['risk_summary']}")
     if cmd_err:
         click.echo(f"Validation error: {cmd_err}", err=True)
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,8 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.cli_common import get_db
+from filigree.core import FiligreeDB
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -55,9 +58,13 @@ class _FakeProc:
 
     def __init__(self, pid: int = 12345) -> None:
         self.pid = pid
+        self.killed = False
 
     def poll(self) -> None:
         return None
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 @pytest.fixture
@@ -162,6 +169,13 @@ class TestPreviewScanCommand:
             assert "target.py" in data["command_string"]
             assert data["valid"] is True
             assert data["validation_error"] is None
+            assert data["execution_mode"] == "external_process"
+            assert data["may_send_contents"] is True
+            assert data["requires_dashboard"] is True
+            assert data["estimated_cost"] == "unknown"
+            assert data["safe_preview_only"] is True
+            assert data["requires_approval"] is True
+            assert "External scanner process" in data["risk_summary"]
         finally:
             os.chdir(original)
 
@@ -555,6 +569,29 @@ class TestTriggerScanCommand:
         finally:
             os.chdir(original)
 
+    def test_trigger_scan_backfill_failure_marks_reserved_run_failed(self, project_with_scanner: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        proc = _FakeProc(12346)
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(FiligreeDB, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert proc.killed is True
+            with get_db() as db:
+                row = db.conn.execute("SELECT id, status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
+        finally:
+            os.chdir(original)
+
 
 # ---------------------------------------------------------------------------
 # TestTriggerScanBatchCommand
@@ -650,6 +687,29 @@ class TestTriggerScanBatchCommand:
             assert result.exit_code == 1
             data = json.loads(result.output)
             assert data["code"] == "INVALID_API_URL"
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_backfill_failure_marks_reserved_run_failed(self, project_with_scanner: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        proc = _FakeProc(102)
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(FiligreeDB, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+            ):
+                result = runner.invoke(cli, ["trigger-scan-batch", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert proc.killed is True
+            with get_db() as db:
+                row = db.conn.execute("SELECT id, status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
         finally:
             os.chdir(original)
 
