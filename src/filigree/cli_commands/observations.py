@@ -11,6 +11,7 @@ import click
 
 from filigree.cli_common import get_db, refresh_summary
 from filigree.issue_payloads import issue_to_public
+from filigree.mcp_tools.payloads import observation_to_mcp
 from filigree.models import Issue
 from filigree.types.api import BatchFailure, ErrorCode
 
@@ -121,7 +122,7 @@ def observe_cmd(
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         if as_json:
-            click.echo(json_mod.dumps(obs, indent=2, default=str))
+            click.echo(json_mod.dumps(observation_to_mcp(obs), indent=2, default=str))
         else:
             click.echo(f"Observed {obs['id']}: {obs['summary']}")
         refresh_summary(db)
@@ -200,7 +201,10 @@ def list_observations_cmd(
         next_offset = offset + len(observations) if has_more else None
 
         if as_json:
-            payload: dict[str, Any] = {"items": list(observations), "has_more": has_more}
+            payload: dict[str, Any] = {
+                "items": [observation_to_mcp(obs) for obs in observations],
+                "has_more": has_more,
+            }
             if has_more and next_offset is not None:
                 payload["next_offset"] = next_offset
             click.echo(json_mod.dumps(payload, indent=2, default=str))
@@ -304,8 +308,8 @@ def promote_observation_cmd(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
-        # Mirror MCP: issue is an Issue object, call .to_dict()
-        resp: dict[str, Any] = {"issue": result["issue"].to_dict()}
+        issue = db.get_issue(result["issue"].id)
+        resp: dict[str, Any] = dict(issue_to_public(issue))
         if result.get("warnings"):
             resp["warnings"] = result["warnings"]
         if as_json:
@@ -345,7 +349,7 @@ def batch_dismiss_observations_cmd(
         # batch_dismiss_observations so the fetch must happen first.
         full_records: list[dict[str, Any]] = []
         if response_detail == "full":
-            full_records = [dict(rec) for rec in db.get_observations_by_ids(raw_ids)]
+            full_records = [observation_to_mcp(rec) for rec in db.get_observations_by_ids(raw_ids)]
         try:
             result = db.batch_dismiss_observations(
                 raw_ids,

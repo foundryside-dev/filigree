@@ -221,7 +221,8 @@ class TestCliFindingsAndObservationsBatchDetail:
         assert len(data["succeeded"]) == 2
         for item in data["succeeded"]:
             assert isinstance(item, dict)
-            assert {"id", "summary"} <= set(item.keys())
+            assert {"observation_id", "summary"} <= set(item.keys())
+            assert "id" not in item
 
     def test_batch_promote_observations_slim_default(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, project = cli_in_project

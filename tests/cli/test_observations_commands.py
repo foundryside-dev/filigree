@@ -2,11 +2,11 @@
 promote-observation, batch-dismiss-observations, batch-promote-observations.
 
 MCP shape verification:
-- observe: {"id", "summary", "detail", "file_id", "file_path", "line",
+- observe: {"observation_id", "summary", "detail", "file_id", "file_path", "line",
             "source_issue_id", "priority", "actor", "created_at", "expires_at"}
 - list-observations: ListResponse — {"items": [...], "has_more": bool} + "next_offset" when has_more
 - dismiss-observation: {"status": "dismissed", "observation_id": <str>}
-- promote-observation: {"issue": <IssueDict>} + optional "warnings"
+- promote-observation: flat PublicIssue + optional "warnings"
 - batch-dismiss-observations: BatchResponse[str] — {"succeeded": [...], "failed": [...]}
 - batch-promote-observations: BatchResponse[SlimIssue] — {"succeeded": [...], "failed": [...]}
 """
@@ -29,7 +29,7 @@ from tests.cli.conftest import SeededProject
 
 _OBSERVE_KEYS = frozenset(
     {
-        "id",
+        "observation_id",
         "summary",
         "detail",
         "file_id",
@@ -71,6 +71,7 @@ class TestObserveCommand:
         data = json.loads(result.output)
         # Exact MCP key-set
         assert set(data.keys()) == _OBSERVE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _OBSERVE_KEYS}"
+        assert "id" not in data
         assert data["summary"] == "spotted a code smell"
         assert data["priority"] == 2  # CLI default
 
@@ -155,6 +156,7 @@ class TestListObservationsCommand:
             item = data["items"][0]
             # Every key the MCP emits must be present; no extra keys allowed.
             assert set(item.keys()) == _OBSERVE_KEYS, f"Item key mismatch: {set(item.keys()) ^ _OBSERVE_KEYS}"
+            assert "id" not in item
         finally:
             os.chdir(original)
 
@@ -313,20 +315,21 @@ class TestPromoteObservationCommand:
             result = runner.invoke(cli, ["promote-observation", obs_id, "--json"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            # Mirror MCP: {"issue": <IssueDict>} + optional "warnings"
-            assert "issue" in data
-            issue = data["issue"]
-            # Issue dict must have the core IssueDict keys
-            assert "id" in issue
-            assert "title" in issue
-            assert "status" in issue
-            assert "priority" in issue
-            assert "type" in issue
+            # Mirror MCP: flat PublicIssue projection, refreshed after enrichment.
+            assert "issue" not in data
+            assert "id" not in data
+            assert "issue_id" in data
+            assert data["title"] == "note"
+            assert data["status"] == "open"
+            assert data["type"] == "task"
+            assert "from-observation" in data["labels"]
         finally:
             os.chdir(original)
 
-    def test_promote_returns_issue_dict_not_issue_object(self, initialized_project_with_observation: SeededProject) -> None:
-        """Regression guard: issue must be a serialized dict, not an Issue object repr."""
+    def test_promote_returns_flat_public_issue_not_wrapped_internal_issue(
+        self, initialized_project_with_observation: SeededProject
+    ) -> None:
+        """Regression guard: issue must be the public flat shape, not an internal wrapper."""
         import os
 
         runner = CliRunner()
@@ -336,9 +339,11 @@ class TestPromoteObservationCommand:
             obs_id = initialized_project_with_observation.obs_id
             result = runner.invoke(cli, ["promote-observation", obs_id, "--json"])
             assert result.exit_code == 0
-            # Must be parseable JSON — confirms it's a dict, not repr(object)
             data = json.loads(result.output)
-            assert isinstance(data["issue"], dict)
+            assert isinstance(data["issue_id"], str)
+            assert data["issue_id"]
+            assert "issue" not in data
+            assert "id" not in data
         finally:
             os.chdir(original)
 
@@ -364,8 +369,8 @@ class TestPromoteObservationCommand:
             )
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert data["issue"]["type"] == "bug"
-            assert data["issue"]["priority"] == 1
+            assert data["type"] == "bug"
+            assert data["priority"] == 1
         finally:
             os.chdir(original)
 
