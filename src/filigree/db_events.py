@@ -162,12 +162,12 @@ class EventsMixin(DBMixinProtocol):
         ).fetchall()
         return [self._build_event_record_with_title(r) for r in rows]
 
-    def get_issue_events(self, issue_id: str, *, limit: int = 50) -> list[EventRecord]:
+    def get_issue_events(self, issue_id: str, *, limit: int = 50, offset: int = 0) -> list[EventRecord]:
         """Get events for a specific issue, newest first."""
         self.get_issue(issue_id)  # raises KeyError if not found
         rows = self.conn.execute(
-            "SELECT * FROM events WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
-            (issue_id, limit),
+            "SELECT * FROM events WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (issue_id, limit, offset),
         ).fetchall()
         return [self._build_event_record(r) for r in rows]
 

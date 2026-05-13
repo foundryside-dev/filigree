@@ -369,7 +369,7 @@ def create_classic_router() -> APIRouter:
         notes = _validate_body_string_field(body, "notes", default=None)
         if isinstance(notes, JSONResponse):
             return notes
-        parent_id = _validate_body_string_field(body, "parent_id", allow_null=True, default=None)
+        parent_id = _validate_body_string_field(body, "parent_id", default=None)
         if isinstance(parent_id, JSONResponse):
             return parent_id
         status = _validate_body_string_field(body, "status", default=None)
@@ -915,16 +915,16 @@ def create_loom_router() -> APIRouter:
         pagination = _parse_pagination(params, default_limit=50)
         if isinstance(pagination, JSONResponse):
             return pagination
-        limit, _ = pagination
+        limit, offset = pagination
         try:
-            events = db.get_issue_events(issue_id, limit=limit + 1)
+            events = db.get_issue_events(issue_id, limit=limit + 1, offset=offset)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         has_more = len(events) > limit
         if has_more:
             events = events[:limit]
         items = [issue_event_to_loom(e) for e in events]
-        return JSONResponse(list_response(items, limit=limit, offset=0, has_more=has_more))
+        return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/issues/{issue_id}/files")
     async def api_loom_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
@@ -1034,7 +1034,7 @@ def create_loom_router() -> APIRouter:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         body: dict[str, Any] = dict(issue_to_loom(issue))
         if include_files:
-            body["files"] = db.get_issue_files(issue_id)
+            body["files"] = [file_assoc_to_loom(a) for a in db.get_issue_files(issue_id)]
         return JSONResponse(body)
 
     @router.post("/issues", status_code=201)
@@ -1107,7 +1107,7 @@ def create_loom_router() -> APIRouter:
         notes = _validate_body_string_field(body, "notes", default=None)
         if isinstance(notes, JSONResponse):
             return notes
-        parent_id = _validate_body_string_field(body, "parent_id", allow_null=True, default=None)
+        parent_id = _validate_body_string_field(body, "parent_id", default=None)
         if isinstance(parent_id, JSONResponse):
             return parent_id
         status = _validate_body_string_field(body, "status", default=None)

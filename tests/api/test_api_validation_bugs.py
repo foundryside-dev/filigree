@@ -529,6 +529,87 @@ class TestPatchStatusTypeValidation:
         assert body["code"] == "VALIDATION", body
 
 
+class TestPatchParentIdNullValidation:
+    async def test_classic_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        parent = bug_db.create_issue("Classic parent")
+        child = bug_db.create_issue("Classic child", parent_id=parent.id)
+
+        resp = await client.patch(f"/api/issue/{child.id}", json={"parent_id": None})
+
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "VALIDATION", body
+        assert "parent_id" in body["error"]
+        assert bug_db.get_issue(child.id).parent_id == parent.id
+
+    async def test_loom_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        parent = bug_db.create_issue("Loom parent")
+        child = bug_db.create_issue("Loom child", parent_id=parent.id)
+
+        resp = await client.patch(f"/api/loom/issues/{child.id}", json={"parent_id": None})
+
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "VALIDATION", body
+        assert "parent_id" in body["error"]
+        assert bug_db.get_issue(child.id).parent_id == parent.id
+
+    async def test_classic_patch_parent_id_empty_string_still_clears(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        parent = bug_db.create_issue("Clear parent")
+        child = bug_db.create_issue("Clear child", parent_id=parent.id)
+
+        resp = await client.patch(f"/api/issue/{child.id}", json={"parent_id": ""})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["parent_id"] is None
+        assert bug_db.get_issue(child.id).parent_id is None
+
+
+class TestLoomIssueDetailIncludeFilesShape:
+    async def test_include_files_uses_loom_file_assoc_shape(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Loom include files")
+        file_record = bug_db.register_file("src/loom_file_shape.py")
+        bug_db.add_file_association(file_record.id, issue.id, "bug_in")
+
+        resp = await client.get(f"/api/loom/issues/{issue.id}", params={"include_files": "true"})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["files"]) == 1
+        assoc = body["files"][0]
+        assert "assoc_id" in assoc
+        assert "id" not in assoc
+        assert assoc["file_id"] == file_record.id
+        assert assoc["issue_id"] == issue.id
+
+
+class TestLoomIssueEventsPagination:
+    async def test_issue_events_offset_advances_page(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Loom events page")
+        bug_db.conn.execute(
+            "UPDATE events SET created_at = ? WHERE issue_id = ?",
+            ("2025-01-01T00:00:00+00:00", issue.id),
+        )
+        first = bug_db.conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES (?, ?, ?, ?)",
+            (issue.id, "title_changed", "agent", "2026-01-01T00:00:00+00:00"),
+        ).lastrowid
+        second = bug_db.conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES (?, ?, ?, ?)",
+            (issue.id, "status_changed", "agent", "2026-01-01T00:00:01+00:00"),
+        ).lastrowid
+        bug_db.conn.commit()
+
+        page1 = await client.get(f"/api/loom/issues/{issue.id}/events", params={"limit": "1"})
+        page2 = await client.get(f"/api/loom/issues/{issue.id}/events", params={"limit": "1", "offset": "1"})
+
+        assert page1.status_code == 200, page1.text
+        assert page2.status_code == 200, page2.text
+        assert [item["event_id"] for item in page1.json()["items"]] == [second]
+        assert [item["event_id"] for item in page2.json()["items"]] == [first]
+        assert page1.json()["next_offset"] == 1
+
+
 # ---------------------------------------------------------------------------
 # filigree-25b44e65e2: write routes map WrongProjectError to CONFLICT/NOT_FOUND
 # instead of VALIDATION on claim/release/add-dependency/add-comment.
