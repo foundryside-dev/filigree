@@ -680,6 +680,7 @@ Show all workflow statuses grouped by category (open, wip, done) from enabled te
 filigree stats                              # Counts by status name/category, type, ready/blocked
 filigree metrics --days=30                  # Cycle time, lead time, throughput
 filigree changes --since 2026-01-01T00:00   # Events since timestamp
+filigree changes --since 2026-01-01T00:00 --actor agent-1 --label cluster:review
 filigree events <id>                        # Event history for one issue
 ```
 
@@ -706,6 +707,12 @@ Events since a timestamp. Used for session resumption.
 |-----------|------|-------------|
 | `--since` | ISO timestamp | Start timestamp (required) |
 | `--limit` | integer | Max events (default 100) |
+| `--after-event-id` | integer | Resume inside a same-timestamp event group |
+| `--actor` | string | Only include events written by this actor |
+| `--issue-id` | string | Only include events for this issue |
+| `--label` | string | Only include events for issues currently carrying this label |
+| `--type` | string | Only include events of this event type |
+| `--include-heartbeats` | flag | Include heartbeat events; excluded by default |
 
 ### `events`
 

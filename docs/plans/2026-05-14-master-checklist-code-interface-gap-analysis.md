@@ -46,7 +46,7 @@ write defaults, and registry-derived MCP self-discovery metadata.
 | Checklist item | Current status | Evidence | Remaining work |
 |---|---:|---|---|
 | Claim-aware writes hard to misuse | Done | `_check_expected_assignee()` now derives the expected holder from `actor` when `expected_assignee` is omitted and the issue is held (`src/filigree/db_issues.py`). Issue update/close, comments, labels, and batch write paths pass actor/author through, and MCP/API/CLI surfaces classify holder mismatches as `CONFLICT`. Regression coverage in `tests/core/test_workflow_behavior.py` verifies actor defaults, actorless local writes, explicit coordinator overrides, and batch partial conflicts; `tests/mcp/test_tools.py` covers public MCP conflict/override behavior. | None. |
-| Live-work search and catch-up filters | Partial and interface-drifted | Search supports bracket/hyphen literal fallback and `status_category` (`src/filigree/db_issues.py:2015`; `uv run filigree search --help`). MCP `get_changes` supports actor, issue, label, type, after-event-id, and heartbeat exclusion (`src/filigree/mcp_tools/meta.py:252`). CLI `get-changes` only exposes `since`, `limit`, and `after-event-id` (`src/filigree/cli_commands/planning.py:472`). | Add multi-value filters if still desired, and bring CLI catch-up filters to parity with MCP. |
+| Live-work search and catch-up filters | Done | Search supports bracket/hyphen literal fallback and `status_category` (`src/filigree/db_issues.py`; `uv run filigree search --help`). MCP `get_changes` and CLI `changes`/`get-changes` support actor, issue, label, type, after-event-id, and heartbeat separation (`src/filigree/mcp_tools/meta.py`; `src/filigree/cli_commands/planning.py`). CLI heartbeat events are excluded by default and restored with `--include-heartbeats`, matching MCP behavior. Regression coverage in `tests/cli/test_workflow_commands.py` pins actor/type/label filters and heartbeat opt-in. | None. |
 | MCP self-discovery and docs generated from live registry | Done | `get_schema` derives `accepted_by_tools` from the live MCP tool registry input schemas (`src/filigree/mcp_tools/workflow.py`). Regression coverage in `tests/mcp/test_tools.py` asserts the schema output exactly matches the registered tool properties for each ID family, and `tests/util/test_module_split.py` checks the `docs/mcp.md` headline tool count against the live registry. | None. |
 | ID and relationship naming consistency | Partial | Public issue payload emits both `parent_id` and `parent_issue_id` for compatibility (`src/filigree/issue_payloads.py:22`). Dependency tools use `from_issue_id`/`to_issue_id` (`src/filigree/mcp_tools/planning.py:72`). | Complete deprecation story for legacy `parent_id` and any remaining mixed naming in CLI/API docs. |
 | Common response envelopes and slim paths | Partial | List envelopes are common (`src/filigree/mcp_tools/common.py:101`), batch envelopes are common, stats include canonical and compatibility keys (`src/filigree/db_meta.py:404`). `get_valid_transitions` still returns a bare array (`src/filigree/mcp_tools/workflow.py:335`), and `get_plan` has no `response_detail` or slim mode (`src/filigree/mcp_tools/planning.py:104`). | Normalize remaining bare arrays and verbose full-record defaults where ADR-009 calls for slim/default plus `response_detail`. |
@@ -75,8 +75,8 @@ write defaults, and registry-derived MCP self-discovery metadata.
 
 ## Interface Drift Notes
 
-- MCP `get_changes` is richer than CLI `get-changes`. The CLI lacks actor,
-  issue, label, type, and heartbeat controls, even though MCP exposes them.
+- MCP and CLI `get_changes`/`get-changes` now share actor, issue, label, type,
+  cursor, and heartbeat controls.
 - MCP exposes `get_summary`; CLI does not expose `get-summary`. This is fine if
   summary JSON is MCP-only by design, but the checklist should say so.
 - MCP schemas are all hand-written and permissive. Without unknown-parameter
@@ -103,7 +103,7 @@ Keep as active gaps:
 - ADR-007 `report_finding` default side effect change. **Resolved 2026-05-14:** paired observation creation is explicit opt-in and default responses remain slim.
 - Mixed scratch cleanup documentation/orchestration. **Resolved 2026-05-14:** CLI and MCP docs now provide a single end-of-session cleanup recipe covering claims, observations, findings, file records, scratch issue archive, and compaction.
 - ADR-008 actor-as-default claim-aware writes. **Resolved 2026-05-14:** held issue writes default expected holder to actor/author and return `CONFLICT` on mismatch.
-- CLI parity for `get_changes` filters.
+- CLI parity for `get_changes` filters. **Resolved 2026-05-14:** CLI `changes`/`get-changes` now support actor, issue, label, type, cursor, and heartbeat controls.
 - Registry-generated MCP schema/docs. **Resolved 2026-05-14:** `accepted_by_tools` is derived from live tool schemas and docs count drift is pinned by test.
 - Remaining response-envelope normalization.
 - Plan read slim/full mode and move/dependency warnings.

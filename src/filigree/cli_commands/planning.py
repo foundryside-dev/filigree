@@ -7,13 +7,14 @@ import json as json_mod
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, get_args
 
 import click
 
 from filigree.cli_common import get_db, refresh_summary
 from filigree.issue_payloads import issue_to_ready
 from filigree.types.api import ErrorCode
+from filigree.types.events import EventType
 
 
 def _emit_error(message: str, code: ErrorCode, as_json: bool) -> NoReturn:
@@ -440,11 +441,47 @@ def create_plan(ctx: click.Context, file_path: str | None, as_json: bool) -> Non
         refresh_summary(db)
 
 
-def _changes_impl(since: str, limit: int, after_event_id: int | None, as_json: bool) -> None:
+def _validate_changes_filters(label: str | None, event_type: str | None, as_json: bool) -> None:
+    if label is not None:
+        label = label.strip()
+        if not label:
+            _emit_error("label cannot be empty", ErrorCode.VALIDATION, as_json)
+        if any(ord(c) < 32 or c == "\x7f" for c in label):
+            _emit_error("label contains control characters", ErrorCode.VALIDATION, as_json)
+    if event_type is not None and event_type not in get_args(EventType):
+        _emit_error(f"Invalid event type: {event_type}", ErrorCode.VALIDATION, as_json)
+
+
+def _changes_impl(
+    since: str,
+    limit: int,
+    after_event_id: int | None,
+    as_json: bool,
+    *,
+    actor: str | None = None,
+    issue_id: str | None = None,
+    label: str | None = None,
+    event_type: str | None = None,
+    include_heartbeats: bool = False,
+) -> None:
     since = _normalize_iso_timestamp(since, as_json)
+    _validate_changes_filters(label, event_type, as_json)
+    label_filter = label.strip() if label is not None else None
+    exclude_types: list[str] = []
+    if not include_heartbeats and event_type != "heartbeat":
+        exclude_types.append("heartbeat")
     with get_db() as db:
         # Overfetch by 1 to detect has_more without an offset param.
-        raw = db.get_events_since(since, after_event_id=after_event_id, limit=limit + 1 if limit > 0 else limit)
+        raw = db.get_events_since(
+            since,
+            after_event_id=after_event_id,
+            limit=limit + 1 if limit > 0 else limit,
+            actor=actor,
+            issue_id=issue_id,
+            label=label_filter,
+            event_type=event_type,
+            exclude_types=exclude_types or None,
+        )
         has_more = limit > 0 and len(raw) > limit
         events = raw[:limit] if has_more else raw
 
@@ -478,10 +515,35 @@ def _changes_impl(since: str, limit: int, after_event_id: int | None, as_json: b
     help="Max events (default 100, must be >= 1)",
 )
 @click.option("--after-event-id", default=None, type=click.IntRange(min=0), help="Resume after this event id when --since ties")
+@click.option("--actor", default=None, help="Only include events written by this actor")
+@click.option("--issue-id", default=None, help="Only include events for this issue")
+@click.option("--label", default=None, help="Only include events for issues currently carrying this label")
+@click.option("--type", "event_type", default=None, help="Only include events of this event type")
+@click.option("--include-heartbeats", is_flag=True, help="Include heartbeat events (excluded by default)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def changes(since: str, limit: int, after_event_id: int | None, as_json: bool) -> None:
+def changes(
+    since: str,
+    limit: int,
+    after_event_id: int | None,
+    actor: str | None,
+    issue_id: str | None,
+    label: str | None,
+    event_type: str | None,
+    include_heartbeats: bool,
+    as_json: bool,
+) -> None:
     """Get events since a timestamp (for session resumption)."""
-    _changes_impl(since, limit, after_event_id, as_json)
+    _changes_impl(
+        since,
+        limit,
+        after_event_id,
+        as_json,
+        actor=actor,
+        issue_id=issue_id,
+        label=label,
+        event_type=event_type,
+        include_heartbeats=include_heartbeats,
+    )
 
 
 @click.command("get-changes")
@@ -493,10 +555,35 @@ def changes(since: str, limit: int, after_event_id: int | None, as_json: bool) -
     help="Max events (default 100, must be >= 1)",
 )
 @click.option("--after-event-id", default=None, type=click.IntRange(min=0), help="Resume after this event id when --since ties")
+@click.option("--actor", default=None, help="Only include events written by this actor")
+@click.option("--issue-id", default=None, help="Only include events for this issue")
+@click.option("--label", default=None, help="Only include events for issues currently carrying this label")
+@click.option("--type", "event_type", default=None, help="Only include events of this event type")
+@click.option("--include-heartbeats", is_flag=True, help="Include heartbeat events (excluded by default)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def get_changes(since: str, limit: int, after_event_id: int | None, as_json: bool) -> None:
+def get_changes(
+    since: str,
+    limit: int,
+    after_event_id: int | None,
+    actor: str | None,
+    issue_id: str | None,
+    label: str | None,
+    event_type: str | None,
+    include_heartbeats: bool,
+    as_json: bool,
+) -> None:
     """Get events since a timestamp (for session resumption). Alias for `changes`."""
-    _changes_impl(since, limit, after_event_id, as_json)
+    _changes_impl(
+        since,
+        limit,
+        after_event_id,
+        as_json,
+        actor=actor,
+        issue_id=issue_id,
+        label=label,
+        event_type=event_type,
+        include_heartbeats=include_heartbeats,
+    )
 
 
 def register(cli: click.Group) -> None:

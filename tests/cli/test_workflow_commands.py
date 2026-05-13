@@ -1046,6 +1046,57 @@ class TestEventsCli:
         assert data["has_more"] is True
         assert data["next_since"] == data["items"][-1]["created_at"]
 
+    def test_changes_json_filters_by_actor_type_and_label(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        with get_db() as db:
+            target = db.create_issue("Target catch-up", actor="agent-alpha", labels=["cluster:focus"])
+            db.create_issue("Other actor", actor="agent-beta", labels=["cluster:focus"])
+            db.create_issue("Other label", actor="agent-alpha", labels=["cluster:other"])
+
+        result = runner.invoke(
+            cli,
+            [
+                "changes",
+                "--since",
+                "2000-01-01T00:00:00+00:00",
+                "--actor",
+                "agent-alpha",
+                "--type",
+                "created",
+                "--label",
+                "cluster:focus",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [target.id]
+        assert {item["event_type"] for item in data["items"]} == {"created"}
+        assert {item["actor"] for item in data["items"]} == {"agent-alpha"}
+
+    def test_changes_json_excludes_heartbeats_by_default_with_opt_in(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        with get_db() as db:
+            issue = db.create_issue("Heartbeat catch-up")
+            db.conn.execute(
+                "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES (?, ?, ?, ?)",
+                (issue.id, "heartbeat", "agent-alpha", "2026-01-01T00:00:00+00:00"),
+            )
+            db.conn.commit()
+
+        base_args = ["changes", "--since", "2000-01-01T00:00:00+00:00", "--json"]
+        default_result = runner.invoke(cli, base_args)
+        include_result = runner.invoke(cli, [*base_args, "--include-heartbeats"])
+
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.output)
+        assert "heartbeat" not in {item["event_type"] for item in default_data["items"]}
+
+        assert include_result.exit_code == 0, include_result.output
+        include_data = json.loads(include_result.output)
+        assert "heartbeat" in {item["event_type"] for item in include_data["items"]}
+
     def test_changes_json_can_resume_inside_same_timestamp_group(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         tied_timestamp = "2026-01-01T00:00:00+00:00"

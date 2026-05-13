@@ -158,14 +158,20 @@ product match those decisions.
   is held. Explicit `expected_assignee` remains the coordinator override, and
   conflict responses name both observed and expected holders.
 
-- [ ] **Fix live-work search and catch-up filters.**
+- [x] **Fix live-work search and catch-up filters.**
   Source: D6, D11, E7/E8, G4, H4.
+  Tracker: `filigree-0f3794c1c3` is closed.
   Problem: `search_issues` tokenizes away agent session prefixes and returns
   archived/done results without status filters; `get_changes` can be a heartbeat
   firehose and does not have sufficiently expressive filters for catch-up.
   Ship criterion: search supports live-work filters and predictable handling of
   bracket/hyphen actor prefixes; changes support multi-value actor/type/category
   filters or sensible heartbeat separation.
+  Resolution: search already supports bracket/hyphen literal fallback and
+  `status_category`. CLI `changes`/`get-changes` now match MCP catch-up filters
+  for actor, issue, label, event type, same-timestamp cursor, and heartbeat
+  separation; heartbeat events are excluded by default and restored with
+  `--include-heartbeats`.
 
 - [x] **Keep MCP self-discovery and docs generated from the live registry.**
   Source: D/E/F/G schema drift findings, H11, G10.
