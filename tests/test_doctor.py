@@ -479,6 +479,17 @@ class TestDoctorGitignore:
 
 
 class TestDoctorBundledScanners:
+    def test_no_scanners_gives_enablement_nudge(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
+            results = run_doctor(tmp_path)
+
+        scanner_result = next(r for r in results if r.name == "Bundled scanner registrations")
+        assert scanner_result.passed is True
+        assert "0 scanners enabled" in scanner_result.message
+        assert "filigree scanner available" in scanner_result.fix_hint
+
     def test_reports_stale_bundled_scanner_registration(self, tmp_path: Path) -> None:
         _make_project(tmp_path)
         scanners_dir = tmp_path / FILIGREE_DIR_NAME / "scanners"
@@ -513,6 +524,25 @@ class TestDoctorBundledScanners:
 
         scanner_result = next(r for r in results if r.name == "Bundled scanner registrations")
         assert scanner_result.passed is True
+
+    def test_current_bundled_scanner_with_missing_command_fails(self, tmp_path: Path) -> None:
+        from filigree.bundled_scanners import BUNDLED_SCANNERS
+
+        _make_project(tmp_path)
+        scanners_dir = tmp_path / FILIGREE_DIR_NAME / "scanners"
+        scanners_dir.mkdir()
+        (scanners_dir / "codex.toml").write_text(BUNDLED_SCANNERS["codex"].toml())
+
+        with (
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+            patch("filigree.install_support.doctor.shutil.which", return_value=None),
+        ):
+            results = run_doctor(tmp_path)
+
+        scanner_result = next(r for r in results if r.name == "Bundled scanner registrations")
+        assert scanner_result.passed is False
+        assert "missing command(s)" in scanner_result.message
+        assert "uv tool install --upgrade filigree" in scanner_result.fix_hint
 
 
 # ---------------------------------------------------------------------------

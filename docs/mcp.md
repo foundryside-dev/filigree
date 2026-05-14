@@ -831,15 +831,15 @@ instead of acknowledging an unrelated issue.
 
 No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in
 the unified list envelope:
-`{items: [{name, description, file_types, accepts_prompt, prompt_packs_endpoint, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
+`{items: [{name, description, file_types, accepts_prompt, prompt_pack_aware, prompt_packs_endpoint, applicable_prompts, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
 If the list is empty, call `list_available_scanners` to see bundled scanners
 that can be enabled.
 
 #### `list_available_scanners`
 
 No parameters. Returns bundled scanners that can be enabled in the current
-project, including `command_available`, `command_path`, `enabled`, and the
-managed TOML `path`.
+project, including `command_available`, `command_path`, `enabled`,
+`language_focus`, `applicable_prompts`, and the managed TOML `path`.
 
 #### `enable_scanner`
 
@@ -849,7 +849,10 @@ managed TOML `path`.
 | `force` | boolean | no | Replace an existing custom or stale bundled TOML |
 
 Writes the managed `.filigree/scanners/<scanner>.toml` registration for a
-bundled scanner. Refuses to overwrite custom TOML unless `force=true`.
+bundled scanner. Refuses to overwrite custom TOML unless `force=true`. If the
+packaged runner command is not on `PATH`, the response includes
+`command_available=false` and a warning with the `uv tool install --upgrade
+filigree` remediation.
 
 #### `disable_scanner`
 
@@ -863,10 +866,16 @@ without `force`; bundled scanner names with custom content require `force=true`.
 
 #### `list_prompt_packs`
 
-No parameters. Returns bundled scanner prompt packs in the unified list envelope:
-`{items: [{name, description, components, when_to_use}], has_more: bool}`.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `language` | string | no | Optional scanner language focus, e.g. `python`; returns language-agnostic packs plus packs for that focus |
+
+Returns bundled scanner prompt packs in the unified list envelope:
+`{items: [{name, description, instructions, components, when_to_use, audience, language, expected_relative_cost, prompt_pack_scope}], has_more: bool}`.
 Prompt packs are advisory review-focus hints; they do not restrict scanner file
-access or reported findings.
+access or reported findings. Some packs are language-specific; prefer a
+scanner's `applicable_prompts` field, or call `list_prompt_packs` with the
+scanner's `language_focus`, when selecting a pack.
 
 #### `trigger_scan`
 
@@ -874,10 +883,14 @@ access or reported findings.
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name (from list_scanners) |
 | `file_path` | string | yes | File path to scan (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; requires `accepts_prompt=true` for non-default packs) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
 Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, message}`.
+If the scanner name is a bundled scanner that is not enabled in this project,
+the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
+"enable_scanner"`, `cli_enable_command`, and a hint pointing at
+`list_available_scanners` / `enable_scanner`.
 
 #### `trigger_scan_batch`
 
@@ -885,7 +898,7 @@ Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_paths` | string[] | yes | File paths to scan (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; requires `accepts_prompt=true` for non-default packs) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
 Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
@@ -908,7 +921,7 @@ Returns scan status with a live PID check and a tail of the scanner's log.
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_path` | string | yes | File path (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only) |
 
 Returns the exact command that *would* be executed, without spawning anything. Useful for debugging scanner config.
 
@@ -948,6 +961,6 @@ create a linked triage observation; full responses then include
 
 **Scanner registration:** Use `list_available_scanners`, `enable_scanner`, and `disable_scanner` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 
-**Prompt packs:** Use `list_prompt_packs` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `preview_scan`, `trigger_scan`, or `trigger_scan_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
+**Prompt packs:** Use `list_prompt_packs` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `preview_scan`, `trigger_scan`, or `trigger_scan_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. Pack records include `language`, `expected_relative_cost`, `instructions`, and `prompt_pack_scope`; scanner records include `applicable_prompts` so agents do not need to infer language fit from names. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
 
 For end-to-end issue/file/finding workflows (including dashboard UI and troubleshooting), see [File Traceability Playbook](file-traceability.md).

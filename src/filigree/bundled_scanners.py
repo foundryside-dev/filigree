@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from filigree.scanners import load_scanner
+
+BundledScannerStatus = Literal["missing", "current", "stale_bundled", "custom"]
 
 
 @dataclass(frozen=True)
@@ -12,6 +18,7 @@ class BundledScanner:
     command: str
     args: tuple[str, ...]
     file_types: tuple[str, ...]
+    language_focus: tuple[str, ...]
 
     def toml(self) -> str:
         rendered_args = ", ".join(f'"{arg}"' for arg in self.args)
@@ -48,6 +55,7 @@ BUNDLED_SCANNERS: dict[str, BundledScanner] = {
             "{prompt}",
         ),
         file_types=("py",),
+        language_focus=("python",),
     ),
     "claude": BundledScanner(
         name="claude",
@@ -68,9 +76,36 @@ BUNDLED_SCANNERS: dict[str, BundledScanner] = {
             "{prompt}",
         ),
         file_types=("py",),
+        language_focus=("python",),
     ),
 }
 
 
 def get_bundled_scanner(name: str) -> BundledScanner | None:
     return BUNDLED_SCANNERS.get(name)
+
+
+def bundled_scanner_config_status(scanners_dir: Path, scanner_name: str) -> BundledScannerStatus:
+    """Classify a project scanner registration against a bundled definition."""
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return "missing"
+    path = scanners_dir / f"{scanner_name}.toml"
+    if not path.is_file():
+        return "missing"
+    cfg = load_scanner(scanners_dir, scanner_name)
+    if cfg is None or cfg.command != bundled.command:
+        return "custom"
+    if cfg.args == bundled.args and cfg.file_types == bundled.file_types:
+        return "current"
+    return "stale_bundled"
+
+
+def bundled_scanner_matches(scanners_dir: Path, scanner_name: str) -> bool:
+    """Return whether a project registration exactly matches the bundled scanner."""
+    return bundled_scanner_config_status(scanners_dir, scanner_name) == "current"
+
+
+def looks_like_stale_bundled_scanner(scanners_dir: Path, scanner_name: str) -> bool:
+    """Return whether a registration appears to be an older bundled scanner."""
+    return bundled_scanner_config_status(scanners_dir, scanner_name) == "stale_bundled"

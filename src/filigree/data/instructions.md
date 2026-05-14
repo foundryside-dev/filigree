@@ -154,8 +154,11 @@ filigree batch-update-findings <ids...> --status=...     # Update many at once
 # Scanners
 filigree scanner available                               # Bundled scanners that can be enabled
 filigree scanner prompts                                 # Bundled scanner prompt packs
+filigree scanner prompts --language python               # Packs applicable to a scanner language focus
 filigree scanner enable codex                            # Enable bundled Codex scanner in this project
 filigree scanner disable codex                           # Disable a scanner registration
+filigree list-available-scanners                         # Alias for scanner available
+filigree list-prompt-packs                               # Alias for scanner prompts
 filigree scanner list                                    # Registered scanners (grouped alias)
 filigree scanner preview <scanner> <file>                 # Dry-run a scanner (grouped alias)
 filigree scanner trigger <scanner> <file> --prompt security # Run a scanner (grouped alias)
@@ -167,6 +170,7 @@ filigree get-scan-status <scan_id>                       # Scan progress / resul
 filigree report-finding ...                              # Report a finding from a scanner
 
 Prompt packs are advisory review-focus hints; they do not restrict what the scanner process can read or report.
+Use a scanner's `applicable_prompts` or `list_prompt_packs language=<focus>` when choosing language-specific packs.
 
 # Most data commands support --json; --actor is global on every command.
 # (`install`, `doctor`, `session-context` etc. are human-output only.)

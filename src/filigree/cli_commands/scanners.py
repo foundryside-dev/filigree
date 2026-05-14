@@ -21,16 +21,16 @@ from typing import Any
 
 import click
 
-from filigree.bundled_scanners import BUNDLED_SCANNERS, get_bundled_scanner
+from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.cli_common import get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
 from filigree.mcp_tools.scanners import _load_scanner_or_error, _report_finding_observation_ids, _validate_localhost_url
 from filigree.paths import safe_path
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
-from filigree.scanner_prompts import expand_prompt_pack_names, list_prompt_packs
+from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import load_scanner, validate_scanner_command
+from filigree.scanners import validate_scanner_command
 from filigree.types.api import ErrorCode
 
 _logger = logging.getLogger(__name__)
@@ -123,21 +123,11 @@ def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
 
 
 def _bundled_scanner_matches(path: Path, scanner_name: str) -> bool:
-    bundled = get_bundled_scanner(scanner_name)
-    if bundled is None:
-        return False
-    cfg = load_scanner(path.parent, scanner_name)
-    if cfg is None:
-        return False
-    return cfg.command == bundled.command and cfg.args == bundled.args and cfg.file_types == bundled.file_types
+    return bundled_scanner_matches(path.parent, scanner_name)
 
 
 def _looks_like_stale_bundled_scanner(path: Path, scanner_name: str) -> bool:
-    bundled = get_bundled_scanner(scanner_name)
-    if bundled is None:
-        return False
-    cfg = load_scanner(path.parent, scanner_name)
-    return cfg is not None and cfg.command == bundled.command
+    return looks_like_stale_bundled_scanner(path.parent, scanner_name)
 
 
 def _validate_prompt_or_die(prompt: str, *, as_json: bool) -> None:
@@ -158,14 +148,22 @@ def _validate_scanner_accepts_prompt_or_die(cfg: Any, prompt: str, *, as_json: b
     )
 
 
-@click.group("scanner")
-def scanner_group() -> None:
+@click.group("scanner", invoke_without_command=True)
+@click.pass_context
+def scanner_group(ctx: click.Context) -> None:
     """Manage project scanner registrations.
 
-    Enable bundled scanners with ``filigree scanner enable codex``. Run scans
-    with the aliases here or the stable top-level commands such as
-    ``filigree trigger-scan codex <file>``.
+    Bootstrap flow: available -> enable -> trigger.
+
+    Use ``filigree scanner available`` to see packaged scanners, ``filigree
+    scanner enable codex`` to opt the current project into one, and ``filigree
+    scanner trigger codex <file>`` to run it. ``filigree scanner list`` mirrors
+    ``filigree list-scanners``; ``filigree scanner trigger`` mirrors
+    ``filigree trigger-scan``.
     """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
 
 
 @scanner_group.command("available")
@@ -186,6 +184,8 @@ def scanner_available_cmd(as_json: bool) -> None:
                 "command_available": command_path is not None,
                 "command_path": command_path,
                 "file_types": list(bundled.file_types),
+                "language_focus": list(bundled.language_focus),
+                "applicable_prompts": applicable_prompt_pack_names(bundled.language_focus),
                 "enabled": path.is_file() and _bundled_scanner_matches(path, scanner_name),
                 "path": str(path),
             }
@@ -200,18 +200,22 @@ def scanner_available_cmd(as_json: bool) -> None:
 
 
 @scanner_group.command("prompts")
+@click.option("--language", default=None, help="Only show packs applicable to a language focus, plus language-agnostic packs")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def scanner_prompts_cmd(as_json: bool) -> None:
+def scanner_prompts_cmd(language: str | None, as_json: bool) -> None:
     """List bundled scanner prompt packs."""
-    items = [pack.to_dict() for pack in list_prompt_packs()]
+    items = [pack.to_dict() for pack in list_prompt_packs(language=language)]
     if as_json:
         click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2, default=str))
         return
     for item in items:
         components = item["components"]
         suffix = f" ({', '.join(components)})" if isinstance(components, list) and components else ""
-        click.echo(f"{item['name']}  {item['description']}{suffix}")
-    click.echo("\nPrompt packs are advisory review-focus hints; they do not restrict scanner file access or findings.")
+        language_hint = f" [{item['language']}]" if item.get("language") != "any" else ""
+        click.echo(f"{item['name']}  {item['description']}{suffix}{language_hint}")
+        click.echo(f"  {item['when_to_use']}")
+    click.echo("\nSome packs are language-specific; list-scanners shows each scanner's applicable_prompts.")
+    click.echo("Prompt packs are advisory review-focus hints; they do not restrict scanner file access or findings.")
 
 
 @scanner_group.command("enable")
@@ -250,11 +254,29 @@ def scanner_enable_cmd(scanner: str, force: bool, as_json: bool) -> None:
         )
         return
     path.write_text(bundled.toml(), encoding="utf-8")
-    response = {"status": "enabled", "scanner": scanner, "path": str(path)}
+    command_path = shutil.which(bundled.command)
+    warning = (
+        f"Bundled scanner command {bundled.command!r} is not on PATH. "
+        "Install or upgrade the uv tool with: uv tool install --upgrade filigree"
+        if command_path is None and not force
+        else ""
+    )
+    response: dict[str, Any] = {
+        "status": "enabled",
+        "scanner": scanner,
+        "path": str(path),
+        "command": bundled.command,
+        "command_available": command_path is not None,
+        "command_path": command_path,
+    }
+    if warning:
+        response["warnings"] = [warning]
     if as_json:
         click.echo(json_mod.dumps(response, indent=2, default=str))
         return
     click.echo(f"Enabled scanner {scanner} (managed).")
+    if warning:
+        click.echo(f"Warning: {warning}", err=True)
     click.echo(f"Run 'filigree scanner disable {scanner}' to remove.")
 
 
@@ -1062,6 +1084,10 @@ def register(cli: click.Group) -> None:
     scanner_group.add_command(preview_scan_cmd, "preview")
     scanner_group.add_command(report_finding_cmd, "report-finding")
     cli.add_command(scanner_group)
+    cli.add_command(scanner_available_cmd, "list-available-scanners")
+    cli.add_command(scanner_enable_cmd, "enable-scanner")
+    cli.add_command(scanner_disable_cmd, "disable-scanner")
+    cli.add_command(scanner_prompts_cmd, "list-prompt-packs")
     cli.add_command(list_scanners_cmd)
     cli.add_command(trigger_scan_cmd)
     cli.add_command(trigger_scan_batch_cmd)

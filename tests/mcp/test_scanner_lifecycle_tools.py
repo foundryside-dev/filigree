@@ -82,11 +82,16 @@ class TestPreviewScanTool:
         listed = _parse(await call_tool("list_scanners", {}))
         codex = next(item for item in listed["items"] if item["name"] == "codex")
         assert codex["accepts_prompt"] is True
+        assert codex["prompt_pack_aware"] is True
         assert codex["prompt_packs_endpoint"] == "list_prompt_packs"
+        assert "python-engineering" in codex["applicable_prompts"]
+        assert "pytorch" in codex["applicable_prompts"]
+        assert "rust" not in codex["applicable_prompts"]
         assert codex["managed"] is True
         assert codex["bundled_name"] is True
         assert codex["bundled_match"] is True
         assert codex["sandbox_class"] == "tool-sandboxed"
+        assert codex["language_focus"] == ["python"]
 
         disabled = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
         assert disabled["status"] == "disabled"
@@ -217,7 +222,21 @@ class TestPreviewScanTool:
 
         names = {item["name"] for item in data["items"]}
         assert {"bug-hunt", "security", "typescript"} <= names
+        security = next(item for item in data["items"] if item["name"] == "security")
+        assert security["language"] == "any"
+        assert security["prompt_pack_scope"] == "advisory"
+        assert security["expected_relative_cost"] == "medium"
+        assert "instructions" in security
         assert data["has_more"] is False
+
+    async def test_list_prompt_packs_can_filter_by_language(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("list_prompt_packs", {"language": "python"}))
+
+        names = {item["name"] for item in data["items"]}
+        assert {"bug-hunt", "security", "python-engineering", "pytorch"} <= names
+        assert "rust" not in names
+        assert "terraform" not in names
+        assert "react" not in names
 
     async def test_prompt_argument_schema_uses_prompt_pack_enum(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
@@ -229,6 +248,12 @@ class TestPreviewScanTool:
             assert "not-a-pack" not in prompt_schema["enum"]
             assert prompt_schema["default"] == "bug-hunt"
             assert "accepts_prompt" in prompt_schema["description"]
+            assert "advisory only" in prompt_schema["description"]
+            assert "does not restrict scanner file access" in prompt_schema["description"]
+
+        pack_schema = tools["list_prompt_packs"].inputSchema
+        assert pack_schema["properties"]["language"]["type"] == "string"
+        assert "language-specific" in pack_schema["properties"]["language"]["description"]
 
     async def test_preview_scan_uses_ethereal_port_file_for_default_api_url(self, mcp_db: FiligreeDB) -> None:
         import filigree.mcp_server as mcp_mod
@@ -260,6 +285,20 @@ class TestPreviewScanTool:
             )
         )
         assert data["code"] == ErrorCode.NOT_FOUND
+
+    async def test_preview_scan_known_bundled_not_enabled_points_to_enable_flow(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "preview_scan",
+                {"scanner": "codex", "file_path": "foo.py"},
+            )
+        )
+
+        assert data["code"] == ErrorCode.NOT_FOUND
+        assert data["details"]["bundled"] is True
+        assert data["details"]["enable_with"] == "enable_scanner"
+        assert data["details"]["cli_enable_command"] == "filigree scanner enable codex"
+        assert "list_available_scanners" in data["details"]["hint"]
 
     async def test_preview_scan_path_traversal(self, mcp_db: FiligreeDB) -> None:
         _write_scanner_toml(mcp_db)

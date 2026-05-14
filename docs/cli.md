@@ -118,6 +118,12 @@ Install filigree into the current project. With no flags, installs everything: M
 
 Run health checks on the filigree installation.
 
+Doctor also inspects scanner readiness: projects with no scanner registrations
+get a nudge to run `filigree scanner available`, stale bundled registrations
+are reported with `filigree scanner enable <name> --force`, and enabled bundled
+scanners whose runner command is missing point at `uv tool install --upgrade
+filigree`.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `--fix` | flag | Auto-fix what's possible |
@@ -1117,8 +1123,13 @@ override that target explicitly.
 ```bash
 filigree scanner available
 filigree scanner prompts
+filigree scanner prompts --language python
 filigree scanner enable codex
 filigree scanner disable codex
+filigree list-available-scanners
+filigree enable-scanner codex
+filigree disable-scanner codex
+filigree list-prompt-packs
 filigree scanner list
 filigree scanner preview <scanner> <file-path>
 filigree scanner trigger <scanner> <file-path> --prompt security
@@ -1135,7 +1146,10 @@ cat finding.json | filigree report-finding   # Read from stdin
 ### `scanner available`
 
 List bundled scanners that can be enabled in the current project, including
-whether the packaged scanner entrypoint is currently on `PATH`.
+whether the packaged scanner entrypoint is currently on `PATH` and the bundled
+scanner's `language_focus`.
+JSON output also includes `applicable_prompts`, the prompt packs that fit that
+scanner's declared language focus.
 
 ### `scanner prompts`
 
@@ -1149,14 +1163,25 @@ List bundled prompt packs for scanner focus. Current packs include
 
 Prompt packs are review-focus hints only; any file the scanner can read can be
 reviewed, and packs do not restrict scanner file access or reported findings.
+Human output includes each pack's `when_to_use`; JSON additionally includes an
+`audience` hint for agent-facing selection, the full injected `instructions`,
+`language` (`any` or a concrete technology focus), `expected_relative_cost`,
+and `prompt_pack_scope: "advisory"`. Use `--language <focus>` to show
+language-agnostic packs plus packs for that focus. Some packs are
+language-specific; use `list-scanners` / `scanner available` `applicable_prompts`
+when choosing a pack for a scanner.
 
 ### `scanner enable`
 
 Enable a bundled scanner by writing its managed TOML registration under
 `.filigree/scanners/`. Bundled scanners use entrypoints installed with
 Filigree, so projects do not need local copies of scanner runner scripts.
+The command is idempotent when the current managed TOML already matches the
+bundled definition.
 After upgrading Filigree, re-run `filigree scanner enable <name> --force` to
 refresh an existing bundled scanner registration with new arg templates.
+If the packaged runner command is not on `PATH`, enable still writes the managed
+TOML but emits a warning and remediation hint.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1179,13 +1204,18 @@ scanner names can be removed without `--force`.
 List configured scanners from the `scanners/` directory. JSON records include
 whether the scanner accepts prompt packs (`accepts_prompt`), where to discover
 packs (`prompt_packs_endpoint`), managed bundled-registration state
-(`bundled_name`, `bundled_match`, `managed`), `sandbox_class`, and a short
-`sandbox_summary`.
+(`bundled_name`, `bundled_match`, `managed`), `language_focus`,
+`prompt_pack_aware`, `applicable_prompts`, `sandbox_class`, and a short
+`sandbox_summary`. `accepts_prompt` remains the compatibility field;
+`prompt_pack_aware` is the clearer name for scanners whose command template
+can receive non-default prompt packs.
 
 The grouped aliases `filigree scanner list`, `filigree scanner preview`,
 `filigree scanner trigger`, `filigree scanner trigger-batch`,
 `filigree scanner status`, and `filigree scanner report-finding` mirror the
-older flat commands. The flat commands remain stable aliases.
+older flat commands. Management commands also have verb-noun aliases:
+`list-available-scanners`, `enable-scanner`, `disable-scanner`, and
+`list-prompt-packs`. The flat commands remain stable aliases.
 
 ### Runner entrypoint contract
 
@@ -1218,6 +1248,9 @@ Trigger a single-file scan.
 Prompt packs require a scanner command template containing `{prompt}`. Passing
 a non-default pack to a custom scanner without that placeholder is rejected so
 agents do not mistake a silent no-op for a focused review.
+If a requested scanner is a bundled scanner that has not been enabled in the
+current project, the JSON error includes `bundled: true`, `enable_with`,
+`cli_enable_command`, and a hint pointing at the available -> enable flow.
 
 JSON responses echo `api_url`, `api_url_source`, `sandbox_class`, and scanner
 risk metadata including `risk_summary` and `prompt_pack_scope`.

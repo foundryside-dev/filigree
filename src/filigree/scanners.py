@@ -87,18 +87,33 @@ class ScannerConfig:
             "description": self.description,
             "file_types": list(self.file_types),
             "accepts_prompt": self.accepts_prompt(),
+            "prompt_pack_aware": self.prompt_pack_aware(),
+            "applicable_prompts": self.applicable_prompts(),
             "prompt_packs_endpoint": "list_prompt_packs",
             "sandbox_summary": self.sandbox_summary(),
             "sandbox_class": self.sandbox_class(),
             "bundled_name": self.is_bundled_name(),
             "bundled_match": self.matches_bundled_definition(),
             "managed": self.matches_bundled_definition(),
+            "language_focus": list(self.language_focus()),
             **self.risk_metadata(),
         }
 
     def accepts_prompt(self) -> bool:
         """Return whether this scanner command template accepts a prompt pack."""
         return "{prompt}" in self.command or any("{prompt}" in arg for arg in self.args)
+
+    def prompt_pack_aware(self) -> bool:
+        """Return whether this scanner can receive non-default prompt packs."""
+        return self.accepts_prompt()
+
+    def applicable_prompts(self) -> list[str]:
+        """Return prompt packs that are a reasonable fit for this scanner."""
+        if not self.prompt_pack_aware():
+            return []
+        from filigree.scanner_prompts import applicable_prompt_pack_names
+
+        return applicable_prompt_pack_names(self.language_focus())
 
     def sandbox_summary(self) -> str:
         """Return a concise description of scanner-specific process constraints."""
@@ -130,6 +145,15 @@ class ScannerConfig:
         if bundled is None:
             return False
         return self.command == bundled.command and self.args == bundled.args and self.file_types == bundled.file_types
+
+    def language_focus(self) -> tuple[str, ...]:
+        """Return bundled language focus hints, if this scanner name has one."""
+        from filigree.bundled_scanners import get_bundled_scanner
+
+        bundled = get_bundled_scanner(self.name)
+        if bundled is None:
+            return ()
+        return bundled.language_focus
 
     def risk_metadata(self) -> dict[str, object]:
         """Return conservative execution and egress metadata for agent callers.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sqlite3
 import subprocess
 import tomllib
@@ -118,27 +119,29 @@ def _is_absolute_command_path(path: str) -> bool:
 
 def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
     """Check project scanner TOML against current bundled scanner definitions."""
-    from filigree.bundled_scanners import BUNDLED_SCANNERS
-    from filigree.scanners import load_scanner
+    from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_config_status
 
     scanners_dir = filigree_dir / "scanners"
     if not scanners_dir.is_dir():
-        return [CheckResult("Bundled scanner registrations", True, "No scanner registrations")]
+        return [
+            CheckResult(
+                "Bundled scanner registrations",
+                True,
+                "0 scanners enabled",
+                fix_hint="Run: filigree scanner available",
+            )
+        ]
 
     stale: list[str] = []
     current: list[str] = []
+    missing_commands: list[str] = []
     for scanner_name, bundled in sorted(BUNDLED_SCANNERS.items()):
-        path = scanners_dir / f"{scanner_name}.toml"
-        if not path.is_file():
-            continue
-        cfg = load_scanner(scanners_dir, scanner_name)
-        if cfg is None:
-            continue
-        if cfg.command != bundled.command:
-            continue
-        if cfg.args == bundled.args and cfg.file_types == bundled.file_types:
+        status = bundled_scanner_config_status(scanners_dir, scanner_name)
+        if status == "current":
             current.append(scanner_name)
-        else:
+            if shutil.which(bundled.command) is None:
+                missing_commands.append(f"{scanner_name} ({bundled.command})")
+        elif status == "stale_bundled":
             stale.append(scanner_name)
 
     if stale:
@@ -153,9 +156,30 @@ def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
             )
         ]
 
+    if missing_commands:
+        return [
+            CheckResult(
+                "Bundled scanner registrations",
+                False,
+                f"Enabled bundled scanner missing command(s): {', '.join(missing_commands)}",
+                fix_hint="Run: uv tool install --upgrade filigree",
+                code="bundled_scanner_command_missing",
+            )
+        ]
+
     if current:
         return [CheckResult("Bundled scanner registrations", True, f"Current bundled scanner registration(s): {', '.join(current)}")]
-    return [CheckResult("Bundled scanner registrations", True, "No bundled scanner registrations")]
+    configured = sorted(p.stem for p in scanners_dir.glob("*.toml"))
+    if configured:
+        return [CheckResult("Bundled scanner registrations", True, "No bundled scanner registrations")]
+    return [
+        CheckResult(
+            "Bundled scanner registrations",
+            True,
+            "0 scanners enabled",
+            fix_hint="Run: filigree scanner available",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

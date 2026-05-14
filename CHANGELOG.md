@@ -18,10 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dashboard callback port, expose callback provenance (`api_url_source`),
   advertise prompt support and risk/sandbox metadata, and reject non-default
   prompt packs for custom scanners that do not declare a `{prompt}` template
-  placeholder. Bundled prompt packs now cover security, quality engineering,
-  solution architecture, systems thinking, system interactions, Python,
-  PyTorch, CSS, JavaScript, TypeScript, React, Rust, Go, Terraform, SQL,
-  `major-refactor`, and broader `comprehensive` reviews.
+  placeholder. `filigree doctor` now nudges projects with zero scanners,
+  flags stale bundled scanner registrations with exact `--force` remediation,
+  and reports enabled bundled scanners whose runner command is missing. Bundled
+  prompt packs now expose full injected instructions, `when_to_use`, `audience`,
+  `language`, advisory scope, and relative-cost hints and cover security,
+  quality engineering, solution architecture, systems thinking, system
+  interactions, Python, PyTorch, CSS, JavaScript, TypeScript, React, Rust, Go,
+  Terraform, SQL, `major-refactor`, and broader `comprehensive` reviews.
+  Scanner records now include `prompt_pack_aware` and `applicable_prompts`, and
+  `list_prompt_packs` / `filigree scanner prompts` can be filtered by language.
+  A bundled-but-not-enabled scanner request now returns an actionable hint
+  pointing at `list_available_scanners` / `enable_scanner` (or the CLI
+  `filigree scanner available` / `filigree scanner enable` flow), and the CLI
+  includes verb-noun aliases for scanner management (`list-available-scanners`,
+  `enable-scanner`, `disable-scanner`, and `list-prompt-packs`).
 
 - **Senior-user MCP review closure package.** The review corpus is now
   reconciled into a closed master checklist with implementation evidence,

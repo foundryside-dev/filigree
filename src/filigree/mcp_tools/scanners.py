@@ -15,12 +15,12 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
-from filigree.bundled_scanners import BUNDLED_SCANNERS, get_bundled_scanner
+from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.core import VALID_SEVERITIES
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
-from filigree.scanner_prompts import PROMPT_PACKS, expand_prompt_pack_names, list_prompt_packs
+from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
 from filigree.scanners import load_scanner, validate_scanner_command
@@ -46,7 +46,11 @@ def _prompt_pack_schema() -> dict[str, Any]:
         "type": "string",
         "enum": sorted(PROMPT_PACKS),
         "default": "bug-hunt",
-        "description": "Bundled scanner prompt pack. See list_prompt_packs; only applies when the scanner's accepts_prompt field is true.",
+        "description": (
+            "Bundled scanner prompt pack. See list_prompt_packs; only applies when the scanner's accepts_prompt field is true. "
+            "Prompt packs are advisory only; the selected prompt does not restrict scanner file access. "
+            "See scanner risk_metadata.prompt_pack_scope."
+        ),
     }
 
 
@@ -73,21 +77,11 @@ def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
 
 
 def _bundled_scanner_matches(path: Path, scanner_name: str) -> bool:
-    bundled = get_bundled_scanner(scanner_name)
-    if bundled is None:
-        return False
-    cfg = load_scanner(path.parent, scanner_name)
-    if cfg is None:
-        return False
-    return cfg.command == bundled.command and cfg.args == bundled.args and cfg.file_types == bundled.file_types
+    return bundled_scanner_matches(path.parent, scanner_name)
 
 
 def _looks_like_stale_bundled_scanner(path: Path, scanner_name: str) -> bool:
-    bundled = get_bundled_scanner(scanner_name)
-    if bundled is None:
-        return False
-    cfg = load_scanner(path.parent, scanner_name)
-    return cfg is not None and cfg.command == bundled.command
+    return looks_like_stale_bundled_scanner(path.parent, scanner_name)
 
 
 def _available_scanner_items(filigree_dir: Path) -> list[dict[str, Any]]:
@@ -104,6 +98,8 @@ def _available_scanner_items(filigree_dir: Path) -> list[dict[str, Any]]:
                 "command_available": command_path is not None,
                 "command_path": command_path,
                 "file_types": list(bundled.file_types),
+                "language_focus": list(bundled.language_focus),
+                "applicable_prompts": applicable_prompt_pack_names(bundled.language_focus),
                 "enabled": path.is_file() and _bundled_scanner_matches(path, scanner_name),
                 "path": str(path),
             }
@@ -205,11 +201,20 @@ def register(
             name="list_prompt_packs",
             description=(
                 "List bundled scanner prompt packs. Prompt packs are advisory review-focus hints; "
-                "they do not restrict what the scanner process can read or report."
+                "they do not restrict what the scanner process can read or report. "
+                "Use the optional language filter to hide language-specific packs that do not match a scanner's language_focus."
             ),
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "language": {
+                        "type": "string",
+                        "description": (
+                            "Optional scanner language focus, e.g. python. Returns language-specific packs for that language "
+                            "plus language-agnostic packs."
+                        ),
+                    },
+                },
             },
         ),
         Tool(
@@ -421,10 +426,29 @@ def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any |
     cfg = load_scanner(scanners_dir, scanner_name)
     if cfg is None:
         available = [s.name for s in _list_scanners(scanners_dir)]
+        bundled = get_bundled_scanner(scanner_name)
+        details: dict[str, Any] = {"available_scanners": available}
+        if bundled is not None:
+            details.update(
+                {
+                    "bundled": True,
+                    "enable_with": "enable_scanner",
+                    "cli_enable_command": f"filigree scanner enable {scanner_name}",
+                    "hint": (
+                        "This is a bundled scanner, but it is not enabled in this project. "
+                        "Call list_available_scanners, then enable_scanner to write the managed registration "
+                        "(CLI: filigree scanner available, then filigree scanner enable)."
+                    ),
+                }
+            )
+            error = f"Bundled scanner {scanner_name!r} is not enabled in this project"
+        else:
+            details["hint"] = "Call list_available_scanners to see bundled scanners that can be enabled."
+            error = f"Scanner {scanner_name!r} not found"
         return None, ErrorResponse(
-            error=f"Scanner {scanner_name!r} not found",
+            error=error,
             code=ErrorCode.NOT_FOUND,
-            details={"available_scanners": available},
+            details=details,
         )
     return cfg, None
 
@@ -454,7 +478,10 @@ async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_list_prompt_packs(arguments: dict[str, Any]) -> list[TextContent]:
-    items = [pack.to_dict() for pack in list_prompt_packs()]
+    language = arguments.get("language")
+    if language is not None and not isinstance(language, str):
+        return _text(ErrorResponse(error="'language' must be a string", code=ErrorCode.VALIDATION))
+    items = [pack.to_dict() for pack in list_prompt_packs(language=language)]
     return _text(_list_response(items, has_more=False))
 
 

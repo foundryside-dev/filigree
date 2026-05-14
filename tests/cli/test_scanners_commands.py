@@ -119,10 +119,13 @@ class TestListScannersCommand:
                 "estimated_cost",
                 "execution_mode",
                 "accepts_prompt",
+                "applicable_prompts",
                 "file_types",
+                "language_focus",
                 "managed",
                 "may_send_contents",
                 "name",
+                "prompt_pack_aware",
                 "preview_recommended",
                 "prompt_packs_endpoint",
                 "prompt_pack_scope",
@@ -135,10 +138,13 @@ class TestListScannersCommand:
                 "sandbox_summary",
             }
             assert item["accepts_prompt"] is False
+            assert item["prompt_pack_aware"] is False
+            assert item["applicable_prompts"] == []
             assert item["prompt_packs_endpoint"] == "list_prompt_packs"
             assert item["bundled_name"] is False
             assert item["bundled_match"] is False
             assert item["managed"] is False
+            assert item["language_focus"] == []
         finally:
             os.chdir(original)
 
@@ -168,6 +174,19 @@ class TestListScannersCommand:
 
 
 class TestScannerManagementCommand:
+    def test_scanner_group_help_shows_bootstrap_flow(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner"])
+            assert result.exit_code == 0, result.output
+            assert "available -> enable -> trigger" in result.output
+            assert "list-scanners" in result.output
+            assert "trigger-scan" in result.output
+        finally:
+            os.chdir(original)
+
     def test_scanner_group_aliases_flat_scanner_commands(self, project_with_scanner: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -203,6 +222,10 @@ class TestScannerManagementCommand:
             assert codex["command"] == "filigree-scanner-codex"
             assert "command_available" in codex
             assert "command_path" in codex
+            assert codex["language_focus"] == ["python"]
+            assert "python-engineering" in codex["applicable_prompts"]
+            assert "pytorch" in codex["applicable_prompts"]
+            assert "rust" not in codex["applicable_prompts"]
         finally:
             os.chdir(original)
 
@@ -217,6 +240,21 @@ class TestScannerManagementCommand:
             codex = next(item for item in json.loads(result.output)["items"] if item["name"] == "codex")
             assert codex["command_available"] is False
             assert codex["command_path"] is None
+        finally:
+            os.chdir(original)
+
+    def test_scanner_enable_warns_when_runner_command_missing(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            with patch("filigree.cli_commands.scanners.shutil.which", return_value=None):
+                result = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "enabled"
+            assert data["command_available"] is False
+            assert "uv tool install --upgrade filigree" in data["warnings"][0]
         finally:
             os.chdir(original)
 
@@ -270,12 +308,19 @@ class TestScannerManagementCommand:
             assert result.exit_code == 0, result.output
             item = json.loads(result.output)["items"][0]
             assert item["accepts_prompt"] is True
+            assert item["prompt_pack_aware"] is True
             assert item["prompt_packs_endpoint"] == "list_prompt_packs"
+            assert "security" in item["applicable_prompts"]
+            assert "python-engineering" in item["applicable_prompts"]
+            assert "pytorch" in item["applicable_prompts"]
+            assert "rust" not in item["applicable_prompts"]
+            assert "terraform" not in item["applicable_prompts"]
             assert "read-only" in item["sandbox_summary"]
             assert item["sandbox_class"] == "tool-sandboxed"
             assert item["managed"] is True
             assert item["bundled_name"] is True
             assert item["bundled_match"] is True
+            assert item["language_focus"] == ["python"]
         finally:
             os.chdir(original)
 
@@ -374,7 +419,20 @@ class TestScannerManagementCommand:
             data = json.loads(result.output)
             names = {item["name"] for item in data["items"]}
             assert {"security", "pytorch", "quality-engineering", "major-refactor", "css", "javascript", "typescript"} <= names
+            assert all(item["when_to_use"].startswith("Use when ") for item in data["items"])
+            assert all(item["audience"] == "agent" for item in data["items"])
+            assert all(item["prompt_pack_scope"] == "advisory" for item in data["items"])
+            assert all(item["expected_relative_cost"] in {"low", "medium", "high"} for item in data["items"])
+            assert all(item["instructions"] for item in data["items"])
+            bug_hunt = next(item for item in data["items"] if item["name"] == "bug-hunt")
+            assert bug_hunt["language"] == "any"
+            assert bug_hunt["expected_relative_cost"] == "low"
+            python = next(item for item in data["items"] if item["name"] == "python-engineering")
+            assert python["language"] == "python"
+            rust = next(item for item in data["items"] if item["name"] == "rust")
+            assert rust["language"] == "rust"
             major = next(item for item in data["items"] if item["name"] == "major-refactor")
+            assert major["expected_relative_cost"] == "high"
             assert "when_to_use" in major
             assert major["components"] == [
                 "solution-architecture",
@@ -385,6 +443,47 @@ class TestScannerManagementCommand:
             comprehensive = next(item for item in data["items"] if item["name"] == "comprehensive")
             assert "security" in comprehensive["components"]
             assert comprehensive["components"] != major["components"]
+        finally:
+            os.chdir(original)
+
+    def test_scanner_prompts_human_output_includes_when_to_use(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "prompts"])
+            assert result.exit_code == 0, result.output
+            assert "Use when you want a broad pass" in result.output
+            assert "Prompt packs are advisory" in result.output
+            assert "Some packs are language-specific" in result.output
+            assert "applicable_prompts" in result.output
+        finally:
+            os.chdir(original)
+
+    def test_scanner_prompts_filters_by_language(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "prompts", "--language", "python", "--json"])
+            assert result.exit_code == 0, result.output
+            names = {item["name"] for item in json.loads(result.output)["items"]}
+            assert {"bug-hunt", "security", "python-engineering", "pytorch"} <= names
+            assert "rust" not in names
+            assert "terraform" not in names
+            assert "react" not in names
+        finally:
+            os.chdir(original)
+
+    def test_list_available_scanners_alias(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["list-available-scanners", "--json"])
+            assert result.exit_code == 0, result.output
+            names = {item["name"] for item in json.loads(result.output)["items"]}
+            assert {"codex", "claude"} <= names
         finally:
             os.chdir(original)
 
@@ -519,6 +618,22 @@ class TestPreviewScanCommand:
             assert result.exit_code == 1
             data = json.loads(result.output)
             assert data["code"] == "NOT_FOUND"
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_known_bundled_not_enabled_points_to_enable_flow(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "codex", "foo.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "NOT_FOUND"
+            assert data["details"]["bundled"] is True
+            assert data["details"]["enable_with"] == "enable_scanner"
+            assert data["details"]["cli_enable_command"] == "filigree scanner enable codex"
+            assert "filigree scanner available" in data["details"]["hint"]
         finally:
             os.chdir(original)
 
