@@ -106,8 +106,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "mutable defaults, iterator exhaustion, subprocess handling, and filesystem portability."
         ),
         when_to_use=(
-            "Use when reviewing Python implementation mechanics, runtime edge cases, packaging, async code, "
-            "or filesystem/subprocess use."
+            "Use when reviewing Python implementation mechanics, runtime edge cases, packaging, async code, or filesystem/subprocess use."
         ),
         language="python",
     ),
@@ -120,8 +119,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "overlap or disappear."
         ),
         when_to_use=(
-            "Use when reviewing stylesheets, layout behaviour, responsive UI states, visual regressions, "
-            "or CSS accessibility risks."
+            "Use when reviewing stylesheets, layout behaviour, responsive UI states, visual regressions, or CSS accessibility risks."
         ),
         language="css",
     ),
@@ -133,8 +131,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "DOM state drift, browser API misuse, serialization boundaries, and user-input edge cases."
         ),
         when_to_use=(
-            "Use when reviewing browser or Node JavaScript runtime behaviour, async/event handling, DOM state, "
-            "or serialization boundaries."
+            "Use when reviewing browser or Node JavaScript runtime behaviour, async/event handling, DOM state, or serialization boundaries."
         ),
         language="javascript",
     ),
@@ -159,8 +156,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "panic paths, integer overflow, async cancellation, and FFI or serialization contracts."
         ),
         when_to_use=(
-            "Use when reviewing Rust systems code, unsafe or async boundaries, FFI, serialization, ownership, "
-            "or panic/error paths."
+            "Use when reviewing Rust systems code, unsafe or async boundaries, FFI, serialization, ownership, or panic/error paths."
         ),
         language="rust",
     ),
@@ -185,8 +181,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "event ordering, accessibility state, data fetching races, and UI states that can desynchronize from backend truth."
         ),
         when_to_use=(
-            "Use when reviewing React components, hooks, data-fetching state, hydration, accessibility state, "
-            "or frontend/backend sync."
+            "Use when reviewing React components, hooks, data-fetching state, hydration, accessibility state, or frontend/backend sync."
         ),
         language="javascript",
     ),
@@ -198,8 +193,7 @@ PROMPT_PACKS: dict[str, ScannerPromptPack] = {
             "workspace/account mixups, module interface contracts, and destructive plan surprises."
         ),
         when_to_use=(
-            "Use when reviewing Terraform modules, provider changes, resource lifecycle, state drift, secrets, "
-            "or destructive plan risk."
+            "Use when reviewing Terraform modules, provider changes, resource lifecycle, state drift, secrets, or destructive plan risk."
         ),
         language="terraform",
     ),

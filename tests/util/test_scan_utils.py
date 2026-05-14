@@ -12,6 +12,7 @@ import pytest
 
 from filigree.scanner_scripts.scan_utils import (
     PROMPT_TEMPLATE,
+    _analyse_files,
     _infer_rule_id,
     build_prompt_template,
     estimate_tokens,
@@ -170,6 +171,285 @@ class TestRunScannerPipeline:
 
         assert rc == 0
         assert "src/target.py" in capsys.readouterr().out
+
+    async def test_rejects_invalid_prompt_pack(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "target.py").write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--prompt", "missing-pack"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("invalid prompt must stop before execution")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test")
+
+        assert rc == 1
+        assert "missing-pack" in capsys.readouterr().err
+
+    async def test_rejects_invalid_batch_size(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "target.py").write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--batch-size", "0"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("invalid batch size must stop before execution")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test")
+
+        assert rc == 1
+        assert "--batch-size must be at least 1" in capsys.readouterr().err
+
+    async def test_rejects_file_outside_scan_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "src"
+        root.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", "src", "--file", "outside.py"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("invalid file must stop before execution")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test")
+
+        assert rc == 1
+        assert "outside scan root" in capsys.readouterr().err
+
+    async def test_rejects_missing_cli_tool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "target.py").write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", "."])
+        monkeypatch.setattr("shutil.which", lambda _tool: None)
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("missing tool must stop before execution")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", cli_tool="definitely-missing")
+
+        assert rc == 1
+        assert "`definitely-missing` not found" in capsys.readouterr().err
+
+    async def test_successful_scan_prints_summary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Bug Hunt Summary (test)" in out
+        assert "Defects found:  1" in out
+        assert "P1: 1" in out
+
+
+class TestAnalyseFiles:
+    async def test_ingests_findings_and_completes_scan_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        post_calls: list[dict[str, Any]] = []
+
+        async def fake_executor(**kwargs: object) -> None:
+            Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(kwargs["output_path"]).write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            post_calls.append(kwargs)
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["P1"] == 1
+        assert stats["failed"] == 0
+        assert stats["api_files_posted"] == 1
+        assert stats["api_files_failed"] == 0
+        assert len(post_calls) == 2
+        assert post_calls[0]["complete_scan_run"] is False
+        assert post_calls[0]["create_observations"] is True
+        assert post_calls[1]["findings"] == []
+        assert post_calls[1]["complete_scan_run"] is True
+        assert "[1/1] target.py" in capsys.readouterr().err
+
+    async def test_records_api_failures_for_finding_and_completion_posts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+
+        async def fake_executor(**kwargs: object) -> None:
+            Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(kwargs["output_path"]).write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", lambda **_kwargs: (False, "boom"))
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["api_files_posted"] == 0
+        assert stats["api_files_failed"] == 2
+        err = capsys.readouterr().err
+        assert "API error for target.py: boom" in err
+        assert "API error completing scan run: boom" in err
+
+    async def test_skip_existing_report_counts_clean_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        report = output_dir / "target.py.md"
+        report.parent.mkdir(parents=True)
+        report.write_text(NO_BUG_MD, encoding="utf-8")
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("skip-existing must not execute scanner")
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=True,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=True,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["clean"] == 1
+        assert stats["failed"] == 0
+        assert "[skip] target.py" in capsys.readouterr().err
+
+    async def test_executor_failure_and_unknown_report_are_summarized(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        failed_target = root / "failed.py"
+        unknown_target = root / "unknown.py"
+        failed_target.write_text("x = 1\n")
+        unknown_target.write_text("y = 1\n")
+        output_dir = tmp_path / "reports"
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            if output_path.name == "failed.py.md":
+                raise RuntimeError("scanner exploded")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("## Summary\nBug without priority\n", encoding="utf-8")
+
+        stats = await _analyse_files(
+            files=[failed_target, unknown_target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=2,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=True,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["failed"] == 1
+        assert stats["unknown"] == 1
+        err = capsys.readouterr().err
+        assert "FAIL failed.py: scanner exploded" in err
+        assert "[2/2] unknown.py" in err
 
 
 # ── severity_map ───────────────────────────────────────────────────────

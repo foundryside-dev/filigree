@@ -35,6 +35,7 @@ from filigree.types.api import ErrorCode
 
 _logger = logging.getLogger(__name__)
 
+
 def _get_filigree_dir() -> Path:
     """Discover .filigree/ directory.
 

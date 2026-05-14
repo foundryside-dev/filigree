@@ -22,7 +22,8 @@ def test_public_docs_mcp_tool_count_matches_registry() -> None:
     }
 
     for path, text in docs.items():
-        assert "71 tools" not in text and "71 MCP tools" not in text, path
+        assert "71 tools" not in text, path
+        assert "71 MCP tools" not in text, path
         assert f"{count} tools" in text or f"{count} MCP tools" in text, path
 
 

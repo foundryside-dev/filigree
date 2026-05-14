@@ -49,6 +49,7 @@ def _validate_int_range(value: int, name: str, *, min_val: int, max_val: int, as
     if value < min_val or value > max_val:
         _emit_validation_error(f"{name} must be between {min_val} and {max_val}, got {value}", as_json=as_json)
 
+
 # ---------------------------------------------------------------------------
 # File commands
 # ---------------------------------------------------------------------------

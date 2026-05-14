@@ -104,12 +104,7 @@ class TestPreviewScanTool:
         scanner_path = mcp_mod._filigree_dir / "scanners" / "codex.toml"
         scanner_path.parent.mkdir(exist_ok=True)
         scanner_path.write_text(
-            '[scanner]\n'
-            'name = "codex"\n'
-            'description = "Custom scanner"\n'
-            'command = "python custom.py"\n'
-            'args = []\n'
-            'file_types = ["py"]\n'
+            '[scanner]\nname = "codex"\ndescription = "Custom scanner"\ncommand = "python custom.py"\nargs = []\nfile_types = ["py"]\n'
         )
 
         data = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
@@ -165,7 +160,7 @@ class TestPreviewScanTool:
         scanner_path = mcp_mod._filigree_dir / "scanners" / "codex.toml"
         scanner_path.parent.mkdir(exist_ok=True)
         scanner_path.write_text(
-            '[scanner]\n'
+            "[scanner]\n"
             'name = "codex"\n'
             'description = "Codex"\n'
             'command = "echo"\n'
@@ -370,7 +365,7 @@ class TestTriggerScanBatchTool:
                         "trigger_scan_batch",
                         {"scanner": "test-scanner", "file_paths": ["batch_a.py", "batch_b.py"]},
                     )
-            )
+                )
             assert data["status"] == "triggered"
             assert data["file_count"] == 2
             assert data["processes_spawned"] == 2

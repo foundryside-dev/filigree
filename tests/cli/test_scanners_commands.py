@@ -343,12 +343,7 @@ class TestScannerManagementCommand:
     def test_scanner_disable_refuses_custom_scanner_without_force(self, initialized_project: Path) -> None:
         custom = initialized_project / ".filigree" / "scanners" / "codex.toml"
         custom.write_text(
-            '[scanner]\n'
-            'name = "codex"\n'
-            'description = "Custom scanner"\n'
-            'command = "python custom.py"\n'
-            'args = []\n'
-            'file_types = ["py"]\n'
+            '[scanner]\nname = "codex"\ndescription = "Custom scanner"\ncommand = "python custom.py"\nargs = []\nfile_types = ["py"]\n'
         )
         runner = CliRunner()
         original = os.getcwd()
@@ -367,7 +362,7 @@ class TestScannerManagementCommand:
     def test_scanner_enable_reports_likely_stale_bundled_config(self, initialized_project: Path) -> None:
         stale = initialized_project / ".filigree" / "scanners" / "codex.toml"
         stale.write_text(
-            '[scanner]\n'
+            "[scanner]\n"
             'name = "codex"\n'
             'description = "Per-file bug hunt using Codex CLI"\n'
             'command = "filigree-scanner-codex"\n'
@@ -391,12 +386,7 @@ class TestScannerManagementCommand:
     def test_scanner_disable_removes_non_bundled_custom_scanner_without_force(self, initialized_project: Path) -> None:
         custom = initialized_project / ".filigree" / "scanners" / "custom.toml"
         custom.write_text(
-            '[scanner]\n'
-            'name = "custom"\n'
-            'description = "Custom scanner"\n'
-            'command = "python custom.py"\n'
-            'args = []\n'
-            'file_types = ["py"]\n'
+            '[scanner]\nname = "custom"\ndescription = "Custom scanner"\ncommand = "python custom.py"\nargs = []\nfile_types = ["py"]\n'
         )
         runner = CliRunner()
         original = os.getcwd()

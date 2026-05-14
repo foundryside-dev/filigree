@@ -495,7 +495,7 @@ class TestDoctorBundledScanners:
         scanners_dir = tmp_path / FILIGREE_DIR_NAME / "scanners"
         scanners_dir.mkdir()
         (scanners_dir / "codex.toml").write_text(
-            '[scanner]\n'
+            "[scanner]\n"
             'name = "codex"\n'
             'description = "Per-file bug hunt using Codex CLI"\n'
             'command = "filigree-scanner-codex"\n'
