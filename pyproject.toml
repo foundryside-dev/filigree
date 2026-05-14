@@ -44,6 +44,8 @@ Documentation = "https://github.com/tachyon-beep/filigree#readme"
 filigree = "filigree.cli:cli"
 filigree-mcp = "filigree.mcp_server:main"
 filigree-dashboard = "filigree.dashboard:main"
+filigree-scanner-codex = "filigree.scanner_scripts.codex_bug_hunt:main"
+filigree-scanner-claude = "filigree.scanner_scripts.claude_bug_hunt:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/filigree"]

@@ -1108,9 +1108,22 @@ unrelated issue.
 
 Trigger and monitor automated code scanners.
 
+By default, scan callbacks target the active local dashboard: ethereal mode
+uses `.filigree/ephemeral.port`, server mode uses the configured daemon port,
+and Filigree falls back to `http://localhost:8377` only when no active
+ethereal port has been recorded. Use `--api-url` on trigger commands to
+override that target explicitly.
+
 ```bash
+filigree scanner available
+filigree scanner prompts
+filigree scanner enable codex
+filigree scanner disable codex
+filigree scanner list
+filigree scanner preview <scanner> <file-path>
+filigree scanner trigger <scanner> <file-path> --prompt security
 filigree list-scanners
-filigree trigger-scan <scanner> <file-path>
+filigree trigger-scan <scanner> <file-path> --prompt security
 filigree trigger-scan-batch <scanner> <file1> <file2>
 filigree get-scan-status <scan-run-id>
 filigree preview-scan <scanner> <file-path>
@@ -1119,9 +1132,77 @@ filigree report-finding --file finding.json --create-observation
 cat finding.json | filigree report-finding   # Read from stdin
 ```
 
+### `scanner available`
+
+List bundled scanners that can be enabled in the current project, including
+whether the packaged scanner entrypoint is currently on `PATH`.
+
+### `scanner prompts`
+
+List bundled prompt packs for scanner focus. Current packs include
+`bug-hunt`, `security`, `pytorch`, `quality-engineering`,
+`solution-architecture`, `systems-thinking`, `system-interactions`,
+`python-engineering`, frontend lenses such as `css`, `javascript`,
+`typescript`, and `react`, systems/infrastructure lenses such as `rust`,
+`go`, `terraform`, and `sql`, and multi-lens packs such as
+`comprehensive` and `major-refactor`.
+
+Prompt packs are review-focus hints only; any file the scanner can read can be
+reviewed, and packs do not restrict scanner file access or reported findings.
+
+### `scanner enable`
+
+Enable a bundled scanner by writing its managed TOML registration under
+`.filigree/scanners/`. Bundled scanners use entrypoints installed with
+Filigree, so projects do not need local copies of scanner runner scripts.
+After upgrading Filigree, re-run `filigree scanner enable <name> --force` to
+refresh an existing bundled scanner registration with new arg templates.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `scanner` | string | Bundled scanner name, e.g. `codex` or `claude` |
+| `--force` | flag | Replace an existing custom TOML for that scanner name |
+
+### `scanner disable`
+
+Disable a scanner by removing its TOML registration. For bundled scanner names,
+Filigree refuses to remove a custom TOML unless `--force` is provided. Custom
+scanner names can be removed without `--force`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `scanner` | string | Scanner name |
+| `--force` | flag | Remove a custom TOML that uses a bundled scanner name |
+
 ### `list-scanners`
 
-List configured scanners from the `scanners/` directory.
+List configured scanners from the `scanners/` directory. JSON records include
+whether the scanner accepts prompt packs (`accepts_prompt`), where to discover
+packs (`prompt_packs_endpoint`), managed bundled-registration state
+(`bundled_name`, `bundled_match`, `managed`), `sandbox_class`, and a short
+`sandbox_summary`.
+
+The grouped aliases `filigree scanner list`, `filigree scanner preview`,
+`filigree scanner trigger`, `filigree scanner trigger-batch`,
+`filigree scanner status`, and `filigree scanner report-finding` mirror the
+older flat commands. The flat commands remain stable aliases.
+
+### Runner entrypoint contract
+
+Bundled scanner TOML uses packaged entrypoints installed with Filigree:
+`filigree-scanner-codex` and `filigree-scanner-claude`. These command names
+and their current flags are public scanner-runner contract:
+
+```bash
+filigree-scanner-codex --root <project-root> --file <path> --max-files 1 \
+  --api-url <dashboard-url> --scan-run-id <run-id> --prompt <pack>
+```
+
+Runners execute with the project as their current working directory and post
+results to the living scan-results endpoint, `/api/scan-results`, which aliases
+the recommended Loom generation. If a future runner flag changes, refresh
+managed project registrations with `filigree scanner enable <name> --force`;
+`filigree doctor` reports bundled registrations that look stale.
 
 ### `trigger-scan`
 
@@ -1131,7 +1212,15 @@ Trigger a single-file scan.
 |-----------|------|-------------|
 | `scanner` | string | Scanner name (positional) |
 | `file-path` | string | File to scan (positional) |
-| `--api-url` | string | Dashboard URL override |
+| `--api-url` | string | Dashboard URL override (localhost only) |
+| `--prompt` | string | Bundled prompt pack (default `bug-hunt`; see `filigree scanner prompts`) |
+
+Prompt packs require a scanner command template containing `{prompt}`. Passing
+a non-default pack to a custom scanner without that placeholder is rejected so
+agents do not mistake a silent no-op for a focused review.
+
+JSON responses echo `api_url`, `api_url_source`, `sandbox_class`, and scanner
+risk metadata including `risk_summary` and `prompt_pack_scope`.
 
 ### `trigger-scan-batch`
 
@@ -1141,7 +1230,11 @@ Trigger a scanner on multiple files.
 |-----------|------|-------------|
 | `scanner` | string | Scanner name (positional) |
 | `file-paths` | string... | Files to scan (positional, multiple) |
-| `--api-url` | string | Dashboard URL override |
+| `--api-url` | string | Dashboard URL override (localhost only) |
+| `--prompt` | string | Bundled prompt pack (default `bug-hunt`; see `filigree scanner prompts`) |
+
+JSON responses echo the resolved callback `api_url`, `api_url_source`, and the
+same scanner risk/sandbox metadata as `trigger-scan`.
 
 ### `get-scan-status`
 
@@ -1160,6 +1253,7 @@ Preview the shell command a scanner would run (without executing it).
 |-----------|------|-------------|
 | `scanner` | string | Scanner name (positional) |
 | `file-path` | string | File to preview (positional) |
+| `--prompt` | string | Bundled prompt pack (default `bug-hunt`; see `filigree scanner prompts`) |
 
 ### `report-finding`
 
@@ -1168,7 +1262,6 @@ Ingest a finding in loom-shape JSON format. Reads from stdin by default; `--file
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `--file` | path | JSON finding file (optional; reads from stdin if omitted) |
-| `--api-url` | string | Dashboard URL override |
 | `--create-observation` | flag | Also create a linked triage observation |
 
 ## Data Management

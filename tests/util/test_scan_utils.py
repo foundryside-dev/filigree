@@ -1,4 +1,4 @@
-"""Tests for scripts/scan_utils.py — shared scanner utilities."""
+"""Tests for bundled scanner utility helpers."""
 
 from __future__ import annotations
 
@@ -8,22 +8,20 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-# scripts/ is not a package — add it to sys.path so we can import scan_utils [B3]
-_scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-if _scripts_dir not in sys.path:
-    sys.path.insert(0, _scripts_dir)
+import pytest
 
-from scan_utils import (  # type: ignore[import-not-found]  # noqa: E402, I001
+from filigree.scanner_scripts.scan_utils import (
     PROMPT_TEMPLATE,
     _infer_rule_id,
+    build_prompt_template,
     estimate_tokens,
     find_files,
     load_context,
     parse_findings,
     post_to_api,
+    run_scanner_pipeline,
     severity_map,
 )
-
 
 # ── PROMPT_TEMPLATE ────────────────────────────────────────────────────
 
@@ -52,6 +50,126 @@ class TestPromptTemplate:
         assert "Bug categories to check" in shared_prefix
         assert "## Suggested Fix" in shared_prefix
         assert "Shared project guidance" in shared_prefix
+
+    def test_prompt_pack_adds_static_review_focus_before_file_path(self) -> None:
+        prompt_template = build_prompt_template("security")
+        rendered = prompt_template.format(file_path="/repo/src/app.py", context="context")
+
+        assert "Review focus: security" in rendered
+        assert "authentication" in rendered
+        assert rendered.index("Review focus: security") < rendered.index("Target file:")
+
+    def test_major_refactor_prompt_pack_combines_four_disciplines(self) -> None:
+        prompt_template = build_prompt_template("major-refactor")
+
+        assert "Review focus: solution-architecture" in prompt_template
+        assert "Review focus: systems-thinking" in prompt_template
+        assert "Review focus: python-engineering" in prompt_template
+        assert "Review focus: quality-engineering" in prompt_template
+
+    def test_comprehensive_prompt_pack_is_broader_than_major_refactor(self) -> None:
+        prompt_template = build_prompt_template("comprehensive")
+        major_refactor = build_prompt_template("major-refactor")
+
+        assert prompt_template != major_refactor
+        assert "Review focus: security" in prompt_template
+        assert "Review focus: solution-architecture" in prompt_template
+        assert "Review focus: system-interactions" in prompt_template
+        assert "Review focus: python-engineering" in prompt_template
+        assert "Review focus: quality-engineering" in prompt_template
+
+    def test_system_interactions_distinguishes_interface_failures_from_systems_thinking(self) -> None:
+        prompt_template = build_prompt_template("system-interactions")
+        systems_thinking = build_prompt_template("systems-thinking")
+
+        assert "Review focus: system-interactions" in prompt_template
+        assert "cross-component" in prompt_template
+        assert "integration contract" in prompt_template
+        assert "stocks" in systems_thinking
+
+    def test_frontend_prompt_packs_cover_css_javascript_and_typescript(self) -> None:
+        css = build_prompt_template("css")
+        javascript = build_prompt_template("javascript")
+        typescript = build_prompt_template("typescript")
+
+        assert "Review focus: css" in css
+        assert "specificity" in css
+        assert "Review focus: javascript" in javascript
+        assert "event lifecycle" in javascript
+        assert "Review focus: typescript" in typescript
+        assert "type erasure" in typescript
+
+    def test_infrastructure_and_system_language_prompt_packs(self) -> None:
+        rust = build_prompt_template("rust")
+        go = build_prompt_template("go")
+        react = build_prompt_template("react")
+        terraform = build_prompt_template("terraform")
+        sql = build_prompt_template("sql")
+
+        assert "Review focus: rust" in rust
+        assert "ownership" in rust
+        assert "Review focus: go" in go
+        assert "goroutine" in go
+        assert "Review focus: react" in react
+        assert "hook" in react
+        assert "Review focus: terraform" in terraform
+        assert "state drift" in terraform
+        assert "Review focus: sql" in sql
+        assert "transaction" in sql
+
+
+class TestRunScannerPipeline:
+    async def test_default_root_infers_package_from_repo_home(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        project_root = tmp_path / "elspeth"
+        package_root = project_root / "src" / "elspeth"
+        package_root.mkdir(parents=True)
+        (package_root / "target.py").write_text("x = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--dry-run", "--max-files", "1"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("dry-run must not execute scanner")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            cli_tool="",
+        )
+
+        assert rc == 0
+        assert "src/elspeth/target.py" in capsys.readouterr().out
+
+    async def test_uses_current_working_directory_as_project_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", "src", "--dry-run", "--max-files", "1"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("dry-run must not execute scanner")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            cli_tool="",
+        )
+
+        assert rc == 0
+        assert "src/target.py" in capsys.readouterr().out
 
 
 # ── severity_map ───────────────────────────────────────────────────────
@@ -277,6 +395,7 @@ class TestPostToApi:
                 findings=findings,
             )
             req = mock_open.call_args[0][0]
+            assert req.full_url == "http://localhost:8377/api/scan-results"
             payload = json.loads(req.data.decode("utf-8"))
             assert payload["scan_source"] == "codex"
             assert payload["scan_run_id"] == "run-42"
@@ -323,7 +442,7 @@ class TestPostToApi:
         body = {"status": "ok", "warnings": ["severity coerced: extreme → info"]}
         with (
             patch("urllib.request.urlopen", return_value=self._mock_urlopen(body=body)),
-            patch("scan_utils.logger") as mock_logger,
+            patch("filigree.scanner_scripts.scan_utils.logger") as mock_logger,
         ):
             post_to_api(
                 api_url="http://localhost:8377",

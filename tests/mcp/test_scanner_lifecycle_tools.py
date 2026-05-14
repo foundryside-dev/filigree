@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from filigree.core import FiligreeDB
-from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
+from filigree.core import FiligreeDB, write_config
+from filigree.mcp_server import call_tool, list_tools  # type: ignore[attr-defined]
 from filigree.mcp_tools.scanners import _validate_localhost_url
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
@@ -28,7 +28,9 @@ def _write_scanner_toml(mcp_db: FiligreeDB, name: str = "test-scanner") -> None:
     scanners_dir.mkdir(exist_ok=True)
     (scanners_dir / f"{name}.toml").write_text(
         f'[scanner]\nname = "{name}"\ndescription = "Test scanner"\n'
-        f'command = "echo"\nargs = ["scan", "{{file}}", "--scan-run-id", "{{scan_run_id}}"]\nfile_types = ["py"]\n'
+        'command = "echo"\n'
+        'args = ["scan", "{file}", "--api-url", "{api_url}", "--scan-run-id", "{scan_run_id}"]\n'
+        'file_types = ["py"]\n'
     )
 
 
@@ -64,6 +66,63 @@ class _FakeProc:
 
 
 class TestPreviewScanTool:
+    async def test_mcp_can_manage_bundled_scanner_registration(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+
+        available = _parse(await call_tool("list_available_scanners", {}))
+        names = {item["name"] for item in available["items"]}
+        assert {"codex", "claude"} <= names
+
+        enabled = _parse(await call_tool("enable_scanner", {"scanner": "codex"}))
+        assert enabled["status"] == "enabled"
+        assert (mcp_mod._filigree_dir / "scanners" / "codex.toml").is_file()
+
+        listed = _parse(await call_tool("list_scanners", {}))
+        codex = next(item for item in listed["items"] if item["name"] == "codex")
+        assert codex["accepts_prompt"] is True
+        assert codex["prompt_packs_endpoint"] == "list_prompt_packs"
+        assert codex["managed"] is True
+        assert codex["bundled_name"] is True
+        assert codex["bundled_match"] is True
+        assert codex["sandbox_class"] == "tool-sandboxed"
+
+        disabled = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
+        assert disabled["status"] == "disabled"
+        assert not (mcp_mod._filigree_dir / "scanners" / "codex.toml").exists()
+
+    async def test_mcp_disable_refuses_custom_bundled_name_without_force(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        scanner_path = mcp_mod._filigree_dir / "scanners" / "codex.toml"
+        scanner_path.parent.mkdir(exist_ok=True)
+        scanner_path.write_text(
+            '[scanner]\n'
+            'name = "codex"\n'
+            'description = "Custom scanner"\n'
+            'command = "python custom.py"\n'
+            'args = []\n'
+            'file_types = ["py"]\n'
+        )
+
+        data = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
+
+        assert data["code"] == ErrorCode.CONFLICT
+        assert "--force" in data["error"]
+        assert data["details"]["conflict_kind"] == "custom"
+        assert scanner_path.exists()
+
+    async def test_scanner_management_schema_is_exposed(self, mcp_db: FiligreeDB) -> None:
+        tools = {tool.name: tool for tool in await list_tools()}
+
+        assert "list_available_scanners" in tools
+        assert "enable_scanner" in tools
+        assert "disable_scanner" in tools
+        assert "list_available_scanners" in tools["list_scanners"].description
+        assert tools["enable_scanner"].inputSchema["properties"]["scanner"]["type"] == "string"
+
     async def test_preview_scan(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["preview_target.py"])
         _write_scanner_toml(mcp_db)
@@ -78,13 +137,118 @@ class TestPreviewScanTool:
             assert data["scanner"] == "test-scanner"
             assert isinstance(data["command"], list)
             assert "preview_target.py" in data["command_string"]
+            assert data["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
             assert data["execution_mode"] == "external_process"
             assert data["may_send_contents"] is True
             assert data["requires_dashboard"] is True
             assert data["estimated_cost"] == "unknown"
             assert data["safe_preview_only"] is True
+            assert data["preview_recommended"] is True
             assert data["requires_approval"] is True
+            assert data["sandbox_class"] == "custom"
             assert "repository files" in data["risk_summary"]
+            assert data["prompt_pack_scope"] == "advisory"
+            assert "does not restrict" in data["prompt_pack_scope_summary"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_preview_scan_accepts_prompt_pack(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        files = _make_target_files(mcp_db, ["preview_prompt.py"])
+        scanner_path = mcp_mod._filigree_dir / "scanners" / "codex.toml"
+        scanner_path.parent.mkdir(exist_ok=True)
+        scanner_path.write_text(
+            '[scanner]\n'
+            'name = "codex"\n'
+            'description = "Codex"\n'
+            'command = "echo"\n'
+            'args = ["--file", "{file}", "--prompt", "{prompt}", "--api-url", "{api_url}"]\n'
+            'file_types = ["py"]\n'
+        )
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "codex", "file_path": "preview_prompt.py", "prompt": "pytorch"},
+                )
+            )
+            assert data["valid"] is True
+            assert "--prompt pytorch" in data["command_string"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_preview_scan_rejects_unknown_prompt_pack(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        files = _make_target_files(mcp_db, ["preview_bad_prompt.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "test-scanner", "file_path": "preview_bad_prompt.py", "prompt": "not-a-pack"},
+                )
+            )
+            assert data["code"] == ErrorCode.VALIDATION
+            assert "Unknown prompt pack" in data["error"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_preview_scan_rejects_prompt_when_scanner_template_cannot_accept_it(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["preview_no_prompt.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "test-scanner", "file_path": "preview_no_prompt.py", "prompt": "security"},
+                )
+            )
+            assert data["code"] == ErrorCode.VALIDATION
+            assert "does not accept prompt packs" in data["error"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_list_prompt_packs_tool(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("list_prompt_packs", {}))
+
+        names = {item["name"] for item in data["items"]}
+        assert {"bug-hunt", "security", "typescript"} <= names
+        assert data["has_more"] is False
+
+    async def test_prompt_argument_schema_uses_prompt_pack_enum(self, mcp_db: FiligreeDB) -> None:
+        tools = {tool.name: tool for tool in await list_tools()}
+
+        for tool_name in ("preview_scan", "trigger_scan", "trigger_scan_batch"):
+            schema = tools[tool_name].inputSchema
+            prompt_schema = schema["properties"]["prompt"]
+            assert "security" in prompt_schema["enum"]
+            assert "not-a-pack" not in prompt_schema["enum"]
+            assert prompt_schema["default"] == "bug-hunt"
+            assert "accepts_prompt" in prompt_schema["description"]
+
+    async def test_preview_scan_uses_ethereal_port_file_for_default_api_url(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        (mcp_mod._filigree_dir / "ephemeral.port").write_text("9229\n")
+        files = _make_target_files(mcp_db, ["preview_port.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "test-scanner", "file_path": "preview_port.py"},
+                )
+            )
+            assert data["valid"] is True
+            assert "http://localhost:9229" in data["command"]
+            assert data["api_url"] == "http://localhost:9229"
+            assert data["api_url_source"] == "ephemeral_port"
+            assert "http://localhost:8377" not in data["command"]
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -167,10 +331,15 @@ class TestTriggerScanBatchTool:
                         "trigger_scan_batch",
                         {"scanner": "test-scanner", "file_paths": ["batch_a.py", "batch_b.py"]},
                     )
-                )
+            )
             assert data["status"] == "triggered"
             assert data["file_count"] == 2
             assert data["processes_spawned"] == 2
+            assert data["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
+            assert data["api_url"].startswith("http://localhost:")
+            assert data["prompt_pack_scope"] == "advisory"
+            assert data["preview_recommended"] is True
+            assert data["sandbox_class"] == "custom"
             # Batch returns per-file scan_run_ids rather than one shared id —
             # each child's completion is tracked independently (filigree-ec33df4b86).
             assert "batch_id" in data
@@ -181,6 +350,78 @@ class TestTriggerScanBatchTool:
                 run = mcp_db.get_scan_run(child_id)
                 assert len(run["file_paths"]) == 1
                 assert run["status"] == "running"
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_uses_ethereal_port_file_for_default_api_url(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        (mcp_mod._filigree_dir / "ephemeral.port").write_text("9229\n")
+        files = _make_target_files(mcp_db, ["batch_port.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_port.py"]},
+                    )
+                )
+            assert data["status"] == "triggered"
+            assert "http://localhost:9229" in popen.call_args.args[0]
+            assert "http://localhost:8377" not in popen.call_args.args[0]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_explicit_api_url_overrides_port_file(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        (mcp_mod._filigree_dir / "ephemeral.port").write_text("9229\n")
+        files = _make_target_files(mcp_db, ["batch_override.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {
+                            "scanner": "test-scanner",
+                            "file_paths": ["batch_override.py"],
+                            "api_url": "http://localhost:9999",
+                        },
+                    )
+                )
+            assert data["status"] == "triggered"
+            assert "http://localhost:9999" in popen.call_args.args[0]
+            assert "http://localhost:9229" not in popen.call_args.args[0]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_uses_server_config_port_in_server_mode(
+        self,
+        mcp_db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import filigree.mcp_server as mcp_mod
+        from filigree.server import ServerConfig
+
+        assert mcp_mod._filigree_dir is not None
+        write_config(mcp_mod._filigree_dir, {"prefix": "mcp", "version": 1, "mode": "server"})
+        monkeypatch.setattr("filigree.server.read_server_config", lambda: ServerConfig(port=9230))
+        files = _make_target_files(mcp_db, ["batch_server.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_server.py"]},
+                    )
+                )
+            assert data["status"] == "triggered"
+            assert "http://localhost:9230" in popen.call_args.args[0]
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -563,6 +804,12 @@ class TestTriggerScanCooldownReservation:
                     )
                 )
                 assert first["status"] == "triggered"
+                assert first["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
+                assert first["api_url"].startswith("http://localhost:")
+                assert first["prompt_pack_scope"] == "advisory"
+                assert first["preview_recommended"] is True
+                assert first["sandbox_class"] == "custom"
+                assert "repository files" in first["risk_summary"]
                 # Second call immediately after — the reservation row should block it
                 # regardless of whether the first process has finished.
                 second = _parse(
@@ -573,6 +820,21 @@ class TestTriggerScanCooldownReservation:
                 )
             assert second["code"] == ErrorCode.CONFLICT
             assert second["details"]["blocking_run_id"] == first["scan_run_id"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_trigger_scan_rejects_prompt_when_scanner_template_cannot_accept_it(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["trigger_no_prompt.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "trigger_scan",
+                    {"scanner": "test-scanner", "file_path": "trigger_no_prompt.py", "prompt": "security"},
+                )
+            )
+            assert data["code"] == ErrorCode.VALIDATION
+            assert "does not accept prompt packs" in data["error"]
         finally:
             _cleanup_files(mcp_db, files)
 

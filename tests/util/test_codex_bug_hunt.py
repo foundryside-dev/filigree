@@ -1,36 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
 
-def _load_scan_utils() -> ModuleType:
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "scan_utils.py"
-    spec = importlib.util.spec_from_file_location("scan_utils_script", script_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_codex_bug_hunt() -> ModuleType:
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "codex_bug_hunt.py"
-    spec = importlib.util.spec_from_file_location("codex_bug_hunt_script", script_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 class TestResolveTargetFile:
     def test_resolve_relative_target_file(self, tmp_path: Path) -> None:
-        mod = _load_scan_utils()
+        from filigree.scanner_scripts import scan_utils as mod
+
         repo_root = tmp_path / "repo"
         root_dir = repo_root / "src"
         root_dir.mkdir(parents=True)
@@ -41,7 +20,8 @@ class TestResolveTargetFile:
         assert resolved == target.resolve()
 
     def test_reject_target_outside_root(self, tmp_path: Path) -> None:
-        mod = _load_scan_utils()
+        from filigree.scanner_scripts import scan_utils as mod
+
         repo_root = tmp_path / "repo"
         root_dir = repo_root / "src"
         root_dir.mkdir(parents=True)
@@ -53,7 +33,8 @@ class TestResolveTargetFile:
             mod._resolve_target_file(repo_root=repo_root, root_dir=root_dir, file_arg="outside.py")
 
     def test_reject_missing_target(self, tmp_path: Path) -> None:
-        mod = _load_scan_utils()
+        from filigree.scanner_scripts import scan_utils as mod
+
         repo_root = tmp_path / "repo"
         root_dir = repo_root / "src"
         root_dir.mkdir(parents=True)
@@ -65,7 +46,8 @@ class TestResolveTargetFile:
 class TestRunCodex:
     @pytest.mark.asyncio
     async def test_prompt_is_sent_over_stdin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        mod = _load_codex_bug_hunt()
+        from filigree.scanner_scripts import codex_bug_hunt as mod
+
         captured: dict[str, object] = {}
 
         class FakeProcess:

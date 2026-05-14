@@ -28,7 +28,7 @@ from click.testing import CliRunner
 
 from filigree.cli import cli
 from filigree.cli_common import get_db
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, write_config
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,9 @@ def _write_scanner_toml(project_path: Path, name: str = "test-scanner") -> None:
     scanners_dir.mkdir(parents=True, exist_ok=True)
     (scanners_dir / f"{name}.toml").write_text(
         f'[scanner]\nname = "{name}"\ndescription = "Test scanner"\n'
-        f'command = "echo"\nargs = ["scan", "{{file}}", "--scan-run-id", "{{scan_run_id}}"]\nfile_types = ["py"]\n'
+        'command = "echo"\n'
+        'args = ["scan", "{file}", "--api-url", "{api_url}", "--scan-run-id", "{scan_run_id}"]\n'
+        'file_types = ["py"]\n'
     )
 
 
@@ -111,17 +113,32 @@ class TestListScannersCommand:
             assert "file_types" in item
             # Exact key set matches ScannerConfig.to_dict()
             assert set(item.keys()) == {
+                "bundled_match",
+                "bundled_name",
                 "description",
                 "estimated_cost",
                 "execution_mode",
+                "accepts_prompt",
                 "file_types",
+                "managed",
                 "may_send_contents",
                 "name",
+                "preview_recommended",
+                "prompt_packs_endpoint",
+                "prompt_pack_scope",
+                "prompt_pack_scope_summary",
                 "requires_approval",
                 "requires_dashboard",
                 "risk_summary",
                 "safe_preview_only",
+                "sandbox_class",
+                "sandbox_summary",
             }
+            assert item["accepts_prompt"] is False
+            assert item["prompt_packs_endpoint"] == "list_prompt_packs"
+            assert item["bundled_name"] is False
+            assert item["bundled_match"] is False
+            assert item["managed"] is False
         finally:
             os.chdir(original)
 
@@ -133,6 +150,7 @@ class TestListScannersCommand:
             result = runner.invoke(cli, ["list-scanners"])
             assert result.exit_code == 0
             assert "No scanners" in result.output
+            assert "filigree scanner available" in result.output
         finally:
             os.chdir(original)
 
@@ -145,6 +163,228 @@ class TestListScannersCommand:
             result = runner.invoke(cli, ["list-scanners"])
             assert result.exit_code == 0
             assert "test-scanner" in result.output
+        finally:
+            os.chdir(original)
+
+
+class TestScannerManagementCommand:
+    def test_scanner_group_aliases_flat_scanner_commands(self, project_with_scanner: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            listed = runner.invoke(cli, ["scanner", "list", "--json"])
+            assert listed.exit_code == 0, listed.output
+            assert json.loads(listed.output)["items"][0]["name"] == "test-scanner"
+
+            previewed = runner.invoke(cli, ["scanner", "preview", "test-scanner", "target.py", "--json"])
+            assert previewed.exit_code == 0, previewed.output
+            assert json.loads(previewed.output)["scanner"] == "test-scanner"
+
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(12345)):
+                triggered = runner.invoke(cli, ["scanner", "trigger", "test-scanner", "target.py", "--json"])
+            assert triggered.exit_code == 0, triggered.output
+            assert json.loads(triggered.output)["status"] == "triggered"
+        finally:
+            os.chdir(original)
+
+    def test_scanner_available_lists_bundled_scanners(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "available", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            names = {item["name"] for item in data["items"]}
+            assert {"codex", "claude"} <= names
+            codex = next(item for item in data["items"] if item["name"] == "codex")
+            assert codex["enabled"] is False
+            assert codex["command"] == "filigree-scanner-codex"
+            assert "command_available" in codex
+            assert "command_path" in codex
+        finally:
+            os.chdir(original)
+
+    def test_scanner_available_reports_cli_prereq_status(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            with patch("filigree.cli_commands.scanners.shutil.which", return_value=None):
+                result = runner.invoke(cli, ["scanner", "available", "--json"])
+            assert result.exit_code == 0, result.output
+            codex = next(item for item in json.loads(result.output)["items"] if item["name"] == "codex")
+            assert codex["command_available"] is False
+            assert codex["command_path"] is None
+        finally:
+            os.chdir(original)
+
+    def test_scanner_enable_writes_installed_entrypoint_toml(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "enabled"
+            assert data["scanner"] == "codex"
+            scanner_toml = initialized_project / ".filigree" / "scanners" / "codex.toml"
+            content = scanner_toml.read_text()
+            assert "# Generated by 'filigree scanner enable codex'." in content
+            assert "scanner disable codex" in content
+            assert 'command = "filigree-scanner-codex"' in content
+            assert '"--prompt", "{prompt}"' in content
+            assert "scripts/codex_bug_hunt.py" not in content
+
+            listed = runner.invoke(cli, ["list-scanners", "--json"])
+            assert listed.exit_code == 0, listed.output
+            items = json.loads(listed.output)["items"]
+            assert [item["name"] for item in items] == ["codex"]
+        finally:
+            os.chdir(original)
+
+    def test_scanner_enable_human_output_deemphasizes_toml_path(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "enable", "codex"])
+            assert result.exit_code == 0, result.output
+            assert "Enabled scanner codex (managed)." in result.output
+            assert "filigree scanner disable codex" in result.output
+            assert ".filigree/scanners/codex.toml" not in result.output
+        finally:
+            os.chdir(original)
+
+    def test_enabled_bundled_scanner_advertises_prompt_and_sandbox(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            enable = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert enable.exit_code == 0, enable.output
+
+            result = runner.invoke(cli, ["list-scanners", "--json"])
+            assert result.exit_code == 0, result.output
+            item = json.loads(result.output)["items"][0]
+            assert item["accepts_prompt"] is True
+            assert item["prompt_packs_endpoint"] == "list_prompt_packs"
+            assert "read-only" in item["sandbox_summary"]
+            assert item["sandbox_class"] == "tool-sandboxed"
+            assert item["managed"] is True
+            assert item["bundled_name"] is True
+            assert item["bundled_match"] is True
+        finally:
+            os.chdir(original)
+
+    def test_scanner_disable_removes_enabled_bundled_scanner(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            enable = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert enable.exit_code == 0, enable.output
+
+            result = runner.invoke(cli, ["scanner", "disable", "codex", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "disabled"
+            assert not (initialized_project / ".filigree" / "scanners" / "codex.toml").exists()
+        finally:
+            os.chdir(original)
+
+    def test_scanner_disable_refuses_custom_scanner_without_force(self, initialized_project: Path) -> None:
+        custom = initialized_project / ".filigree" / "scanners" / "codex.toml"
+        custom.write_text(
+            '[scanner]\n'
+            'name = "codex"\n'
+            'description = "Custom scanner"\n'
+            'command = "python custom.py"\n'
+            'args = []\n'
+            'file_types = ["py"]\n'
+        )
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "disable", "codex", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "CONFLICT"
+            assert "--force" in data["error"]
+            assert data["details"]["conflict_kind"] == "custom"
+            assert custom.exists()
+        finally:
+            os.chdir(original)
+
+    def test_scanner_enable_reports_likely_stale_bundled_config(self, initialized_project: Path) -> None:
+        stale = initialized_project / ".filigree" / "scanners" / "codex.toml"
+        stale.write_text(
+            '[scanner]\n'
+            'name = "codex"\n'
+            'description = "Per-file bug hunt using Codex CLI"\n'
+            'command = "filigree-scanner-codex"\n'
+            'args = ["--root", "{project_root}", "--file", "{file}"]\n'
+            'file_types = ["py"]\n'
+        )
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "CONFLICT"
+            assert "does not match current bundled definition" in data["error"]
+            assert "--force" in data["error"]
+            assert data["details"]["conflict_kind"] == "stale_bundled"
+        finally:
+            os.chdir(original)
+
+    def test_scanner_disable_removes_non_bundled_custom_scanner_without_force(self, initialized_project: Path) -> None:
+        custom = initialized_project / ".filigree" / "scanners" / "custom.toml"
+        custom.write_text(
+            '[scanner]\n'
+            'name = "custom"\n'
+            'description = "Custom scanner"\n'
+            'command = "python custom.py"\n'
+            'args = []\n'
+            'file_types = ["py"]\n'
+        )
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "disable", "custom", "--json"])
+            assert result.exit_code == 0, result.output
+            assert json.loads(result.output)["status"] == "disabled"
+            assert not custom.exists()
+        finally:
+            os.chdir(original)
+
+    def test_scanner_prompts_lists_bundled_prompt_packs(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "prompts", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            names = {item["name"] for item in data["items"]}
+            assert {"security", "pytorch", "quality-engineering", "major-refactor", "css", "javascript", "typescript"} <= names
+            major = next(item for item in data["items"] if item["name"] == "major-refactor")
+            assert "when_to_use" in major
+            assert major["components"] == [
+                "solution-architecture",
+                "systems-thinking",
+                "python-engineering",
+                "quality-engineering",
+            ]
+            comprehensive = next(item for item in data["items"] if item["name"] == "comprehensive")
+            assert "security" in comprehensive["components"]
+            assert comprehensive["components"] != major["components"]
         finally:
             os.chdir(original)
 
@@ -169,13 +409,104 @@ class TestPreviewScanCommand:
             assert "target.py" in data["command_string"]
             assert data["valid"] is True
             assert data["validation_error"] is None
+            assert data["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
             assert data["execution_mode"] == "external_process"
             assert data["may_send_contents"] is True
             assert data["requires_dashboard"] is True
             assert data["estimated_cost"] == "unknown"
             assert data["safe_preview_only"] is True
+            assert data["preview_recommended"] is True
             assert data["requires_approval"] is True
+            assert data["sandbox_class"] == "custom"
             assert "External scanner process" in data["risk_summary"]
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_accepts_prompt_pack(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            enabled = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert enabled.exit_code == 0, enabled.output
+            _make_target_file(initialized_project, "target.py")
+
+            result = runner.invoke(cli, ["preview-scan", "codex", "target.py", "--prompt", "security", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert "--prompt security" in data["command_string"]
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_rejects_unknown_prompt_pack(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            enabled = runner.invoke(cli, ["scanner", "enable", "codex", "--json"])
+            assert enabled.exit_code == 0, enabled.output
+            _make_target_file(initialized_project, "target.py")
+
+            result = runner.invoke(cli, ["preview-scan", "codex", "target.py", "--prompt", "not-a-pack", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "Unknown prompt pack" in data["error"]
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_rejects_prompt_pack_when_scanner_template_cannot_accept_it(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "test-scanner", "target.py", "--prompt", "security", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "does not accept prompt packs" in data["error"]
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_uses_ethereal_port_file_for_default_api_url(self, project_with_scanner: SeededProject) -> None:
+        (project_with_scanner.path / ".filigree" / "ephemeral.port").write_text("9229\n")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert "http://localhost:9229" in data["command"]
+            assert data["api_url"] == "http://localhost:9229"
+            assert data["api_url_source"] == "ephemeral_port"
+            assert "http://localhost:8377" not in data["command"]
+        finally:
+            os.chdir(original)
+
+    def test_preview_scan_uses_server_config_port_in_server_mode(
+        self,
+        project_with_scanner: SeededProject,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from filigree.server import ServerConfig
+
+        write_config(project_with_scanner.path / ".filigree", {"prefix": "test", "version": 1, "mode": "server"})
+        monkeypatch.setattr("filigree.server.read_server_config", lambda: ServerConfig(port=9230))
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert "http://localhost:9230" in data["command"]
+            assert data["api_url"] == "http://localhost:9230"
+            assert data["api_url_source"] == "server_config"
         finally:
             os.chdir(original)
 
@@ -517,6 +848,61 @@ class TestTriggerScanCommand:
             assert data["pid"] == 12345
             assert "log_path" in data
             assert "message" in data
+            assert data["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
+            assert data["api_url"].startswith("http://localhost:")
+            assert data["prompt_pack_scope"] == "advisory"
+            assert data["preview_recommended"] is True
+            assert data["sandbox_class"] == "custom"
+            assert "repository files" in data["risk_summary"]
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_uses_ethereal_port_file_for_default_api_url(self, project_with_scanner: SeededProject) -> None:
+        (project_with_scanner.path / ".filigree" / "ephemeral.port").write_text("9229\n")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(12345)) as popen:
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 0, result.output
+            assert "http://localhost:9229" in popen.call_args.args[0]
+            assert "http://localhost:8377" not in popen.call_args.args[0]
+            assert json.loads(result.output)["api_url_source"] == "ephemeral_port"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_explicit_api_url_overrides_port_file(self, project_with_scanner: SeededProject) -> None:
+        (project_with_scanner.path / ".filigree" / "ephemeral.port").write_text("9229\n")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(12345)) as popen:
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan", "test-scanner", "target.py", "--api-url", "http://localhost:9999", "--json"],
+                )
+            assert result.exit_code == 0, result.output
+            assert "http://localhost:9999" in popen.call_args.args[0]
+            assert "http://localhost:9229" not in popen.call_args.args[0]
+            assert json.loads(result.output)["api_url_source"] == "explicit"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_rejects_prompt_pack_when_scanner_template_cannot_accept_it(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--prompt", "security", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "does not accept prompt packs" in data["error"]
         finally:
             os.chdir(original)
 
@@ -641,6 +1027,9 @@ class TestTriggerScanBatchCommand:
             assert len(data["scan_run_ids"]) == 2
             assert len(set(data["scan_run_ids"])) == 2  # unique per file
             assert len(data["per_file"]) == 2
+            assert data["api_url_source"] in {"fallback_default", "ephemeral_port", "server_config"}
+            assert data["prompt_pack_scope"] == "advisory"
+            assert data["sandbox_class"] == "custom"
         finally:
             os.chdir(original)
 

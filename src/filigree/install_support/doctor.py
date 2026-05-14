@@ -116,6 +116,48 @@ def _is_absolute_command_path(path: str) -> bool:
     return len(path) > 2 and path[0].isalpha() and path[1] == ":" and path[2] in ("/", "\\")
 
 
+def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
+    """Check project scanner TOML against current bundled scanner definitions."""
+    from filigree.bundled_scanners import BUNDLED_SCANNERS
+    from filigree.scanners import load_scanner
+
+    scanners_dir = filigree_dir / "scanners"
+    if not scanners_dir.is_dir():
+        return [CheckResult("Bundled scanner registrations", True, "No scanner registrations")]
+
+    stale: list[str] = []
+    current: list[str] = []
+    for scanner_name, bundled in sorted(BUNDLED_SCANNERS.items()):
+        path = scanners_dir / f"{scanner_name}.toml"
+        if not path.is_file():
+            continue
+        cfg = load_scanner(scanners_dir, scanner_name)
+        if cfg is None:
+            continue
+        if cfg.command != bundled.command:
+            continue
+        if cfg.args == bundled.args and cfg.file_types == bundled.file_types:
+            current.append(scanner_name)
+        else:
+            stale.append(scanner_name)
+
+    if stale:
+        commands = ", ".join(f"filigree scanner enable {name} --force" for name in stale)
+        return [
+            CheckResult(
+                "Bundled scanner registrations",
+                False,
+                f"Stale bundled scanner registration(s): {', '.join(stale)}",
+                fix_hint=f"Run: {commands}",
+                code="stale_bundled_scanner",
+            )
+        ]
+
+    if current:
+        return [CheckResult("Bundled scanner registrations", True, f"Current bundled scanner registration(s): {', '.join(current)}")]
+    return [CheckResult("Bundled scanner registrations", True, "No bundled scanner registrations")]
+
+
 # ---------------------------------------------------------------------------
 # Mode-specific checks
 # ---------------------------------------------------------------------------
@@ -750,7 +792,10 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     elif mode == "server":
         results.extend(_doctor_server_checks(filigree_dir))
 
-    # 13. Check git working tree status
+    # 13. Check scanner registration drift
+    results.extend(_doctor_bundled_scanner_checks(filigree_dir))
+
+    # 14. Check git working tree status
     try:
         result = subprocess.run(
             ["git", "-C", str(filigree_dir.parent), "status", "--porcelain"],
@@ -784,7 +829,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
             )
         )
 
-    # 14. Check installation method
+    # 15. Check installation method
     results.extend(_doctor_install_method())
 
     return results

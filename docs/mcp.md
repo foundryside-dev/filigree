@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 105 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 109 tools, 1 resource, and 1 prompt.
 
 ## Contents
 
@@ -817,6 +817,10 @@ instead of acknowledging an unrelated issue.
 | Tool | Description |
 |------|-------------|
 | `list_scanners` | List registered scanners |
+| `list_available_scanners` | List bundled scanners that can be enabled |
+| `enable_scanner` | Enable a bundled scanner registration |
+| `disable_scanner` | Disable a scanner registration |
+| `list_prompt_packs` | List bundled scanner review-focus prompt packs |
 | `trigger_scan` | Trigger async file scan (single file) |
 | `trigger_scan_batch` | Trigger a scanner across multiple files in one call |
 | `get_scan_status` | Live status + log tail for a `scan_run_id` |
@@ -825,7 +829,44 @@ instead of acknowledging an unrelated issue.
 
 #### `list_scanners`
 
-No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in the unified list envelope: `{items: [{name, description, file_types, ...}], has_more: bool}`.
+No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in
+the unified list envelope:
+`{items: [{name, description, file_types, accepts_prompt, prompt_packs_endpoint, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
+If the list is empty, call `list_available_scanners` to see bundled scanners
+that can be enabled.
+
+#### `list_available_scanners`
+
+No parameters. Returns bundled scanners that can be enabled in the current
+project, including `command_available`, `command_path`, `enabled`, and the
+managed TOML `path`.
+
+#### `enable_scanner`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scanner` | string | yes | Bundled scanner name, e.g. `codex` or `claude` |
+| `force` | boolean | no | Replace an existing custom or stale bundled TOML |
+
+Writes the managed `.filigree/scanners/<scanner>.toml` registration for a
+bundled scanner. Refuses to overwrite custom TOML unless `force=true`.
+
+#### `disable_scanner`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `scanner` | string | yes | Scanner name |
+| `force` | boolean | no | Remove a custom TOML that uses a bundled scanner name |
+
+Removes a scanner registration. Custom non-bundled scanner names can be removed
+without `force`; bundled scanner names with custom content require `force=true`.
+
+#### `list_prompt_packs`
+
+No parameters. Returns bundled scanner prompt packs in the unified list envelope:
+`{items: [{name, description, components, when_to_use}], has_more: bool}`.
+Prompt packs are advisory review-focus hints; they do not restrict scanner file
+access or reported findings.
 
 #### `trigger_scan`
 
@@ -833,9 +874,10 @@ No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in the
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name (from list_scanners) |
 | `file_path` | string | yes | File path to scan (relative to project root) |
-| `api_url` | string | no | Dashboard URL (default `http://localhost:8377`, localhost only) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; requires `accepts_prompt=true` for non-default packs) |
+| `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
-Response: `{status, scanner, file_path, file_id, scan_run_id, pid, message}`
+Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, message}`.
 
 #### `trigger_scan_batch`
 
@@ -843,9 +885,13 @@ Response: `{status, scanner, file_path, file_id, scan_run_id, pid, message}`
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_paths` | string[] | yes | File paths to scan (relative to project root) |
-| `api_url` | string | no | Dashboard URL where the scanner POSTs results (localhost only) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; requires `accepts_prompt=true` for non-default packs) |
+| `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
-Spawns one scanner process per file and returns per-file `scan_run_id`s plus a `batch_id` for correlation. Same 30s rate-limit applies per scanner+file.
+Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
+`batch_id` for correlation. The response also echoes `api_url`,
+`api_url_source`, and scanner risk/sandbox metadata. Same 30s rate-limit applies
+per scanner+file.
 
 #### `get_scan_status`
 
@@ -862,6 +908,7 @@ Returns scan status with a live PID check and a tail of the scanner's log.
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_path` | string | yes | File path (relative to project root) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`) |
 
 Returns the exact command that *would* be executed, without spawning anything. Useful for debugging scanner config.
 
@@ -888,15 +935,19 @@ create a linked triage observation; full responses then include
 `observation_id` when one was created.
 
 **Workflow:**
-1. `list_scanners` — discover available scanners
-2. `trigger_scan` or `trigger_scan_batch` — fire-and-forget, get `scan_run_id`(s)
-3. `get_scan_status` — poll for completion / tail logs
-4. Check results via `list_findings` / `get_finding` or `GET /api/loom/files/{file_id}/findings`
+1. `list_scanners` — discover registered scanners
+2. If none are registered, `list_available_scanners` then `enable_scanner`
+3. `list_prompt_packs` — choose an advisory review lens, if needed
+4. `trigger_scan` or `trigger_scan_batch` — fire-and-forget, get `scan_run_id`(s)
+5. `get_scan_status` — poll for completion / tail logs
+6. Check results via `list_findings` / `get_finding` or `GET /api/loom/files/{file_id}/findings`
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API. Ensure the dashboard is running at the target `api_url` before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Loom generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
-**Scanner registration:** Add TOML files to `.filigree/scanners/`. See `scripts/scanners/*.toml.example` for templates.
+**Scanner registration:** Use `list_available_scanners`, `enable_scanner`, and `disable_scanner` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
+
+**Prompt packs:** Use `list_prompt_packs` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `preview_scan`, `trigger_scan`, or `trigger_scan_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
 
 For end-to-end issue/file/finding workflows (including dashboard UI and troubleshooting), see [File Traceability Playbook](file-traceability.md).

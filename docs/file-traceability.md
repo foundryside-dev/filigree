@@ -185,5 +185,5 @@ Checklist:
 - `GET /api/files/{file_id}/timeline`
 - `POST /api/files/{file_id}/associations`
 - `GET /api/issue/{issue_id}/files`
-- `POST /api/v1/scan-results`
+- `POST /api/scan-results` (living Loom alias; `/api/v1/scan-results` remains supported for classic integrations)
 - `GET /api/scan-runs`

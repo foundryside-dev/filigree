@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bundled scanner activation and prompt-pack review lenses.** Filigree now
+  ships packaged scanner runner entrypoints (`filigree-scanner-codex` and
+  `filigree-scanner-claude`) plus `filigree scanner available/prompts/enable/
+  disable` and matching MCP management tools so projects opt into scanners by
+  writing managed `.filigree/scanners/*.toml` registrations instead of copying
+  repo-local scripts. Scanner trigger/preview flows resolve the active local
+  dashboard callback port, expose callback provenance (`api_url_source`),
+  advertise prompt support and risk/sandbox metadata, and reject non-default
+  prompt packs for custom scanners that do not declare a `{prompt}` template
+  placeholder. Bundled prompt packs now cover security, quality engineering,
+  solution architecture, systems thinking, system interactions, Python,
+  PyTorch, CSS, JavaScript, TypeScript, React, Rust, Go, Terraform, SQL,
+  `major-refactor`, and broader `comprehensive` reviews.
+
 - **Senior-user MCP review closure package.** The review corpus is now
   reconciled into a closed master checklist with implementation evidence,
   ADRs, and docs for the locked 2.0 outcomes. New ADRs record that Filigree's

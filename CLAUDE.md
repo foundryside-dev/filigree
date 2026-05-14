@@ -1,4 +1,4 @@
-<!-- filigree:instructions:v2.0.0:8160de89 -->
+<!-- filigree:instructions:v2.0.0:d2e32bfd -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -30,7 +30,7 @@ faster and return structured data. Key tools:
 - `get_mcp_status` — read-only connector/schema compatibility diagnostic
 - `get_valid_transitions` — workflow navigation
 - `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
-- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` — automated code scanning
+- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` / `list_available_scanners` / `enable_scanner` / `disable_scanner` / `list_prompt_packs` — automated code scanning
 - `get_finding` / `list_findings` / `update_finding` / `batch_update_findings` — scan finding triage
 - `promote_finding` / `dismiss_finding` — finding lifecycle (promote to issue or dismiss)
 
@@ -153,12 +153,21 @@ filigree dismiss-finding <id>                            # Dismiss finding
 filigree batch-update-findings <ids...> --status=...     # Update many at once
 
 # Scanners
+filigree scanner available                               # Bundled scanners that can be enabled
+filigree scanner prompts                                 # Bundled scanner prompt packs
+filigree scanner enable codex                            # Enable bundled Codex scanner in this project
+filigree scanner disable codex                           # Disable a scanner registration
+filigree scanner list                                    # Registered scanners (grouped alias)
+filigree scanner preview <scanner> <file>                 # Dry-run a scanner (grouped alias)
+filigree scanner trigger <scanner> <file> --prompt security # Run a scanner (grouped alias)
 filigree list-scanners                                   # Registered scanners
-filigree trigger-scan <scanner>                          # Run a scanner
+filigree trigger-scan <scanner> <file> --prompt security  # Run a scanner with a review focus
 filigree trigger-scan-batch <scanners...>                # Run several scanners
 filigree preview-scan <scanner>                          # Dry-run a scanner
 filigree get-scan-status <scan_id>                       # Scan progress / results
 filigree report-finding ...                              # Report a finding from a scanner
+
+Prompt packs are advisory review-focus hints; they do not restrict what the scanner process can read or report.
 
 # Most data commands support --json; --actor is global on every command.
 # (`install`, `doctor`, `session-context` etc. are human-output only.)

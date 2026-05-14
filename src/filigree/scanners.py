@@ -5,7 +5,7 @@ Each TOML file defines one scanner with a command template.
 
 Template variables substituted at invocation:
     {file}         — target file path
-    {api_url}      — dashboard URL (default http://localhost:8377)
+    {api_url}      — resolved dashboard callback URL
     {project_root} — filigree project root directory
     {scan_run_id}  — MCP-generated correlation ID for tracking results
 """
@@ -43,6 +43,7 @@ class ScannerConfig:
         api_url: str = "http://localhost:8377",
         project_root: str = ".",
         scan_run_id: str = "",
+        prompt: str = "bug-hunt",
     ) -> list[str]:
         """Build the full command list with template variables substituted.
 
@@ -57,6 +58,7 @@ class ScannerConfig:
             "{api_url}": str(api_url),
             "{project_root}": str(project_root),
             "{scan_run_id}": str(scan_run_id),
+            "{prompt}": str(prompt),
         }
         # Single-pass replacement prevents double-substitution when a
         # substituted value (e.g. a file path) contains template variables.
@@ -84,8 +86,50 @@ class ScannerConfig:
             "name": self.name,
             "description": self.description,
             "file_types": list(self.file_types),
+            "accepts_prompt": self.accepts_prompt(),
+            "prompt_packs_endpoint": "list_prompt_packs",
+            "sandbox_summary": self.sandbox_summary(),
+            "sandbox_class": self.sandbox_class(),
+            "bundled_name": self.is_bundled_name(),
+            "bundled_match": self.matches_bundled_definition(),
+            "managed": self.matches_bundled_definition(),
             **self.risk_metadata(),
         }
+
+    def accepts_prompt(self) -> bool:
+        """Return whether this scanner command template accepts a prompt pack."""
+        return "{prompt}" in self.command or any("{prompt}" in arg for arg in self.args)
+
+    def sandbox_summary(self) -> str:
+        """Return a concise description of scanner-specific process constraints."""
+        if self.command == "filigree-scanner-codex":
+            return "codex exec --sandbox read-only with approval_policy=never; file access is governed by Codex CLI sandboxing."
+        if self.command == "filigree-scanner-claude":
+            return "claude --print; file access is governed by Claude Code permissions and sandboxing."
+        return "Custom external process; file access is governed by the scanner command and its runtime sandbox."
+
+    def sandbox_class(self) -> str:
+        """Return a machine-readable scanner sandbox category."""
+        if self.command == "filigree-scanner-codex":
+            return "tool-sandboxed"
+        if self.command == "filigree-scanner-claude":
+            return "host-policy"
+        return "custom"
+
+    def is_bundled_name(self) -> bool:
+        """Return whether this scanner name is reserved by a bundled definition."""
+        from filigree.bundled_scanners import get_bundled_scanner
+
+        return get_bundled_scanner(self.name) is not None
+
+    def matches_bundled_definition(self) -> bool:
+        """Return whether this config exactly matches the current bundled definition."""
+        from filigree.bundled_scanners import get_bundled_scanner
+
+        bundled = get_bundled_scanner(self.name)
+        if bundled is None:
+            return False
+        return self.command == bundled.command and self.args == bundled.args and self.file_types == bundled.file_types
 
     def risk_metadata(self) -> dict[str, object]:
         """Return conservative execution and egress metadata for agent callers.
@@ -101,8 +145,14 @@ class ScannerConfig:
             "requires_dashboard": True,
             "estimated_cost": "unknown",
             "safe_preview_only": True,
+            "preview_recommended": True,
             "requires_approval": True,
             "risk_summary": "External scanner process may read repository files; result callback is localhost-only by default.",
+            "prompt_pack_scope": "advisory",
+            "prompt_pack_scope_summary": (
+                "The prompt pack nudges review focus but does not restrict what the scanner process can read or report. "
+                "File-access scope is governed by the scanner CLI sandbox, not by the prompt pack."
+            ),
         }
 
 

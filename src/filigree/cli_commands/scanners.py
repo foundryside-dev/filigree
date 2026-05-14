@@ -13,6 +13,7 @@ import json as json_mod
 import logging
 import secrets
 import shlex
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,19 +21,19 @@ from typing import Any
 
 import click
 
+from filigree.bundled_scanners import BUNDLED_SCANNERS, get_bundled_scanner
 from filigree.cli_common import get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
 from filigree.mcp_tools.scanners import _load_scanner_or_error, _report_finding_observation_ids, _validate_localhost_url
 from filigree.paths import safe_path
+from filigree.scanner_callback import resolve_scanner_api_url_with_source
+from filigree.scanner_prompts import expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import validate_scanner_command
+from filigree.scanners import load_scanner, validate_scanner_command
 from filigree.types.api import ErrorCode
 
 _logger = logging.getLogger(__name__)
-
-_DEFAULT_API_URL = "http://localhost:8377"
-
 
 def _get_filigree_dir() -> Path:
     """Discover .filigree/ directory.
@@ -105,10 +106,189 @@ def list_scanners_cmd(as_json: bool) -> None:
 
     if not items:
         click.echo("No scanners configured.")
+        click.echo("Run 'filigree scanner available' to see bundled scanners that can be enabled.")
         return
     for sc in items:
         click.echo(f"{sc['name']}  {sc.get('description', '')}")
     click.echo(f"\n{len(items)} scanner(s)")
+
+
+# ---------------------------------------------------------------------------
+# scanner management
+# ---------------------------------------------------------------------------
+
+
+def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
+    return filigree_dir / "scanners" / f"{scanner_name}.toml"
+
+
+def _bundled_scanner_matches(path: Path, scanner_name: str) -> bool:
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return False
+    cfg = load_scanner(path.parent, scanner_name)
+    if cfg is None:
+        return False
+    return cfg.command == bundled.command and cfg.args == bundled.args and cfg.file_types == bundled.file_types
+
+
+def _looks_like_stale_bundled_scanner(path: Path, scanner_name: str) -> bool:
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return False
+    cfg = load_scanner(path.parent, scanner_name)
+    return cfg is not None and cfg.command == bundled.command
+
+
+def _validate_prompt_or_die(prompt: str, *, as_json: bool) -> None:
+    try:
+        expand_prompt_pack_names(prompt)
+    except ValueError as exc:
+        _emit_error(str(exc), ErrorCode.VALIDATION, as_json=as_json)
+
+
+def _validate_scanner_accepts_prompt_or_die(cfg: Any, prompt: str, *, as_json: bool) -> None:
+    if prompt == "bug-hunt" or cfg.accepts_prompt():
+        return
+    _emit_error(
+        f"Scanner {cfg.name!r} does not accept prompt packs; its command template has no {{prompt}} placeholder.",
+        ErrorCode.VALIDATION,
+        as_json=as_json,
+        details={"scanner": cfg.name, "prompt": prompt, "accepts_prompt": False},
+    )
+
+
+@click.group("scanner")
+def scanner_group() -> None:
+    """Manage project scanner registrations.
+
+    Enable bundled scanners with ``filigree scanner enable codex``. Run scans
+    with the aliases here or the stable top-level commands such as
+    ``filigree trigger-scan codex <file>``.
+    """
+
+
+@scanner_group.command("available")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def scanner_available_cmd(as_json: bool) -> None:
+    """List bundled scanners that can be enabled for this project."""
+    filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    items: list[dict[str, Any]] = []
+    for scanner_name in sorted(BUNDLED_SCANNERS):
+        bundled = BUNDLED_SCANNERS[scanner_name]
+        path = _scanner_path(filigree_dir, scanner_name)
+        command_path = shutil.which(bundled.command)
+        items.append(
+            {
+                "name": bundled.name,
+                "description": bundled.description,
+                "command": bundled.command,
+                "command_available": command_path is not None,
+                "command_path": command_path,
+                "file_types": list(bundled.file_types),
+                "enabled": path.is_file() and _bundled_scanner_matches(path, scanner_name),
+                "path": str(path),
+            }
+        )
+    if as_json:
+        click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2, default=str))
+        return
+    for item in items:
+        marker = "enabled" if item["enabled"] else "available"
+        prereq = f"cli: {item['command_path']}" if item["command_available"] else f"cli missing: {item['command']}"
+        click.echo(f"{item['name']}  {marker}  {prereq}  {item['description']}")
+
+
+@scanner_group.command("prompts")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def scanner_prompts_cmd(as_json: bool) -> None:
+    """List bundled scanner prompt packs."""
+    items = [pack.to_dict() for pack in list_prompt_packs()]
+    if as_json:
+        click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2, default=str))
+        return
+    for item in items:
+        components = item["components"]
+        suffix = f" ({', '.join(components)})" if isinstance(components, list) and components else ""
+        click.echo(f"{item['name']}  {item['description']}{suffix}")
+    click.echo("\nPrompt packs are advisory review-focus hints; they do not restrict scanner file access or findings.")
+
+
+@scanner_group.command("enable")
+@click.argument("scanner")
+@click.option("--force", is_flag=True, help="Overwrite an existing scanner TOML with the bundled definition")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def scanner_enable_cmd(scanner: str, force: bool, as_json: bool) -> None:
+    """Enable a bundled scanner in the current project."""
+    filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    bundled = get_bundled_scanner(scanner)
+    if bundled is None:
+        _emit_error(
+            f"Bundled scanner {scanner!r} not found",
+            ErrorCode.NOT_FOUND,
+            as_json=as_json,
+            details={"available_scanners": sorted(BUNDLED_SCANNERS)},
+        )
+        return
+    scanners_dir = filigree_dir / "scanners"
+    scanners_dir.mkdir(exist_ok=True)
+    path = scanners_dir / f"{scanner}.toml"
+    if path.exists() and not force and not _bundled_scanner_matches(path, scanner):
+        if _looks_like_stale_bundled_scanner(path, scanner):
+            msg = f"Existing scanner config does not match current bundled definition: {path}. Re-run with --force to upgrade it."
+            hint = "Re-run with --force to upgrade this scanner registration to the current bundled definition."
+            conflict_kind = "stale_bundled"
+        else:
+            msg = f"Refusing to overwrite custom scanner config: {path}. Re-run with --force to replace it with the bundled scanner."
+            hint = "Re-run with --force to replace it with the bundled scanner."
+            conflict_kind = "custom"
+        _emit_error(
+            msg,
+            ErrorCode.CONFLICT,
+            as_json=as_json,
+            details={"path": str(path), "hint": hint, "conflict_kind": conflict_kind},
+        )
+        return
+    path.write_text(bundled.toml(), encoding="utf-8")
+    response = {"status": "enabled", "scanner": scanner, "path": str(path)}
+    if as_json:
+        click.echo(json_mod.dumps(response, indent=2, default=str))
+        return
+    click.echo(f"Enabled scanner {scanner} (managed).")
+    click.echo(f"Run 'filigree scanner disable {scanner}' to remove.")
+
+
+@scanner_group.command("disable")
+@click.argument("scanner")
+@click.option("--force", is_flag=True, help="Remove the scanner TOML even if it does not match a bundled definition")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def scanner_disable_cmd(scanner: str, force: bool, as_json: bool) -> None:
+    """Disable a project scanner by removing its TOML registration."""
+    filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    path = _scanner_path(filigree_dir, scanner)
+    if not path.exists():
+        _emit_error(f"Scanner {scanner!r} is not enabled", ErrorCode.NOT_FOUND, as_json=as_json, details={"path": str(path)})
+        return
+    if scanner in BUNDLED_SCANNERS and not force and not _bundled_scanner_matches(path, scanner):
+        if _looks_like_stale_bundled_scanner(path, scanner):
+            msg = f"Existing scanner config does not match current bundled definition: {path}. Re-run with --force to remove it."
+            conflict_kind = "stale_bundled"
+        else:
+            msg = f"Refusing to remove custom scanner config: {path}. Re-run with --force to remove it anyway."
+            conflict_kind = "custom"
+        _emit_error(
+            msg,
+            ErrorCode.CONFLICT,
+            as_json=as_json,
+            details={"path": str(path), "hint": "Re-run with --force to remove it anyway.", "conflict_kind": conflict_kind},
+        )
+        return
+    path.unlink()
+    response = {"status": "disabled", "scanner": scanner, "path": str(path)}
+    if as_json:
+        click.echo(json_mod.dumps(response, indent=2, default=str))
+        return
+    click.echo(f"Disabled scanner {scanner}: removed {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -119,13 +299,17 @@ def list_scanners_cmd(as_json: bool) -> None:
 @click.command("trigger-scan")
 @click.argument("scanner")
 @click.argument("file_path")
-@click.option("--api-url", default=_DEFAULT_API_URL, help="Dashboard URL for scan result callbacks")
+@click.option("--api-url", default=None, help="Dashboard URL for scan result callbacks")
+@click.option("--prompt", default="bug-hunt", help="Bundled prompt pack to pass to scanner commands. See 'filigree scanner prompts'.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) -> None:
+def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: str, as_json: bool) -> None:
     """Trigger an async scan on a single file. Returns immediately with a scan_run_id."""
     from datetime import UTC, datetime
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    _validate_prompt_or_die(prompt, as_json=as_json)
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
     if url_err is not None:
@@ -144,6 +328,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) 
         return
 
     assert cfg is not None  # noqa: S101
+    _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
     if not target.is_file():
         _emit_error(f"File not found: {file_path}", ErrorCode.NOT_FOUND, as_json=as_json)
@@ -194,6 +379,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) 
                 project_root=project_root,
                 scan_run_id=scan_run_id,
                 filigree_dir=filigree_dir,
+                prompt=prompt,
             )
         except ScannerSpawnError as exc:
             with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
@@ -260,6 +446,11 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) 
             "scan_run_id": scan_run_id,
             "pid": proc.pid,
             "log_path": log_rel,
+            "api_url": api_url,
+            "api_url_source": api_resolution.source,
+            "sandbox_summary": cfg.sandbox_summary(),
+            "sandbox_class": cfg.sandbox_class(),
+            **cfg.risk_metadata(),
             "message": (
                 f"Scan triggered with run_id={scan_run_id!r}. "
                 f"Results will be POSTed to {api_url}. "
@@ -290,13 +481,17 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str, as_json: bool) 
 @click.command("trigger-scan-batch")
 @click.argument("scanner")
 @click.argument("file_paths", nargs=-1)
-@click.option("--api-url", default=_DEFAULT_API_URL, help="Dashboard URL for scan result callbacks")
+@click.option("--api-url", default=None, help="Dashboard URL for scan result callbacks")
+@click.option("--prompt", default="bug-hunt", help="Bundled prompt pack to pass to scanner commands. See 'filigree scanner prompts'.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: str, as_json: bool) -> None:
+def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: str | None, prompt: str, as_json: bool) -> None:
     """Trigger a scanner on multiple files. Returns batch_id and per-file scan_run_ids."""
     from datetime import UTC, datetime
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    _validate_prompt_or_die(prompt, as_json=as_json)
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_url = api_resolution.url
 
     fp_list = list(file_paths)
     if not fp_list:
@@ -322,6 +517,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
         _emit_error(err["error"], err["code"], as_json=as_json, details=err.get("details"))
         return
     assert cfg is not None  # noqa: S101
+    _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
     project_root = filigree_dir.parent
 
@@ -404,6 +600,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                     project_root=project_root,
                     scan_run_id=child_run_id,
                     filigree_dir=filigree_dir,
+                    prompt=prompt,
                     log_suffix=f"-{entry['index']}",
                 )
             except ScannerSpawnError as exc:
@@ -504,6 +701,11 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             "batch_id": batch_id,
             "scan_run_ids": scan_run_ids,
             "per_file": per_file,
+            "api_url": api_url,
+            "api_url_source": api_resolution.source,
+            "sandbox_summary": cfg.sandbox_summary(),
+            "sandbox_class": cfg.sandbox_class(),
+            **cfg.risk_metadata(),
         }
         if spawn_errors:
             result["spawn_errors"] = spawn_errors
@@ -570,10 +772,12 @@ def get_scan_status_cmd(scan_run_id: str, log_lines: int, as_json: bool) -> None
 @click.command("preview-scan")
 @click.argument("scanner")
 @click.argument("file_path")
+@click.option("--prompt", default="bug-hunt", help="Bundled prompt pack to pass to scanner commands. See 'filigree scanner prompts'.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
+def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -> None:
     """Preview the command that would be executed for a scan, without spawning a process."""
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    _validate_prompt_or_die(prompt, as_json=as_json)
     project_root = filigree_dir.parent
     try:
         target = safe_path(file_path, project_root)
@@ -586,14 +790,17 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
         _emit_error(err["error"], err["code"], as_json=as_json, details=err.get("details"))
         return
     assert cfg is not None  # noqa: S101
+    _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
     canonical_path = str(target.relative_to(project_root.resolve()))
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,
-            api_url=_DEFAULT_API_URL,
+            api_url=api_resolution.url,
             project_root=str(project_root),
             scan_run_id="preview-dry-run",
+            prompt=prompt,
         )
     except ValueError as e:
         _emit_error(str(e), ErrorCode.VALIDATION, as_json=as_json)
@@ -606,8 +813,12 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
         "file_path": file_path,
         "command": cmd,
         "command_string": shlex.join(cmd),
+        "api_url": api_resolution.url,
+        "api_url_source": api_resolution.source,
         "valid": cmd_err is None,
         "validation_error": cmd_err,
+        "sandbox_summary": cfg.sandbox_summary(),
+        "sandbox_class": cfg.sandbox_class(),
         **cfg.risk_metadata(),
     }
 
@@ -618,6 +829,7 @@ def preview_scan_cmd(scanner: str, file_path: str, as_json: bool) -> None:
     click.echo(f"Scanner: {scanner}")
     click.echo(f"File: {file_path}")
     click.echo(f"Command: {preview['command_string']}")
+    click.echo(f"API URL: {preview['api_url']} ({preview['api_url_source']})")
     click.echo(f"Valid: {preview['valid']}")
     click.echo(f"Requires approval: {preview['requires_approval']}")
     click.echo(f"May send contents: {preview['may_send_contents']}")
@@ -843,6 +1055,13 @@ def report_finding_cmd(
 
 def register(cli: click.Group) -> None:
     """Register scanner commands with the CLI group."""
+    scanner_group.add_command(list_scanners_cmd, "list")
+    scanner_group.add_command(trigger_scan_cmd, "trigger")
+    scanner_group.add_command(trigger_scan_batch_cmd, "trigger-batch")
+    scanner_group.add_command(get_scan_status_cmd, "status")
+    scanner_group.add_command(preview_scan_cmd, "preview")
+    scanner_group.add_command(report_finding_cmd, "report-finding")
+    cli.add_command(scanner_group)
     cli.add_command(list_scanners_cmd)
     cli.add_command(trigger_scan_cmd)
     cli.add_command(trigger_scan_batch_cmd)

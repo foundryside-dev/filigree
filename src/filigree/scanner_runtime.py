@@ -37,6 +37,7 @@ def _spawn_scan(
     project_root: Path,
     scan_run_id: str,
     filigree_dir: Path,
+    prompt: str = "bug-hunt",
     log_suffix: str = "",
 ) -> dict[str, Any]:
     """Build command, validate, and spawn scanner process.
@@ -57,6 +58,7 @@ def _spawn_scan(
             api_url=api_url,
             project_root=str(project_root),
             scan_run_id=scan_run_id,
+            prompt=prompt,
         )
     except ValueError as e:
         raise ScannerSpawnError(str(e), code=ErrorCode.VALIDATION) from e

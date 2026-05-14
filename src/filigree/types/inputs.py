@@ -613,6 +613,17 @@ class TriggerScanArgs(TypedDict):
     scanner: str
     file_path: str
     api_url: NotRequired[str]
+    prompt: NotRequired[str]
+
+
+class EnableScannerArgs(TypedDict):
+    scanner: str
+    force: NotRequired[bool]
+
+
+class DisableScannerArgs(TypedDict):
+    scanner: str
+    force: NotRequired[bool]
 
 
 class GetFindingArgs(TypedDict):
@@ -680,6 +691,7 @@ class TriggerScanBatchArgs(TypedDict):
     scanner: str
     file_paths: list[str]
     api_url: NotRequired[str]
+    prompt: NotRequired[str]
 
 
 class GetScanStatusArgs(TypedDict):
@@ -690,6 +702,7 @@ class GetScanStatusArgs(TypedDict):
 class PreviewScanArgs(TypedDict):
     scanner: str
     file_path: str
+    prompt: NotRequired[str]
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +882,8 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "promote_finding": PromoteFindingArgs,
     "dismiss_finding": DismissFindingArgs,
     # scanners.py (list_scanners has no args — excluded)
+    "enable_scanner": EnableScannerArgs,
+    "disable_scanner": DisableScannerArgs,
     "trigger_scan": TriggerScanArgs,
     "report_finding": ReportFindingArgs,
     "trigger_scan_batch": TriggerScanBatchArgs,

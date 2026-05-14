@@ -474,6 +474,48 @@ class TestDoctorGitignore:
 
 
 # ---------------------------------------------------------------------------
+# run_doctor — bundled scanner registration drift
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorBundledScanners:
+    def test_reports_stale_bundled_scanner_registration(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        scanners_dir = tmp_path / FILIGREE_DIR_NAME / "scanners"
+        scanners_dir.mkdir()
+        (scanners_dir / "codex.toml").write_text(
+            '[scanner]\n'
+            'name = "codex"\n'
+            'description = "Per-file bug hunt using Codex CLI"\n'
+            'command = "filigree-scanner-codex"\n'
+            'args = ["--root", "{project_root}", "--file", "{file}"]\n'
+            'file_types = ["py"]\n'
+        )
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
+            results = run_doctor(tmp_path)
+
+        scanner_result = next(r for r in results if r.name == "Bundled scanner registrations")
+        assert scanner_result.passed is False
+        assert "codex" in scanner_result.message
+        assert "scanner enable codex --force" in scanner_result.fix_hint
+
+    def test_current_bundled_scanner_registration_passes(self, tmp_path: Path) -> None:
+        from filigree.bundled_scanners import BUNDLED_SCANNERS
+
+        _make_project(tmp_path)
+        scanners_dir = tmp_path / FILIGREE_DIR_NAME / "scanners"
+        scanners_dir.mkdir()
+        (scanners_dir / "codex.toml").write_text(BUNDLED_SCANNERS["codex"].toml())
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")):
+            results = run_doctor(tmp_path)
+
+        scanner_result = next(r for r in results if r.name == "Bundled scanner registrations")
+        assert scanner_result.passed is True
+
+
+# ---------------------------------------------------------------------------
 # run_doctor — Claude Code MCP (.mcp.json) check
 # ---------------------------------------------------------------------------
 

@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from filigree.scanner_prompts import PROMPT_PACKS, expand_prompt_pack_names
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -453,6 +455,22 @@ Target file:
 """
 
 
+def build_prompt_template(prompt_pack: str) -> str:
+    """Return the base prompt template with a bundled review focus inserted."""
+    if prompt_pack == "bug-hunt":
+        return PROMPT_TEMPLATE
+
+    pack_names = expand_prompt_pack_names(prompt_pack)
+    focus_sections = []
+    for pack_name in pack_names:
+        pack = PROMPT_PACKS[pack_name]
+        focus_sections.append(f"Review focus: {pack.name}\n{pack.instructions}")
+
+    focus_text = "\n\n".join(focus_sections)
+    marker = "\nRepository context:\n"
+    return PROMPT_TEMPLATE.replace(marker, f"\nAdditional review focus:\n{focus_text}\n\nRepository context:\n", 1)
+
+
 def _display_path(path: Path, base: Path) -> Path:
     """Best-effort relative path for display; falls back to absolute."""
     try:
@@ -655,8 +673,6 @@ async def run_scanner_pipeline(
     import shutil
     from datetime import UTC, datetime
 
-    template = prompt_template or PROMPT_TEMPLATE
-
     parser = argparse.ArgumentParser(description=description or f"Per-file bug hunt ({scan_source}).")
     parser.add_argument("--root", default=None, help="Directory to scan")
     parser.add_argument("--file", default=None, help="Scan exactly one file")
@@ -674,8 +690,18 @@ async def run_scanner_pipeline(
     parser.add_argument("--api-url", default="http://localhost:8377", help="Filigree dashboard URL")
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
+    parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
 
     args = parser.parse_args()
+
+    if prompt_template:
+        template = prompt_template
+    else:
+        try:
+            template = build_prompt_template(args.prompt)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
     if args.batch_size < 1:
         print("Error: --batch-size must be at least 1", file=sys.stderr)

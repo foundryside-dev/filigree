@@ -7,6 +7,7 @@ import contextlib
 import logging
 import secrets
 import shlex
+import shutil
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -14,14 +15,19 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
+from filigree.bundled_scanners import BUNDLED_SCANNERS, get_bundled_scanner
 from filigree.core import VALID_SEVERITIES
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
+from filigree.scanner_callback import resolve_scanner_api_url_with_source
+from filigree.scanner_prompts import PROMPT_PACKS, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
 from filigree.scanners import load_scanner, validate_scanner_command
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.inputs import (
+    DisableScannerArgs,
+    EnableScannerArgs,
     GetScanStatusArgs,
     PreviewScanArgs,
     ReportFindingArgs,
@@ -33,6 +39,76 @@ _LOCALHOST_HOSTS = frozenset(("localhost", "127.0.0.1", "::1"))
 _ALLOWED_URL_SCHEMES = frozenset(("http", "https"))
 
 _logger = logging.getLogger(__name__)
+
+
+def _prompt_pack_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "enum": sorted(PROMPT_PACKS),
+        "default": "bug-hunt",
+        "description": "Bundled scanner prompt pack. See list_prompt_packs; only applies when the scanner's accepts_prompt field is true.",
+    }
+
+
+def _validate_prompt_pack(prompt: str) -> ErrorResponse | None:
+    try:
+        expand_prompt_pack_names(prompt)
+    except ValueError as exc:
+        return ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION)
+    return None
+
+
+def _validate_scanner_accepts_prompt(cfg: Any, prompt: str) -> ErrorResponse | None:
+    if prompt == "bug-hunt" or cfg.accepts_prompt():
+        return None
+    return ErrorResponse(
+        error=f"Scanner {cfg.name!r} does not accept prompt packs; its command template has no {{prompt}} placeholder.",
+        code=ErrorCode.VALIDATION,
+        details={"scanner": cfg.name, "prompt": prompt, "accepts_prompt": False},
+    )
+
+
+def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
+    return filigree_dir / "scanners" / f"{scanner_name}.toml"
+
+
+def _bundled_scanner_matches(path: Path, scanner_name: str) -> bool:
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return False
+    cfg = load_scanner(path.parent, scanner_name)
+    if cfg is None:
+        return False
+    return cfg.command == bundled.command and cfg.args == bundled.args and cfg.file_types == bundled.file_types
+
+
+def _looks_like_stale_bundled_scanner(path: Path, scanner_name: str) -> bool:
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return False
+    cfg = load_scanner(path.parent, scanner_name)
+    return cfg is not None and cfg.command == bundled.command
+
+
+def _available_scanner_items(filigree_dir: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for scanner_name in sorted(BUNDLED_SCANNERS):
+        bundled = BUNDLED_SCANNERS[scanner_name]
+        path = _scanner_path(filigree_dir, scanner_name)
+        command_path = shutil.which(bundled.command)
+        items.append(
+            {
+                "name": bundled.name,
+                "description": bundled.description,
+                "command": bundled.command,
+                "command_available": command_path is not None,
+                "command_path": command_path,
+                "file_types": list(bundled.file_types),
+                "enabled": path.is_file() and _bundled_scanner_matches(path, scanner_name),
+                "path": str(path),
+            }
+        )
+    return items
 
 
 def _report_finding_observation_ids(
@@ -126,6 +202,58 @@ def register(
             },
         ),
         Tool(
+            name="list_prompt_packs",
+            description=(
+                "List bundled scanner prompt packs. Prompt packs are advisory review-focus hints; "
+                "they do not restrict what the scanner process can read or report."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="list_available_scanners",
+            description=(
+                "List bundled scanner registrations that can be enabled in this project. "
+                "Returns command availability, command path, enabled state, and target TOML path."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="enable_scanner",
+            description=(
+                "Enable a bundled scanner in the current project by writing its managed TOML registration. "
+                "Refuses to overwrite custom TOML unless force=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scanner": {"type": "string", "description": "Bundled scanner name, e.g. codex or claude"},
+                    "force": {"type": "boolean", "default": False, "description": "Replace an existing custom or stale bundled TOML"},
+                },
+                "required": ["scanner"],
+            },
+        ),
+        Tool(
+            name="disable_scanner",
+            description=(
+                "Disable a scanner registration by removing its TOML file. "
+                "For bundled scanner names, refuses to remove custom TOML unless force=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scanner": {"type": "string", "description": "Scanner name"},
+                    "force": {"type": "boolean", "default": False, "description": "Remove a custom TOML that uses a bundled scanner name"},
+                },
+                "required": ["scanner"],
+            },
+        ),
+        Tool(
             name="trigger_scan_batch",
             description=(
                 "Trigger a scanner on multiple files in one call. Registers all files, "
@@ -141,10 +269,10 @@ def register(
                         "items": {"type": "string"},
                         "description": "File paths to scan (relative to project root)",
                     },
+                    "prompt": _prompt_pack_schema(),
                     "api_url": {
                         "type": "string",
-                        "default": "http://localhost:8377",
-                        "description": "Dashboard URL where scanner POSTs results",
+                        "description": "Dashboard URL where scanner POSTs results. Defaults to the active local Filigree dashboard.",
                     },
                 },
                 "required": ["scanner", "file_paths"],
@@ -176,6 +304,7 @@ def register(
                 "properties": {
                     "scanner": {"type": "string", "description": "Scanner name"},
                     "file_path": {"type": "string", "description": "File path (relative to project root)"},
+                    "prompt": _prompt_pack_schema(),
                 },
                 "required": ["scanner", "file_path"],
             },
@@ -185,7 +314,11 @@ def register(
     legacy_tools = [
         Tool(
             name="list_scanners",
-            description="List registered scanners from .filigree/scanners/*.toml. Returns available scanner names, descriptions, and supported file types.",
+            description=(
+                "List registered scanners from .filigree/scanners/*.toml. Returns available scanner names, "
+                "descriptions, supported file types, prompt support, and risk metadata. If this returns an empty "
+                "items list, call list_available_scanners to see bundled scanners that can be enabled."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -205,10 +338,10 @@ def register(
                 "properties": {
                     "scanner": {"type": "string", "description": "Scanner name (from list_scanners)"},
                     "file_path": {"type": "string", "description": "File path to scan (relative to project root)"},
+                    "prompt": _prompt_pack_schema(),
                     "api_url": {
                         "type": "string",
-                        "default": "http://localhost:8377",
-                        "description": "Dashboard URL where scanner POSTs results (localhost only by default)",
+                        "description": "Dashboard URL where scanner POSTs results. Defaults to the active local Filigree dashboard.",
                     },
                 },
                 "required": ["scanner", "file_path"],
@@ -219,6 +352,10 @@ def register(
     tools = list(new_tools)
     handlers: dict[str, Callable[..., Any]] = {
         "report_finding": _handle_report_finding,
+        "list_prompt_packs": _handle_list_prompt_packs,
+        "list_available_scanners": _handle_list_available_scanners,
+        "enable_scanner": _handle_enable_scanner,
+        "disable_scanner": _handle_disable_scanner,
         "trigger_scan_batch": _handle_trigger_scan_batch,
         "get_scan_status": _handle_get_scan_status,
         "preview_scan": _handle_preview_scan,
@@ -314,6 +451,109 @@ async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
             _logger.warning("list_scanners load error: %s", msg)
     items = [s.to_dict() for s in scanners]
     return _text(_list_response(items, has_more=False))
+
+
+async def _handle_list_prompt_packs(arguments: dict[str, Any]) -> list[TextContent]:
+    items = [pack.to_dict() for pack in list_prompt_packs()]
+    return _text(_list_response(items, has_more=False))
+
+
+async def _handle_list_available_scanners(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_filigree_dir
+
+    filigree_dir = _get_filigree_dir()
+    if filigree_dir is None:
+        return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
+    return _text(_list_response(_available_scanner_items(filigree_dir), has_more=False))
+
+
+async def _handle_enable_scanner(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_filigree_dir
+
+    filigree_dir = _get_filigree_dir()
+    if filigree_dir is None:
+        return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
+
+    args = _parse_args(arguments, EnableScannerArgs)
+    scanner_name = args["scanner"]
+    force = args.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="'force' must be a boolean", code=ErrorCode.VALIDATION))
+
+    bundled = get_bundled_scanner(scanner_name)
+    if bundled is None:
+        return _text(
+            ErrorResponse(
+                error=f"Bundled scanner {scanner_name!r} not found",
+                code=ErrorCode.NOT_FOUND,
+                details={"available_scanners": sorted(BUNDLED_SCANNERS)},
+            )
+        )
+
+    scanners_dir = filigree_dir / "scanners"
+    scanners_dir.mkdir(exist_ok=True)
+    path = scanners_dir / f"{scanner_name}.toml"
+    if path.exists() and not force and not _bundled_scanner_matches(path, scanner_name):
+        if _looks_like_stale_bundled_scanner(path, scanner_name):
+            msg = f"Existing scanner config does not match current bundled definition: {path}. Re-run with force=true (CLI: --force) to upgrade it."
+            hint = "Re-run with force=true to upgrade this scanner registration to the current bundled definition."
+            conflict_kind = "stale_bundled"
+        else:
+            msg = f"Refusing to overwrite custom scanner config: {path}. Re-run with force=true (CLI: --force) to replace it with the bundled scanner."
+            hint = "Re-run with force=true to replace it with the bundled scanner."
+            conflict_kind = "custom"
+        return _text(
+            ErrorResponse(
+                error=msg,
+                code=ErrorCode.CONFLICT,
+                details={"path": str(path), "hint": hint, "conflict_kind": conflict_kind},
+            )
+        )
+
+    path.write_text(bundled.toml(), encoding="utf-8")
+    return _text({"status": "enabled", "scanner": scanner_name, "path": str(path), "managed": True})
+
+
+async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_filigree_dir
+
+    filigree_dir = _get_filigree_dir()
+    if filigree_dir is None:
+        return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
+
+    args = _parse_args(arguments, DisableScannerArgs)
+    scanner_name = args["scanner"]
+    force = args.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="'force' must be a boolean", code=ErrorCode.VALIDATION))
+
+    path = _scanner_path(filigree_dir, scanner_name)
+    if not path.exists():
+        return _text(
+            ErrorResponse(
+                error=f"Scanner {scanner_name!r} is not enabled",
+                code=ErrorCode.NOT_FOUND,
+                details={"path": str(path)},
+            )
+        )
+
+    if scanner_name in BUNDLED_SCANNERS and not force and not _bundled_scanner_matches(path, scanner_name):
+        if _looks_like_stale_bundled_scanner(path, scanner_name):
+            msg = f"Existing scanner config does not match current bundled definition: {path}. Re-run with force=true (CLI: --force) to remove it."
+            conflict_kind = "stale_bundled"
+        else:
+            msg = f"Refusing to remove custom scanner config: {path}. Re-run with force=true (CLI: --force) to remove it anyway."
+            conflict_kind = "custom"
+        return _text(
+            ErrorResponse(
+                error=msg,
+                code=ErrorCode.CONFLICT,
+                details={"path": str(path), "hint": "Re-run with force=true to remove it anyway.", "conflict_kind": conflict_kind},
+            )
+        )
+
+    path.unlink()
+    return _text({"status": "disabled", "scanner": scanner_name, "path": str(path)})
 
 
 async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]:
@@ -425,7 +665,12 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     tracker = _get_db()
     scanner_name = args["scanner"]
     file_path = args["file_path"]
-    api_url = args.get("api_url", "http://localhost:8377")
+    prompt = args.get("prompt", "bug-hunt")
+    prompt_err = _validate_prompt_pack(prompt)
+    if prompt_err is not None:
+        return _text(prompt_err)
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
     if url_err is not None:
@@ -440,6 +685,9 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     if err is not None:
         return _text(err)
     assert cfg is not None  # noqa: S101  -- narrowing after error-check
+    prompt_support_err = _validate_scanner_accepts_prompt(cfg, prompt)
+    if prompt_support_err is not None:
+        return _text(prompt_support_err)
 
     if not target.is_file():
         return _text(ErrorResponse(error=f"File not found: {file_path}", code=ErrorCode.NOT_FOUND))
@@ -502,6 +750,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             project_root=project_root,
             scan_run_id=scan_run_id,
             filigree_dir=filigree_dir,
+            prompt=prompt,
         )
     except ScannerSpawnError as exc:
         with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
@@ -579,6 +828,11 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         "scan_run_id": scan_run_id,
         "pid": proc.pid,
         "log_path": log_rel,
+        "api_url": api_url,
+        "api_url_source": api_resolution.source,
+        "sandbox_summary": cfg.sandbox_summary(),
+        "sandbox_class": cfg.sandbox_class(),
+        **cfg.risk_metadata(),
         "message": (
             f"Scan triggered with run_id={scan_run_id!r}. "
             f"Results will be POSTed to {api_url}. "
@@ -609,7 +863,12 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     tracker = _get_db()
     scanner_name = args["scanner"]
     file_paths = args.get("file_paths", [])
-    api_url = args.get("api_url", "http://localhost:8377")
+    prompt = args.get("prompt", "bug-hunt")
+    prompt_err = _validate_prompt_pack(prompt)
+    if prompt_err is not None:
+        return _text(prompt_err)
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_url = api_resolution.url
 
     if not isinstance(file_paths, list) or not file_paths:
         return _text(ErrorResponse(error="file_paths must be a non-empty list", code=ErrorCode.VALIDATION))
@@ -631,6 +890,9 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     if err is not None:
         return _text(err)
     assert cfg is not None  # noqa: S101  -- narrowing after error-check
+    prompt_support_err = _validate_scanner_accepts_prompt(cfg, prompt)
+    if prompt_support_err is not None:
+        return _text(prompt_support_err)
 
     # Validate and resolve all paths. Dedupe repeated file_paths in the
     # request so we don't attempt to reserve the same (scanner, file) twice —
@@ -730,6 +992,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                 project_root=project_root,
                 scan_run_id=child_run_id,
                 filigree_dir=filigree_dir,
+                prompt=prompt,
                 log_suffix=f"-{entry['index']}",
             )
         except ScannerSpawnError as exc:
@@ -847,6 +1110,11 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         "batch_id": batch_id,
         "scan_run_ids": scan_run_ids,
         "per_file": per_file,
+        "api_url": api_url,
+        "api_url_source": api_resolution.source,
+        "sandbox_summary": cfg.sandbox_summary(),
+        "sandbox_class": cfg.sandbox_class(),
+        **cfg.risk_metadata(),
     }
     if spawn_errors:
         result["spawn_errors"] = spawn_errors
@@ -894,6 +1162,10 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, PreviewScanArgs)
     scanner_name = args["scanner"]
     file_path = args["file_path"]
+    prompt = args.get("prompt", "bug-hunt")
+    prompt_err = _validate_prompt_pack(prompt)
+    if prompt_err is not None:
+        return _text(prompt_err)
 
     try:
         target = _safe_path(file_path)
@@ -904,15 +1176,20 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
     if err is not None:
         return _text(err)
     assert cfg is not None  # noqa: S101  -- narrowing after error-check
+    prompt_support_err = _validate_scanner_accepts_prompt(cfg, prompt)
+    if prompt_support_err is not None:
+        return _text(prompt_support_err)
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
     project_root = filigree_dir.parent
+    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,
-            api_url="http://localhost:8377",
+            api_url=api_resolution.url,
             project_root=str(project_root),
             scan_run_id="preview-dry-run",
+            prompt=prompt,
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
@@ -925,8 +1202,12 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
             "file_path": file_path,
             "command": cmd,
             "command_string": shlex.join(cmd),
+            "api_url": api_resolution.url,
+            "api_url_source": api_resolution.source,
             "valid": cmd_err is None,
             "validation_error": cmd_err,
+            "sandbox_summary": cfg.sandbox_summary(),
+            "sandbox_class": cfg.sandbox_class(),
             **cfg.risk_metadata(),
         }
     )
