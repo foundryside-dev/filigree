@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -77,6 +79,38 @@ class TestRegisterFile:
         f1 = db.register_file("src/main.py")
         f2 = db.register_file("src/main.py")
         assert f1.id == f2.id
+
+    def test_register_duplicate_path_race_returns_existing(self, tmp_path: Path) -> None:
+        """If another writer inserts the path after the lookup, retry as an update."""
+        db_path = tmp_path / "filigree.db"
+        primary = FiligreeDB(db_path, prefix="test")
+        racer = FiligreeDB(db_path, prefix="test")
+        primary.initialize()
+        racer.initialize()
+        real_conn = primary.conn
+
+        class RaceOnceConnection:
+            def __init__(self) -> None:
+                self.armed = True
+
+            def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+                if self.armed and sql.lstrip().startswith("INSERT INTO file_records"):
+                    self.armed = False
+                    racer.register_file("src/race.py", actor="racer")
+                return real_conn.execute(sql, params)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_conn, name)
+
+        primary._conn = RaceOnceConnection()  # type: ignore[assignment]
+        try:
+            registered = primary.register_file("src/race.py", language="python", actor="scanner")
+        finally:
+            primary.close()
+            racer.close()
+
+        assert registered.path == "src/race.py"
+        assert registered.language == "python"
 
     def test_register_updates_language(self, db: FiligreeDB) -> None:
         db.register_file("src/main.py", language="")

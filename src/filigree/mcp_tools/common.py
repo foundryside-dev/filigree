@@ -38,6 +38,8 @@ def _parse_args(arguments: dict[str, Any], cls: type[_T]) -> _T:
 # Hard cap on list/search results (issues, observations) to keep MCP response
 # size within token limits.  Callers can pass no_limit=true to bypass.
 _MAX_LIST_RESULTS = 50
+_MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
+_MAX_SQLITE_OVERFETCH_LIMIT = _MAX_SQLITE_OFFSET - 1
 
 
 def _text(content: object) -> list[TextContent]:
@@ -73,12 +75,12 @@ def _resolve_pagination(arguments: dict[str, Any]) -> tuple[int, int, list[TextC
         return 0, 0, _text(ErrorResponse(error="no_limit must be a boolean", code=ErrorCode.VALIDATION))
 
     requested_limit = arguments.get("limit", _MAX_LIST_RESULTS)
-    limit_err = _validate_int_range(requested_limit, "limit", min_val=1)
+    limit_err = _validate_int_range(requested_limit, "limit", min_val=1, max_val=_MAX_SQLITE_OVERFETCH_LIMIT)
     if limit_err is not None:
         return 0, 0, limit_err
 
     offset = arguments.get("offset", 0)
-    offset_err = _validate_int_range(offset, "offset", min_val=0)
+    offset_err = _validate_int_range(offset, "offset", min_val=0, max_val=_MAX_SQLITE_OFFSET)
     if offset_err is not None:
         return 0, 0, offset_err
 

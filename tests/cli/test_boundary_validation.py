@@ -173,9 +173,29 @@ class TestIssuePriorityFilterEnvelopeEmission:
         result = runner.invoke(cli, ["list", "--limit", "-1", "--json"])
         self._assert_validation_envelope(result)
 
+    def test_list_limit_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--limit", "9223372036854775807", "--json"])
+        self._assert_validation_envelope(result)
+
     def test_list_issues_offset_negative_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["list-issues", "--offset", "-1", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_issues_offset_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-issues", "--offset", "9223372036854775808", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_files_limit_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-files", "--limit", "9223372036854775807", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_annotations_limit_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-annotations", "--limit", "9223372036854775807", "--json"])
         self._assert_validation_envelope(result)
 
     def test_update_priority_high_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:

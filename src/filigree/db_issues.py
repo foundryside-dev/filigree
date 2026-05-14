@@ -362,7 +362,7 @@ class IssuesMixin(DBMixinProtocol):
             value = fields.get(fs.name)
             if value is None or (isinstance(value, str) and value.strip() == ""):
                 continue
-            sql = "SELECT id FROM issues WHERE type = ? AND json_extract(fields, ?) = ?"
+            sql = "SELECT id FROM issues WHERE type = ? AND json_valid(fields) AND json_extract(fields, ?) = ?"
             params: list[Any] = [issue_type, f"$.{fs.name}", value]
             if exclude_id is not None:
                 sql += " AND id != ?"

@@ -187,6 +187,16 @@ class TestPaginationValidation:
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
+    async def test_no_limit_huge_limit_rejected(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("list_issues", {"no_limit": True, "limit": 9223372036854775807})
+        data = _parse(result)
+        assert data.get("code") == ErrorCode.VALIDATION, data
+
+    async def test_huge_offset_rejected(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("list_observations", {"offset": 9223372036854775808})
+        data = _parse(result)
+        assert data.get("code") == ErrorCode.VALIDATION, data
+
 
 # ---------------------------------------------------------------------------
 # filigree-d5935566fd: _handle_observe bad-type args

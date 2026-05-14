@@ -32,6 +32,22 @@ from filigree.types.core import AssocType, FindingStatus
 from filigree.validation import sanitize_actor
 
 _DISMISS_FINDING_STATUSES = ("acknowledged", "false_positive", "fixed", "unseen_in_latest")
+_MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
+_MAX_SQLITE_LIMIT = _MAX_SQLITE_OFFSET - 1
+_UNLIMITED_LIST_LIMIT = 10_000_000
+
+
+def _emit_validation_error(msg: str, *, as_json: bool) -> None:
+    if as_json:
+        click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.VALIDATION}))
+    else:
+        click.echo(f"Error: {msg}", err=True)
+    sys.exit(1)
+
+
+def _validate_int_range(value: int, name: str, *, min_val: int, max_val: int, as_json: bool) -> None:
+    if value < min_val or value > max_val:
+        _emit_validation_error(f"{name} must be between {min_val} and {max_val}, got {value}", as_json=as_json)
 
 # ---------------------------------------------------------------------------
 # File commands
@@ -39,15 +55,15 @@ _DISMISS_FINDING_STATUSES = ("acknowledged", "false_positive", "fixed", "unseen_
 
 
 @click.command("list-files")
-@click.option("--limit", default=100, type=click.IntRange(min=1), help="Max results (default 100)")
-@click.option("--offset", default=0, type=click.IntRange(min=0), help="Skip first N results")
+@click.option("--limit", default=100, type=int, help="Max results (default 100)")
+@click.option("--offset", default=0, type=int, help="Skip first N results")
 @click.option("--no-limit", "no_limit", is_flag=True, help="Return all results without cap")
 @click.option("--language", default=None, help="Filter by language")
 @click.option("--path-prefix", default=None, help="Filter by substring in file path")
 @click.option(
     "--min-findings",
     default=None,
-    type=click.IntRange(min=0),
+    type=int,
     help="Minimum open findings count",
 )
 @click.option(
@@ -84,8 +100,12 @@ def list_files_cmd(
     as_json: bool,
 ) -> None:
     """List tracked files with filtering, sorting, and pagination."""
+    _validate_int_range(limit, "limit", min_val=1, max_val=_MAX_SQLITE_LIMIT, as_json=as_json)
+    _validate_int_range(offset, "offset", min_val=0, max_val=_MAX_SQLITE_OFFSET, as_json=as_json)
+    if min_findings is not None:
+        _validate_int_range(min_findings, "min_findings", min_val=0, max_val=_MAX_SQLITE_LIMIT, as_json=as_json)
     with get_db() as db:
-        effective_limit = limit if not no_limit else 10_000_000
+        effective_limit = limit if not no_limit else _UNLIMITED_LIST_LIMIT
         try:
             result = db.list_files_paginated(
                 limit=effective_limit,

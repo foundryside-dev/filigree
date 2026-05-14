@@ -14,6 +14,7 @@ export const callbacks = {
 };
 
 const PROJECT_FILTERS_STORAGE_KEY = "filigree_project_filter_settings";
+const PRESETS_STORAGE_KEY = "filigree_presets";
 const DEFAULT_PROJECT_FILTERS = Object.freeze({
   open: true,
   active: true,
@@ -76,6 +77,25 @@ function writeProjectFilterSettings(settings) {
   }
 }
 
+function readPresets() {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_e) {
+    return {};
+  }
+}
+
+function writePresets(presets) {
+  try {
+    localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(presets));
+  } catch (_e) {
+    // best effort
+  }
+}
+
 function updateToggleButtons() {
   const readyBtn = document.getElementById("btnReadyFilter");
   if (readyBtn) {
@@ -100,7 +120,9 @@ export function saveProjectFilterSettings() {
 export function loadProjectFilterSettings() {
   const settings = readProjectFilterSettings();
   const saved = settings[getProjectStorageKey()];
-  const filterState = saved ? normalizeFilterState(saved) : normalizeFilterState(DEFAULT_PROJECT_FILTERS);
+  const filterState = saved
+    ? normalizeFilterState(saved)
+    : normalizeFilterState(DEFAULT_PROJECT_FILTERS);
   applyFilterState(filterState, { skipPersist: true });
 }
 
@@ -193,7 +215,8 @@ export function toggleBlocked() {
 // --- Status pill toggles ---
 
 const PILL_ON = "px-2 py-1 rounded text-xs font-medium bg-accent text-primary";
-const PILL_OFF = "px-2 py-1 rounded text-xs font-medium bg-overlay text-secondary border border-strong";
+const PILL_OFF =
+  "px-2 py-1 rounded text-xs font-medium bg-overlay text-secondary border border-strong";
 
 function syncPillUI() {
   const pillOpen = document.getElementById("pillOpen");
@@ -368,9 +391,9 @@ export function confirmSavePreset() {
     if (callbacks.showToast) callbacks.showToast("Name is required", "error");
     return;
   }
-  const presets = JSON.parse(localStorage.getItem("filigree_presets") || "{}");
+  const presets = readPresets();
   presets[name] = getFilterState();
-  localStorage.setItem("filigree_presets", JSON.stringify(presets));
+  writePresets(presets);
   document.getElementById("presetNameModal").remove();
   populatePresets();
   if (callbacks.showToast) {
@@ -381,7 +404,7 @@ export function confirmSavePreset() {
 export function loadPreset() {
   const name = document.getElementById("filterPreset").value;
   if (!name) return;
-  const presets = JSON.parse(localStorage.getItem("filigree_presets") || "{}");
+  const presets = readPresets();
   if (presets[name]) applyFilterState(presets[name]);
   document.getElementById("filterPreset").value = "";
 }
@@ -389,7 +412,7 @@ export function loadPreset() {
 export function populatePresets() {
   const select = document.getElementById("filterPreset");
   if (!select) return;
-  const presets = JSON.parse(localStorage.getItem("filigree_presets") || "{}");
+  const presets = readPresets();
   select.innerHTML = '<option value="">Presets...</option>';
   Object.keys(presets)
     .sort()

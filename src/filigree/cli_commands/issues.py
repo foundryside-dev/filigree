@@ -35,6 +35,9 @@ def _resolve_and_sanitize_actor(actor: str | None, assignee: str, *, as_json: bo
 
 logger = logging.getLogger(__name__)
 
+_MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
+_MAX_SQLITE_OVERFETCH_LIMIT = _MAX_SQLITE_OFFSET - 1
+
 
 def _range_check_int(value: int | None, name: str, *, min_val: int, max_val: int, as_json: bool) -> None:
     """Validate that ``value`` (when not ``None``) sits in ``[min_val, max_val]``.
@@ -265,8 +268,8 @@ def _list_issues_impl(
     as_json: bool,
 ) -> None:
     _range_check_int(priority, "priority", min_val=0, max_val=4, as_json=as_json)
-    _min_check_int(limit, "limit", min_val=0, as_json=as_json)
-    _min_check_int(offset, "offset", min_val=0, as_json=as_json)
+    _range_check_int(limit, "limit", min_val=0, max_val=_MAX_SQLITE_OVERFETCH_LIMIT, as_json=as_json)
+    _range_check_int(offset, "offset", min_val=0, max_val=_MAX_SQLITE_OFFSET, as_json=as_json)
     with get_db() as db:
         label_filter = list(label) if label else None
         try:

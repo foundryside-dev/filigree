@@ -18,6 +18,8 @@ from filigree.core import (
 from filigree.types.api import ErrorCode
 
 _ANCHOR_STATES = ("current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing")
+_MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
+_MAX_SQLITE_LIMIT = _MAX_SQLITE_OFFSET - 1
 
 
 def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> None:
@@ -35,10 +37,12 @@ def _validate_choice(value: str | None, name: str, choices: set[str] | frozenset
     raise AssertionError("unreachable")
 
 
-def _validate_min_int(value: int, name: str, minimum: int, *, as_json: bool) -> int:
-    if value >= minimum:
+def _validate_min_int(value: int, name: str, minimum: int, *, as_json: bool, maximum: int | None = None) -> int:
+    if value >= minimum and (maximum is None or value <= maximum):
         return value
-    _emit_error(f"{name} must be >= {minimum}, got {value}", ErrorCode.VALIDATION, as_json=as_json)
+    if maximum is None:
+        _emit_error(f"{name} must be >= {minimum}, got {value}", ErrorCode.VALIDATION, as_json=as_json)
+    _emit_error(f"{name} must be between {minimum} and {maximum}, got {value}", ErrorCode.VALIDATION, as_json=as_json)
     raise AssertionError("unreachable")
 
 
@@ -160,8 +164,8 @@ def list_annotations_cmd(
     status = _validate_choice(status, "status", VALID_ANNOTATION_STATUSES, as_json=as_json)
     anchor_state = _validate_choice(anchor_state, "anchor_state", _ANCHOR_STATES, as_json=as_json)
     detail = _annotation_detail(detail, as_json=as_json)
-    limit = _validate_min_int(limit, "limit", 1, as_json=as_json)
-    offset = _validate_min_int(offset, "offset", 0, as_json=as_json)
+    limit = _validate_min_int(limit, "limit", 1, as_json=as_json, maximum=_MAX_SQLITE_LIMIT)
+    offset = _validate_min_int(offset, "offset", 0, as_json=as_json, maximum=_MAX_SQLITE_OFFSET)
     with get_db() as db:
         try:
             result = db.list_annotations(

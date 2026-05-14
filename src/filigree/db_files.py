@@ -272,6 +272,11 @@ class FilesMixin(DBMixinProtocol):
                 (file_id, path, stored_language, file_type, actor, actor, now, now, json.dumps(metadata or {})),
             )
             self.conn.commit()
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            if self.conn.execute("SELECT id FROM file_records WHERE path = ?", (path,)).fetchone() is not None:
+                return self.register_file(path, language=language, file_type=file_type, metadata=metadata, actor=actor)
+            raise
         except Exception:
             self.conn.rollback()
             raise

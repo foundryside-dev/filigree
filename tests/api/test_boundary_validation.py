@@ -152,6 +152,16 @@ class TestPaginationOverflowBoundary:
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
+    async def test_classic_files_rejects_huge_min_findings_with_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files", params={"min_findings": "9223372036854775808"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_loom_files_rejects_huge_min_findings_with_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/loom/files", params={"min_findings": "9223372036854775808"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
     async def test_hotspots_rejects_huge_limit_with_400(self, client: AsyncClient) -> None:
         # filigree-873962aa58: limit-only endpoints bypassed _parse_pagination
         # and bound 2**63 directly into SQLite, raising OverflowError -> 500.

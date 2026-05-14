@@ -29,6 +29,8 @@ from filigree.types.core import AssocType, FindingStatus, Severity
 
 logger = logging.getLogger(__name__)
 
+_MAX_MIN_FINDINGS = 2_147_483_647
+
 # ---------------------------------------------------------------------------
 # Shared request parsing
 # ---------------------------------------------------------------------------
@@ -105,7 +107,7 @@ def create_classic_router() -> APIRouter:
         if isinstance(pagination, JSONResponse):
             return pagination
         limit, offset = pagination
-        min_findings = _safe_int(params.get("min_findings", "0"), "min_findings", min_value=0)
+        min_findings = _safe_int(params.get("min_findings", "0"), "min_findings", min_value=0, max_value=_MAX_MIN_FINDINGS)
         if isinstance(min_findings, JSONResponse):
             return min_findings
         try:
@@ -431,7 +433,7 @@ def create_loom_router() -> APIRouter:
         if isinstance(pagination, JSONResponse):
             return pagination
         limit, offset = pagination
-        min_findings = _safe_int(params.get("min_findings", "0"), "min_findings", min_value=0)
+        min_findings = _safe_int(params.get("min_findings", "0"), "min_findings", min_value=0, max_value=_MAX_MIN_FINDINGS)
         if isinstance(min_findings, JSONResponse):
             return min_findings
         try:

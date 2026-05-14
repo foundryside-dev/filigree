@@ -44,7 +44,7 @@ FiligreeDB(
 |---|---|---|---|
 | `db_path` | `str \| Path` | *(required)* | Path to the SQLite database file |
 | `prefix` | `str` | `"filigree"` | Prefix for generated issue IDs (e.g. `"myproject"` yields `myproject-a3f`) |
-| `enabled_packs` | `list[str] \| None` | `None` | Workflow packs to enable. `None` reads from config; defaults to `["core", "planning"]` |
+| `enabled_packs` | `list[str] \| None` | `None` | Workflow packs to enable. `None` reads from config; defaults to `["core", "planning", "release"]` |
 | `template_registry` | `TemplateRegistry \| None` | `None` | Inject a pre-configured registry (useful for testing). `None` creates one lazily |
 
 ### Class Method: `from_project`
@@ -1339,7 +1339,7 @@ Walks up from `start` (default: current working directory) looking for a `.filig
 def read_config(filigree_dir: Path) -> dict[str, Any]
 ```
 
-Reads `.filigree/config.json`. Returns defaults (`{"prefix": "filigree", "version": 1, "enabled_packs": ["core", "planning"]}`) if the file is missing.
+Reads `.filigree/config.json`. Returns defaults (`{"prefix": "filigree", "version": 1, "enabled_packs": ["core", "planning", "release"]}`) if the file is missing.
 
 ### `write_config`
 

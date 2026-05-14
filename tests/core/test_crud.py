@@ -36,6 +36,16 @@ class TestCreateIssueValidation:
         with pytest.raises(TypeError, match="fields must be a dict"):
             db.create_issue("Valid title", fields="not a dict")  # type: ignore[arg-type]
 
+    def test_unique_field_checks_ignore_corrupt_existing_fields_json(self, db: FiligreeDB) -> None:
+        """A corrupt fields blob on an existing row must not abort uniqueness checks."""
+        corrupt = db.create_issue("Corrupt release", type="release", fields={"version": "v1.2.3"})
+        db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", ("{", corrupt.id))
+        db.conn.commit()
+
+        created = db.create_issue("Valid release", type="release", fields={"version": "v2.0.0"})
+
+        assert created.fields["version"] == "v2.0.0"
+
     def test_unknown_type_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="Unknown type"):
             db.create_issue("Valid title", type="nonexistent_type")
