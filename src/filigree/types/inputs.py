@@ -687,6 +687,10 @@ class ReportFindingArgs(TypedDict):
     response_detail: NotRequired[str]
 
 
+class ListPromptPacksArgs(TypedDict):
+    language: NotRequired[str]
+
+
 class TriggerScanBatchArgs(TypedDict):
     scanner: str
     file_paths: list[str]
@@ -886,6 +890,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "disable_scanner": DisableScannerArgs,
     "trigger_scan": TriggerScanArgs,
     "report_finding": ReportFindingArgs,
+    "list_prompt_packs": ListPromptPacksArgs,
     "trigger_scan_batch": TriggerScanBatchArgs,
     "get_scan_status": GetScanStatusArgs,
     "preview_scan": PreviewScanArgs,

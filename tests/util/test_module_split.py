@@ -49,7 +49,7 @@ def test_mcp_tools_register_shape() -> None:
 
 
 def test_mcp_tools_total_count() -> None:
-    """All 105 tools are registered across domain modules.
+    """All 109 tools are registered across domain modules.
 
     Count includes the structured observation triage surfaces so the
     split-module registry test notices dropped tool registrations.
@@ -64,7 +64,7 @@ def test_mcp_tools_total_count() -> None:
     tools, _ = scanners.register(include_legacy=True)
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
-    assert total == 105, f"Expected 105 tools total, got {total}"
+    assert total == 109, f"Expected 109 tools total, got {total}"
 
 
 def test_mcp_docs_tool_count_matches_registry() -> None:

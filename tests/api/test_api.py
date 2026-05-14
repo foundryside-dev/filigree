@@ -690,6 +690,54 @@ class TestClaimEmptyAssigneeAPI:
 class TestCommentAPI:
     """POST /api/issue/{issue_id}/comments — add a comment."""
 
+    @pytest.mark.parametrize(
+        ("path_template", "id_field"),
+        [
+            ("/api/issue/{issue_id}/comments", "id"),
+            ("/api/loom/issues/{issue_id}/comments", "comment_id"),
+        ],
+    )
+    async def test_add_comment_expected_assignee_allows_coordinator(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        path_template: str,
+        id_field: str,
+    ) -> None:
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="alice")
+
+        resp = await client.post(
+            path_template.format(issue_id=ids["a"]),
+            json={"text": "coordinator note", "author": "coordinator", "expected_assignee": "alice"},
+        )
+
+        assert resp.status_code == 201
+        assert id_field in resp.json()
+
+    @pytest.mark.parametrize(
+        "path_template",
+        [
+            "/api/issue/{issue_id}/comments",
+            "/api/loom/issues/{issue_id}/comments",
+        ],
+    )
+    async def test_add_comment_expected_assignee_must_be_string(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        path_template: str,
+    ) -> None:
+        ids = dashboard_db.ids
+
+        resp = await client.post(
+            path_template.format(issue_id=ids["a"]),
+            json={"text": "bad expectation", "expected_assignee": ["alice"]},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
     async def test_add_comment(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         resp = await client.post(

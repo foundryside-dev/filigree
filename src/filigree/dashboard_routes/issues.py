@@ -499,8 +499,11 @@ def create_classic_router() -> APIRouter:
         author, author_err = _validate_actor(body.get("author", "dashboard"))
         if author_err:
             return author_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         try:
-            comment_id = db.add_comment(issue_id, text, author=author)
+            comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
@@ -1334,8 +1337,11 @@ def create_loom_router() -> APIRouter:
         author, author_err = _validate_actor(body.get("author", "dashboard"))
         if author_err:
             return author_err
+        expected_assignee = body.get("expected_assignee")
+        if expected_assignee is not None and not isinstance(expected_assignee, str):
+            return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
         try:
-            comment_id = db.add_comment(issue_id, text, author=author)
+            comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))

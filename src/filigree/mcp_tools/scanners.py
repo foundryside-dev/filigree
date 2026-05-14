@@ -29,6 +29,7 @@ from filigree.types.inputs import (
     DisableScannerArgs,
     EnableScannerArgs,
     GetScanStatusArgs,
+    ListPromptPacksArgs,
     PreviewScanArgs,
     ReportFindingArgs,
     TriggerScanArgs,
@@ -478,7 +479,8 @@ async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_list_prompt_packs(arguments: dict[str, Any]) -> list[TextContent]:
-    language = arguments.get("language")
+    args = _parse_args(arguments, ListPromptPacksArgs)
+    language = args.get("language")
     if language is not None and not isinstance(language, str):
         return _text(ErrorResponse(error="'language' must be a string", code=ErrorCode.VALIDATION))
     items = [pack.to_dict() for pack in list_prompt_packs(language=language)]
