@@ -47,7 +47,7 @@ class TestInjectInstructions:
         assert target.exists()
         content = target.read_text()
         assert FILIGREE_INSTRUCTIONS_MARKER in content
-        assert "filigree ready" in content
+        assert "Filigree Issue Tracker" in content
 
     def test_append_to_existing(self, tmp_path: Path) -> None:
         target = tmp_path / "CLAUDE.md"

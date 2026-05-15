@@ -1,229 +1,86 @@
 ## Filigree Issue Tracker
 
-Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
+`filigree` tracks tasks for this project. Data lives in `.filigree/`. Prefer
+the MCP tools (`mcp__filigree__*`) when available; fall back to the `filigree`
+CLI otherwise.
 
-Filigree is a component of the Loom federation. The HTTP `loom` generation at `/api/loom/*` is the stable contract; classic at `/api/v1/*` is frozen. See ADR-002.
+### Workflow
 
-### If you see a `ForeignDatabaseError`
+```bash
+# At session start
+filigree session-context                            # ready / in-progress / critical path
 
-Filigree refuses to open an ancestor project's database when it detects that
-the current directory is inside a git repo with no local `.filigree.conf`.
-The error message tells you exactly what to do (usually `filigree init` in
-the current project, then restart MCP). Do not work around it by `cd`-ing
-upward unless that was the actual intent.
+# Pick up the next ready issue (atomic claim + transition to in_progress)
+filigree start-next-work --assignee <name>
+# ...or claim a specific issue
+filigree start-work <id> --assignee <name>
 
-### MCP Tools (Preferred)
+# Do the work, commit, then
+filigree close <id>
+```
 
-When MCP is configured, prefer `mcp__filigree__*` tools over CLI commands — they're
-faster and return structured data. Key tools:
+Use the atomic claim+transition verbs — `start_work` / `start_next_work`
+(MCP) or `start-work` / `start-next-work` (CLI). Do **not** chain
+`claim_issue` (MCP) or `filigree claim` (CLI) with a subsequent status
+update — the two-step form races against other agents; the combined verb is
+atomic.
 
-- `get_ready` / `get_blocked` — find available work
-- `get_issue` / `list_issues` / `search_issues` — read issues
-- `create_issue` / `update_issue` / `close_issue` — manage issues
-- `start_work` / `start_next_work` — atomically claim and transition to in-progress (the usual way to pick up work in 2.0)
-- `claim_issue` / `claim_next` — atomic claim only, no transition (niche; prefer `start_work`)
-- `add_comment` / `add_label` — metadata
-- `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
-- `create_plan` / `get_plan` — milestone planning
-- `get_stats` / `get_metrics` — project health
-- `get_mcp_status` — read-only connector/schema compatibility diagnostic
-- `get_valid_transitions` — workflow navigation
-- `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
-- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` / `list_available_scanners` / `enable_scanner` / `disable_scanner` / `list_prompt_packs` — automated code scanning
-- `get_finding` / `list_findings` / `update_finding` / `batch_update_findings` — scan finding triage
-- `promote_finding` / `dismiss_finding` — finding lifecycle (promote to issue or dismiss)
+### Observations: when (and when not) to use them
 
-Observations are fire-and-forget notes that expire after 14 days. Use `list_issues --label=from-observation` to find promoted observations.
+`observe` is a fire-and-forget scratchpad for *incidental* defects — things
+you notice *outside the scope of your current task* (a code smell in a
+neighbouring file, a stale TODO, a missing test for an edge case you happened
+to spot). Notes expire after 14 days unless promoted. Include `file_path` and
+`line` when relevant. At session end, skim `list_observations` and either
+`dismiss_observation` or `promote_observation` for what has accumulated.
 
-**Observations are ambient — for *incidental* defects only.** Use `observe` when
-you notice something *outside the scope of your current task* while working on
-something else: a code smell in a neighbouring file, a stale TODO, a missing
-test for an edge case you happened to spot. Don't stop what you're doing; fire
-off the observation and carry on. Include `file_path` and `line` when relevant.
-At session end, skim `list_observations` and either `dismiss_observation` or
-`promote_observation` for anything that's accumulated.
-
-**You fix bugs in your currently defined scope. You do NOT use observations to
-finish work prematurely.** If a defect, gap, or follow-up belongs to your
+**You fix bugs in your currently defined scope. You do NOT use observations
+to finish work prematurely.** If a defect, gap, or follow-up belongs to your
 current task, you own it — handle it as part of that task: fix it now, expand
 the task's scope, file a proper issue with a dependency, or surface it to the
-user. Filing it as an observation and closing the task is *not* completing the
-task; it is shipping known-broken work and hiding the debt in a 14-day
+user. Filing it as an observation and closing the task is *not* completing
+the task; it is shipping known-broken work and hiding the debt in a 14-day
 expiring scratchpad. The test is "would I have noticed this even if I weren't
 working on this task?" If no, it's task scope, not an observation.
 
-Fall back to CLI (`filigree <command>`) when MCP is unavailable.
+### Priority scale
 
-### Response shapes (for `--json` and MCP)
-
-Filigree 2.0 unifies response envelopes across MCP and CLI:
-
-- **Batch ops** return `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`. `failed` is always present (empty list if none); `newly_unblocked` is omitted when the op cannot unblock. Pass `response_detail="full"` (MCP) or `--detail=full` (CLI) to get full records back instead of slim summaries.
-- **List ops** return `{items: [...], has_more: bool, next_offset?: int}`. `has_more` is always present; `next_offset` appears only when there is a next page.
-- **Ready items** are slim by default; pass `include_context=true` (MCP) or `ready --json --include-context` (CLI) to add `parent_issue_id` and `parent_title`.
-- **Stats** include explicit `status_name_counts` (literal workflow statuses) and `status_category_counts` (template categories), while `by_status` and `by_category` remain for compatibility.
-- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
-
-### Schema-mismatch (warm-but-degraded MCP)
-
-When the installed `filigree` is older than the project's database, the MCP server still launches but most tool calls return an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance. `get_mcp_status` remains available as a safe read-only diagnostic. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
-
-### CLI Quick Reference
-
-```bash
-# Finding work
-filigree ready                              # Show issues ready to work (no blockers)
-filigree ready --json --include-context     # JSON ready queue with parent issue context
-filigree list --status=open                 # All open issues
-filigree list --status=in_progress          # Active work
-filigree list --label=bug --priority=1      # Filter bugs by numeric priority
-filigree list --label-prefix=cluster:       # Filter by label namespace prefix
-filigree list --not-label=wontfix           # Exclude issues with label
-filigree show <id>                          # Detailed issue view
-filigree show <id> --with-files             # Include file associations (off by default)
-
-# Creating & updating
-filigree create "Title" --type=task --priority=2          # New issue
-filigree update <id> --status=<status>                   # Update status (free-form; prefer `start-work` for open→in_progress)
-filigree close <id>                                      # Mark complete
-filigree close <id> --reason="explanation"               # Close with reason
-
-# Dependencies
-filigree add-dep <issue> <depends-on>       # Add dependency
-filigree remove-dep <issue> <depends-on>    # Remove dependency
-filigree blocked                            # Show blocked issues
-
-# Comments & labels
-filigree add-comment <id> "text"            # Add comment
-filigree get-comments <id>                  # List comments
-filigree add-label <label> <id>             # Add label
-filigree remove-label <id> <label>          # Remove label
-filigree labels                             # List all labels by namespace
-filigree taxonomy                           # Show reserved namespaces and vocabulary
-
-# Workflow templates
-filigree types                              # List registered types with status flows
-filigree get-template <type>                # Canonical full workflow definition for a type
-filigree type-info <type>                   # Compatibility alias for get-template
-filigree transitions <id>                   # Valid next statuses for an issue
-filigree workflow-statuses                  # All statuses by category from enabled templates
-filigree explain-status <type> <status>     # Explain a status's transitions and required fields
-filigree packs                              # List enabled workflow packs
-filigree validate <id>                      # Validate issue against template
-filigree guide <pack>                       # Display workflow guide for a pack
-
-# Atomic claiming
-filigree claim <id> --assignee <name>            # Claim issue (optimistic lock)
-filigree claim-next --assignee <name>            # Claim highest-priority ready issue
-filigree start-work <id> --assignee <name>       # Claim + transition to in_progress
-filigree start-next-work --assignee <name>       # Claim-next + transition to in_progress
-
-# Batch operations
-filigree batch-update <ids...> --priority=0      # Update multiple issues
-filigree batch-close <ids...>                    # Close multiple with error reporting
-
-# Planning
-filigree create-plan --file plan.json            # Create milestone/phase/step hierarchy
-
-# Event history
-filigree changes --since 2026-01-01T00:00:00    # Events since timestamp
-filigree events <id>                             # Event history for issue
-
-# Observations (agent scratchpad)
-filigree observe "note" --file=src/foo.py --line=42      # Fire-and-forget note
-filigree list-observations                               # List active observations
-filigree dismiss-observation <id>                        # Drop a single observation
-filigree promote-observation <id>                        # Promote to a tracked issue
-filigree batch-dismiss-observations <ids...>             # Drop several at once
-
-# Files
-filigree list-files                                      # List tracked file records
-filigree get-file <file_id>                              # File detail with associations
-filigree get-file-timeline <file_id>                     # Per-file event timeline
-filigree register-file <path>                            # Register a file record
-filigree add-file-association <file_id> <issue_id>       # Link file to issue
-
-# Findings (scan-result triage)
-filigree list-findings                                   # List scan findings
-filigree get-finding <id>                                # Finding detail
-filigree update-finding <id> --status=...                # Update finding status
-filigree promote-finding <id>                            # Promote finding to issue
-filigree dismiss-finding <id>                            # Dismiss finding
-filigree batch-update-findings <ids...> --status=...     # Update many at once
-
-# Scanners
-filigree scanner available                               # Bundled scanners that can be enabled
-filigree scanner prompts                                 # Bundled scanner prompt packs
-filigree scanner prompts --language python               # Packs applicable to a scanner language focus
-filigree scanner enable codex                            # Enable bundled Codex scanner in this project
-filigree scanner disable codex                           # Disable a scanner registration
-filigree list-available-scanners                         # Alias for scanner available
-filigree list-prompt-packs                               # Alias for scanner prompts
-filigree scanner list                                    # Registered scanners (grouped alias)
-filigree scanner preview <scanner> <file>                 # Dry-run a scanner (grouped alias)
-filigree scanner trigger <scanner> <file> --prompt security # Run a scanner (grouped alias)
-filigree list-scanners                                   # Registered scanners
-filigree trigger-scan <scanner> <file> --prompt security  # Run a scanner with a review focus
-filigree trigger-scan-batch <scanners...>                # Run several scanners
-filigree preview-scan <scanner>                          # Dry-run a scanner
-filigree get-scan-status <scan_id>                       # Scan progress / results
-filigree report-finding ...                              # Report a finding from a scanner
-
-Prompt packs are advisory review-focus hints; they do not restrict what the scanner process can read or report.
-Use a scanner's `applicable_prompts` or `list_prompt_packs language=<focus>` when choosing language-specific packs.
-
-# Most data commands support --json; --actor is global on every command.
-# (`install`, `doctor`, `session-context` etc. are human-output only.)
-filigree --actor bot-1 create "Title"            # Specify actor identity
-filigree list --json                             # Machine-readable output
-
-# Project health
-filigree stats                              # Project statistics
-filigree search "query"                     # Search issues
-filigree doctor                             # Health check
-```
-
-Every short-form CLI command (e.g. `ready`, `labels`, `update`) has a permanent
-verb-noun alias matching the MCP tool name (`get-ready`, `list-labels`,
-`update-issue`). Both forms are stable — pick whichever reads better.
-
-### File Records & Scan Findings (API)
-
-The dashboard exposes REST endpoints for file tracking and scan result ingestion.
-Use `GET /api/files/_schema` for available endpoints and valid field values.
-
-API generations: `loom` (`/api/loom/*`) is the stable 2.0 federation contract;
-`classic` (`/api/v1/*`) is frozen but supported. The un-prefixed living surface
-(`/api/<endpoint>`) only aliases `loom` for endpoints explicitly listed as
-living-surface aliases; many un-prefixed routes still serve classic shapes. New
-Loom consumers should target `/api/loom/*` except for explicitly listed aliases.
-`classic` exists for existing integrations only. See ADR-002 and
-`docs/federation/contracts.md`.
-
-Key endpoints:
-- `GET /api/files/_schema` — Discovery: valid enums, endpoint catalog
-- `POST /api/loom/scan-results` (or `/api/scan-results`) — Ingest scan results (loom envelope)
-- `POST /api/v1/scan-results` — Same intake, classic frozen response shape
-- `GET /api/loom/files` — List tracked files with filtering and sorting
-- `GET /api/loom/files/{file_id}` — File detail with associations and findings summary
-- `GET /api/loom/files/{file_id}/findings` — Findings for a specific file
-
-### Workflow
-1. `filigree ready` to find available work
-2. `filigree show <id>` to review details
-3. `filigree transitions <id>` to see valid status transitions
-4. `filigree start-work <issue-id> --assignee <name>` to atomically claim and transition to in-progress (or `filigree start-next-work --assignee <name>` to skip steps 1–3 and grab the highest-priority ready issue)
-5. Do the work, commit code
-6. `filigree close <id>` when done
-
-### Session Start
-When beginning a new session, run `filigree session-context` to load the project
-snapshot (ready work, in-progress items, critical path). This provides the
-context needed to pick up where the previous session left off.
-
-### Priority Scale
 - P0: Critical (drop everything)
 - P1: High (do next)
 - P2: Medium (default)
 - P3: Low
 - P4: Backlog
+
+### Reaching for tools
+
+MCP tool schemas describe each tool; `filigree --help` and `filigree <verb>
+--help` are the authoritative CLI reference. You do not need to memorise
+either catalogue. The verbs you will reach for most:
+
+- **Find work:** `get_ready`, `get_blocked`, `list_issues`, `search_issues`
+- **Claim work:** `start_work`, `start_next_work`
+- **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
+- **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
+- **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
+
+Pass `--actor <name>` (CLI) so events attribute to your agent identity.
+
+### Error handling
+
+Errors return `{error: str, code: ErrorCode, details?: dict}`. Switch on
+`code`, not on message text. Codes: `VALIDATION`, `NOT_FOUND`, `CONFLICT`,
+`INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`,
+`INVALID_API_URL`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
+
+On `INVALID_TRANSITION`, call `get_valid_transitions` (MCP) or
+`filigree transitions <id>` to see what the workflow allows from here.
+
+Two failure modes deserve a specific response:
+
+- **`SCHEMA_MISMATCH`** — the installed `filigree` is older than the project
+  database. The error message contains upgrade guidance. Surface it to the
+  user; do not retry.
+- **`ForeignDatabaseError`** — filigree found a parent project's database
+  but no local `.filigree.conf`. Run `filigree init` in the current
+  directory. Do **not** `cd` upward to a different project unless that was
+  the actual intent.

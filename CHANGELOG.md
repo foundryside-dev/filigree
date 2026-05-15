@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-05-15
+
+### Changed
+
+- **Agent instruction prompt restructured.** The CLAUDE.md / AGENTS.md block
+  that `filigree install` injects has been rewritten from a 231-line
+  man-page-style catalogue to an 84-line behavioural prompt. The workflow
+  loop with a worked example, the observation-scope policy, and the priority
+  enum are now top-level; the full CLI Quick Reference, response-shape prose,
+  federation generation essay, and the eagerly pre-loaded `ForeignDatabaseError`
+  and `SCHEMA_MISMATCH` walkthroughs have been dropped in favour of
+  `filigree --help`, MCP tool schemas, and short recovery pointers at the
+  bottom. The rationale for preferring `start_work` over the racy
+  `claim_issue + update --status=in_progress` pair is now stated explicitly,
+  and `INVALID_TRANSITION` recovery points the agent at `get_valid_transitions`.
+  The instructions hash changes, so `filigree install` and `filigree doctor`
+  will refresh downstream CLAUDE.md and AGENTS.md files on next run.
+
 ## [2.0.0] - 2026-05-14
 
 ### Added

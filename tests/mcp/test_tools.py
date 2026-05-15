@@ -2237,17 +2237,37 @@ class TestPromptRuntimeErrorNarrowing:
 
 
 class TestInstructionsUpdate:
-    """Test that FILIGREE_INSTRUCTIONS includes workflow commands."""
+    """The injected prompt is intentionally lean — command catalogues are
+    discoverable via `--help` and MCP tool schemas. What the prompt itself
+    must pre-load is the action loop, behavioural policy, and project enums.
+    These tests pin the load-bearing pieces."""
 
-    def test_instructions_include_types(self) -> None:
+    def test_instructions_include_atomic_workflow(self) -> None:
         from filigree.install import FILIGREE_INSTRUCTIONS
 
-        assert "filigree types" in FILIGREE_INSTRUCTIONS
-        assert "filigree type-info" in FILIGREE_INSTRUCTIONS
-        assert "filigree transitions" in FILIGREE_INSTRUCTIONS
-        assert "filigree packs" in FILIGREE_INSTRUCTIONS
-        assert "filigree validate" in FILIGREE_INSTRUCTIONS
-        assert "filigree guide" in FILIGREE_INSTRUCTIONS
+        assert "start-next-work" in FILIGREE_INSTRUCTIONS
+        assert "start-work" in FILIGREE_INSTRUCTIONS
+        assert "session-context" in FILIGREE_INSTRUCTIONS
+
+    def test_instructions_include_observation_policy(self) -> None:
+        from filigree.install import FILIGREE_INSTRUCTIONS
+
+        lower = FILIGREE_INSTRUCTIONS.lower()
+        assert "incidental" in lower
+        assert "current task" in lower
+
+    def test_instructions_include_priority_scale(self) -> None:
+        from filigree.install import FILIGREE_INSTRUCTIONS
+
+        for level in ("P0", "P1", "P2", "P3", "P4"):
+            assert level in FILIGREE_INSTRUCTIONS
+
+    def test_instructions_include_invalid_transition_recovery(self) -> None:
+        """An agent hitting INVALID_TRANSITION needs to know how to recover."""
+        from filigree.install import FILIGREE_INSTRUCTIONS
+
+        assert "INVALID_TRANSITION" in FILIGREE_INSTRUCTIONS
+        assert "get_valid_transitions" in FILIGREE_INSTRUCTIONS
 
 
 class TestSafePath:

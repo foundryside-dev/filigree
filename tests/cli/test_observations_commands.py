@@ -668,8 +668,10 @@ class TestObservationTriageCommands:
 
 
 class TestObserveFileAlias:
-    """`instructions.md` documents `filigree observe "note" --file=src/foo.py`.
-    The `--file` alias must be accepted alongside `--file-path`.
+    """The `--file` alias must be accepted alongside `--file-path`. The short
+    form has been the documented spelling since filigree-6f8d9816b7 and
+    external scripts depend on it, even though the agent-facing prompt no
+    longer pins specific CLI examples for `observe`.
     """
 
     def test_observe_accepts_file_alias(self, cli_in_project: tuple[CliRunner, Path]) -> None:
