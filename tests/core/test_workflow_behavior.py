@@ -306,17 +306,16 @@ class TestUpdateIssueTransitionEnforcement:
         path validates by default and only bypasses when force is set.
         Senior-user MCP review run e P1.3.
 
-        Note: bug from triage has two reachable done states (wont_fix, not_a_bug),
-        so F1 auto-resolve correctly declines to pick — the close still fails
-        without force. force=True then bypasses the validator entirely and
-        lands in the default done state (template's first done-category state)
-        for both types. Senior-user MCP review run h F1.
+        Note: bug from triage cannot reach the default done state ('closed') —
+        the only directly-reachable done targets are 'wont_fix' and 'not_a_bug'.
+        Without an explicit status= or force=True, the close fails. force=True
+        then bypasses the validator entirely and lands in the default done
+        state (template's first done-category state) for both types.
         """
         bug = db.create_issue("Bug A", type="bug")
         bug_b = db.create_issue("Bug B", type="bug")
-        # No force, no explicit status → both bugs have ambiguous done targets
-        # from triage (wont_fix vs not_a_bug), so auto-resolve declines and the
-        # close fails with INVALID_TRANSITION.
+        # No force, no explicit status → default done state 'closed' is not
+        # reachable from 'triage', so the close fails with INVALID_TRANSITION.
         _, errors = db.batch_close([bug.id, bug_b.id], reason="cleanup")
         assert len(errors) == 2
         assert all(e["code"] == ErrorCode.INVALID_TRANSITION for e in errors)
@@ -325,18 +324,25 @@ class TestUpdateIssueTransitionEnforcement:
         assert len(closed) == 2
         assert errors == []
 
-    def test_batch_close_auto_resolves_unique_done(self, db: FiligreeDB) -> None:
-        """When exactly one done state is reachable from the current status and
-        the template default is unreachable, batch_close auto-resolves to the
-        unique target. Senior-user MCP review run h F1.
+    def test_batch_close_unreachable_default_surfaces_invalid_transition(self, db: FiligreeDB) -> None:
+        """When the template default done state is unreachable from current,
+        batch_close surfaces INVALID_TRANSITION per item. Callers explicitly
+        pick a dismissal target (e.g. status='skipped') or use force=True.
         """
         milestone = db.create_issue("Milestone X", type="milestone")
         phase = db.create_issue("Phase X", type="phase")
         closed, errors = db.batch_close([milestone.id, phase.id], reason="cleanup")
-        assert len(errors) == 0
+        assert closed == []
+        assert len(errors) == 2
+        assert all(e["code"] == ErrorCode.INVALID_TRANSITION for e in errors)
+        # force=True lets the cleanup land in each type's default done state.
+        closed, errors = db.batch_close([milestone.id, phase.id], reason="cleanup", force=True)
+        assert errors == []
         by_id = {r.id: r for r in closed}
-        assert by_id[milestone.id].status == "cancelled"
-        assert by_id[phase.id].status == "skipped"
+        # milestone's first done-category state is 'completed' (declared first),
+        # phase's is 'completed'.
+        assert by_id[milestone.id].status == "completed"
+        assert by_id[phase.id].status == "completed"
 
     def test_reopen_bypasses_transition_check(self, db: FiligreeDB) -> None:
         """Reopen works from done state back to initial."""
@@ -396,48 +402,51 @@ class TestCloseIssue:
         with pytest.raises(ValueError, match="already closed"):
             db.close_issue(issue.id)
 
-    def test_close_phase_in_pending_auto_resolves_to_skipped(self, db: FiligreeDB) -> None:
-        """When the default done state is unreachable but exactly one done state is
-        reachable from the current status, close_issue auto-resolves to that target.
-        This makes mixed-type cleanup work without force=True. (F1 — review-h.)
+    def test_close_phase_in_pending_without_status_raises(self, db: FiligreeDB) -> None:
+        """Default done target ('completed') isn't reachable from 'pending'. The
+        caller must pass status= explicitly (e.g. 'skipped') or walk the
+        workflow forward — close_issue must not silently pick a done state.
         """
         issue = db.create_issue("Phase", type="phase")
-        closed = db.close_issue(issue.id, reason="cleanup")
-        assert closed.status == "skipped"
-        assert any("auto-resolved" in w for w in closed.data_warnings)
-        assert closed.fields["close_reason"] == "cleanup"
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id, reason="cleanup")
 
-    def test_close_step_in_pending_auto_resolves_to_skipped(self, db: FiligreeDB) -> None:
+    def test_close_step_in_pending_without_status_raises(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Step", type="step")
-        closed = db.close_issue(issue.id)
-        assert closed.status == "skipped"
-        assert any("auto-resolved" in w for w in closed.data_warnings)
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id)
 
-    def test_close_milestone_in_planning_auto_resolves_to_cancelled(self, db: FiligreeDB) -> None:
+    def test_close_milestone_in_planning_without_status_raises(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Milestone", type="milestone")
-        closed = db.close_issue(issue.id, reason="abandoned")
-        assert closed.status == "cancelled"
-        assert any("auto-resolved" in w for w in closed.data_warnings)
+        with pytest.raises(ValueError, match="not allowed"):
+            db.close_issue(issue.id, reason="abandoned")
 
-    def test_close_bug_triage_ambiguous_still_fails(self, db: FiligreeDB) -> None:
-        """Bug in triage has two reachable done states (wont_fix, not_a_bug); the
-        default 'closed' is not reachable. Auto-resolve should NOT pick one
-        arbitrarily — surface INVALID_TRANSITION so the caller picks explicitly.
+    def test_close_bug_triage_without_status_raises(self, db: FiligreeDB) -> None:
+        """Bug in triage has reachable done states but the default 'closed' is
+        not among them. Caller must pick explicitly.
         """
         issue = db.create_issue("Bug", type="bug")
         with pytest.raises(ValueError, match="not allowed"):
             db.close_issue(issue.id)
 
-    def test_close_explicit_status_skips_auto_resolve(self, db: FiligreeDB) -> None:
-        """When status is passed explicitly, auto-resolve is bypassed and the
-        explicit choice is honored (and no auto-resolve warning is emitted).
+    def test_close_phase_with_explicit_skipped(self, db: FiligreeDB) -> None:
+        """Caller picks the dismissal target explicitly; close succeeds with no
+        data_warning emitted.
         """
         issue = db.create_issue("Phase", type="phase")
-        # 'completed' isn't reachable from pending; passing it would normally fail
-        # through update_issue's transition check. So pass 'skipped' explicitly.
-        closed = db.close_issue(issue.id, status="skipped")
+        closed = db.close_issue(issue.id, status="skipped", reason="cleanup")
         assert closed.status == "skipped"
         assert not any("auto-resolved" in w for w in closed.data_warnings)
+        assert closed.fields["close_reason"] == "cleanup"
+
+    def test_close_with_force_bypasses_transition_check(self, db: FiligreeDB) -> None:
+        """force=True is the documented escape hatch for cleanup that needs to
+        land in the default done state regardless of reachability.
+        """
+        issue = db.create_issue("Phase", type="phase")
+        closed = db.close_issue(issue.id, force=True)
+        # Default done state for phase is 'completed' (first done-category state).
+        assert closed.status == "completed"
 
 
 class TestCloseIssueHardEnforcement:

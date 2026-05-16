@@ -294,27 +294,44 @@ class TestBatchWithTemplates:
         assert all(r.status == "closed" for r in results)
         assert len(errors) == 0
 
-    def test_batch_close_mixed_types_auto_resolves(self, db: FiligreeDB) -> None:
+    def test_batch_close_mixed_types_without_reachable_default_errors(self, db: FiligreeDB) -> None:
         """Mixed-type cleanup: task closes normally; phase/step/milestone in their
-        initial states auto-resolve to the unique reachable done state instead of
-        failing INVALID_TRANSITION. (F1 — review-h.)
+        initial states cannot reach the default done state and surface
+        INVALID_TRANSITION (with valid_transitions echo) so the caller picks
+        explicitly or uses force=True.
         """
         t = db.create_issue("Task", type="task")
         p = db.create_issue("Phase", type="phase")
         s = db.create_issue("Step", type="step")
         m = db.create_issue("Milestone", type="milestone")
         results, errors = db.batch_close([t.id, p.id, s.id, m.id], reason="cleanup")
+        assert len(results) == 1
+        assert results[0].id == t.id
+        assert results[0].status == "closed"
+        err_ids = {e["id"] for e in errors}
+        assert err_ids == {p.id, s.id, m.id}
+        for e in errors:
+            assert e["code"] == "INVALID_TRANSITION"
+            assert "valid_transitions" in e
+
+    def test_batch_close_force_bypasses_transition_check(self, db: FiligreeDB) -> None:
+        """force=True lets cleanup flows close to the default done state
+        regardless of reachability.
+        """
+        p = db.create_issue("Phase", type="phase")
+        s = db.create_issue("Step", type="step")
+        m = db.create_issue("Milestone", type="milestone")
+        results, errors = db.batch_close([p.id, s.id, m.id], reason="cleanup", force=True)
         assert len(errors) == 0
         by_id = {r.id: r for r in results}
-        assert by_id[t.id].status == "closed"
-        assert by_id[p.id].status == "skipped"
-        assert by_id[s.id].status == "skipped"
-        assert by_id[m.id].status == "cancelled"
+        assert by_id[p.id].status == "completed"
+        assert by_id[s.id].status == "completed"
+        assert by_id[m.id].status == "completed"
 
     def test_batch_close_ambiguous_done_still_fails(self, db: FiligreeDB) -> None:
-        """A bug in 'triage' has two reachable done states (wont_fix, not_a_bug)
-        and the default 'closed' is unreachable — auto-resolve should NOT pick
-        arbitrarily. The failure echoes valid_transitions so the caller can retry.
+        """A bug in 'triage' has reachable done states but the default 'closed'
+        is not among them — caller must pick explicitly. The failure echoes
+        valid_transitions so the caller can retry.
         """
         bug = db.create_issue("Bug", type="bug")
         task = db.create_issue("Task", type="task")

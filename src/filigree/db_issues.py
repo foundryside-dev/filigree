@@ -908,14 +908,15 @@ class IssuesMixin(DBMixinProtocol):
         flows that intentionally bypass the workflow.
 
         When ``status`` is omitted, the close target defaults to the first
-        done-category state for the type. If that default is unreachable
-        from the current status but exactly one done-category state IS
-        reachable, the close auto-resolves to that target and emits a
-        ``data_warning``. Ambiguous cases (multiple done targets, none
-        matching the default) still surface INVALID_TRANSITION so the
-        caller picks. This makes mixed-type cleanup (e.g. ``batch_close``
-        on milestone/phase/step in their initial states) succeed without
-        ``force=True``. Senior-user MCP review run h F1.
+        done-category state for the type. If that default is not reachable
+        from the current status, ``update_issue`` raises INVALID_TRANSITION
+        and the caller must either pass ``status=`` explicitly to pick a
+        done-category target, walk the workflow forward to a state from
+        which the default is reachable, or pass ``force=True`` to bypass
+        the transition table. The close path never silently picks a done
+        state on the caller's behalf — that hid intent (a feature in
+        ``building`` that's actually shipped should not become ``deferred``
+        just because that's the only reachable done-state).
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -929,7 +930,6 @@ class IssuesMixin(DBMixinProtocol):
             msg = f"Issue {issue_id} is already closed (status: '{current.status}', closed_at: {current.closed_at})"
             raise ValueError(msg)
 
-        auto_resolved_done: str | None = None
         if status is not None:
             # Validate that the requested status is a done-category state
             target_category = self.templates.get_category(current.type, status)
@@ -938,26 +938,12 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
             done_status = status
         else:
-            # Default to first done-category state.
+            # Default to first done-category state. If it isn't reachable
+            # from current.status, update_issue's transition validator
+            # raises INVALID_TRANSITION below and the caller must pick
+            # explicitly or use force=True.
             _first_done = self.templates.get_first_state_of_category(current.type, "done")
             done_status = _first_done if _first_done is not None else "closed"
-            # If the default isn't reachable from the current state but exactly one
-            # done state IS reachable, auto-resolve to that — this lets mixed-type
-            # cleanup (e.g. batch_close on milestone/phase/step in 'pending', bug in
-            # 'triage' with a single dismissal path, …) succeed without forcing the
-            # caller to issue per-type batches or set force=True. Ambiguous cases
-            # (multiple reachable done states, none matching the default) fall
-            # through to update_issue and surface INVALID_TRANSITION with a
-            # valid_transitions echo so the caller picks explicitly.
-            if not force:
-                reachable_done = [
-                    opt.to
-                    for opt in self.templates.get_valid_transitions(current.type, current.status, current.fields)
-                    if opt.category == "done"
-                ]
-                if done_status not in reachable_done and len(reachable_done) == 1:
-                    auto_resolved_done = reachable_done[0]
-                    done_status = auto_resolved_done
 
         # Merge close_reason into fields for the update call. Transition
         # validation (including hard-enforcement field gates) is delegated
@@ -971,7 +957,7 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
-        updated = self.update_issue(
+        return self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
@@ -979,15 +965,6 @@ class IssuesMixin(DBMixinProtocol):
             expected_assignee=expected_assignee,
             _skip_transition_check=force,
         )
-        if auto_resolved_done is not None:
-            warning = (
-                f"close_issue auto-resolved target status to {auto_resolved_done!r} "
-                f"(template default unreachable from {current.status!r}); "
-                f"pass status= explicitly to override"
-            )
-            if warning not in updated.data_warnings:
-                updated.data_warnings.append(warning)
-        return updated
 
     def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
