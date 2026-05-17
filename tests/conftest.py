@@ -93,6 +93,25 @@ def cli_runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture
+def concurrent_db_workers(tmp_path: Path) -> Generator[list[FiligreeDB], None, None]:
+    """Open multiple FiligreeDB connections to the same on-disk database.
+
+    Returns a list of two connections by default; tests requesting a
+    different N can call ``.append(make_db(tmp_path))`` to add more —
+    every connection points at the same ``tmp_path / "filigree.db"``
+    file so they exercise true SQLite-level concurrency. Lands as part
+    of 2.1.0 §0.1 (the update_issue CAS test needs a real second writer
+    to exercise the AND assignee = ? guard).
+    """
+    workers = [make_db(tmp_path) for _ in range(2)]
+    try:
+        yield workers
+    finally:
+        for w in workers:
+            w.close()
+
+
 def _fresh_project(tmp_path: Path) -> Path:
     """Run `filigree init` into tmp_path and return the project root."""
     from filigree.cli import cli

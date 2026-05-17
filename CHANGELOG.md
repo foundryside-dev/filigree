@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`update_issue` is now atomic on assignee under multi-agent contention
+  (2.1.0 §0.1).** When `update_issue` (and everything that routes through
+  it — `close_issue`, `batch_close`, `batch_update`) observes a non-empty
+  assignee at SELECT time, the subsequent UPDATE adds an
+  ``AND assignee = ?`` compare-and-swap clause; a concurrent
+  reassignment between read and write now fails the UPDATE atomically
+  and surfaces as `ClaimConflictError` (ErrorCode.CONFLICT). Previously
+  the read-then-write window silently let the second writer overwrite
+  audit-trail attribution. Closes silent-failure C1 / solution-architect
+  C1 / threat T-001 / embedded-db H1 from the 2.1.0 panel review.
+  Matches the CAS pattern already used by ``claim_issue``,
+  ``heartbeat_work``, and ``reclaim_issue``. Unassigned issues do not
+  trigger the guard — ADR-008 read-tolerance for unheld writes is
+  preserved.
+
 ### Security
 
 - **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0

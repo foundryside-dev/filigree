@@ -656,6 +656,13 @@ class IssuesMixin(DBMixinProtocol):
         # like a compare-and-swap guard, while ADR-008 defaults the expected
         # holder to actor when actor is present and the issue is held.
         _check_expected_assignee(issue_id, expected_assignee, current.assignee, actor=actor)
+        # 2.1.0 §0.1: capture the observed assignee at SELECT time. When
+        # non-empty the WHERE clause below adds ``AND assignee = ?`` so a
+        # concurrent reassignment between this read and the write below
+        # closes the race instead of silently overwriting the new claimant's
+        # state. Matches the pattern already used by claim_issue:1080,
+        # heartbeat_work:1332, reclaim_issue:1438.
+        _observed_assignee = current.assignee or ""
         now = _now_iso()
 
         # --- Validate all inputs BEFORE any writes to prevent partial commits ---
@@ -874,8 +881,30 @@ class IssuesMixin(DBMixinProtocol):
                 updates.append("updated_at = ?")
                 params.append(now)
                 params.append(issue_id)
-                sql = f"UPDATE issues SET {', '.join(updates)} WHERE id = ?"
-                self.conn.execute(sql, params)
+                # §0.1 CAS guard: when an assignee was observed at SELECT time,
+                # add ``AND assignee = ?`` so a concurrent reassignment fails
+                # the UPDATE atomically. On rowcount==0 we re-read to
+                # distinguish "row vanished" from "reassigned" and raise
+                # ClaimConflictError (typed CONFLICT, not silent VALIDATION).
+                where = "WHERE id = ?"
+                if _observed_assignee:
+                    where += " AND assignee = ?"
+                    params.append(_observed_assignee)
+                sql = f"UPDATE issues SET {', '.join(updates)} {where}"
+                cursor = self.conn.execute(sql, params)
+                if _observed_assignee and cursor.rowcount == 0:
+                    row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+                    if row is None:
+                        msg = f"Issue not found: {issue_id}"
+                        raise KeyError(msg)
+                    new_assignee = row["assignee"] or ""
+                    msg = f"Cannot update {issue_id}: reassigned to '{new_assignee}' (expected '{_observed_assignee}')"
+                    raise ClaimConflictError(
+                        issue_id,
+                        observed=new_assignee,
+                        expected=_observed_assignee,
+                        message=msg,
+                    )
                 self.conn.commit()
         except Exception:
             self.conn.rollback()
