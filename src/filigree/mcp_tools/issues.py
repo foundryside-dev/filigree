@@ -1328,13 +1328,17 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     ready_before = {i.id for i in tracker.get_ready()}
-    closed, failed = tracker.batch_close(
-        issue_ids,
-        reason=args.get("reason", ""),
-        actor=actor,
-        expected_assignee=expected_assignee,
-        force=force,
-    )
+    try:
+        closed, failed = tracker.batch_close(
+            issue_ids,
+            reason=args.get("reason", ""),
+            actor=actor,
+            expected_assignee=expected_assignee,
+            force=force,
+        )
+    except WrongProjectError as e:
+        # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+        return _wrong_project_response(e)
     _refresh_summary()
     ready_after = tracker.get_ready()
     newly_unblocked = [i for i in ready_after if i.id not in ready_before]
@@ -1379,15 +1383,19 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     u_fields = args.get("fields")
     if u_fields is not None and not isinstance(u_fields, dict):
         return _text(ErrorResponse(error="fields must be a JSON object", code=ErrorCode.VALIDATION))
-    updated, update_failed = tracker.batch_update(
-        issue_ids,
-        status=args.get("status"),
-        priority=priority,
-        assignee=args.get("assignee"),
-        fields=u_fields,
-        actor=actor,
-        expected_assignee=expected_assignee,
-    )
+    try:
+        updated, update_failed = tracker.batch_update(
+            issue_ids,
+            status=args.get("status"),
+            priority=priority,
+            assignee=args.get("assignee"),
+            fields=u_fields,
+            actor=actor,
+            expected_assignee=expected_assignee,
+        )
+    except WrongProjectError as e:
+        # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+        return _wrong_project_response(e)
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(

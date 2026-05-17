@@ -588,6 +588,10 @@ def create_classic_router() -> APIRouter:
         issue_ids = parsed.pop("issue_ids")
         try:
             updated, errors = db.batch_update(issue_ids, **parsed)
+        except WrongProjectError as e:
+            # 2.1.0 §0.4: a foreign-prefix id in a batch aborts envelope-
+            # level rather than producing N misleading per-item errors.
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(
@@ -607,7 +611,10 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
-        closed, errors = db.batch_close(issue_ids, **parsed)
+        try:
+            closed, errors = db.batch_close(issue_ids, **parsed)
+        except WrongProjectError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(
             {
                 "closed": [i.to_dict() for i in closed],
@@ -1014,6 +1021,9 @@ def create_loom_router() -> APIRouter:
         issue_ids = parsed.pop("issue_ids")
         try:
             updated, errors = db.batch_update(issue_ids, **parsed)
+        except WrongProjectError as e:
+            # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         project = issue_to_loom if detail == "full" else slim_issue_to_loom
@@ -1052,7 +1062,11 @@ def create_loom_router() -> APIRouter:
             return parsed
         issue_ids = parsed.pop("issue_ids")
         ready_before = {i.id for i in db.get_ready()}
-        closed, errors = db.batch_close(issue_ids, **parsed)
+        try:
+            closed, errors = db.batch_close(issue_ids, **parsed)
+        except WrongProjectError as e:
+            # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         project = issue_to_loom if detail == "full" else slim_issue_to_loom

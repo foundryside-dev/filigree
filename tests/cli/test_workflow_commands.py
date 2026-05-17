@@ -876,7 +876,7 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-update", id1, "nonexistent-abc", "--priority", "1", "--json"])
+        result = runner.invoke(cli, ["batch-update", id1, "test-deadbeef00", "--priority", "1", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
@@ -906,7 +906,7 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-close", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-close", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
@@ -961,12 +961,12 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-add-label", "security", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-add-label", "security", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
     def test_batch_add_label_rejects_priority_like_label_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -1009,13 +1009,13 @@ class TestBatchCli:
         id1 = _extract_id(r1.output)
         runner.invoke(cli, ["add-label", "security", id1])
 
-        result = runner.invoke(cli, ["batch-remove-label", "security", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-remove-label", "security", id1, "test-deadbeef00", "--json"])
 
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["succeeded"] == [id1]
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
     def test_batch_add_comment_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -1041,12 +1041,12 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-add-comment", "triage-complete", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-add-comment", "triage-complete", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
 
 class TestEventsCli:

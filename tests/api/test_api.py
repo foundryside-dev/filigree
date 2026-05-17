@@ -1171,12 +1171,30 @@ class TestBatchClosePartialMutation:
         """Even if all items fail, batch/close should return 200 with errors list."""
         resp = await client.post(
             "/api/batch/close",
-            json={"issue_ids": ["bad-1", "bad-2"]},
+            json={"issue_ids": ["test-deadbeef00", "test-cafebabe01"]},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["closed"]) == 0
         assert len(data["errors"]) == 2
+
+    async def test_batch_close_foreign_prefix_aborts_envelope_level(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """2.1.0 §0.4: foreign-prefix in a batch aborts envelope-level
+        rather than producing N misleading per-item NOT_FOUND errors."""
+        ids = dashboard_db.ids
+        resp = await client.post(
+            "/api/batch/close",
+            # ids["a"] is local; "foreign-deadbeef01" parses as foreign-prefix
+            # (hex 12 chars, candidate prefix "foreign" != local "test").
+            json={"issue_ids": [ids["a"], "foreign-deadbeef01"]},
+        )
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["code"] == "VALIDATION"
+        assert "foreign" in data["error"]
+        # No partial mutation: the local id must NOT have been closed.
+        check = await client.get(f"/api/issue/{ids['a']}")
+        assert check.json()["status"] != "closed"
 
     async def test_core_batch_close_returns_tuple(self, dashboard_db: PopulatedDB) -> None:
         """core.batch_close should return (results, errors) like batch_update."""
@@ -1398,14 +1416,14 @@ class TestDashboardBatchCloseKeyError:
     async def test_batch_close_nonexistent_id(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api/batch/close",
-            json={"issue_ids": ["nonexistent-xyz"]},
+            json={"issue_ids": ["test-deadbeef00"]},
         )
         # Returns 200 with per-item error collection (not fail-fast 404)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["closed"]) == 0
         assert len(data["errors"]) == 1
-        assert data["errors"][0]["id"] == "nonexistent-xyz"
+        assert data["errors"][0]["id"] == "test-deadbeef00"
 
 
 class TestDashboardMalformedJSON:

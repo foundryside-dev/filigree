@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0
+  §0.4).** Every batch handler in the data layer (`batch_close`,
+  `batch_update`, `batch_add_label`, `batch_remove_label`,
+  `batch_add_comment`) now pre-flights every `issue_ids[i]` through
+  `_check_id_prefix` before any per-item write commits; a foreign
+  prefix raises `WrongProjectError` envelope-level instead of being
+  silently re-classified as N per-item validation failures. CLI batch
+  commands (`filigree batch-update`, `batch-close`, `batch-add-label`,
+  `batch-remove-label`, `batch-add-comment`), the dashboard's
+  `POST /api/batch/{update,close}` (classic + loom envelopes), and
+  the MCP `batch_*` tools all translate this to a single envelope-
+  level VALIDATION error rather than crashing or emitting per-item
+  noise. Closes the silent foreign-DB-mutation surface flagged as
+  silent-failure H7 in the 2.1.0 panel review — the same class of
+  cross-project confusion that PR #41's `core.py` anchor-discovery
+  hardening addressed on the read side.
+
 ### Added
 
 - **Typed `ClaimConflictError` for optimistic-lock CAS failures (2.1.0

@@ -9,6 +9,7 @@ from typing import Any
 import click
 
 from filigree.cli_common import get_db, refresh_summary
+from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public, label_namespace_to_public
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp
@@ -364,15 +365,23 @@ def batch_update(
             fields[k] = v
 
     with get_db() as db:
-        results, errors = db.batch_update(
-            list(issue_ids),
-            status=status,
-            priority=priority,
-            assignee=assignee,
-            fields=fields,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
+        try:
+            results, errors = db.batch_update(
+                list(issue_ids),
+                status=status,
+                priority=priority,
+                assignee=assignee,
+                fields=fields,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4: foreign-prefix id in the batch aborts envelope-level.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         if as_json:
             if response_detail == "full":
                 succeeded_payload: list[dict[str, Any]] = [dict(issue_to_public(i)) for i in results]
@@ -435,13 +444,21 @@ def batch_close(
     """Close multiple issues with per-item error reporting."""
     with get_db() as db:
         ready_before_batch = {i.id for i in db.get_ready()} if as_json else set()
-        closed, errors = db.batch_close(
-            list(issue_ids),
-            reason=reason,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-            force=force,
-        )
+        try:
+            closed, errors = db.batch_close(
+                list(issue_ids),
+                reason=reason,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+                force=force,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
             ready_after_batch = db.get_ready() if as_json else []
@@ -503,12 +520,20 @@ def batch_add_label(
 ) -> None:
     """Add the same label to multiple issues."""
     with get_db() as db:
-        labeled, errors = db.batch_add_label(
-            list(issue_ids),
-            label=label_name,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
+        try:
+            labeled, errors = db.batch_add_label(
+                list(issue_ids),
+                label=label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
             if response_detail == "full":
@@ -562,12 +587,20 @@ def batch_remove_label(
 ) -> None:
     """Remove the same label from multiple issues."""
     with get_db() as db:
-        removed, errors = db.batch_remove_label(
-            list(issue_ids),
-            label=label_name,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
+        try:
+            removed, errors = db.batch_remove_label(
+                list(issue_ids),
+                label=label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
             if response_detail == "full":
@@ -621,12 +654,20 @@ def batch_add_comment(
 ) -> None:
     """Add the same comment to multiple issues."""
     with get_db() as db:
-        commented, errors = db.batch_add_comment(
-            list(issue_ids),
-            text=text,
-            author=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
+        try:
+            commented, errors = db.batch_add_comment(
+                list(issue_ids),
+                text=text,
+                author=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
             if response_detail == "full":

@@ -1676,13 +1676,30 @@ class IssuesMixin(DBMixinProtocol):
         issue_ids: list[str],
         action: Callable[[str], Issue],
     ) -> tuple[list[Issue], list[BatchFailure]]:
-        """Run *action(issue_id)* per item with transition-enriched error handling."""
+        """Run *action(issue_id)* per item with transition-enriched error handling.
+
+        ``WrongProjectError`` aborts the whole batch envelope-level rather
+        than producing N per-item validation failures (2.1.0 §0.4). The
+        foreign-prefix surface is structurally distinct from "this issue
+        is missing in our DB" — silently masking it as N per-item errors
+        is exactly the silent foreign-DB-mutation surface `core.py`'s
+        anchor discovery was hardened against. Pre-flighting every id
+        through ``_check_id_prefix`` before any per-item work commits
+        ensures the abort fires before partial state lands; the helper
+        already raises ``WrongProjectError`` on a foreign prefix.
+        """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
         results: list[Issue] = []
         errors: list[BatchFailure] = []
         for issue_id in issue_ids:
             try:
                 results.append(action(issue_id))
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
@@ -1771,11 +1788,16 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``actor``
         is present, held issues default the expected holder to actor (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str]] = []
         errors: list[BatchFailure] = []
@@ -1789,6 +1811,8 @@ class IssuesMixin(DBMixinProtocol):
                     expected_assignee=expected_assignee,
                 )
                 results.append({"id": issue_id, "status": "added" if added else "already_exists"})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
@@ -1808,11 +1832,16 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``actor``
         is present, held issues default the expected holder to actor (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str]] = []
         errors: list[BatchFailure] = []
@@ -1826,6 +1855,8 @@ class IssuesMixin(DBMixinProtocol):
                     expected_assignee=expected_assignee,
                 )
                 results.append({"id": issue_id, "status": "removed" if removed else "not_found"})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
@@ -1845,7 +1876,10 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``author``
         is present, held issues default the expected holder to author (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(text, str):
             msg = "text must be a string"
@@ -1853,6 +1887,8 @@ class IssuesMixin(DBMixinProtocol):
         if not isinstance(author, str):
             msg = "author must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str | int]] = []
         errors: list[BatchFailure] = []
@@ -1861,6 +1897,8 @@ class IssuesMixin(DBMixinProtocol):
                 self.get_issue(issue_id)
                 comment_id = self.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
                 results.append({"id": issue_id, "comment_id": comment_id})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:

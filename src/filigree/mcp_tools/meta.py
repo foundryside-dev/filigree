@@ -9,6 +9,7 @@ from typing import Any, cast, get_args
 
 from mcp.types import TextContent, Tool
 
+from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range, _validate_str
@@ -640,12 +641,16 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_add_label(
-        issue_ids,
-        label=args["label"],
-        actor=actor,
-        expected_assignee=expected_assignee,
-    )
+    try:
+        label_succeeded, label_failed = tracker.batch_add_label(
+            issue_ids,
+            label=args["label"],
+            actor=actor,
+            expected_assignee=expected_assignee,
+        )
+    except WrongProjectError as e:
+        # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -679,12 +684,16 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["label"], str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
-    label_succeeded, label_failed = tracker.batch_remove_label(
-        issue_ids,
-        label=args["label"],
-        actor=actor,
-        expected_assignee=expected_assignee,
-    )
+    try:
+        label_succeeded, label_failed = tracker.batch_remove_label(
+            issue_ids,
+            label=args["label"],
+            actor=actor,
+            expected_assignee=expected_assignee,
+        )
+    except WrongProjectError as e:
+        # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -718,12 +727,16 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
     if not isinstance(args["text"], str):
         return _text(ErrorResponse(error="text must be a string", code=ErrorCode.VALIDATION))
-    comment_succeeded, comment_failed = tracker.batch_add_comment(
-        issue_ids,
-        text=args["text"],
-        author=actor,
-        expected_assignee=expected_assignee,
-    )
+    try:
+        comment_succeeded, comment_failed = tracker.batch_add_comment(
+            issue_ids,
+            text=args["text"],
+            author=actor,
+            expected_assignee=expected_assignee,
+        )
+    except WrongProjectError as e:
+        # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
