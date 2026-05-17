@@ -29,6 +29,7 @@ from filigree.mcp_tools.payloads import file_assoc_to_mcp
 from filigree.types.api import (
     AmbiguousTransitionError,
     BatchResponse,
+    ClaimConflictError,
     ClaimNextEmptyResponse,
     ClaimNextResponse,
     ErrorCode,
@@ -912,10 +913,10 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except ValueError as e:
         msg = str(e)
+        if isinstance(e, ClaimConflictError):
+            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
-        if "assigned to" in msg and "expected" in msg:
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
@@ -960,7 +961,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except ValueError as e:
         msg = str(e)
-        if "assigned to" in msg and "expected" in msg:
+        if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(_build_transition_error(tracker, args["issue_id"], msg))
 

@@ -22,6 +22,7 @@ from filigree.dashboard_routes.common import (
 )
 from filigree.models import Issue
 from filigree.types.api import (
+    ClaimConflictError,
     DepDetail,
     EnrichedIssueDetail,
     ErrorCode,
@@ -40,10 +41,10 @@ _ISSUES_LIST_PAGE_SIZE = 1000
 _MISSING = object()
 
 
-def _classify_issue_write_error(message: str) -> ErrorCode:
-    if "assigned to" in message and "expected" in message:
+def _classify_issue_write_error(exc: BaseException) -> ErrorCode:
+    if isinstance(exc, ClaimConflictError):
         return ErrorCode.CONFLICT
-    return classify_value_error(message)
+    return classify_value_error(str(exc))
 
 
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
@@ -428,7 +429,7 @@ def create_classic_router() -> APIRouter:
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
@@ -468,7 +469,7 @@ def create_classic_router() -> APIRouter:
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
@@ -520,7 +521,7 @@ def create_classic_router() -> APIRouter:
         try:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         # Fetch just the single comment to get the real created_at timestamp
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
@@ -1184,7 +1185,7 @@ def create_loom_router() -> APIRouter:
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue_to_loom(issue))
 
@@ -1227,7 +1228,7 @@ def create_loom_router() -> APIRouter:
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
@@ -1358,7 +1359,7 @@ def create_loom_router() -> APIRouter:
         try:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
-            code = _classify_issue_write_error(str(e))
+            code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code))
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:

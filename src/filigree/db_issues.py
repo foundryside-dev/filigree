@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from filigree.db_base import AGE_BUCKETS, DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
 from filigree.models import Issue
 from filigree.templates import TransitionResult, validate_field_pattern
-from filigree.types.api import BatchFailure, ErrorCode, classify_value_error
+from filigree.types.api import BatchFailure, ClaimConflictError, ErrorCode, classify_value_error
 from filigree.types.core import StatusCategory
 
 if TYPE_CHECKING:
@@ -260,8 +260,7 @@ def _check_expected_assignee(
         return
     expected = _normalize_assignee(expected_assignee)
     if current != expected:
-        msg = f"Cannot operate on {issue_id}: assigned to '{current}' (expected '{expected}')"
-        raise ValueError(msg)
+        raise ClaimConflictError(issue_id, observed=current, expected=expected)
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -1161,7 +1160,7 @@ class IssuesMixin(DBMixinProtocol):
             raise ValueError(msg)
         if if_held and observed != expected_holder:
             msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder or "", message=msg)
 
         try:
             cursor = self.conn.execute(
@@ -1184,9 +1183,9 @@ class IssuesMixin(DBMixinProtocol):
                     raise ValueError(msg)
                 if if_held:
                     msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
-                    raise ValueError(msg)
+                    raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
                 msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
-                raise ValueError(msg)
+                raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
 
             self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
             self.conn.commit()
@@ -1287,9 +1286,12 @@ class IssuesMixin(DBMixinProtocol):
                 released.append(result)
             except (ValueError, KeyError) as exc:
                 msg = str(exc)
-                code = ErrorCode.CONFLICT if "expected" in msg and "assigned to" in msg else ErrorCode.VALIDATION
                 if isinstance(exc, KeyError):
                     code = ErrorCode.NOT_FOUND
+                elif isinstance(exc, ClaimConflictError):
+                    code = ErrorCode.CONFLICT
+                else:
+                    code = classify_value_error(msg)
                 failures.append(BatchFailure(id=issue.id, error=msg, code=code))
         return released, failures
 
@@ -1320,7 +1322,7 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
         if expected_holder and observed != expected_holder:
             msg = f"Cannot heartbeat {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot heartbeat {issue_id}: status is '{row['status']}'"
             raise ValueError(msg)
@@ -1339,7 +1341,7 @@ class IssuesMixin(DBMixinProtocol):
                     raise KeyError(msg)
                 new_assignee = current["assignee"] or ""
                 msg = f"Cannot heartbeat {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
-                raise ValueError(msg)
+                raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
             self._record_event(
                 issue_id,
                 "heartbeat",
@@ -1427,7 +1429,7 @@ class IssuesMixin(DBMixinProtocol):
         observed = row["assignee"] or ""
         if observed != expected_assignee:
             msg = f"Cannot reclaim {issue_id}: assigned to '{observed}' (expected '{expected_assignee}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_assignee, message=msg)
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot reclaim {issue_id}: status is '{row['status']}'"
             raise ValueError(msg)
@@ -1447,7 +1449,7 @@ class IssuesMixin(DBMixinProtocol):
                     raise KeyError(msg)
                 new_assignee = current["assignee"] or ""
                 msg = f"Cannot reclaim {issue_id}: reassigned to '{new_assignee}' (expected '{expected_assignee}')"
-                raise ValueError(msg)
+                raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_assignee, message=msg)
             self._record_event(
                 issue_id,
                 "reclaimed",
@@ -1685,7 +1687,7 @@ class IssuesMixin(DBMixinProtocol):
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
                 err = BatchFailure(id=issue_id, error=str(e), code=code)
                 if code == ErrorCode.INVALID_TRANSITION:
                     try:
@@ -1790,7 +1792,7 @@ class IssuesMixin(DBMixinProtocol):
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
@@ -1827,7 +1829,7 @@ class IssuesMixin(DBMixinProtocol):
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
@@ -1862,7 +1864,7 @@ class IssuesMixin(DBMixinProtocol):
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 

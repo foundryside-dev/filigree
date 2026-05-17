@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `ClaimConflictError` for optimistic-lock CAS failures (2.1.0
+  §0.3).** `filigree.types.api.ClaimConflictError(ValueError)` carries
+  the failing issue id and the observed/expected assignee pair. Every
+  CAS-failure path in `db_issues.py` (`_check_expected_assignee`,
+  `release_claim`, `heartbeat_work`, `reclaim_issue`) raises the typed
+  class; every dispatch site (5 in `db_issues.py`, plus the dashboard
+  routes, MCP tools, and CLI surfaces) now routes via `isinstance`
+  rather than message-text matching. The class still subclasses
+  `ValueError`, so pre-existing `except ValueError` callers continue
+  to work — only the routing mechanism changed. Closes the project's
+  own CLAUDE.md contract violation ("switch on `code`, not message
+  text") and removes a class of silent CONFLICT→VALIDATION downgrades
+  triggered by future message rewording.
+
 - **Cross-product entity-association binding (ADR-029, Clarion B.7 /
   WP9-A).** New `entity_associations` table (schema v15) binds Filigree
   issues to Clarion entity IDs as opaque strings. Four MCP tools —

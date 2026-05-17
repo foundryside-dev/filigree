@@ -12,7 +12,7 @@ import click
 from filigree.cli_common import get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
-from filigree.types.api import AmbiguousTransitionError, ErrorCode, InvalidTransitionError, classify_value_error
+from filigree.types.api import AmbiguousTransitionError, ClaimConflictError, ErrorCode, InvalidTransitionError, classify_value_error
 from filigree.validation import sanitize_actor
 
 
@@ -468,7 +468,7 @@ def _update_impl(
         except ValueError as e:
             if as_json:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
@@ -644,7 +644,7 @@ def close(
                     click.echo(f"Not found: {issue_id}", err=True)
             except ValueError as e:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
                 errors.append({"id": issue_id, "error": msg, "code": code})
                 if not as_json:
                     click.echo(msg, err=True)

@@ -12,7 +12,7 @@ from filigree.cli_common import get_db, refresh_summary
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public, label_namespace_to_public
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp
-from filigree.types.api import ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode
 
 
 @click.command("add-comment")
@@ -47,7 +47,7 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee:
             comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"], expected_assignee=expected_assignee)
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
@@ -131,7 +131,7 @@ def add_label(ctx: click.Context, label_name: str, issue_id: str, expected_assig
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
@@ -190,7 +190,7 @@ def remove_label(ctx: click.Context, issue_id: str, label_name: str, expected_as
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)

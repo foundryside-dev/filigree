@@ -17,6 +17,7 @@ from filigree.types.api import (
     AddCommentResult,
     ArchiveClosedResponse,
     BatchResponse,
+    ClaimConflictError,
     CompactEventsResponse,
     ErrorCode,
     ErrorResponse,
@@ -515,7 +516,7 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
         )
     except ValueError as e:
         msg = str(e)
-        if "assigned to" in msg and "expected" in msg:
+        if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
@@ -563,7 +564,7 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
         )
     except ValueError as e:
         msg = str(e)
-        if "assigned to" in msg and "expected" in msg:
+        if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
@@ -608,7 +609,7 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
         )
     except ValueError as e:
         msg = str(e)
-        if "assigned to" in msg and "expected" in msg:
+        if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()

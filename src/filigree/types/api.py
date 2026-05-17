@@ -559,6 +559,24 @@ class SchemaVersionMismatchError(ValueError):
         )
 
 
+class ClaimConflictError(ValueError):
+    """Raised when an optimistic-lock CAS check on a claim-aware write fails.
+
+    Carries the failing issue's id and the expected/observed assignee pair so
+    callers can render a structured conflict envelope. Subclasses
+    ``ValueError`` so pre-typed-exception callers (``except ValueError``)
+    continue to work; the dashboard / MCP / CLI surfaces route this class
+    to ``ErrorCode.CONFLICT`` via ``isinstance`` rather than message-text
+    matching (2.1.0 §0.3).
+    """
+
+    def __init__(self, issue_id: str, *, observed: str, expected: str, message: str | None = None) -> None:
+        self.issue_id = issue_id
+        self.observed = observed
+        self.expected = expected
+        super().__init__(message or f"Cannot operate on {issue_id}: assigned to '{observed}' (expected '{expected}')")
+
+
 class AmbiguousTransitionError(Exception):
     """Raised when start-work cannot choose between multiple wip-category targets.
 
