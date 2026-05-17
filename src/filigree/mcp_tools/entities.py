@@ -29,6 +29,7 @@ from filigree.mcp_tools.common import (
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.inputs import (
     AddEntityAssociationArgs,
+    ListAssociationsByEntityArgs,
     ListEntityAssociationsArgs,
     RemoveEntityAssociationArgs,
 )
@@ -110,12 +111,34 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "required": ["issue_id"],
             },
         ),
+        Tool(
+            name="list_associations_by_entity",
+            description=(
+                "Reverse lookup: return every Filigree issue currently bound "
+                "to a given Clarion entity_id. This is the surface Clarion's "
+                "issues_for tool (B.6) calls to answer 'what issues are about "
+                "this code I'm reading?' in one round trip. Project isolation "
+                "is by DB file. Drift detection remains the consumer's job per "
+                'ADR-029 §"Decision 3".'
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Clarion entity ID (opaque string)",
+                    },
+                },
+                "required": ["entity_id"],
+            },
+        ),
     ]
 
     handlers: dict[str, Callable[..., Any]] = {
         "add_entity_association": _handle_add_entity_association,
         "remove_entity_association": _handle_remove_entity_association,
         "list_entity_associations": _handle_list_entity_associations,
+        "list_associations_by_entity": _handle_list_associations_by_entity,
     }
 
     return tools, handlers
@@ -196,8 +219,37 @@ async def _handle_list_entity_associations(arguments: dict[str, Any]) -> list[Te
     if err is not None:
         return err
 
+    # Order matters here: the data-layer list call enforces the
+    # cross-project prefix (WrongProjectError → 400 VALIDATION) but
+    # returns [] for both "issue has no bindings" and "issue doesn't
+    # exist". Probe in two phases so a typoed or deleted issue
+    # surfaces as NOT_FOUND rather than masquerading as an empty
+    # result, matching get_issue_files (mcp_tools/files.py).
     try:
         rows = tracker.list_entity_associations(issue_id)
     except WrongProjectError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+    if not rows:
+        try:
+            tracker.get_issue(issue_id)
+        except KeyError:
+            return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
+    return _text({"associations": [dict(row) for row in rows]})
+
+
+async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_db
+
+    args = _parse_args(arguments, ListAssociationsByEntityArgs)
+    tracker = _get_db()
+    entity_id = args.get("entity_id", "")
+
+    err = _require_nonempty_str(entity_id, "entity_id")
+    if err is not None:
+        return err
+
+    try:
+        rows = tracker.list_associations_by_entity(entity_id)
+    except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     return _text({"associations": [dict(row) for row in rows]})

@@ -32,8 +32,17 @@ class TestListEntityAssociationsHTTP:
         assert ids == {"py:func:a", "py:func:b"}
 
     async def test_missing_issue_returns_404(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/issue/proj-nonexistent/entity-associations")
+        # dashboard_db prefix is "test"; same-prefix missing ID is the
+        # only configuration where "not found" is the right answer (a
+        # foreign-prefix ID is a project-routing error, not a typo).
+        resp = await client.get("/api/issue/test-nonexistent/entity-associations")
         assert resp.status_code == 404
+
+    async def test_list_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+        """A foreign-prefix issue_id surfaces as VALIDATION via
+        WrongProjectError, not a misleading NOT_FOUND."""
+        resp = await client.get("/api/issue/other-1234567890/entity-associations")
+        assert resp.status_code == 400
 
 
 class TestAddEntityAssociationHTTP:
@@ -69,8 +78,10 @@ class TestAddEntityAssociationHTTP:
         assert body["attached_by"] == "alice"  # preserved
 
     async def test_attach_missing_issue_returns_404(self, client: AsyncClient) -> None:
+        # Same prefix as the test DB ("test") so this is a real "issue
+        # doesn't exist" case rather than a cross-project routing error.
         resp = await client.post(
-            "/api/issue/proj-nonexistent/entity-associations",
+            "/api/issue/test-nonexistent/entity-associations",
             json={"entity_id": "py:func:foo", "content_hash": "h"},
         )
         assert resp.status_code == 404
@@ -89,6 +100,72 @@ class TestAddEntityAssociationHTTP:
             f"/api/issue/{issue_id}/entity-associations",
             json={"entity_id": "py:func:foo"},
         )
+        assert resp.status_code == 400
+
+    async def test_attach_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+        """Other write routes surface foreign-prefix IDs as 400 VALIDATION
+        via WrongProjectError, not 404. The pre-existence check that
+        masked this is intentionally removed.
+        """
+        resp = await client.post(
+            "/api/issue/other-1234567890/entity-associations",
+            json={"entity_id": "py:func:foo", "content_hash": "h"},
+        )
+        assert resp.status_code == 400
+
+    async def test_attach_rejects_whitespace_actor(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Match other write routes: actor goes through _validate_actor
+        so whitespace/control-character values can't reach attached_by.
+        """
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "py:func:foo", "content_hash": "h", "actor": "   "},
+        )
+        assert resp.status_code == 400
+
+    async def test_attach_defaults_actor_when_omitted(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Omitting actor uses the dashboard default rather than empty
+        string, so audit rows always have a non-empty attached_by.
+        """
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "py:func:default-actor", "content_hash": "h"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["attached_by"]  # non-empty
+
+
+class TestListAssociationsByEntityHTTP:
+    """Reverse lookup — the route Clarion's issues_for (B.6) calls."""
+
+    async def test_returns_empty_for_unbound_entity(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        resp = await client.get("/api/entity-associations", params={"entity_id": "py:func:never"})
+        assert resp.status_code == 200
+        assert resp.json() == {"associations": []}
+
+    async def test_returns_every_issue_bound_to_entity(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        a_id = dashboard_db.ids["a"]
+        b_id = dashboard_db.ids["b"]
+        target = "py:func:parser.tokenize"
+        dashboard_db.db.add_entity_association(a_id, target, content_hash="h1")
+        dashboard_db.db.add_entity_association(b_id, target, content_hash="h2")
+        # An unrelated binding that must not appear in the result.
+        dashboard_db.db.add_entity_association(a_id, "py:func:other", content_hash="h3")
+
+        resp = await client.get("/api/entity-associations", params={"entity_id": target})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert {row["issue_id"] for row in body["associations"]} == {a_id, b_id}
+        assert all(row["clarion_entity_id"] == target for row in body["associations"])
+
+    async def test_missing_entity_id_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/entity-associations")
+        assert resp.status_code == 400
+
+    async def test_whitespace_entity_id_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/entity-associations", params={"entity_id": "   "})
         assert resp.status_code == 400
 
 

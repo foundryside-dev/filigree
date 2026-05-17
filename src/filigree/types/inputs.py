@@ -630,6 +630,10 @@ class ListEntityAssociationsArgs(TypedDict):
     issue_id: str
 
 
+class ListAssociationsByEntityArgs(TypedDict):
+    entity_id: str
+
+
 class TriggerScanArgs(TypedDict):
     scanner: str
     file_path: str
@@ -904,6 +908,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "add_entity_association": AddEntityAssociationArgs,
     "remove_entity_association": RemoveEntityAssociationArgs,
     "list_entity_associations": ListEntityAssociationsArgs,
+    "list_associations_by_entity": ListAssociationsByEntityArgs,
     "get_finding": GetFindingArgs,
     "list_findings": ListFindingsArgs,
     "update_finding": UpdateFindingArgs,

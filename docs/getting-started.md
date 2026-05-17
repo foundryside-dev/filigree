@@ -124,7 +124,7 @@ filigree close myproj-a3f9b2e1c0 --reason="Implemented in commit abc123"
 
 ### MCP Server
 
-The MCP server is included in the base install — no extra needed. It exposes 112 tools so agents interact with filigree without parsing CLI output. See [MCP Server Reference](mcp.md).
+The MCP server is included in the base install — no extra needed. It exposes 113 tools so agents interact with filigree without parsing CLI output. See [MCP Server Reference](mcp.md).
 
 ### Web Dashboard
 
@@ -145,7 +145,7 @@ The dashboard is included in the base install — no extra needed.
 ## What Next?
 
 - [CLI Reference](cli.md) — full command reference with parameter docs
-- [MCP Server Reference](mcp.md) — 112 tools for agent-native interaction
+- [MCP Server Reference](mcp.md) — 113 tools for agent-native interaction
 - [Workflow Templates](workflows.md) — state machines, packs, and field schemas
 - [Agent Integration](agent-integration.md) — multi-agent patterns and session resumption
 - [Architecture](architecture.md) — source layout, DB schema, design decisions

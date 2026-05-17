@@ -160,6 +160,48 @@ class TestListEntityAssociationsMCP:
         result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
         assert "drift_warning" not in result["associations"][0]
 
+    async def test_list_missing_issue_returns_not_found(self, mcp_db: FiligreeDB) -> None:
+        """A typoed or deleted issue_id surfaces as NOT_FOUND rather than
+        an empty associations list, matching the get_issue_files pattern.
+        """
+        result = _parse(await call_tool("list_entity_associations", {"issue_id": "mcp-nonexistent"}))
+        assert result["code"] == ErrorCode.NOT_FOUND
+
+    async def test_list_foreign_prefix_validation(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_entity_associations", {"issue_id": "other-1234567890"}))
+        assert result["code"] == ErrorCode.VALIDATION
+
+
+class TestListAssociationsByEntityMCP:
+    """Reverse lookup — the surface Clarion's issues_for (B.6) calls."""
+
+    async def test_returns_empty_for_unbound_entity(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "py:func:never"}))
+        assert result == {"associations": []}
+
+    async def test_returns_every_issue_bound_to_entity(self, mcp_db: FiligreeDB) -> None:
+        a = mcp_db.create_issue("a", priority=2)
+        b = mcp_db.create_issue("b", priority=2)
+        c = mcp_db.create_issue("c", priority=2)
+        target = "py:func:parser.tokenize"
+        for issue in (a, b):
+            await call_tool(
+                "add_entity_association",
+                {"issue_id": issue.id, "entity_id": target, "content_hash": "h"},
+            )
+        await call_tool(
+            "add_entity_association",
+            {"issue_id": c.id, "entity_id": "py:func:other", "content_hash": "h"},
+        )
+
+        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": target}))
+        issue_ids = {row["issue_id"] for row in result["associations"]}
+        assert issue_ids == {a.id, b.id}
+
+    async def test_rejects_blank_entity_id(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "   "}))
+        assert result["code"] == ErrorCode.VALIDATION
+
 
 class TestRoundTrip:
     async def test_full_lifecycle_via_mcp(self, mcp_db: FiligreeDB) -> None:

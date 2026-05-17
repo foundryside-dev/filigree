@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import FiligreeDB, WrongProjectError
-from filigree.dashboard_routes.common import _error_response, _parse_json_body
+from filigree.dashboard_routes.common import _error_response, _parse_json_body, _validate_actor
 from filigree.types.api import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -54,13 +54,39 @@ def create_classic_router() -> APIRouter:
         Returns raw rows; drift detection is the caller's job per
         ADR-029 §"Decision 3".
         """
-        try:
-            db.get_issue(issue_id)
-        except KeyError:
-            return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        # Mirror the MCP handler: list first (prefix-enforcing →
+        # WrongProjectError → 400), then probe existence only when
+        # empty so a typoed or deleted issue surfaces as 404 rather
+        # than an empty-result false negative. get_issue is a read
+        # path and does not enforce prefix, so doing it first would
+        # mask cross-project errors as 404.
         try:
             rows = db.list_entity_associations(issue_id)
         except WrongProjectError as exc:
+            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+        if not rows:
+            try:
+                db.get_issue(issue_id)
+            except KeyError:
+                return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        return JSONResponse({"associations": [dict(row) for row in rows]})
+
+    @router.get("/entity-associations")
+    async def api_list_associations_by_entity(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Reverse lookup: return every issue in this project bound to *entity_id*.
+
+        The companion to ``GET /api/issue/{issue_id}/entity-associations``;
+        the entity_id lives in the query string (URL-encoded) because
+        Clarion entity IDs contain colons. Project isolation is by DB
+        file. Drift detection is the consumer's job per ADR-029
+        §"Decision 3".
+        """
+        entity_id = request.query_params.get("entity_id", "")
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
+        try:
+            rows = db.list_associations_by_entity(entity_id)
+        except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"associations": [dict(row) for row in rows]})
 
@@ -72,30 +98,28 @@ def create_classic_router() -> APIRouter:
 
         Body: ``{"entity_id": str, "content_hash": str, "actor": str?}``.
         """
-        try:
-            db.get_issue(issue_id)
-        except KeyError:
-            return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
         entity_id = body.get("entity_id", "")
         content_hash = body.get("content_hash", "")
-        actor = body.get("actor", "")
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id is required", ErrorCode.VALIDATION, 400)
         if not isinstance(content_hash, str) or not content_hash.strip():
             return _error_response("content_hash is required", ErrorCode.VALIDATION, 400)
-        if not isinstance(actor, str):
-            return _error_response("actor must be a string", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        # No pre-existence check: the data layer enforces prefix
+        # (WrongProjectError → 400 VALIDATION) and existence (ValueError
+        # "Issue not found" → 404 NOT_FOUND) in the correct order. A
+        # pre-check via get_issue() would surface foreign-prefix IDs as
+        # 404, contradicting the other write routes.
         try:
             row = db.add_entity_association(issue_id, entity_id, content_hash, actor=actor)
         except WrongProjectError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         except ValueError as exc:
-            # The data layer already validated existence above, but a
-            # ValueError can still surface for empty strings if a future
-            # refactor weakens the route-side validation.
             code = ErrorCode.NOT_FOUND if "Issue not found" in str(exc) else ErrorCode.VALIDATION
             status = 404 if code == ErrorCode.NOT_FOUND else 400
             return _error_response(str(exc), code, status)

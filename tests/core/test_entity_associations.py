@@ -52,13 +52,24 @@ class TestAddEntityAssociation:
 
     def test_attach_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
-        with pytest.raises(ValueError, match="entity_id must not be empty"):
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
             db.add_entity_association(issue.id, "", content_hash="hash")
+
+    def test_attach_rejects_whitespace_entity_id(self, db: FiligreeDB) -> None:
+        """Match the MCP/HTTP layers, which both reject .strip() == ""."""
+        issue = db.create_issue("t", priority=2)
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
+            db.add_entity_association(issue.id, "   ", content_hash="hash")
 
     def test_attach_rejects_empty_content_hash(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
-        with pytest.raises(ValueError, match="content_hash must not be empty"):
+        with pytest.raises(ValueError, match="content_hash must not be blank"):
             db.add_entity_association(issue.id, "py:func:foo", content_hash="")
+
+    def test_attach_rejects_whitespace_content_hash(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        with pytest.raises(ValueError, match="content_hash must not be blank"):
+            db.add_entity_association(issue.id, "py:func:foo", content_hash="\t\n ")
 
     def test_attach_rejects_foreign_prefix(self, db: FiligreeDB) -> None:
         """Prefix enforcement matches every other write-side mutation."""
@@ -92,8 +103,13 @@ class TestRemoveEntityAssociation:
 
     def test_remove_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
-        with pytest.raises(ValueError, match="entity_id must not be empty"):
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
             db.remove_entity_association(issue.id, "")
+
+    def test_remove_rejects_whitespace_entity_id(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
+            db.remove_entity_association(issue.id, "  ")
 
 
 class TestListEntityAssociations:
@@ -131,6 +147,51 @@ class TestListEntityAssociations:
         assert "drift_warning" not in rows[0]
         # The stored hash is returned verbatim so the caller can compare.
         assert rows[0]["content_hash_at_attach"] == "original"
+
+
+class TestListAssociationsByEntity:
+    """Reverse lookup — the surface Clarion's issues_for (B.6) calls."""
+
+    def test_empty_entity_returns_empty_list(self, db: FiligreeDB) -> None:
+        assert db.list_associations_by_entity("py:func:never-attached") == []
+
+    def test_returns_all_issues_bound_to_entity(self, db: FiligreeDB) -> None:
+        a = db.create_issue("a", priority=2)
+        b = db.create_issue("b", priority=2)
+        c = db.create_issue("c", priority=2)
+        target = "py:func:parser.tokenize"
+        db.add_entity_association(a.id, target, content_hash="h1")
+        db.add_entity_association(b.id, target, content_hash="h2")
+        db.add_entity_association(c.id, "py:func:unrelated", content_hash="h3")
+
+        rows = db.list_associations_by_entity(target)
+        issue_ids = {row["issue_id"] for row in rows}
+        assert issue_ids == {a.id, b.id}
+        # The unrelated entity's binding does not appear in the result.
+        assert all(row["clarion_entity_id"] == target for row in rows)
+
+    def test_returns_raw_hash_for_drift_comparison(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, "py:func:x", content_hash="original")
+        rows = db.list_associations_by_entity("py:func:x")
+        assert rows[0]["content_hash_at_attach"] == "original"
+        assert "drift_warning" not in rows[0]
+
+    def test_rejects_blank_entity_id(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
+            db.list_associations_by_entity("")
+        with pytest.raises(ValueError, match="entity_id must not be blank"):
+            db.list_associations_by_entity("   ")
+
+    def test_treats_entity_id_opaquely(self, db: FiligreeDB) -> None:
+        """Federation enrich-only: malformed entity IDs round-trip verbatim,
+        with no parsing or schema enforcement on the lookup side."""
+        issue = db.create_issue("t", priority=2)
+        weird = "::: not a real grammar :::"
+        db.add_entity_association(issue.id, weird, content_hash="h")
+        rows = db.list_associations_by_entity(weird)
+        assert len(rows) == 1
+        assert rows[0]["clarion_entity_id"] == weird
 
 
 # Cascade behaviour (ON DELETE CASCADE on issue_id) is pinned at the schema

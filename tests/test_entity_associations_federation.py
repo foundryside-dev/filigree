@@ -106,6 +106,11 @@ class TestFederationInitialisationCoupling:
             db.add_entity_association(issue.id, "py:func:b", content_hash="h2")
             rows = db.list_entity_associations(issue.id)
             assert len(rows) == 2
+            # Reverse lookup — the exact surface Clarion's issues_for
+            # calls — must run with no Clarion process on the box.
+            reverse = db.list_associations_by_entity("py:func:a")
+            assert len(reverse) == 1
+            assert reverse[0]["issue_id"] == issue.id
             removed = db.remove_entity_association(issue.id, "py:func:a")
             assert removed is True
         finally:

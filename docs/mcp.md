@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 112 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 113 tools, 1 resource, and 1 prompt.
 
 ## Contents
 
@@ -757,6 +757,7 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | `add_entity_association` | Attach a Clarion entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
 | `remove_entity_association` | Remove the binding identified by `(issue_id, entity_id)` |
 | `list_entity_associations` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
+| `list_associations_by_entity` | Reverse lookup: return every issue in this project bound to a given Clarion entity (the surface Clarion's `issues_for` calls) |
 
 #### `add_entity_association`
 
@@ -779,6 +780,16 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
+
+#### `list_associations_by_entity`
+
+Project isolation is by DB file — every row in this query already
+belongs to the project hosting this database, so no project filter
+is required (or accepted).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `entity_id` | string | yes | Opaque Clarion entity ID; not parsed |
 
 ### Agent Context Notes
 

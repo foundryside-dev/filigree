@@ -11,19 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Cross-product entity-association binding (ADR-029, Clarion B.7 /
   WP9-A).** New `entity_associations` table (schema v15) binds Filigree
-  issues to Clarion entity IDs as opaque strings. Three MCP tools —
+  issues to Clarion entity IDs as opaque strings. Four MCP tools —
   `add_entity_association`, `remove_entity_association`,
-  `list_entity_associations` — front the binding for agent writes;
-  three matching HTTP routes under `/api/issue/{issue_id}/entity-associations`
-  serve cross-product reads (notably for Clarion's forthcoming
-  `issues_for` tool, B.6). The binding is idempotent on the composite
-  key: re-attaching refreshes `content_hash_at_attach` and
-  `attached_at` while preserving the original `attached_by`, so drift
-  refreshes don't overwrite the audit signal of who first bound the
-  issue. Filigree never parses the Clarion entity-ID grammar
-  (ADR-003), preserving the federation enrich-only rule (loom.md §5);
-  the audit is encoded as three named tests in
-  `tests/test_entity_associations_federation.py`.
+  `list_entity_associations`, and `list_associations_by_entity` —
+  front the binding for agent writes and both lookup directions;
+  matching HTTP routes serve cross-product reads (notably for
+  Clarion's forthcoming `issues_for` tool, B.6). The reverse-lookup
+  surface (`GET /api/entity-associations?entity_id=…`,
+  `list_associations_by_entity`) answers "what issues are about this
+  code I'm reading?" in one round trip and uses the
+  `idx_entity_associations_entity` index. The binding is idempotent
+  on the composite key: re-attaching refreshes `content_hash_at_attach`
+  and `attached_at` while preserving the original `attached_by`, so
+  drift refreshes don't overwrite the audit signal of who first
+  bound the issue. Actor identity on HTTP writes runs through
+  `_validate_actor` for parity with other write routes. Filigree
+  never parses the Clarion entity-ID grammar (ADR-003), preserving
+  the federation enrich-only rule (loom.md §5); the audit is encoded
+  as three named tests in `tests/test_entity_associations_federation.py`,
+  with the initialisation-coupling test exercising the reverse
+  lookup under blocked sockets so the §5 invariant covers Clarion's
+  primary call path.
 
 ## [2.0.3] - 2026-05-17
 

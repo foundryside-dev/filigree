@@ -62,14 +62,19 @@ either catalogue. The verbs you will reach for most:
 - **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
 - **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
 - **Cross-product entity bindings (ADR-029):** `add_entity_association`,
-  `remove_entity_association`, `list_entity_associations`. Used when a
-  sibling tool (e.g. Clarion) needs to bind a Filigree issue to a
-  function, class, or module identifier it owns. The `entity_id` is an
-  opaque string from Filigree's perspective; the consumer (the sibling
-  tool's read path) does drift detection against the stored
-  `content_hash_at_attach`. Also reachable over HTTP as
-  `GET/POST /api/issue/{issue_id}/entity-associations` and
-  `DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`.
+  `remove_entity_association`, `list_entity_associations`,
+  `list_associations_by_entity`. Used when a sibling tool (e.g.
+  Clarion) needs to bind a Filigree issue to a function, class, or
+  module identifier it owns. The `entity_id` is an opaque string
+  from Filigree's perspective; the consumer (the sibling tool's read
+  path) does drift detection against the stored
+  `content_hash_at_attach`. `list_associations_by_entity` is the
+  reverse-lookup surface — given a Clarion entity ID, return every
+  Filigree issue bound to it (project isolation is by DB file). Also
+  reachable over HTTP as
+  `GET/POST /api/issue/{issue_id}/entity-associations`,
+  `DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`,
+  and `GET /api/entity-associations?entity_id=…`.
 - **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
 
 Pass `--actor <name>` (CLI) so events attribute to your agent identity.

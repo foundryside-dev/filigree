@@ -80,11 +80,11 @@ class EntityAssociationsMixin(DBMixinProtocol):
                 blank where they must not be.
         """
         self._check_id_prefix(issue_id)
-        if not entity_id:
-            msg = "entity_id must not be empty"
+        if not entity_id or not entity_id.strip():
+            msg = "entity_id must not be blank"
             raise ValueError(msg)
-        if not content_hash:
-            msg = "content_hash must not be empty"
+        if not content_hash or not content_hash.strip():
+            msg = "content_hash must not be blank"
             raise ValueError(msg)
         # Validate issue exists (FK would catch this too, but the SQLite
         # error is less informative than a typed ValueError).
@@ -149,8 +149,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
             did not exist (idempotent — no-op on missing).
         """
         self._check_id_prefix(issue_id)
-        if not entity_id:
-            msg = "entity_id must not be empty"
+        if not entity_id or not entity_id.strip():
+            msg = "entity_id must not be blank"
             raise ValueError(msg)
         try:
             cursor = self.conn.execute(
@@ -181,6 +181,45 @@ class EntityAssociationsMixin(DBMixinProtocol):
             ORDER BY attached_at ASC, clarion_entity_id ASC
             """,
             (issue_id,),
+        ).fetchall()
+        return [
+            EntityAssociationRow(
+                issue_id=r["issue_id"],
+                clarion_entity_id=r["clarion_entity_id"],
+                content_hash_at_attach=r["content_hash_at_attach"],
+                attached_at=r["attached_at"],
+                attached_by=r["attached_by"],
+            )
+            for r in rows
+        ]
+
+    def list_associations_by_entity(self, entity_id: str) -> list[EntityAssociationRow]:
+        """Return all issue bindings for a given Clarion entity.
+
+        The reverse of :meth:`list_entity_associations`: given an
+        opaque Clarion entity ID, return every Filigree issue currently
+        bound to it. This is the surface Clarion's ``issues_for`` MCP
+        tool (B.6) calls to answer "what issues are about this code I'm
+        reading?" in one round trip.
+
+        Uses the ``idx_entity_associations_entity`` index. Isolation
+        between projects is by DB file — every row in this query
+        already belongs to the project hosting this database.
+
+        Raw rows are returned in attach-time order; drift detection is
+        the consumer's job per ADR-029 §"Decision 3".
+        """
+        if not entity_id or not entity_id.strip():
+            msg = "entity_id must not be blank"
+            raise ValueError(msg)
+        rows = self.conn.execute(
+            """
+            SELECT issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by
+            FROM entity_associations
+            WHERE clarion_entity_id = ?
+            ORDER BY attached_at ASC, issue_id ASC
+            """,
+            (entity_id,),
         ).fetchall()
         return [
             EntityAssociationRow(

@@ -22,17 +22,17 @@ from filigree.db_workflow import WorkflowMixin
 
 def test_mcp_tools_package_exists() -> None:
     """All domain modules import and expose register()."""
-    from filigree.mcp_tools import annotations, files, issues, meta, observations, planning, workflow
+    from filigree.mcp_tools import annotations, entities, files, issues, meta, observations, planning, workflow
 
-    for mod in (issues, planning, files, workflow, meta, observations, annotations):
+    for mod in (issues, planning, files, workflow, meta, observations, annotations, entities):
         assert callable(getattr(mod, "register", None)), f"{mod.__name__} missing register()"
 
 
 def test_mcp_tools_register_shape() -> None:
     """register() returns (list[Tool], dict[str, Callable])."""
-    from filigree.mcp_tools import annotations, files, issues, meta, observations, planning, workflow
+    from filigree.mcp_tools import annotations, entities, files, issues, meta, observations, planning, workflow
 
-    for mod in (issues, planning, files, workflow, meta, observations, annotations):
+    for mod in (issues, planning, files, workflow, meta, observations, annotations, entities):
         tools, handlers = mod.register()
         assert isinstance(tools, list), f"{mod.__name__}.register() tools is not a list"
         assert all(isinstance(t, Tool) for t in tools), f"{mod.__name__} has non-Tool items"
@@ -49,22 +49,24 @@ def test_mcp_tools_register_shape() -> None:
 
 
 def test_mcp_tools_total_count() -> None:
-    """All 109 tools are registered across domain modules.
+    """All 113 tools are registered across domain modules.
 
-    Count includes the structured observation triage surfaces so the
-    split-module registry test notices dropped tool registrations.
+    Count includes the structured observation triage surfaces and the
+    four entity-association tools (ADR-029) so the split-module
+    registry test notices dropped tool registrations.
     """
-    from filigree.mcp_tools import annotations, files, issues, meta, observations, planning, scanners, workflow
+    from filigree.mcp_tools import annotations, entities, files, issues, meta, observations, planning, scanners, workflow
 
     total = 0
-    for mod in (issues, planning, files, workflow, meta, observations, annotations):
+    for mod in (issues, planning, files, workflow, meta, observations, annotations, entities):
         tools, _ = mod.register()
         total += len(tools)
     # Scanner module needs include_legacy=True to include all legacy aliases.
     tools, _ = scanners.register(include_legacy=True)
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
-    assert total == 109, f"Expected 109 tools total, got {total}"
+    # +4 for entity_associations (ADR-029): add/remove/list-by-issue/list-by-entity.
+    assert total == 113, f"Expected 113 tools total, got {total}"
 
 
 def test_mcp_docs_tool_count_matches_registry() -> None:
