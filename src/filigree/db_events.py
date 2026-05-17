@@ -93,10 +93,18 @@ class EventsMixin(DBMixinProtocol):
         new_value: str | None = None,
         comment: str = "",
     ) -> None:
+        # 2.1.0 §0.2: plain INSERT (not INSERT OR IGNORE) so true-duplicate
+        # collisions bubble up to the caller's transaction for rollback.
+        # ``event_seq`` is computed inline as the next per-issue monotonic
+        # value via COALESCE+MAX subquery — multi-process-safe (no
+        # in-memory counter), survives crashes, and runs atomically inside
+        # the caller's open transaction. Same-second emissions (heartbeat
+        # bursts, batch ops sharing _now_iso()) get distinct sequence
+        # numbers and stop silently colliding on the dedup index.
         self.conn.execute(
-            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (issue_id, event_type, actor, old_value, new_value, comment, _now_iso()),
+            "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",
+            (issue_id, event_type, actor, old_value, new_value, comment, _now_iso(), issue_id),
         )
 
     def get_recent_events(self, limit: int = 20) -> list[EventRecordWithTitle]:

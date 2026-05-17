@@ -470,10 +470,18 @@ class MetaMixin(DBMixinProtocol):
         return inserted
 
     def bulk_insert_event(self, event_data: dict[str, Any]) -> bool:
-        """Insert an event. Returns True if inserted, False if skipped (duplicate)."""
+        """Insert an event. Returns True if inserted, False if skipped (duplicate).
+
+        v16: ``event_seq`` is forwarded from ``event_data`` when present so
+        JSONL round-trips preserve per-issue sequence numbers; legacy
+        callers that omit it default to 0 (matching the migration's
+        backfill of pre-v16 rows). ``INSERT OR IGNORE`` is retained on
+        purpose for this path — imports re-applied against the same DB
+        should be idempotent on the full composite key, not raise.
+        """
         cursor = self.conn.execute(
-            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_data["issue_id"],
                 event_data["event_type"],
@@ -482,6 +490,7 @@ class MetaMixin(DBMixinProtocol):
                 event_data.get("new_value"),
                 event_data.get("comment", ""),
                 event_data.get("created_at", _now_iso()),
+                int(event_data.get("event_seq", 0)),
             ),
         )
         inserted = cursor.rowcount > 0
@@ -1091,8 +1100,8 @@ class MetaMixin(DBMixinProtocol):
                 # (filigree-20911dfe6d)
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO events "
-                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.get("issue_id", ""),
                         record.get("event_type", ""),
@@ -1101,6 +1110,7 @@ class MetaMixin(DBMixinProtocol):
                         record.get("new_value"),
                         record.get("comment", ""),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
+                        int(record.get("event_seq", 0)),
                     ),
                 )
                 count += cursor.rowcount

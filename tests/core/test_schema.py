@@ -212,6 +212,54 @@ class TestEntityAssociationsSchema:
         assert "content_hash_at_attach" in columns
         conn.close()
 
+    def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
+        """v15→v16 (2.1.0 §0.2): event_seq column added with DEFAULT 0;
+        the dedup UNIQUE index is rebuilt to include the new column so
+        same-second emissions stop silently colliding. Historical event
+        rows survive the migration with event_seq=0 — replaying the
+        pre-v16 silent-collision behaviour on the backfill is acceptable
+        because those events were already being dropped under the old
+        INSERT OR IGNORE."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Roll the schema back to v15 shape: drop event_seq + restore the
+        # pre-v16 dedup index.
+        conn.execute("PRAGMA user_version = 15")
+        conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
+        # SQLite can't drop columns directly without rebuild; for the
+        # migration regression we just rely on add_column being
+        # idempotent and the rebuilt index being the observable change.
+        # First confirm the v16 column is *present* (because executescript
+        # ran SCHEMA_SQL above), then exercise the dedup-index rebuild.
+        assert "event_seq" in _get_table_columns(conn, "events")
+        # Seed one historical event row with event_seq=0 to mimic a
+        # backfilled pre-v16 record.
+        ts = "2026-01-01T00:00:00+00:00"
+        conn.execute(
+            "INSERT INTO issues (id, title, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("test-fffeeedd00", "t", "open", "task", ts, ts),
+        )
+        conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at, event_seq) VALUES (?, ?, ?, ?, ?)",
+            ("test-fffeeedd00", "created", "", ts, 0),
+        )
+        conn.commit()
+
+        apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+
+        # event_seq still there; historical row preserved.
+        assert "event_seq" in _get_table_columns(conn, "events")
+        rows = conn.execute("SELECT event_seq FROM events WHERE issue_id = 'test-fffeeedd00'").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["event_seq"] == 0
+        # Dedup index now includes event_seq — check the column count on
+        # the index covers the new tuple.
+        idx_info = conn.execute("PRAGMA index_info(idx_events_dedup)").fetchall()
+        # Composite is (issue_id, event_type, actor, coalesce(old), coalesce(new),
+        # created_at, event_seq) — 7 columns.
+        assert len(idx_info) == 7
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Migration runner tests

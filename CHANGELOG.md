@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`_record_event` no longer silently dedups same-second collisions
+  (2.1.0 §0.2).** The events table grew a new ``event_seq INTEGER NOT
+  NULL DEFAULT 0`` column (schema v15 → v16) and the dedup UNIQUE
+  index was rebuilt to include it. ``_record_event`` now uses plain
+  ``INSERT`` (not ``INSERT OR IGNORE``) and computes ``event_seq``
+  inline as ``COALESCE((SELECT MAX(event_seq) FROM events WHERE
+  issue_id = ?), -1) + 1`` so same-actor same-second emissions
+  (heartbeat bursts, batch ops sharing one ``_now_iso()``) land
+  distinct rows. True duplicates (every column including
+  ``event_seq`` identical) now raise ``IntegrityError`` so the
+  caller's transaction can roll back rather than silently dropping
+  the event. Backward-compat: previously suppressed events were
+  never observed by callers anyway; the migration only catches
+  the events that were always meant to be recorded. JSONL
+  ``export_jsonl`` automatically includes the new column via
+  ``SELECT *``; the ``bulk_insert_event`` and import paths now
+  forward ``event_seq`` (default 0) so round-trips preserve
+  per-issue sequence numbers. Forward-only migration; historical
+  rows backfill to ``event_seq=0``. Closes silent-failure C3 from
+  the 2.1.0 panel review.
+
 ### Fixed
 
 - **`update_issue` is now atomic on assignee under multi-agent contention

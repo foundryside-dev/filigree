@@ -598,6 +598,33 @@ def migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
     add_column(conn, "file_events", "actor", "TEXT", "''")
 
 
+def migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """v15 -> v16: Add event_seq column + rebuild dedup UNIQUE index (2.1.0 §0.2).
+
+    Previously the events table's UNIQUE dedup index was
+    ``(issue_id, event_type, actor, old_value, new_value, created_at)``.
+    With ISO-second precision on ``created_at``, same-actor heartbeats in
+    the same second collided and silently lost events under ``INSERT OR
+    IGNORE`` — the silent-failure C3 surface from the 2.1.0 panel review.
+
+    The new column ``event_seq INTEGER NOT NULL DEFAULT 0`` extends the
+    dedup tuple. ``_record_event`` computes the next value inline via
+    ``COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
+    -1) + 1`` so bursts at the same second land distinct rows. Historical
+    rows default to 0; since the old behaviour was to silently drop the
+    collision, replaying history with all-zero ``event_seq`` is no worse
+    than the pre-v16 state.
+    """
+    add_column(conn, "events", "event_seq", "INTEGER", "0")
+    conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_events_dedup ON events("
+        "issue_id, event_type, actor, "
+        "coalesce(old_value, ''), coalesce(new_value, ''), "
+        "created_at, event_seq)"
+    )
+
+
 def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     """v14 -> v15: Add entity_associations table (ADR-029, Clarion B.7).
 
@@ -634,6 +661,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     12: migrate_v12_to_v13,
     13: migrate_v13_to_v14,
     14: migrate_v14_to_v15,
+    15: migrate_v15_to_v16,
 }
 
 

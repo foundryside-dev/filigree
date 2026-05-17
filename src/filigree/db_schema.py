@@ -55,7 +55,12 @@ CREATE TABLE IF NOT EXISTS events (
     old_value  TEXT,
     new_value  TEXT,
     comment    TEXT DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- v16: per-issue monotonic sequence so same-second emissions don't
+    -- collide on the dedup index. _record_event computes the next value
+    -- inline via COALESCE((SELECT MAX(event_seq) FROM events WHERE
+    -- issue_id = ?), -1) + 1; legacy rows default to 0.
+    event_seq  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
@@ -63,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_issue_time ON events(issue_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup
   ON events(issue_id, event_type, actor,
-    coalesce(old_value,''), coalesce(new_value,''), created_at);
+    coalesce(old_value,''), coalesce(new_value,''), created_at, event_seq);
 
 CREATE TABLE IF NOT EXISTS comments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -505,4 +510,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
