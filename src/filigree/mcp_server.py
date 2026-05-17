@@ -41,6 +41,7 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
+    ForeignDatabaseError,
     find_filigree_anchor,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
@@ -679,9 +680,15 @@ def create_mcp_app(
                 await resp(scope, receive, send)
                 return
             except FileNotFoundError as exc:
+                # ForeignDatabaseError subclasses FileNotFoundError; its
+                # str() embeds absolute paths (cwd/anchor/git_boundary).
+                # Redact for wire-exposed surfaces; plain
+                # ProjectNotInitialisedError has no foreign paths and
+                # keeps its rich "run filigree init" guidance.
+                err_msg = exc.safe_message if isinstance(exc, ForeignDatabaseError) else str(exc)
                 resp = JSONResponse(
                     {
-                        "error": str(exc),
+                        "error": err_msg,
                         "code": ErrorCode.NOT_INITIALIZED,
                     },
                     status_code=503,
@@ -689,9 +696,13 @@ def create_mcp_app(
                 await resp(scope, receive, send)
                 return
             except (OSError, sqlite3.Error) as exc:
+                # OSError also covers ForeignDatabaseError (via
+                # FileNotFoundError → OSError) for callers that bypass
+                # the more specific handler above — keep the same redaction.
+                err_msg = exc.safe_message if isinstance(exc, ForeignDatabaseError) else str(exc)
                 resp = JSONResponse(
                     {
-                        "error": str(exc),
+                        "error": err_msg,
                         "code": ErrorCode.IO,
                     },
                     status_code=500,

@@ -398,6 +398,32 @@ class TestForeignDatabaseDetection:
         with pytest.raises(FileNotFoundError):
             find_filigree_anchor(inner)
 
+    def test_safe_message_omits_absolute_paths(self, tmp_path: Path) -> None:
+        """``safe_message`` is the wire-exposed variant used by HTTP/MCP
+        responses. It must not embed the cwd, anchor, or git-boundary
+        absolute paths — those leak the user's directory layout.
+        ``str(exc)`` keeps the rich diagnostic for CLI/stderr/doctor.
+        """
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        (inner / ".git").mkdir()
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(inner)
+        exc = excinfo.value
+        # Rich str() — still contains the paths for CLI use.
+        assert str(inner.resolve()) in str(exc)
+        # safe_message — no absolute paths from this fixture.
+        assert str(inner.resolve()) not in exc.safe_message
+        assert str(tmp_path.resolve()) not in exc.safe_message
+        # But the diagnostic intent is preserved.
+        assert "Refusing to latch" in exc.safe_message
+        assert "filigree doctor" in exc.safe_message
+
 
 class TestGitWorktreeDiscovery:
     """Git linked worktrees place a ``.git`` *file* (not directory) at the
@@ -424,11 +450,25 @@ class TestGitWorktreeDiscovery:
 
     @staticmethod
     def _make_worktree(main_repo: Path, worktree_root: Path, name: str) -> Path:
-        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping."""
+        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping.
+
+        Matches git's on-disk layout (verified against real ``git worktree
+        add``):
+
+        - ``<worktree>/.git`` is a file containing ``gitdir: <admin>``.
+        - ``<admin>/gitdir`` (the back-pointer) contains the absolute path
+          to ``<worktree>/.git`` — used by
+          :func:`_resolve_to_main_worktree` to verify the worktree pointer
+          bidirectionally and reject spoofed or stale pointers.
+        """
         wt_admin = main_repo / ".git" / "worktrees" / name
         wt_admin.mkdir(parents=True)
         worktree_root.mkdir(parents=True, exist_ok=True)
-        (worktree_root / ".git").write_text(f"gitdir: {wt_admin}\n")
+        wt_git_file = worktree_root / ".git"
+        wt_git_file.write_text(f"gitdir: {wt_admin}\n")
+        # Back-pointer that real ``git worktree add`` writes — load-bearing
+        # for the bidirectional verification in _resolve_to_main_worktree.
+        (wt_admin / "gitdir").write_text(f"{wt_git_file}\n")
         return worktree_root
 
     def test_worktree_inside_main_repo_finds_main_anchor(self, tmp_path: Path) -> None:
@@ -501,9 +541,12 @@ class TestGitWorktreeDiscovery:
         wt_admin.mkdir(parents=True)
         wt = main / ".worktrees" / "rel"
         wt.mkdir(parents=True)
+        wt_git = wt / ".git"
         # Relative pointer: from wt/.git up to main/.git/worktrees/rel
         rel = os.path.relpath(wt_admin, wt)
-        (wt / ".git").write_text(f"gitdir: {rel}\n")
+        wt_git.write_text(f"gitdir: {rel}\n")
+        # Back-pointer that real git writes — absolute path to wt/.git.
+        (wt_admin / "gitdir").write_text(f"{wt_git}\n")
 
         project_root, _ = find_filigree_anchor(wt)
         assert project_root == main
@@ -592,6 +635,168 @@ class TestGitWorktreeDiscovery:
         # boundary logic still treats it as a boundary and refuses.
         with pytest.raises(ForeignDatabaseError):
             find_filigree_anchor(weird)
+
+    def test_empty_gitdir_value_is_left_alone(self, tmp_path: Path) -> None:
+        """A ``.git`` file with an empty ``gitdir:`` value must not redirect.
+
+        Otherwise ``Path("").resolve()`` returns cwd, which made the prior
+        behaviour cwd-dependent (worked by accident because cwd was never
+        named ``worktrees/<...>``).
+        """
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        weird = tmp_path / "weird"
+        weird.mkdir()
+        (weird / ".git").write_text("gitdir:   \n")
+
+        with pytest.raises(ForeignDatabaseError):
+            find_filigree_anchor(weird)
+
+    def test_crlf_gitdir_line_resolves(self, tmp_path: Path) -> None:
+        """Some editors / git ports write CRLF line endings. ``splitlines``
+        handles both, but pin the behaviour explicitly.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt_admin = main / ".git" / "worktrees" / "crlf"
+        wt_admin.mkdir(parents=True)
+        wt = tmp_path / "wt-crlf"
+        wt.mkdir(parents=True)
+        wt_git = wt / ".git"
+        wt_git.write_text(f"gitdir: {wt_admin}\r\n")
+        (wt_admin / "gitdir").write_text(f"{wt_git}\r\n")
+
+        project_root, _ = find_filigree_anchor(wt)
+        assert project_root == main
+
+    def test_gitdir_value_with_null_byte_is_left_alone(self, tmp_path: Path) -> None:
+        """A ``gitdir:`` value containing a NUL byte raises ``ValueError`` from
+        ``Path.resolve()`` — must be caught and fall back to start.
+        """
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        weird = tmp_path / "weird"
+        weird.mkdir()
+        (weird / ".git").write_text("gitdir: /tmp/foo\x00bar\n")
+
+        # Must not crash — falls back, then the .git file is a boundary.
+        with pytest.raises(ForeignDatabaseError):
+            find_filigree_anchor(weird)
+
+    def test_stale_worktree_admin_dir_does_not_redirect(self, tmp_path: Path) -> None:
+        """A ``.git`` file pointing at a worktree admin dir that no longer
+        exists must not redirect — the admin dir might have been deleted
+        manually (``git worktree remove --force`` followed by partial
+        cleanup), or the worktree was restored from backup without its
+        admin dir. The pointer is stale; treating it as a valid redirect
+        would route writes to a possibly-unrelated repo.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt = tmp_path / "stale-wt"
+        wt.mkdir(parents=True)
+        # Point at an admin dir that doesn't exist.
+        (wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'ghost'}\n")
+
+        # No nested anchor, no foreign DB — the .git file falls back to
+        # being treated as a boundary, and walk-up has no other anchor.
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(wt)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
+    def test_missing_back_pointer_does_not_redirect(self, tmp_path: Path) -> None:
+        """Admin dir exists but has no ``gitdir`` back-pointer file — must
+        not redirect. Real ``git worktree add`` always writes one.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt_admin = main / ".git" / "worktrees" / "no-back-pointer"
+        wt_admin.mkdir(parents=True)
+        wt = tmp_path / "wt-no-bp"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {wt_admin}\n")
+        # Deliberately do NOT write wt_admin/gitdir.
+
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(wt)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
+    def test_spoofed_worktree_pointer_does_not_redirect(self, tmp_path: Path) -> None:
+        """An attacker-controlled ``.git`` file pointing at a victim project's
+        admin dir must not redirect — the victim's back-pointer points at
+        the victim's worktree, not at the attacker's. This closes the
+        confused-deputy that 2.0.3's redirect would otherwise have opened.
+        """
+        # Victim project: a real main repo + a real worktree of its own.
+        victim_main = self._make_main_repo(tmp_path / "victim-main")
+        victim_wt = self._make_worktree(victim_main, tmp_path / "victim-wt", "real")
+        assert victim_wt  # silence unused-var; the back-pointer in the admin dir matters.
+
+        # Attacker: a directory containing a .git file that points at the
+        # victim's admin directory. No real worktree of victim — just a
+        # spoofed pointer trying to ride the redirect into victim_main's DB.
+        attacker = tmp_path / "attacker-clone"
+        attacker.mkdir()
+        (attacker / ".git").write_text(f"gitdir: {victim_main / '.git' / 'worktrees' / 'real'}\n")
+
+        # Bidirectional check fires: victim's back-pointer doesn't point
+        # at attacker's .git file, so redirect is refused. With no other
+        # anchor in attacker's ancestry, ProjectNotInitialisedError.
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(attacker)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
+    def test_nested_legacy_dir_does_not_block_strict_redirect(self, tmp_path: Path) -> None:
+        """A nested legacy ``.filigree/`` inside a worktree must NOT suppress
+        the redirect for strict ``find_filigree_conf`` — strict callers
+        ignore legacy dirs, so a stray legacy dir shouldn't make them raise
+        a spurious ForeignDatabaseError when the main repo has a conf.
+
+        Regression for the asymmetric-anchor-predicate bug:
+        ``_resolve_to_main_worktree`` accepted both anchor types as a
+        "don't redirect past me" marker, but ``find_filigree_conf``
+        only recognises ``.filigree.conf`` — so the legacy dir blocked
+        the redirect, then strict walk-up ignored the legacy dir, hit
+        the worktree ``.git`` as a boundary, and raised the wrong error.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        # A stray legacy dir inside the worktree (no conf).
+        nested = wt / "legacy-sub"
+        nested.mkdir()
+        (nested / FILIGREE_DIR_NAME).mkdir()
+
+        # Strict find_filigree_conf should still redirect to main's conf —
+        # the legacy dir is invisible to it.
+        assert find_filigree_conf(nested / "src") == main / CONF_FILENAME
+        # And the tolerant find_filigree_anchor still honours the nested
+        # legacy dir as a closer anchor.
+        project_root, conf_path = find_filigree_anchor(nested / "src")
+        assert project_root == nested
+        assert conf_path is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+    def test_unreadable_git_file_does_not_redirect(self, tmp_path: Path) -> None:
+        """A ``.git`` file we can't read falls back to start. Must not
+        crash, must not silently open the main worktree's DB on a guess.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses permission checks")
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        wt_git = wt / ".git"
+        original_mode = wt_git.stat().st_mode
+        wt_git.chmod(0o000)
+        try:
+            # Permission denied on the worktree's .git — falls back, walk-up
+            # then sees no other anchor in this subtree, fails with
+            # ForeignDatabaseError (the .git file still exists() and triggers
+            # the boundary guard even though we can't read it).
+            with pytest.raises(ProjectNotInitialisedError):
+                find_filigree_anchor(wt)
+        finally:
+            wt_git.chmod(original_mode)
 
 
 # ---------------------------------------------------------------------------

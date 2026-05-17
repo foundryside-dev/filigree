@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worktree pointers are now verified bidirectionally before discovery
+  redirects across a `.git` boundary.** 2.0.3's worktree redirect parsed
+  the `gitdir:` line in a worktree's `.git` file and trusted it to name
+  the main repo. An untrusted clone — or any directory containing a
+  hand-written `.git` file — could ship a pointer naming a victim
+  project's worktree admin dir and cause `filigree` to open that
+  project's database silently. Discovery now also reads the main repo's
+  back-pointer at `<main>/.git/worktrees/<name>/gitdir` and requires it
+  to resolve to *this* worktree's `.git` file; mismatches are refused.
+  Real `git worktree add` always writes the back-pointer, so legitimate
+  worktrees are unaffected; spoofed or stale pointers (e.g. lingering
+  after a partial `git worktree remove`) fall back to the pre-2.0.3
+  boundary behaviour.
+- **`find_filigree_conf` no longer raises spurious `ForeignDatabaseError`
+  when a stray legacy `.filigree/` directory exists inside a worktree.**
+  The strict resolver ignores legacy installs everywhere else; it now
+  also ignores them when deciding whether to suppress the worktree
+  redirect. Previously a stray `.filigree/` inside a worktree blocked
+  the redirect, then the strict walk-up didn't recognise it as an
+  anchor, hit the worktree's `.git` file as a boundary, and raised the
+  wrong error class. `find_filigree_anchor` (tolerant) is unchanged.
+- **`_resolve_to_main_worktree` survives malformed `.git` pointer files
+  that previously could raise.** A `gitdir:` value containing an
+  embedded NUL byte raised `ValueError` from `Path.resolve()`; a
+  symlink loop in the gitdir path could raise `RuntimeError`; both
+  propagated out of every `filigree` command. The resolver now catches
+  these alongside the existing `OSError` / `UnicodeDecodeError`,
+  treating them as "not a usable worktree pointer" and falling back to
+  the boundary walk.
+- **Empty `gitdir:` value is now rejected explicitly.** Previously
+  `Path("").resolve()` fell back to the current working directory,
+  which happened not to look like a worktree admin dir — safe by
+  accident, and cwd-dependent. The empty case now short-circuits
+  without touching the filesystem.
+- **HTTP and MCP error responses no longer embed absolute filesystem
+  paths from `ForeignDatabaseError`.** The exception's `str()` carries
+  the cwd, anchor, and git-boundary paths so `filigree doctor` and CLI
+  stderr can show a path-qualified diagnostic; the new `safe_message`
+  property is a redacted variant for wire-exposed surfaces. The
+  dashboard's `/api/...` 400 response and the MCP server's JSON-RPC
+  error payloads now use it. CLI/stderr output is unchanged.
+
+### Changed
+
+- **Silent fall-through branches in `_resolve_to_main_worktree` now log
+  at DEBUG.** Each branch (read failure, missing/empty `gitdir:`,
+  submodule shape, missing main `.git`, bidirectional mismatch) emits a
+  diagnostic line so a misrouted invocation can be debugged from logs
+  without re-running under a debugger. Permission errors on the `.git`
+  file are now distinguished from other read failures in the log
+  message.
+
 ## [2.0.3] - 2026-05-17
 
 ### Fixed

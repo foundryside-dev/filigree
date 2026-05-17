@@ -48,6 +48,7 @@ from filigree.core import (
     CONF_FILENAME,
     FILIGREE_DIR_NAME,
     FiligreeDB,
+    ForeignDatabaseError,
     ProjectNotInitialisedError,
     find_filigree_anchor,
     read_config,
@@ -354,10 +355,15 @@ def _get_db() -> FiligreeDB:
         except SchemaVersionMismatchError:
             raise
         except (ProjectNotInitialisedError, ValueError, TypeError) as exc:
+            # Redact absolute paths for foreign-DB errors — the rich
+            # message embeds cwd/anchor/boundary, which leaks the user's
+            # directory layout into HTTP responses. CLI surfaces keep the
+            # full message via str(exc).
+            detail_msg = exc.safe_message if isinstance(exc, ForeignDatabaseError) else str(exc)
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": f"Invalid project configuration for {key!r}: {exc}",
+                    "error": f"Invalid project configuration for {key!r}: {detail_msg}",
                     "code": ErrorCode.VALIDATION,
                 },
             ) from None

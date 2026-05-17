@@ -165,6 +165,24 @@ class ForeignDatabaseError(ProjectNotInitialisedError):
         )
         super().__init__(msg)
 
+    @property
+    def safe_message(self) -> str:
+        """Redacted variant of the error message for wire-exposed surfaces.
+
+        ``str(self)`` embeds absolute filesystem paths (cwd, anchor,
+        git boundary). That's the right diagnostic for stderr / CLI /
+        ``filigree doctor``, but leaks the user's directory layout into
+        HTTP responses and MCP JSON-RPC payloads where the message may
+        cross trust boundaries (loopback HTTP, log sinks, remote MCP
+        clients). HTTP and MCP layers should serialise this instead.
+        """
+        return (
+            "Refusing to latch onto another project's filigree database: the "
+            "nearest filigree anchor sits above a .git/ boundary, so it "
+            "belongs to a different project. Run `filigree doctor` here for "
+            "a path-qualified diagnosis."
+        )
+
 
 class WrongProjectError(ValueError):
     """Raised when an issue ID's prefix doesn't match the open DB's prefix.
@@ -175,7 +193,7 @@ class WrongProjectError(ValueError):
     """
 
 
-def _resolve_to_main_worktree(start: Path) -> Path:
+def _resolve_to_main_worktree(start: Path, *, include_legacy: bool = True) -> Path:
     """Redirect *start* to the main worktree root when it sits inside a git worktree.
 
     Git linked worktrees place a ``.git`` *file* (not directory) at the
@@ -184,21 +202,37 @@ def _resolve_to_main_worktree(start: Path) -> Path:
     and refuse to find the project's anchor in the main worktree — raising
     :class:`ForeignDatabaseError` for what is, in fact, the same project.
 
-    The redirect is suppressed when a closer anchor (``.filigree.conf`` or
-    legacy ``.filigree/``) sits between *start* and the worktree's ``.git``
-    pointer — that nested anchor wins, preserving the "child anchor
-    overrides parent" contract for sub-projects nested inside a worktree.
+    The redirect is suppressed when a closer anchor sits between *start* and
+    the worktree's ``.git`` pointer — that nested anchor wins, preserving
+    the "child anchor overrides parent" contract for sub-projects nested
+    inside a worktree.
+
+    Set *include_legacy* to ``False`` for strict callers
+    (:func:`find_filigree_conf`) that ignore legacy ``.filigree/`` dirs;
+    otherwise a stray legacy dir inside a worktree would suppress the
+    redirect and produce a spurious :class:`ForeignDatabaseError`.
+
+    Before redirecting, the worktree pointer is verified bidirectionally:
+    the back-pointer at ``<main>/.git/worktrees/<name>/gitdir`` must resolve
+    back to *this* worktree's ``.git`` file. Closes two failure modes —
+    attacker-controlled ``.git`` files (a malicious clone could otherwise
+    redirect discovery to an arbitrary victim project) and stale pointers
+    left over after ``git worktree remove`` or admin-dir rename.
 
     Returns the main worktree root when *start* (or an ancestor up to the
-    first ``.git`` entry) is inside a linked worktree AND no nested anchor
-    exists in that subtree. Returns *start* unchanged in every other case:
-    a closer anchor was found first, plain repos (``.git`` is a directory),
-    submodules (``.git`` file points at ``<parent>/.git/modules/<name>/``),
-    no ``.git`` found, or a malformed ``.git`` file.
+    first ``.git`` entry) is inside a verified linked worktree AND no
+    nested anchor exists in that subtree. Returns *start* unchanged in
+    every other case: a closer anchor was found first, plain repos
+    (``.git`` is a directory), submodules (``.git`` file points at
+    ``<parent>/.git/modules/<name>/``), no ``.git`` found, malformed or
+    unreadable ``.git`` file, or bidirectional verification failure.
+    Diagnostic context for each fall-through is emitted at DEBUG.
     """
     for parent in [start, *start.parents]:
         # A nested anchor in the worktree subtree wins — don't redirect past it.
-        if (parent / CONF_FILENAME).is_file() or (parent / FILIGREE_DIR_NAME).is_dir():
+        if (parent / CONF_FILENAME).is_file():
+            return start
+        if include_legacy and (parent / FILIGREE_DIR_NAME).is_dir():
             return start
         git_path = parent / ".git"
         if not git_path.exists():
@@ -209,23 +243,68 @@ def _resolve_to_main_worktree(start: Path) -> Path:
         # ``.git`` is a file — worktree pointer or submodule pointer.
         try:
             content = git_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except PermissionError as exc:
+            logger.debug("worktree-redirect: cannot read %s (permission denied): %s", git_path, exc)
+            return start
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.debug("worktree-redirect: cannot read %s: %s", git_path, exc)
             return start
         gitdir_line = next(
             (line for line in content.splitlines() if line.startswith("gitdir:")),
             None,
         )
         if gitdir_line is None:
+            logger.debug("worktree-redirect: %s has no gitdir: line", git_path)
             return start
         gitdir_raw = gitdir_line.split(":", 1)[1].strip()
-        gitdir = Path(gitdir_raw)
-        gitdir = gitdir.resolve() if gitdir.is_absolute() else (parent / gitdir).resolve()
+        if not gitdir_raw:
+            # Otherwise Path("").resolve() falls back to cwd — silently
+            # correct today but cwd-dependent and fragile.
+            logger.debug("worktree-redirect: %s has empty gitdir: value", git_path)
+            return start
+        try:
+            gitdir = Path(gitdir_raw)
+            gitdir = gitdir.resolve() if gitdir.is_absolute() else (parent / gitdir).resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            # ValueError: embedded NUL byte. RuntimeError: symlink loops
+            # on some platforms. OSError: filesystem-layer failure.
+            logger.debug("worktree-redirect: cannot resolve gitdir %r from %s: %s", gitdir_raw, git_path, exc)
+            return start
         # Worktree shape: <main_repo>/.git/worktrees/<name>
         # Submodule shape: <parent_repo>/.git/modules/<name> — leave alone.
         if gitdir.parent.name != "worktrees":
+            logger.debug("worktree-redirect: %s points outside worktrees/ (likely submodule)", git_path)
             return start
         main_git_dir = gitdir.parent.parent
         if main_git_dir.name != ".git" or not main_git_dir.is_dir():
+            logger.debug("worktree-redirect: main .git dir at %s is missing or wrong shape", main_git_dir)
+            return start
+        # Bidirectional verification: the main repo's back-pointer at
+        # ``<main>/.git/worktrees/<name>/gitdir`` is the absolute path to
+        # *this* worktree's ``.git`` file (verified empirically against
+        # git-worktree's on-disk format). If it doesn't match, the
+        # worktree pointer is stale (admin dir was renamed, worktree was
+        # removed but the .git file lingers) or spoofed (an untrusted
+        # clone shipped a .git file pointing at someone else's project).
+        # Either way, refuse to redirect.
+        back_pointer_path = gitdir / "gitdir"
+        try:
+            back_pointer = Path(back_pointer_path.read_text(encoding="utf-8").strip()).resolve()
+        except (OSError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
+            logger.debug("worktree-redirect: cannot read back-pointer %s: %s", back_pointer_path, exc)
+            return start
+        try:
+            expected = git_path.resolve()
+        except (OSError, RuntimeError) as exc:
+            logger.debug("worktree-redirect: cannot resolve worktree .git %s: %s", git_path, exc)
+            return start
+        if back_pointer != expected:
+            logger.debug(
+                "worktree-redirect: back-pointer mismatch at %s (points to %s, expected %s) — stale or spoofed pointer",
+                back_pointer_path,
+                back_pointer,
+                expected,
+            )
             return start
         return main_git_dir.parent
     return start
@@ -256,7 +335,9 @@ def find_filigree_conf(start: Path | None = None) -> Path:
             wrong database.
     """
     orig = (start or Path.cwd()).resolve()
-    current = _resolve_to_main_worktree(orig)
+    # Strict variant ignores legacy .filigree/ dirs throughout, including
+    # as "nested anchor" markers that would suppress the worktree redirect.
+    current = _resolve_to_main_worktree(orig, include_legacy=False)
     git_boundary: Path | None = None
     for parent in [current, *current.parents]:
         conf = parent / CONF_FILENAME
