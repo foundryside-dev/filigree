@@ -412,7 +412,7 @@ class TestGitWorktreeDiscovery:
     def _make_main_repo(tmp_path: Path, *, with_anchor: bool = True) -> Path:
         """Set up a main repo with ``.git/``, optionally with a filigree anchor."""
         repo = tmp_path / "main-repo"
-        repo.mkdir()
+        repo.mkdir(parents=True)
         (repo / ".git").mkdir()
         if with_anchor:
             write_conf(
@@ -507,6 +507,31 @@ class TestGitWorktreeDiscovery:
 
         project_root, _ = find_filigree_anchor(wt)
         assert project_root == main
+
+    def test_foreign_database_error_reports_original_cwd(self, tmp_path: Path) -> None:
+        """When the redirect resolves a worktree and the *main* worktree itself
+        lives inside a foreign project, ``ForeignDatabaseError.cwd`` must report
+        the caller's original CWD (inside the worktree), not the redirected
+        main worktree root — otherwise the diagnostic points at the wrong place.
+        """
+        # Outer project has its own .filigree.conf
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        # Main repo nested inside the outer project, with no anchor of its own.
+        main = self._make_main_repo(tmp_path / "main", with_anchor=False)
+        # Worktree of the main repo.
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        wt_subdir = wt / "src"
+        wt_subdir.mkdir()
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(wt_subdir)
+        # The redirect resolved to ``main``; the boundary is ``main`` itself;
+        # but ``cwd`` must point at the caller's original location.
+        assert excinfo.value.cwd == wt_subdir.resolve()
+        assert excinfo.value.git_boundary == main.resolve()
 
     def test_malformed_git_file_is_left_alone(self, tmp_path: Path) -> None:
         """A ``.git`` file with no ``gitdir:`` line falls back to start-unchanged
