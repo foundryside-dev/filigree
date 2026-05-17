@@ -175,6 +175,53 @@ class WrongProjectError(ValueError):
     """
 
 
+def _resolve_to_main_worktree(start: Path) -> Path:
+    """Redirect *start* to the main worktree root when it sits inside a git worktree.
+
+    Git linked worktrees place a ``.git`` *file* (not directory) at the
+    worktree root pointing at ``<main_repo>/.git/worktrees/<name>/``. Walk-up
+    discovery would otherwise treat that ``.git`` file as a project boundary
+    and refuse to find the project's anchor in the main worktree — raising
+    :class:`ForeignDatabaseError` for what is, in fact, the same project.
+
+    Returns the main worktree root when *start* (or an ancestor up to the
+    first ``.git`` entry) is inside a linked worktree. Returns *start*
+    unchanged in every other case: plain repos (``.git`` is a directory),
+    submodules (``.git`` file points at ``<parent>/.git/modules/<name>/``),
+    no ``.git`` found, or a malformed ``.git`` file.
+    """
+    for parent in [start, *start.parents]:
+        git_path = parent / ".git"
+        if not git_path.exists():
+            continue
+        # Plain repo: existing walk-up handles it correctly.
+        if git_path.is_dir():
+            return start
+        # ``.git`` is a file — worktree pointer or submodule pointer.
+        try:
+            content = git_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return start
+        gitdir_line = next(
+            (line for line in content.splitlines() if line.startswith("gitdir:")),
+            None,
+        )
+        if gitdir_line is None:
+            return start
+        gitdir_raw = gitdir_line.split(":", 1)[1].strip()
+        gitdir = Path(gitdir_raw)
+        gitdir = gitdir.resolve() if gitdir.is_absolute() else (parent / gitdir).resolve()
+        # Worktree shape: <main_repo>/.git/worktrees/<name>
+        # Submodule shape: <parent_repo>/.git/modules/<name> — leave alone.
+        if gitdir.parent.name != "worktrees":
+            return start
+        main_git_dir = gitdir.parent.parent
+        if main_git_dir.name != ".git" or not main_git_dir.is_dir():
+            return start
+        return main_git_dir.parent
+    return start
+
+
 def find_filigree_conf(start: Path | None = None) -> Path:
     """Walk up from *start* (default cwd) looking for ``.filigree.conf``.
 
@@ -186,6 +233,10 @@ def find_filigree_conf(start: Path | None = None) -> Path:
 
     Nested ``.filigree.conf`` files override their parents — first hit wins.
 
+    When *start* sits inside a git linked worktree, discovery is redirected
+    to the main worktree root so the worktree's ``.git`` file is not
+    mistaken for a project boundary. See :func:`_resolve_to_main_worktree`.
+
     Raises:
         ProjectNotInitialisedError: if no ``.filigree.conf`` is found in
             *start* or any ancestor up to ``/``. The error message points at
@@ -195,7 +246,7 @@ def find_filigree_conf(start: Path | None = None) -> Path:
             different project and silently opening it would write to the
             wrong database.
     """
-    current = (start or Path.cwd()).resolve()
+    current = _resolve_to_main_worktree((start or Path.cwd()).resolve())
     git_boundary: Path | None = None
     for parent in [current, *current.parents]:
         conf = parent / CONF_FILENAME
@@ -225,6 +276,10 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
     a backfill, run ``filigree init`` (or another explicit write path) on
     a writable copy of the project.
 
+    When *start* sits inside a git linked worktree, discovery is redirected
+    to the main worktree root so the worktree's ``.git`` file is not
+    mistaken for a project boundary. See :func:`_resolve_to_main_worktree`.
+
     Raises:
         ProjectNotInitialisedError: if neither anchor is found anywhere up
             to ``/``.
@@ -233,7 +288,7 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
             different project and silently opening it would write to the
             wrong database.
     """
-    current = (start or Path.cwd()).resolve()
+    current = _resolve_to_main_worktree((start or Path.cwd()).resolve())
     git_boundary: Path | None = None
     for parent in [current, *current.parents]:
         conf = parent / CONF_FILENAME

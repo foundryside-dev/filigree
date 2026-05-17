@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-05-17
+
+### Fixed
+
+- **Project discovery now recognises git linked worktrees.** Running
+  `filigree <verb>` from inside a worktree (e.g. `repo/.worktrees/feature/`)
+  previously raised `ForeignDatabaseError` because the worktree's `.git`
+  *file* — a pointer to `<main_repo>/.git/worktrees/<name>/` — was treated
+  as a separate-project boundary by the walk-up guard. Discovery now
+  parses worktree pointers and redirects to the main worktree root, so
+  the CLI Just Works from any worktree of a filigree-tracked project.
+  Submodules (`.git` file pointing at `.git/modules/<name>`) remain a
+  boundary as before; plain repos with `.git` as a directory are
+  unaffected. The previously-recommended workaround
+  `(cd "$(git rev-parse --git-common-dir)/.." && filigree …)` is no
+  longer necessary.
+
 ## [2.0.2] - 2026-05-16
 
 ### Changed
