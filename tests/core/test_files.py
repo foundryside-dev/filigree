@@ -741,6 +741,32 @@ class TestProcessScanResults:
                 ],
             )
 
+    def test_out_of_range_line_start_for_existing_file_is_cleared(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """Scanner evidence line numbers must not point outside the target file."""
+        db.project_root = tmp_path
+        (tmp_path / "target.py").write_text("one\n")
+
+        result = db.process_scan_results(
+            scan_source="codex",
+            findings=[
+                {
+                    "path": "target.py",
+                    "rule_id": "cross-file-evidence",
+                    "severity": "medium",
+                    "message": "Finding cites evidence from another file",
+                    "line_start": 389,
+                    "line_end": 391,
+                },
+            ],
+        )
+
+        file_record = db.get_file_by_path("target.py")
+        assert file_record is not None
+        finding = db.get_findings(file_record.id)[0]
+        assert finding.line_start is None
+        assert finding.line_end is None
+        assert any("line_start 389" in warning and "target.py has 1 line" in warning for warning in result["warnings"])
+
     def test_non_dict_metadata_rejected(self, db: FiligreeDB) -> None:
         """filigree-ff98665ca3: list metadata must be rejected at ingest."""
         with pytest.raises(ValueError, match="metadata must be a JSON object"):

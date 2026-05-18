@@ -576,6 +576,20 @@ class TestPreviewScanCommand:
         finally:
             os.chdir(original)
 
+    def test_preview_scan_invalid_project_mode_returns_validation(self, project_with_scanner: SeededProject) -> None:
+        write_config(project_with_scanner.path / ".filigree", {"prefix": "test", "version": 1, "mode": "bogus"})
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "Unknown mode" in data["error"]
+        finally:
+            os.chdir(original)
+
     def test_preview_scan_uses_server_config_port_in_server_mode(
         self,
         project_with_scanner: SeededProject,
@@ -986,12 +1000,15 @@ class TestTriggerScanCommand:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(12345)) as popen:
                 result = runner.invoke(
                     cli,
-                    ["trigger-scan", "test-scanner", "target.py", "--api-url", "http://localhost:9999", "--json"],
+                    ["trigger-scan", "test-scanner", "target.py", "--api-url", "http://localhost:9999///", "--json"],
                 )
             assert result.exit_code == 0, result.output
             assert "http://localhost:9999" in popen.call_args.args[0]
+            assert "http://localhost:9999///" not in popen.call_args.args[0]
             assert "http://localhost:9229" not in popen.call_args.args[0]
-            assert json.loads(result.output)["api_url_source"] == "explicit"
+            data = json.loads(result.output)
+            assert data["api_url"] == "http://localhost:9999"
+            assert data["api_url_source"] == "explicit"
         finally:
             os.chdir(original)
 

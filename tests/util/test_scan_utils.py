@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -274,6 +275,53 @@ class TestRunScannerPipeline:
 
 
 class TestAnalyseFiles:
+    async def test_cache_warmup_runs_first_file_before_parallel_batch(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        targets = [root / "a.py", root / "b.py", root / "c.py"]
+        for target in targets:
+            target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        first_finished = asyncio.Event()
+        non_first_started = False
+        started: list[str] = []
+
+        async def fake_executor(**kwargs: object) -> None:
+            nonlocal non_first_started
+            output_path = Path(kwargs["output_path"])
+            started.append(output_path.name)
+            if output_path.name == "a.py.md":
+                await asyncio.sleep(0)
+                first_finished.set()
+            else:
+                non_first_started = True
+                assert first_finished.is_set()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        stats = await _analyse_files(
+            files=targets,
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=3,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=True,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+            cache_warmup=True,
+        )
+
+        assert stats["clean"] == 3
+        assert non_first_started is True
+        assert started == ["a.py.md", "b.py.md", "c.py.md"]
+
     async def test_ingests_findings_and_completes_scan_run(
         self,
         tmp_path: Path,

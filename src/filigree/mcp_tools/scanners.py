@@ -19,7 +19,7 @@ from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches,
 from filigree.core import VALID_SEVERITIES
 from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
-from filigree.scanner_callback import resolve_scanner_api_url_with_source
+from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
@@ -421,6 +421,17 @@ def _validate_localhost_url(api_url: str) -> ErrorResponse | None:
     return None
 
 
+def _resolve_scanner_api_url_or_error(
+    filigree_dir: Path,
+    *,
+    explicit_api_url: str | None = None,
+) -> tuple[ScannerApiUrlResolution | None, ErrorResponse | None]:
+    try:
+        return resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=explicit_api_url), None
+    except ValueError as exc:
+        return None, ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION)
+
+
 def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any | None, ErrorResponse | None]:
     """Load scanner config or return an ErrorResponse."""
     scanners_dir = filigree_dir / "scanners"
@@ -698,7 +709,10 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=args.get("api_url"))
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
@@ -896,7 +910,10 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=args.get("api_url"))
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     api_url = api_resolution.url
 
     if not isinstance(file_paths, list) or not file_paths:
@@ -1211,7 +1228,10 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
     project_root = filigree_dir.parent
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir)
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,

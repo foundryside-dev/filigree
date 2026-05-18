@@ -272,6 +272,25 @@ class TestPreviewScanTool:
         finally:
             _cleanup_files(mcp_db, files)
 
+    async def test_preview_scan_invalid_project_mode_returns_validation(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        write_config(mcp_mod._filigree_dir, {"prefix": "mcp", "version": 1, "mode": "bogus"})
+        files = _make_target_files(mcp_db, ["preview_invalid_mode.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "test-scanner", "file_path": "preview_invalid_mode.py"},
+                )
+            )
+            assert data["code"] == ErrorCode.VALIDATION
+            assert "Unknown mode" in data["error"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_preview_scan_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(

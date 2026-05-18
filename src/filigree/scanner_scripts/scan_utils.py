@@ -529,6 +529,7 @@ async def _analyse_files(
     scan_source: str,
     executor: Any,
     prompt_template: str,
+    cache_warmup: bool = True,
 ) -> dict[str, int]:
     """Run analysis on all files in batches. Returns summary stats."""
     import asyncio
@@ -542,8 +543,8 @@ async def _analyse_files(
     api_successes = 0
     api_failures = 0
 
-    for batch_start in range(0, total, batch_size):
-        batch = files[batch_start : batch_start + batch_size]
+    async def run_batch(batch: list[Path]) -> None:
+        nonlocal done, api_successes, api_failures
         tasks: list[tuple[Path, Path, asyncio.Task[None]]] = []
 
         for fpath in batch:
@@ -603,6 +604,23 @@ async def _analyse_files(
                         else:
                             api_failures += 1
                             print(f"  API error for {rel_path}: {err_detail}", file=sys.stderr)
+
+    remaining_files = files
+    if cache_warmup and batch_size > 1 and total > 1:
+        warmup_index: int | None = None
+        for index, fpath in enumerate(files):
+            rel = fpath.relative_to(root_dir)
+            out = (output_dir / rel).with_suffix(rel.suffix + ".md")
+            if skip_existing and out.exists():
+                continue
+            warmup_index = index
+            break
+        if warmup_index is not None:
+            await run_batch(files[: warmup_index + 1])
+            remaining_files = files[warmup_index + 1 :]
+
+    for batch_start in range(0, len(remaining_files), batch_size):
+        await run_batch(remaining_files[batch_start : batch_start + batch_size])
 
     # Send a final completion POST with empty findings to mark the scan run
     # as completed.  Per-file POSTs above used complete_scan_run=False to
@@ -687,6 +705,11 @@ async def run_scanner_pipeline(
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
     parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
+    parser.add_argument(
+        "--no-cache-warmup",
+        action="store_true",
+        help="Skip the serial first-file warm-up before parallel scanner runs",
+    )
 
     args = parser.parse_args()
 
@@ -745,6 +768,8 @@ async def run_scanner_pipeline(
 
     model_display = f", model={args.model}" if args.model else ""
     print(f"Analysing {len(files)} files (batch={args.batch_size}{model_display}) ...", file=sys.stderr)
+    if not args.no_cache_warmup and args.batch_size > 1 and len(files) > 1:
+        print("  Cache warm-up: first file runs before parallel batches.", file=sys.stderr)
     if not args.no_ingest:
         print(f"  API: {args.api_url}  run_id: {scan_run_id}", file=sys.stderr)
 
@@ -764,6 +789,7 @@ async def run_scanner_pipeline(
         scan_source=scan_source,
         executor=executor,
         prompt_template=template,
+        cache_warmup=not args.no_cache_warmup,
     )
 
     print("\n" + "=" * 50)

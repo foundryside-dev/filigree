@@ -82,6 +82,19 @@ def _mark_reserved_scan_failed(tracker: Any, scan_run_id: str, error_message: st
         tracker.update_scan_run_status(scan_run_id, "failed", error_message=error_message)
 
 
+def _resolve_scanner_api_url_or_die(
+    filigree_dir: Path,
+    *,
+    explicit_api_url: str | None = None,
+    as_json: bool,
+) -> Any:
+    try:
+        return resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=explicit_api_url)
+    except ValueError as exc:
+        _emit_error(str(exc), ErrorCode.VALIDATION, as_json=as_json)
+        raise AssertionError("unreachable: _emit_error calls sys.exit(1)") from None  # pragma: no cover
+
+
 # ---------------------------------------------------------------------------
 # list-scanners
 # ---------------------------------------------------------------------------
@@ -331,7 +344,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
     _validate_prompt_or_die(prompt, as_json=as_json)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, explicit_api_url=api_url, as_json=as_json)
     api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
@@ -513,7 +526,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
     _validate_prompt_or_die(prompt, as_json=as_json)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, explicit_api_url=api_url, as_json=as_json)
     api_url = api_resolution.url
 
     fp_list = list(file_paths)
@@ -816,7 +829,7 @@ def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -
     _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
     canonical_path = str(target.relative_to(project_root.resolve()))
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, as_json=as_json)
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,

@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
 from filigree.db_base import DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
@@ -584,6 +585,58 @@ class FilesMixin(DBMixinProtocol):
                 f["severity"] = "info"
         return warnings
 
+    @staticmethod
+    def _count_file_lines(path: Path) -> int | None:
+        try:
+            with path.open("rb") as handle:
+                return sum(1 for _ in handle)
+        except OSError:
+            return None
+
+    def _normalize_line_attribution_for_existing_files(self, findings: list[dict[str, Any]]) -> list[str]:
+        """Clear or clamp line ranges that cannot exist in the target file."""
+        if self.project_root is None:
+            return []
+
+        root = self.project_root.resolve()
+        line_count_cache: dict[Path, int | None] = {}
+        warnings: list[str] = []
+        for f in findings:
+            path = f["path"]
+            try:
+                target = (root / path).resolve()
+                target.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if not target.is_file():
+                continue
+            if target not in line_count_cache:
+                line_count_cache[target] = self._count_file_lines(target)
+            line_count = line_count_cache[target]
+            if line_count is None:
+                continue
+
+            line_label = "line" if line_count == 1 else "lines"
+            rule_id = f.get("rule_id", "")
+            line_start = f.get("line_start")
+            line_end = f.get("line_end")
+            if line_start is not None and line_start > line_count:
+                f["line_start"] = None
+                if line_end is not None:
+                    f["line_end"] = None
+                warnings.append(
+                    f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length "
+                    f"({path} has {line_count} {line_label}); line attribution cleared."
+                )
+                continue
+            if line_end is not None and line_end > line_count:
+                f["line_end"] = line_count if line_count > 0 else None
+                warnings.append(
+                    f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length "
+                    f"({path} has {line_count} {line_label}); line_end clamped."
+                )
+        return warnings
+
     def _upsert_file_record(
         self,
         *,
@@ -851,6 +904,7 @@ class FilesMixin(DBMixinProtocol):
                 raise ValueError(msg)
 
         warnings = self._validate_scan_findings(findings, scan_source)
+        warnings.extend(self._normalize_line_attribution_for_existing_files(findings))
 
         now = _now_iso()
         actor = observation_actor or f"scanner:{scan_source}"

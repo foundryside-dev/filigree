@@ -29,12 +29,9 @@ def resolve_scanner_api_url_with_source(filigree_dir: Path, *, explicit_api_url:
     ethereal port has been recorded yet, fall back to the legacy default.
     """
     if explicit_api_url is not None:
-        return ScannerApiUrlResolution(url=explicit_api_url, source="explicit")
+        return ScannerApiUrlResolution(url=explicit_api_url.strip().rstrip("/"), source="explicit")
 
-    try:
-        mode = get_mode(filigree_dir)
-    except ValueError:
-        mode = "ethereal"
+    mode = get_mode(filigree_dir)
 
     if mode == "server":
         from filigree.server import read_server_config

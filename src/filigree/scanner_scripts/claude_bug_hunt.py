@@ -44,7 +44,13 @@ async def run_claude_code(
 ) -> None:
     """Run `claude --print` once. Raises RuntimeError on failure."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd: list[str] = ["claude", "--print", "-p", prompt]
+    cmd: list[str] = [
+        "claude",
+        "--print",
+        "--exclude-dynamic-system-prompt-sections",
+        "-p",
+        prompt,
+    ]
     if model:
         cmd.extend(["--model", model])
 
@@ -108,7 +114,7 @@ def main() -> int:
     return asyncio.run(
         run_scanner_pipeline(
             executor=run_claude_code_with_retry,
-            scan_source="claude-code",
+            scan_source="claude",
             description="Per-file bug hunt via Claude Code CLI.",
             cli_tool="claude",
             default_model="sonnet",
