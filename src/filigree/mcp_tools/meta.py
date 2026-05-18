@@ -650,7 +650,8 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
         )
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -693,7 +694,8 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
         )
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
@@ -736,7 +738,8 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
         )
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
-        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
     _refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(

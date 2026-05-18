@@ -359,6 +359,46 @@ class TestUpdateIssueTransitionEnforcement:
         updated = db.update_issue(issue.id, status="verifying", _skip_transition_check=True)
         assert updated.status == "verifying"
 
+    def test_forced_transition_emits_audit_event(self, db: FiligreeDB) -> None:
+        """2.1.0 §1.1: bypassing the workflow validator records a
+        ``transition_forced`` event alongside ``status_changed``.
+
+        Reviewers reading the audit trail must be able to identify every
+        workflow shortcut without inferring it from the absence of a
+        ``transition_warning``. The two events fire in order
+        (forced → changed) so the chain reads causally top-to-bottom.
+        """
+        issue = db.create_issue("Bug", type="bug")
+        # ``verifying`` is not directly reachable from ``triage`` for bugs;
+        # _skip_transition_check is the only way to land here.
+        db.update_issue(
+            issue.id,
+            status="verifying",
+            _skip_transition_check=True,
+            actor="ops",
+        )
+        events = db.get_issue_events(issue.id, limit=20)
+        forced = [e for e in events if e["event_type"] == "transition_forced"]
+        changed = [e for e in events if e["event_type"] == "status_changed"]
+        assert len(forced) == 1, f"expected one transition_forced, got {[e['event_type'] for e in events]}"
+        assert forced[0]["old_value"] == "triage"
+        assert forced[0]["new_value"] == "verifying"
+        assert forced[0]["actor"] == "ops"
+        # status_changed is still emitted; the forced event is additive.
+        assert len(changed) == 1
+        assert changed[0]["new_value"] == "verifying"
+
+    def test_validated_transition_does_not_emit_forced_event(self, db: FiligreeDB) -> None:
+        """The audit event must fire ONLY when the validator was bypassed —
+        a normal transition through the template still emits status_changed
+        without the matching transition_forced sibling.
+        """
+        issue = db.create_issue("Bug", type="bug")
+        # triage → confirmed is a legal forward transition for the bug template.
+        db.update_issue(issue.id, status="confirmed", actor="ops")
+        events = db.get_issue_events(issue.id, limit=20)
+        assert not any(e["event_type"] == "transition_forced" for e in events)
+
 
 class TestCloseIssue:
     """close_issue() accepts optional status parameter for multi-done types."""

@@ -26,6 +26,7 @@ EventType = Literal[
     "dependency_added",
     "dependency_removed",
     "transition_warning",
+    "transition_forced",
     "undone",
     "archived",
 ]

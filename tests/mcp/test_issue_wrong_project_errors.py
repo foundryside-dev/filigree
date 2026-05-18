@@ -54,4 +54,10 @@ async def test_wrong_project_issue_ids_are_validation_errors(
     data = _parse(await handler(args))
 
     assert data["code"] == ErrorCode.VALIDATION
-    assert "other-1234567890" in data["error"]
+    # 2.1.0 §1.2: MCP serialisation uses ``WrongProjectError.safe_message``,
+    # so the offending prefix no longer round-trips. The canonical safe
+    # wording is asserted instead.
+    from filigree.core import WrongProjectError
+
+    assert data["error"] == WrongProjectError.SAFE_MESSAGE
+    assert "other-" not in data["error"]

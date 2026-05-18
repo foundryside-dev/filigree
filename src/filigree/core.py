@@ -173,7 +173,26 @@ class WrongProjectError(ValueError):
     Indicates the caller is operating on a ticket that belongs to a different
     project. Common cause: an agent climbed into a parent's database and is
     trying to act on an ID copy-pasted from somewhere else.
+
+    The ``str(exc)`` form embeds the offending prefix and the open DB's
+    prefix for CLI / stderr / ``filigree doctor`` diagnostics. Untrusted
+    callers (HTTP, MCP) get :attr:`safe_message` instead, which omits
+    both prefixes so cross-project IDs cannot be probed by attempting
+    foreign reads and pattern-matching the error.
     """
+
+    SAFE_MESSAGE = "Issue ID does not belong to this project"
+
+    @property
+    def safe_message(self) -> str:
+        """Generic, prefix-free wording suitable for untrusted clients.
+
+        2.1.0 §1.2: HTTP and MCP responses surface this string so a
+        successful guess of "is project X open?" can't be made from a
+        4xx response body. CLI handlers and ``filigree doctor`` keep
+        ``str(exc)`` so operators still see the offending prefix.
+        """
+        return self.SAFE_MESSAGE
 
 
 def _resolve_to_main_worktree(start: Path) -> Path:

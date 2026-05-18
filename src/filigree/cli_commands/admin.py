@@ -533,7 +533,16 @@ def migrate(from_beads: bool, beads_db: str | None) -> None:
 )
 @click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
 @click.option("--server-mode", is_flag=True, help="Multi-project server mode (reads server.json)")
-def dashboard(port: int | None, no_browser: bool, server_mode: bool) -> None:
+@click.option(
+    "--allow-http-force-close",
+    is_flag=True,
+    help=(
+        "Permit ``force=true`` on POST /api/batch/close and "
+        "POST /api/loom/batch/close. Off by default — HTTP callers cannot "
+        "bypass the workflow transition validator unless explicitly opted in."
+    ),
+)
+def dashboard(port: int | None, no_browser: bool, server_mode: bool, allow_http_force_close: bool) -> None:
     """Launch the web dashboard."""
     from filigree.dashboard import DEFAULT_PORT
     from filigree.dashboard import main as dashboard_main
@@ -559,7 +568,12 @@ def dashboard(port: int | None, no_browser: bool, server_mode: bool) -> None:
         effective_port = port if port is not None else DEFAULT_PORT
 
     try:
-        dashboard_main(port=effective_port, no_browser=no_browser, server_mode=server_mode)
+        dashboard_main(
+            port=effective_port,
+            no_browser=no_browser,
+            server_mode=server_mode,
+            allow_http_force_close=allow_http_force_close,
+        )
     finally:
         if server_mode and pid_claimed:
             from filigree.server import release_daemon_pid_if_owned

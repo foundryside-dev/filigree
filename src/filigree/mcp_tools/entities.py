@@ -173,7 +173,8 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
     try:
         row = tracker.add_entity_association(issue_id, entity_id, content_hash, actor=actor)
     except WrongProjectError as exc:
-        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
     except ValueError as exc:
         # Distinguish "issue not found" from generic validation so the
         # caller can react. The data-layer message starts with that phrase.
@@ -201,7 +202,8 @@ async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[T
     try:
         removed = tracker.remove_entity_association(issue_id, entity_id)
     except WrongProjectError as exc:
-        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     return _text({"removed": removed})
@@ -228,7 +230,8 @@ async def _handle_list_entity_associations(arguments: dict[str, Any]) -> list[Te
     try:
         rows = tracker.list_entity_associations(issue_id)
     except WrongProjectError as exc:
-        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
     if not rows:
         try:
             tracker.get_issue(issue_id)

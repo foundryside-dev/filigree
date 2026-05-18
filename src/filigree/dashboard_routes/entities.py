@@ -27,7 +27,12 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import FiligreeDB, WrongProjectError
-from filigree.dashboard_routes.common import _error_response, _parse_json_body, _validate_actor
+from filigree.dashboard_routes.common import (
+    _check_read_prefix_in_server_mode,
+    _error_response,
+    _parse_json_body,
+    _validate_actor,
+)
 from filigree.types.api import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,14 @@ def create_classic_router() -> APIRouter:
         Returns raw rows; drift detection is the caller's job per
         ADR-029 §"Decision 3".
         """
+        # 2.1.0 §1.3: server-mode reads are 404'd at the route boundary
+        # so cross-project probes can't distinguish "wrong project" from
+        # "no such issue". Ethereal mode falls through to the data-layer
+        # WrongProjectError (→ 400 VALIDATION) — preserves the documented
+        # error code for single-project CLI / MCP via the dashboard.
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         # Mirror the MCP handler: list first (prefix-enforcing →
         # WrongProjectError → 400), then probe existence only when
         # empty so a typoed or deleted issue surfaces as 404 rather
@@ -63,7 +76,7 @@ def create_classic_router() -> APIRouter:
         try:
             rows = db.list_entity_associations(issue_id)
         except WrongProjectError as exc:
-            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         if not rows:
             try:
                 db.get_issue(issue_id)
@@ -118,7 +131,7 @@ def create_classic_router() -> APIRouter:
         try:
             row = db.add_entity_association(issue_id, entity_id, content_hash, actor=actor)
         except WrongProjectError as exc:
-            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as exc:
             code = ErrorCode.NOT_FOUND if "Issue not found" in str(exc) else ErrorCode.VALIDATION
             status = 404 if code == ErrorCode.NOT_FOUND else 400
@@ -139,7 +152,7 @@ def create_classic_router() -> APIRouter:
         try:
             removed = db.remove_entity_association(issue_id, entity_id)
         except WrongProjectError as exc:
-            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"removed": removed})

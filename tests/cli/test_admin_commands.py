@@ -1196,7 +1196,7 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
             from filigree.server import SERVER_PID_FILE, daemon_status
 
             status = daemon_status()
@@ -1236,7 +1236,7 @@ class TestDashboardServerModePidTracking:
 
         called = {"main": False}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
             called["main"] = True
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
@@ -1263,7 +1263,7 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
             observed["port_arg"] = port
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)

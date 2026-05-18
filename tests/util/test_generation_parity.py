@@ -515,7 +515,14 @@ class TestLoomGenerationParityBatchClose:
         """``force=true`` on /api/loom/batch/close bypasses the template
         transition validator — matches CLI ``--force`` and MCP ``force``.
         Phase in 'pending' cannot reach 'completed' without it.
+
+        2.1.0 §1.1: HTTP ``force=true`` is gated behind
+        ``--allow-http-force-close`` (default-off). The test toggles the
+        module flag the CLI option sets so the legacy parity assertion
+        still pins behaviour-under-opt-in.
         """
+        import filigree.dashboard as dash_module
+
         create = await dashboard_surface.post(
             "/api/issues",
             json={"title": "C2 batch close force seed", "type": "phase"},
@@ -532,11 +539,17 @@ class TestLoomGenerationParityBatchClose:
         assert body["succeeded"] == []
         assert len(body["failed"]) == 1
         assert body["failed"][0]["code"] == "INVALID_TRANSITION"
-        # With force → lands in the type's default done state.
-        resp = await dashboard_surface.post(
-            "/api/loom/batch/close",
-            json={"issue_ids": [issue_id], "reason": "force", "force": True},
-        )
+        # With force AND --allow-http-force-close opt-in → lands in the
+        # type's default done state.
+        prev = dash_module._allow_http_force_close
+        dash_module._allow_http_force_close = True
+        try:
+            resp = await dashboard_surface.post(
+                "/api/loom/batch/close",
+                json={"issue_ids": [issue_id], "reason": "force", "force": True},
+            )
+        finally:
+            dash_module._allow_http_force_close = prev
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["failed"] == []

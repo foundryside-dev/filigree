@@ -49,6 +49,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **HTTP batch-close rejects `force=true` by default (2.1.0 §1.1).**
+  `POST /api/batch/close` and `POST /api/loom/batch/close` now return
+  400/VALIDATION when `force=true` is set unless the dashboard was
+  started with `--allow-http-force-close`. CLI (`filigree close
+  --force`) and MCP (`batch_close(force=true)`) are unchanged — those
+  surfaces sit inside a trust boundary that the unauthenticated HTTP
+  endpoint does not. The new `transition_forced` event fires in
+  `update_issue` whenever `_skip_transition_check=True` triggers a
+  status change, so the audit trail records every workflow shortcut
+  even when the validator was bypassed by an internal call site
+  (reopen, release-revert, force-close, rollback). Schema unchanged
+  (event type is a string column). Closes the privilege-escalation
+  surface flagged as threat-analysis T-002 in the 2.1.0 panel review.
+
+- **`WrongProjectError` no longer leaks project prefixes via HTTP /
+  MCP (2.1.0 §1.2).** `WrongProjectError.safe_message` returns the
+  generic `"Issue ID does not belong to this project"`. HTTP and MCP
+  error envelopes use that string; CLI / stderr / `filigree doctor`
+  keep the rich `str(exc)` form with the offending and open prefixes
+  intact for diagnostics. Untrusted callers can no longer probe for
+  project membership by pattern-matching foreign-ID error bodies.
+
+- **Server-mode read endpoints block cross-project IDs at the route
+  boundary (2.1.0 §1.3).** A new `_check_read_prefix_in_server_mode`
+  helper short-circuits every read endpoint that accepts an
+  `issue_id` path parameter (`GET /api/issue/{id}` and family,
+  classic + loom; `GET /api/issue/{id}/entity-associations`) with
+  404/safe_message when the dashboard is running in multi-project
+  server mode and the requested ID has a foreign prefix. Ethereal
+  (single-project) mode preserves the documented read-tolerance of
+  `db.get_issue` for foreign IDs so jsonl import, migration, and
+  `filigree doctor` keep working. The data-layer `db.get_issue` is
+  unchanged — enforcement lives at the HTTP boundary where
+  cross-project probing is the meaningful attack surface.
+
+- **`sanitize_actor` length cap pinned at every entry point (2.1.0
+  §1.4 / ADR-012).** New `docs/architecture/decisions/ADR-012-actor-identity-threat-model.md`
+  documents what actor strings are (claims, not proofs) and what
+  the 2.1.0 hardening pass enforces (128-char cap, control-char
+  rejection, non-empty after strip) at every entry point: CLI
+  (`tests/cli/test_compose_commands.py`), MCP
+  (`tests/mcp/test_boundary_validation.py`), and HTTP
+  (`tests/api/test_api.py::TestActorLengthCapAtHTTPBoundary`).
+  Transport-bound identity verification — the "verified actor"
+  enhancement — is tracked as a 2.2+ work package in the filigree
+  tracker.
+
 - **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0
   §0.4).** Every batch handler in the data layer (`batch_close`,
   `batch_update`, `batch_add_label`, `batch_remove_label`,
@@ -67,6 +114,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardening addressed on the read side.
 
 ### Added
+
+- **`transition_forced` audit event (2.1.0 §1.1).** Every
+  `_skip_transition_check=True` status change in `update_issue` now
+  emits a `transition_forced` event alongside `status_changed`.
+  Reviewers reading the audit trail can identify every workflow
+  shortcut directly instead of inferring it from the absence of a
+  `transition_warning`. Internal callers (`reopen_issue`, force
+  `close_issue`, `release_claim` revert, `start_work` rollback) all
+  emit it automatically.
+
+- **`--allow-http-force-close` opt-in startup flag (2.1.0 §1.1).**
+  `filigree dashboard --allow-http-force-close` enables `force=true`
+  on the HTTP batch-close routes. Default-off; CLI / MCP unchanged.
 
 - **Typed `ClaimConflictError` for optimistic-lock CAS failures (2.1.0
   §0.3).** `filigree.types.api.ClaimConflictError(ValueError)` carries

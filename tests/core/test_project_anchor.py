@@ -899,6 +899,27 @@ class TestWrongProjectErrorOnWrites:
         assert fetched.id == issue.id
         db_p.close()
 
+    def test_wrong_project_error_safe_message_omits_prefix(self, db_p: FiligreeDB) -> None:
+        """2.1.0 §1.2: ``safe_message`` strips both the open DB's prefix and
+        the offending id's prefix so untrusted-surface error envelopes
+        (HTTP / MCP) can't be used to probe project membership.
+
+        ``str(exc)`` still embeds the prefixes for CLI / stderr / doctor —
+        those callers are already inside the trust boundary.
+        """
+        with pytest.raises(WrongProjectError) as excinfo:
+            db_p.update_issue("beefdata-abc123", title="x")
+        rich = str(excinfo.value)
+        safe = excinfo.value.safe_message
+        # Rich (CLI) form keeps the diagnostic prefixes.
+        assert "alpha" in rich
+        assert "beefdata" in rich
+        # Safe (HTTP/MCP) form must NOT leak either prefix.
+        assert "alpha" not in safe
+        assert "beefdata" not in safe
+        assert safe == WrongProjectError.SAFE_MESSAGE
+        db_p.close()
+
     def test_hyphenated_prefix_does_not_trip_guard(self, tmp_path: Path) -> None:
         """A project whose prefix contains a hyphen (e.g. ``my-app``) must still
         be able to mutate its own issues.

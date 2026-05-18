@@ -72,6 +72,24 @@ _EXPECTED_PROJECT_CONFIG_ERRORS = (ProjectNotInitialisedError, ValueError, TypeE
 _db: FiligreeDB | None = None
 _config: dict[str, Any] = {}
 
+# 2.1.0 §1.1: opt-in gate for accepting ``force=true`` on HTTP batch-close
+# routes. Default-off — HTTP callers can't bypass the workflow validator
+# without the operator explicitly starting the dashboard with
+# ``--allow-http-force-close``. Toggled by ``main()`` at process startup.
+_allow_http_force_close: bool = False
+
+
+def _get_allow_http_force_close() -> bool:
+    """Accessor so route handlers read the current flag at request time.
+
+    A plain ``from filigree.dashboard import _allow_http_force_close``
+    would bind the bool by value at import; tests and ``main()`` both
+    mutate this module attribute, so the routes need a function-level
+    read instead.
+    """
+    return _allow_http_force_close
+
+
 # Idle auto-shutdown for ethereal mode (seconds)
 IDLE_TIMEOUT_SECONDS = 3600  # 1 hour
 IDLE_CHECK_INTERVAL = 60  # check every minute
@@ -696,16 +714,28 @@ def _exit_dashboard_config_error(exc: BaseException) -> None:
     sys.exit(1)
 
 
-def main(port: int = DEFAULT_PORT, *, no_browser: bool = False, server_mode: bool = False) -> None:
+def main(
+    port: int = DEFAULT_PORT,
+    *,
+    no_browser: bool = False,
+    server_mode: bool = False,
+    allow_http_force_close: bool = False,
+) -> None:
     """Start the dashboard server.
 
     In server mode, reads ``server.json`` for multi-project routing.
     In ethereal mode (default), serves the single local project.
     Ethereal servers auto-shutdown after IDLE_TIMEOUT_SECONDS of inactivity.
+
+    ``allow_http_force_close`` (2.1.0 §1.1) opts the dashboard into
+    accepting ``force=true`` on ``POST /api/batch/close`` and
+    ``POST /api/loom/batch/close``. Without it those routes reject
+    ``force=true`` with 400/VALIDATION — the workflow validator can only
+    be bypassed by the CLI or MCP, never by a passing HTTP client.
     """
     import uvicorn
 
-    global _db, _last_request_time, _project_store
+    global _db, _last_request_time, _project_store, _allow_http_force_close
 
     filigree_dir: Path | None = None
 
@@ -720,6 +750,7 @@ def main(port: int = DEFAULT_PORT, *, no_browser: bool = False, server_mode: boo
     _project_store = None
     _db = None
     _config.clear()
+    _allow_http_force_close = allow_http_force_close
 
     if server_mode:
         try:
@@ -807,4 +838,5 @@ def main(port: int = DEFAULT_PORT, *, no_browser: bool = False, server_mode: boo
         # cannot serve a stale ``name`` (filigree-154a23794c).
         _project_store = None
         _db = None
+        _allow_http_force_close = False
         _config.clear()

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from filigree.core import FiligreeDB, WrongProjectError
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_OFFSET,
+    _check_read_prefix_in_server_mode,
     _error_response,
     _parse_json_body,
     _safe_int,
@@ -193,6 +194,22 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
     force = body.get("force", False)
     if not isinstance(force, bool):
         return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
+    if force:
+        # 2.1.0 §1.1: HTTP callers can't bypass the workflow transition
+        # validator unless the dashboard was started with
+        # ``--allow-http-force-close``. Runtime import avoids forming a
+        # cycle at module load (filigree.dashboard already imports from
+        # the routes package).
+        from filigree.dashboard import _get_allow_http_force_close
+
+        if not _get_allow_http_force_close():
+            return _error_response(
+                "force=true is not permitted on HTTP batch-close. "
+                "Start the dashboard with --allow-http-force-close to opt in, "
+                "or use the CLI / MCP ``batch_close`` with force=true.",
+                ErrorCode.VALIDATION,
+                400,
+            )
     return {
         "issue_ids": issue_ids,
         "reason": reason,
@@ -250,6 +267,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/issue/{issue_id}")
     async def api_issue_detail(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Full issue detail with dependency details, events, and comments."""
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             issue = db.get_issue(issue_id)
         except KeyError:
@@ -341,6 +361,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/issue/{issue_id}/transitions")
     async def api_issue_transitions(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Valid next states for an issue."""
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             transitions = db.get_valid_transitions(issue_id)
         except KeyError:
@@ -362,6 +385,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/issue/{issue_id}/files")
     async def api_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Files associated with an issue."""
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -372,6 +398,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/issue/{issue_id}/findings")
     async def api_issue_findings(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Scan findings related to an issue."""
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -501,7 +530,7 @@ def create_classic_router() -> APIRouter:
         try:
             db._check_id_prefix(issue_id)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -591,7 +620,7 @@ def create_classic_router() -> APIRouter:
         except WrongProjectError as e:
             # 2.1.0 §0.4: a foreign-prefix id in a batch aborts envelope-
             # level rather than producing N misleading per-item errors.
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(
@@ -614,7 +643,7 @@ def create_classic_router() -> APIRouter:
         try:
             closed, errors = db.batch_close(issue_ids, **parsed)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse(
             {
                 "closed": [i.to_dict() for i in closed],
@@ -707,7 +736,7 @@ def create_classic_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
             if code != ErrorCode.INVALID_TRANSITION:
@@ -732,7 +761,7 @@ def create_classic_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse(issue.to_dict())
@@ -776,7 +805,7 @@ def create_classic_router() -> APIRouter:
         except KeyError as e:
             return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse({"added": added})
@@ -794,7 +823,7 @@ def create_classic_router() -> APIRouter:
         except KeyError as e:
             return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse({"removed": removed})
 
     return router
@@ -952,6 +981,9 @@ def create_loom_router() -> APIRouter:
         the pattern used by ``GET /api/issue/{id}/files`` and
         ``POST /api/issue/{id}/comments``.
         """
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -968,6 +1000,9 @@ def create_loom_router() -> APIRouter:
         ``KeyError``) and accepts a ``limit``. Default 50 to match MCP
         defaults; classic dashboard has no counterpart for this endpoint.
         """
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         params = request.query_params
         pagination = _parse_pagination(params, default_limit=50)
         if isinstance(pagination, JSONResponse):
@@ -991,6 +1026,9 @@ def create_loom_router() -> APIRouter:
         underlying ``db.get_issue_files`` does not. Matches the classic
         ``GET /api/issue/{id}/files`` validation pattern.
         """
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -1023,7 +1061,7 @@ def create_loom_router() -> APIRouter:
             updated, errors = db.batch_update(issue_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         project = issue_to_loom if detail == "full" else slim_issue_to_loom
@@ -1066,7 +1104,7 @@ def create_loom_router() -> APIRouter:
             closed, errors = db.batch_close(issue_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         project = issue_to_loom if detail == "full" else slim_issue_to_loom
@@ -1089,6 +1127,9 @@ def create_loom_router() -> APIRouter:
         not expose ``include_files`` and continues to return its
         existing ``EnrichedIssueDetail`` envelope.
         """
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         include_files = _get_bool_param(request.query_params, "include_files", default=False)
         if isinstance(include_files, JSONResponse):
             return include_files
@@ -1288,7 +1329,7 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
             if code != ErrorCode.INVALID_TRANSITION:
@@ -1313,7 +1354,7 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse(issue_to_loom(issue))
@@ -1353,7 +1394,7 @@ def create_loom_router() -> APIRouter:
         try:
             db._check_id_prefix(issue_id)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         try:
             db.get_issue(issue_id)
         except KeyError:
@@ -1409,7 +1450,7 @@ def create_loom_router() -> APIRouter:
         except KeyError as e:
             return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse({"added": added})
@@ -1433,7 +1474,7 @@ def create_loom_router() -> APIRouter:
         except KeyError as e:
             return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
-            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse({"removed": removed})
 
     return router

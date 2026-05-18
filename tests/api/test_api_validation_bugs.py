@@ -702,3 +702,30 @@ class TestWriteRoutesWrongProjectError:
         assert resp.status_code == 404, resp.text
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body
+
+    async def test_http_400_for_foreign_id_does_not_leak_prefix(self, client: AsyncClient) -> None:
+        """2.1.0 §1.2: untrusted HTTP responses must use ``safe_message``.
+
+        Probing for "is project X open?" by trying ``X-something/claim``
+        and pattern-matching the error body must not work — the
+        envelope's ``error`` field is a generic string, neither the open
+        DB's prefix (``test``) nor the offending id's prefix
+        (``foreignproj``) appears.
+
+        Renamed from the design's ``test_http_404_for_foreign_id_…`` because
+        write routes return 400/VALIDATION (read-route 404 enforcement
+        lands in §1.3 with its own pinning test).
+        """
+        resp = await client.post(
+            f"/api/issue/{self._FOREIGN_A}/claim",
+            json={"assignee": "alice"},
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        # safe_message contains generic wording, not project prefixes.
+        assert "foreignproj" not in body["error"], body
+        assert "test" not in body["error"].lower() or "this project" in body["error"].lower()
+        # Concretely: the canonical safe wording must be present.
+        from filigree.core import WrongProjectError
+
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE

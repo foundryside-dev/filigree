@@ -767,6 +767,22 @@ class IssuesMixin(DBMixinProtocol):
                             comment=warning,
                         )
 
+                # 2.1.0 §1.1: when the transition validator was bypassed
+                # the audit trail records a ``transition_forced`` event
+                # alongside the ``status_changed`` so reviewers can find
+                # every workflow shortcut without inferring it from the
+                # absence of a ``transition_warning``. Sequenced before
+                # the status_changed event so the chain is causally
+                # ordered (force → change) when read top-to-bottom.
+                if _skip_transition_check:
+                    self._record_event(
+                        issue_id,
+                        "transition_forced",
+                        actor=actor,
+                        old_value=current.status,
+                        new_value=status,
+                    )
+
                 self._record_event(
                     issue_id,
                     "status_changed",

@@ -71,7 +71,10 @@ _LIST_ISSUES_SORT_FIELDS = {"created_at", "updated_at", "priority"}
 
 
 def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
-    return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+    # 2.1.0 §1.2: MCP is an untrusted-surface boundary (agents can be
+    # arbitrarily scoped); surface the generic ``safe_message`` so a
+    # foreign prefix is not leaked back to a caller who guessed an ID.
+    return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
 
 
 def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
