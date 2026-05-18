@@ -494,6 +494,38 @@ class TestGitWorktreeDiscovery:
         with pytest.raises(ForeignDatabaseError):
             find_filigree_anchor(submodule)
 
+    def test_submodule_inside_worktree_treated_as_boundary(self, tmp_path: Path) -> None:
+        """A submodule nested inside a linked worktree must not redirect to the main anchor."""
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
+        submodule = wt / "vendor" / "dep"
+        submodule.mkdir(parents=True)
+        submodule_gitdir = main / ".git" / "modules" / "vendor" / "dep"
+        submodule_gitdir.mkdir(parents=True)
+        (submodule / ".git").write_text(f"gitdir: {submodule_gitdir}\n")
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(submodule)
+        assert excinfo.value.git_boundary == submodule.resolve()
+        assert excinfo.value.found_anchor == main / CONF_FILENAME
+
+    def test_worktree_containing_submodule_resolves_normally(self, tmp_path: Path) -> None:
+        """A submodule elsewhere inside the worktree does not block normal worktree resolution."""
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
+        submodule = wt / "vendor" / "dep"
+        submodule.mkdir(parents=True)
+        submodule_gitdir = main / ".git" / "modules" / "vendor" / "dep"
+        submodule_gitdir.mkdir(parents=True)
+        (submodule / ".git").write_text(f"gitdir: {submodule_gitdir}\n")
+        ordinary_dir = wt / "src" / "pkg"
+        ordinary_dir.mkdir(parents=True)
+
+        project_root, conf_path = find_filigree_anchor(ordinary_dir)
+
+        assert project_root == main
+        assert conf_path == main / CONF_FILENAME
+
     def test_relative_gitdir_in_worktree_pointer(self, tmp_path: Path) -> None:
         """Some git versions write a relative ``gitdir:`` path. Must still resolve."""
         main = self._make_main_repo(tmp_path)
@@ -917,6 +949,27 @@ class TestWrongProjectErrorOnWrites:
         issue = db_p.create_issue("Test")
         fetched = db_p.get_issue(issue.id)
         assert fetched.id == issue.id
+        db_p.close()
+
+    def test_get_issue_tolerates_foreign_prefix_locally(self, db_p: FiligreeDB) -> None:
+        """Read-tolerant local lookups can inspect imported cross-prefix rows; writes still reject."""
+        inserted = db_p.bulk_insert_issue(
+            {
+                "id": "beefdata-abc1234567",
+                "title": "Imported foreign row",
+                "status": "open",
+                "type": "task",
+            },
+            validate=False,
+        )
+        db_p.conn.commit()
+        assert inserted is True
+
+        fetched = db_p.get_issue("beefdata-abc1234567")
+        assert fetched.title == "Imported foreign row"
+        with pytest.raises(WrongProjectError):
+            db_p.update_issue("beefdata-abc1234567", title="mutated")
+        assert db_p.get_issue("beefdata-abc1234567").title == "Imported foreign row"
         db_p.close()
 
     def test_wrong_project_error_safe_message_omits_prefix(self, db_p: FiligreeDB) -> None:

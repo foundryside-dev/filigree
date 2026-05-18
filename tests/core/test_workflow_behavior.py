@@ -249,6 +249,30 @@ class TestUpdateIssueTransitionEnforcement:
         assert current.fields.get("fix_verification") == "initial"
         assert "extra_note" not in current.fields
 
+    def test_close_issue_invalid_enum_field_rejected(self, db: FiligreeDB) -> None:
+        """close_issue validates field schema enum options before closing."""
+        issue = db.create_issue("Bug", type="bug", fields={"severity": "major"})
+        db.update_issue(issue.id, status="confirmed")
+        db.update_issue(issue.id, status="fixing", fields={"root_cause": "bad assumption"})
+        db.update_issue(issue.id, status="verifying", fields={"fix_verification": "regression passes"})
+
+        with pytest.raises(ValueError, match="severity"):
+            db.close_issue(issue.id, fields={"severity": "catastrophic"})
+
+        current = db.get_issue(issue.id)
+        assert current.status == "verifying"
+        assert current.fields["severity"] == "major"
+
+    def test_update_issue_to_current_status_is_no_op(self, db: FiligreeDB) -> None:
+        """Setting status to its current value does not require a self-transition or emit status events."""
+        issue = db.create_issue("Task", type="task")
+
+        updated = db.update_issue(issue.id, status=issue.status)
+
+        assert updated.status == issue.status
+        events = [event for event in db.get_issue_events(issue.id, limit=10) if event["event_type"] == "status_changed"]
+        assert events == []
+
     def test_update_issue_sets_closed_at_for_done_category(self, db: FiligreeDB) -> None:
         """closed_at should be set when entering any done-category state, not just 'closed'."""
         issue = db.create_issue("Bug", type="bug")

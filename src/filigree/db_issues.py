@@ -1189,7 +1189,7 @@ class IssuesMixin(DBMixinProtocol):
                 raise KeyError(msg)
             if current["assignee"] and current["assignee"] != assignee:
                 msg = f"Cannot claim {issue_id}: already assigned to '{current['assignee']}'"
-                raise ValueError(msg)
+                raise ClaimConflictError(issue_id, observed=current["assignee"], expected=assignee, message=msg)
             msg = f"Cannot claim {issue_id}: status is '{current['status']}', expected open-category state or wip-category handoff state"
             raise ValueError(msg)
 

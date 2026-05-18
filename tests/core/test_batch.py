@@ -16,6 +16,36 @@ class TestBatchOperations:
         assert len(errors) == 0
         assert all(r.status == "closed" for r in results)
 
+    def test_batch_close_mixed_types_task_and_bug(self, db: FiligreeDB) -> None:
+        """Mixed task/bug closes use each issue's own workflow template."""
+        task = db.create_issue("Task")
+        bug = db.create_issue("Bug", type="bug", fields={"severity": "major"})
+        db.update_issue(bug.id, status="confirmed")
+        db.update_issue(bug.id, status="fixing", fields={"root_cause": "bad assumption"})
+        db.update_issue(bug.id, status="verifying", fields={"fix_verification": "regression passes"})
+
+        results, errors = db.batch_close([task.id, bug.id], reason="done")
+
+        assert errors == []
+        assert {issue.id for issue in results} == {task.id, bug.id}
+        assert db.get_issue(task.id).status == "closed"
+        assert db.get_issue(bug.id).status == "closed"
+
+    def test_batch_close_middle_failure_is_durable(self, db: FiligreeDB) -> None:
+        """A per-item failure in the middle does not roll back neighboring successes."""
+        first = db.create_issue("First task")
+        failing_bug = db.create_issue("Bug still in triage", type="bug")
+        last = db.create_issue("Last task")
+
+        results, errors = db.batch_close([first.id, failing_bug.id, last.id], reason="done")
+
+        assert {issue.id for issue in results} == {first.id, last.id}
+        assert len(errors) == 1
+        assert errors[0]["id"] == failing_bug.id
+        assert db.get_issue(first.id).status == "closed"
+        assert db.get_issue(failing_bug.id).status == "triage"
+        assert db.get_issue(last.id).status == "closed"
+
     def test_batch_update_status(self, db: FiligreeDB) -> None:
         a = db.create_issue("A")
         b = db.create_issue("B")

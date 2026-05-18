@@ -181,6 +181,18 @@ class TestStartWork:
             f"transition should have rolled back; got status={after.status!r}, expected {original_status!r}"
         )
 
+    def test_start_work_rollback_preserves_prior_claim(self, db: FiligreeDB) -> None:
+        """A failed same-agent start_work attempt must not erase a claim that predated it."""
+        issue = db.create_issue("d6-rollback-keeps-prior-claim", type="task")
+        claimed = db.claim_issue(issue.id, assignee="alice", actor="alice")
+
+        with pytest.raises(ValueError, match=r"status|transition"):
+            db.start_work(issue.id, assignee="alice", target_status="nonexistent_status", actor="alice")
+
+        after = db.get_issue(issue.id)
+        assert after.assignee == "alice"
+        assert after.status == claimed.status
+
     def test_failed_attempts_do_not_record_claim_handoffs(self, db: FiligreeDB) -> None:
         """Repeated invalid starts should not look like real claim/release handoffs."""
         issue = db.create_issue("d6-rollback-events", type="task")

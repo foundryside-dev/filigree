@@ -127,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Simultaneous claim contention now surfaces `ClaimConflictError` (2.1.0
+  §5.1).** When two agents race to claim the same issue, the losing writer
+  now raises the typed conflict error instead of a plain `ValueError`, keeping
+  CLI/MCP/HTTP/batch routing on `ErrorCode.CONFLICT`. Phase 5 also adds
+  guardrails for reclaim-vs-heartbeat contention, busy retry behavior,
+  mixed-type `batch_close`, durable middle failures, `start_work` rollback
+  over a prior same-agent claim, local `get_issue` read-tolerance for
+  imported foreign-prefix rows, enum validation through `close_issue`,
+  idempotent current-status updates, and submodule/worktree discovery
+  boundaries.
+
 - **`update_issue` is now atomic on assignee under multi-agent contention
   (2.1.0 §0.1).** When `update_issue` (and everything that routes through
   it — `close_issue`, `batch_close`, `batch_update`) observes a non-empty
