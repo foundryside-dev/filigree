@@ -699,8 +699,13 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
         return _text(
             ErrorResponse(
                 error=f"Registry unavailable while reporting finding: {exc}",
-                code=ErrorCode.IO,
-                details={"cause": "registry_unavailable"},
+                code=ErrorCode.REGISTRY_UNAVAILABLE,
+                details={
+                    "cause": "registry_unavailable",
+                    "cause_kind": exc.cause_kind,
+                    "path": exc.path,
+                    "url": exc.url,
+                },
             )
         )
     except (ValueError, sqlite3.Error) as exc:

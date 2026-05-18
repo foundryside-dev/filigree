@@ -24,8 +24,14 @@ import click
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.cli_common import get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
-from filigree.mcp_tools.scanners import _load_scanner_or_error, _report_finding_observation_ids, _validate_localhost_url
+from filigree.mcp_tools.scanners import (
+    _load_scanner_or_error,
+    _report_finding_observation_ids,
+    _reported_finding_record,
+    _validate_localhost_url,
+)
 from filigree.paths import safe_path
+from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
@@ -1037,6 +1043,31 @@ def report_finding_cmd(
                 create_observations=create_paired_observation,
                 observation_actor=actor.strip(),
             )
+        except RegistryResolutionError as exc:
+            _logger.warning("report_finding registry resolution failed: %s", exc)
+            code = ErrorCode.NOT_FOUND if isinstance(exc, RegistryFileNotFoundError) else ErrorCode.VALIDATION
+            cause = "registry_file_not_found" if isinstance(exc, RegistryFileNotFoundError) else "registry_resolution_rejected"
+            _emit_error(
+                f"Registry could not resolve file while reporting finding: {exc}",
+                code,
+                as_json=as_json,
+                details={"cause": cause},
+            )
+            return
+        except RegistryUnavailableError as exc:
+            _logger.warning("report_finding registry unavailable: %s", exc)
+            _emit_error(
+                f"Registry unavailable while reporting finding: {exc}",
+                ErrorCode.REGISTRY_UNAVAILABLE,
+                as_json=as_json,
+                details={
+                    "cause": "registry_unavailable",
+                    "cause_kind": exc.cause_kind,
+                    "path": exc.path,
+                    "url": exc.url,
+                },
+            )
+            return
         except ValueError as exc:
             # Mirrors the HTTP route at dashboard_routes/files.py: a ValueError
             # from process_scan_results is caller-side malformed-input, not a
@@ -1048,11 +1079,21 @@ def report_finding_cmd(
             _logger.error("report_finding storage failure: %s", exc)
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
-        file_record = tracker.register_file(finding_record["path"])
+        ingested_finding = _reported_finding_record(
+            tracker,
+            result,
+            rule_id=rule_id,
+            line_start=line_start,
+            message=message,
+            severity=severity,
+        )
+        if ingested_finding is None:
+            _emit_error("Reported finding was not found after ingestion", ErrorCode.IO, as_json=as_json)
+            return
         if create_paired_observation and result["new_finding_ids"]:
             observation_ids = _report_finding_observation_ids(
                 tracker,
-                file_id=file_record.id,
+                file_id=ingested_finding["file_id"],
                 finding_id=result["new_finding_ids"][0],
             )
 

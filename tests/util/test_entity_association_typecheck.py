@@ -44,5 +44,5 @@ def exercise(db: EntityAssociationsMixin) -> None:
     assert result.returncode != 0
     output = result.stdout + result.stderr
     assert "incompatible type" in output
-    assert "ClarionEntityId" in output
+    assert "EntityId" in output
     assert "IssueId" in output

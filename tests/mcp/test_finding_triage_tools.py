@@ -8,9 +8,10 @@ these tests verify the MCP integration layer on top.
 from __future__ import annotations
 
 from filigree.core import FiligreeDB
-from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
+from filigree.mcp_server import call_tool
 from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
+from filigree.types.core import make_entity_id, make_file_id
 from tests.mcp._helpers import _parse
 
 
@@ -83,7 +84,7 @@ class TestReportFindingTool:
         class FixedRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 return {
-                    "file_id": "core:file:report-target@src/report_target.py",
+                    "file_id": make_file_id("core:file:report-target@src/report_target.py"),
                     "content_hash": "",
                     "canonical_path": path,
                     "language": language,
@@ -113,7 +114,12 @@ class TestReportFindingTool:
     async def test_report_finding_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                raise RegistryUnavailableError("Clarion registry unavailable for test")
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=src%2Freport_target.py",
+                    path=path,
+                    cause_kind="network",
+                )
 
             def is_displaced(self) -> bool:
                 return False
@@ -132,7 +138,11 @@ class TestReportFindingTool:
             )
         )
 
-        assert data["code"] == ErrorCode.IO
+        assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+        assert data["details"]["cause"] == "registry_unavailable"
+        assert data["details"]["cause_kind"] == "network"
+        assert data["details"]["path"] == "src/report_target.py"
+        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Freport_target.py"
         assert "Registry unavailable" in data["error"]
         assert data["details"]["cause"] == "registry_unavailable"
 
@@ -174,7 +184,7 @@ class TestReportFindingTool:
                 self.resolve_calls += 1
                 canonical_path = path.casefold()
                 return {
-                    "file_id": f"core:file:{canonical_path.replace('/', ':')}",
+                    "file_id": make_entity_id(f"core:file:{canonical_path.replace('/', ':')}"),
                     "content_hash": f"hash:{canonical_path}",
                     "canonical_path": canonical_path,
                     "language": language,

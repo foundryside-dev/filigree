@@ -29,6 +29,7 @@ from click.testing import CliRunner
 from filigree.cli import cli
 from filigree.cli_common import get_db
 from filigree.core import FiligreeDB, write_config
+from filigree.registry import RegistryUnavailableError
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -809,6 +810,60 @@ class TestReportFindingCommand:
                 "observation_ids",
             ):
                 assert noisy not in data, f"slim CLI response unexpectedly carries {noisy!r}"
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_does_not_register_file_after_ingest(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """process_scan_results owns file creation; report-finding must not duplicate it."""
+        original_register_file = FiligreeDB.register_file
+
+        def fail_register_file(self: FiligreeDB, *args: object, **kwargs: object) -> object:
+            raise AssertionError("report-finding called register_file after ingest")
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", fail_register_file)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "created"
+            assert "finding_id" in data
+        finally:
+            monkeypatch.setattr(FiligreeDB, "register_file", original_register_file)
+            os.chdir(original)
+
+    def test_report_finding_registry_unavailable_returns_structured_code(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_registry(self: FiligreeDB, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=src%2Ffoo.py",
+                path="src/foo.py",
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "process_scan_results", unavailable_registry)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "src/foo.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Ffoo.py"
         finally:
             os.chdir(original)
 
