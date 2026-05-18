@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias, TypedDict
+from typing import Literal, TypeAlias, TypedDict, assert_never
 
 from filigree.types.core import ISOTimestamp, IssueDict
 
@@ -34,6 +34,75 @@ EventType = Literal[
     "undone",
     "archived",
 ]
+
+ReversibleEventType: TypeAlias = Literal[
+    "status_changed",
+    "title_changed",
+    "priority_changed",
+    "assignee_changed",
+    "claimed",
+    "dependency_added",
+    "dependency_removed",
+    "description_changed",
+    "notes_changed",
+    "fields_changed",
+    "parent_changed",
+]
+
+REVERSIBLE_EVENT_TYPES: tuple[ReversibleEventType, ...] = (
+    "status_changed",
+    "title_changed",
+    "priority_changed",
+    "assignee_changed",
+    "claimed",
+    "dependency_added",
+    "dependency_removed",
+    "description_changed",
+    "notes_changed",
+    "fields_changed",
+    "parent_changed",
+)
+
+
+def is_reversible_event_type(event_type: EventType) -> bool:
+    """Return whether an event type participates in undo.
+
+    The exhaustive match is deliberate: adding a new EventType forces a
+    yes/no undo decision in mypy, mirroring the ErrorCode assert_never guard.
+    """
+    match event_type:
+        case (
+            "status_changed"
+            | "title_changed"
+            | "priority_changed"
+            | "assignee_changed"
+            | "claimed"
+            | "dependency_added"
+            | "dependency_removed"
+            | "description_changed"
+            | "notes_changed"
+            | "fields_changed"
+            | "parent_changed"
+        ):
+            return True
+        case (
+            "created"
+            | "corrupt_fields_overwritten"
+            | "released"
+            | "heartbeat"
+            | "reclaimed"
+            | "reopened"
+            | "transition_warning"
+            | "transition_forced"
+            | "entity_association_added"
+            | "entity_association_refreshed"
+            | "entity_association_removed"
+            | "undone"
+            | "archived"
+        ):
+            return False
+        case _:
+            assert_never(event_type)
 
 
 class EventRecord(TypedDict):

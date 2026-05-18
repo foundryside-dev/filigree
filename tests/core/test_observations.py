@@ -483,8 +483,8 @@ class TestSweepExceptionSuppression:
         # Stats count must match the visible rows (not include the expired row)
         assert stats["count"] == 1
 
-    def test_sweep_suppresses_integrity_error(self, db: FiligreeDB) -> None:
-        """IntegrityError during sweep is suppressed — sweep is best-effort for all sqlite3.Error."""
+    def test_sweep_propagates_integrity_error(self, db: FiligreeDB) -> None:
+        """IntegrityError during sweep indicates a real invariant violation, not a transient lock."""
         import sqlite3
 
         db.create_observation("will survive sweep failure")
@@ -498,8 +498,8 @@ class TestSweepExceptionSuppression:
 
         db._conn = _InterceptingConn(real_conn, _fail_with_integrity)  # type: ignore[assignment]
         try:
-            result = db.list_observations()
-            assert len(result) == 1
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                db.list_observations()
         finally:
             db._conn = real_conn
 

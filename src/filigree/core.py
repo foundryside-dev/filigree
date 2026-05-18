@@ -191,6 +191,12 @@ class WrongProjectError(ValueError):
     callers (HTTP, MCP) get :attr:`safe_message` instead, which omits
     both prefixes so cross-project IDs cannot be probed by attempting
     foreign reads and pattern-matching the error.
+
+    Public surfaces intentionally split status codes by operation class:
+    server-mode read probes map this to NOT_FOUND/404 for anti-enumeration,
+    while write endpoints map it to VALIDATION/400 because the mutation
+    request is malformed for the current project. Both untrusted paths use
+    ``safe_message`` rather than prefix-bearing diagnostic text.
     """
 
     SAFE_MESSAGE = "Issue ID does not belong to this project"

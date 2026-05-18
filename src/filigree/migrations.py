@@ -26,6 +26,7 @@ SQLite ALTER TABLE limitations (why helpers exist):
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import sqlite3
@@ -750,7 +751,8 @@ def apply_pending_migrations(conn: sqlite3.Connection, target_version: int) -> i
             # Restore caller's original FK enforcement setting.
             # After commit/rollback the connection is in autocommit mode,
             # so this PRAGMA takes effect immediately.
-            conn.execute(f"PRAGMA foreign_keys={'ON' if original_fk else 'OFF'}")
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute(f"PRAGMA foreign_keys={'ON' if original_fk else 'OFF'}")
 
     return applied
 

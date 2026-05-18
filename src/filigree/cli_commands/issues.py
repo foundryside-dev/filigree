@@ -12,7 +12,15 @@ import click
 from filigree.cli_common import get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
-from filigree.types.api import AmbiguousTransitionError, ClaimConflictError, ErrorCode, InvalidTransitionError, classify_value_error
+from filigree.types.api import (
+    AmbiguousTransitionError,
+    ClaimConflictError,
+    ErrorCode,
+    InvalidTransitionError,
+    claim_conflict_envelope,
+    classify_release_claim_error,
+    classify_value_error,
+)
 from filigree.validation import sanitize_actor
 
 
@@ -496,11 +504,12 @@ def _update_impl(
         except ValueError as e:
             if as_json:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
-                if code == ErrorCode.INVALID_TRANSITION:
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                elif classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
                     click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
                 else:
-                    click.echo(json_mod.dumps({"error": msg, "code": code}))
+                    click.echo(json_mod.dumps({"error": msg, "code": classify_value_error(msg)}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -638,7 +647,7 @@ def close(
     """Close one or more issues."""
     with get_db() as db:
         succeeded: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         ready_before = {i.id for i in db.get_ready()} if as_json else set()
         for issue_id in issue_ids:
             try:
@@ -676,7 +685,11 @@ def close(
             except ValueError as e:
                 msg = str(e)
                 code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
-                errors.append({"id": issue_id, "error": msg, "code": code})
+                error_item: dict[str, Any] = {"id": issue_id, "error": msg, "code": code}
+                if isinstance(e, ClaimConflictError):
+                    envelope = claim_conflict_envelope(e)
+                    error_item["details"] = envelope["details"]
+                errors.append(error_item)
                 if not as_json:
                     click.echo(msg, err=True)
         if as_json:
@@ -687,7 +700,10 @@ def close(
             # behaviour for N≥2.
             if len(issue_ids) == 1 and errors and not succeeded:
                 err = errors[0]
-                click.echo(json_mod.dumps({"error": err["error"], "code": err["code"]}))
+                error_payload: dict[str, Any] = {"error": err["error"], "code": err["code"]}
+                if "details" in err:
+                    error_payload["details"] = err["details"]
+                click.echo(json_mod.dumps(error_payload))
                 refresh_summary(db)
                 sys.exit(1)
             # Only issues that became ready *after* the close (per docs/cli.md).
@@ -777,10 +793,14 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
         except ValueError as e:
             msg = str(e)
             if as_json:
-                code = classify_value_error(msg)
-                if code != ErrorCode.INVALID_TRANSITION:
-                    code = ErrorCode.CONFLICT
-                click.echo(json_mod.dumps({"error": msg, "code": code}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    code = classify_value_error(msg)
+                    if code == ErrorCode.INVALID_TRANSITION:
+                        click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
+                    else:
+                        click.echo(json_mod.dumps({"error": msg, "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -898,21 +918,14 @@ def _release_impl(
             sys.exit(1)
         except ClaimConflictError as e:
             if as_json:
-                click.echo(
-                    json_mod.dumps(
-                        {
-                            "error": str(e),
-                            "code": ErrorCode.CONFLICT,
-                            "details": {"issue_id": e.issue_id, "observed": e.observed, "expected": e.expected},
-                        }
-                    )
-                )
+                click.echo(json_mod.dumps(claim_conflict_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                code = classify_release_claim_error(issue_id, e)
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1074,7 +1087,10 @@ def heartbeat_work_cmd(
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    click.echo(json_mod.dumps({"error": str(e), "code": classify_value_error(str(e))}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1186,7 +1202,10 @@ def reclaim_cmd(
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    click.echo(json_mod.dumps({"error": str(e), "code": classify_value_error(str(e))}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1323,7 +1342,7 @@ def start_work(
                             _log_transition_enrichment_failure(issue_id, enrich_exc)
                     click.echo(json_mod.dumps(payload))
                 else:
-                    click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.CONFLICT}))
+                    click.echo(json_mod.dumps({"error": msg, "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)

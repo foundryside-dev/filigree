@@ -290,3 +290,43 @@ class TestStartNextWork:
 
         with pytest.raises(InvalidTransitionError):
             db.start_next_work(assignee="alice", actor="alice")
+
+    def test_deleted_candidate_between_ready_and_claim_is_skipped(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A candidate deleted after get_ready() is a per-candidate race."""
+        doomed = db.create_issue("d6-next-deleted-candidate", type="task", priority=0)
+        survivor = db.create_issue("d6-next-survives", type="task", priority=1)
+        ready_snapshot = [doomed, survivor]
+        real_start_locked = db._start_work_locked
+        deleted = {"done": False}
+
+        def delete_first_candidate_then_start(
+            issue_id: str,
+            *,
+            assignee: str,
+            target_status: str,
+            actor: str,
+        ):
+            if issue_id == doomed.id and not deleted["done"]:
+                db.conn.execute("DELETE FROM events WHERE issue_id = ?", (doomed.id,))
+                db.conn.execute("DELETE FROM issues WHERE id = ?", (doomed.id,))
+                db.conn.commit()
+                deleted["done"] = True
+            return real_start_locked(
+                issue_id,
+                assignee=assignee,
+                target_status=target_status,
+                actor=actor,
+            )
+
+        monkeypatch.setattr(db, "get_ready", lambda: ready_snapshot)
+        monkeypatch.setattr(db, "_start_work_locked", delete_first_candidate_then_start)
+
+        result = db.start_next_work(assignee="alice", actor="alice")
+
+        assert result is not None
+        assert result.id == survivor.id
+        assert result.assignee == "alice"

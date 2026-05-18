@@ -130,6 +130,40 @@ class TestIssuesAPI:
         for field in ["id", "title", "status", "priority", "type", "blocks", "blocked_by", "is_ready"]:
             assert field in issue
 
+    async def test_update_issue_force_overwrite_corrupt_fields(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        issue = dashboard_db.db.create_issue("HTTP corrupt fields")
+        dashboard_db.db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
+        dashboard_db.db.conn.commit()
+
+        resp = await client.patch(
+            f"/api/issue/{issue.id}",
+            json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["fields"] == {"restored": True}
+
+    async def test_loom_update_issue_force_overwrite_corrupt_fields(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        issue = dashboard_db.db.create_issue("Loom corrupt fields")
+        dashboard_db.db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
+        dashboard_db.db.conn.commit()
+
+        resp = await client.patch(
+            f"/api/loom/issues/{issue.id}",
+            json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["fields"] == {"restored": True}
+
 
 class TestIssueDetailAPI:
     async def test_issue_detail(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:

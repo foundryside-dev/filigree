@@ -281,7 +281,7 @@ class TestSearchFTSFallback:
         with patch.object(db, "_conn", _SpyConn()), pytest.raises(sqlite3.OperationalError, match="malformed"):
             db.search_issues("Searchable")
 
-    def test_fts_unavailable_uses_sqlite_errorcode_not_message(self, db: FiligreeDB) -> None:
+    def test_sqlite_error_without_missing_fts_message_propagates(self, db: FiligreeDB) -> None:
         db.create_issue("Searchable notification item")
 
         original_execute = db.conn.execute
@@ -295,10 +295,24 @@ class TestSearchFTSFallback:
                     raise _sqlite_operational_error("custom extension loader failed", sqlite3.SQLITE_ERROR)
                 return original_execute(sql, params)
 
-        with patch.object(db, "_conn", _NoFTS()):
-            results = db.search_issues("notification")
+        with patch.object(db, "_conn", _NoFTS()), pytest.raises(sqlite3.OperationalError, match="custom extension loader failed"):
+            db.search_issues("notification")
 
-        assert [issue.title for issue in results] == ["Searchable notification item"]
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("no such table: issues_fts", True),
+            ("no such module: fts5", True),
+            ("table issues has no column named status_rank", False),
+            ("custom extension loader failed", False),
+        ],
+    )
+    def test_fts_unavailable_discriminates_sqlite_error_messages(self, message: str, expected: bool) -> None:
+        from filigree.db_issues import _is_fts_unavailable_error
+
+        exc = _sqlite_operational_error(message, sqlite3.SQLITE_ERROR)
+
+        assert _is_fts_unavailable_error(exc) is expected
 
     def test_non_fts_error_code_propagates_even_with_legacy_message(self, db: FiligreeDB) -> None:
         db.create_issue("Searchable item")
@@ -636,7 +650,7 @@ class TestCountSearchResults:
             count = db.count_search_results("notification")
         assert count == 2
 
-    def test_fts_unavailable_uses_sqlite_errorcode_not_message(self, db: FiligreeDB) -> None:
+    def test_count_sqlite_error_without_missing_fts_message_propagates(self, db: FiligreeDB) -> None:
         db.create_issue("Fix notification system")
         db.create_issue("Another notification task")
         db.create_issue("Unrelated task")
@@ -652,10 +666,8 @@ class TestCountSearchResults:
                     raise _sqlite_operational_error("custom extension loader failed", sqlite3.SQLITE_ERROR)
                 return original_execute(sql, params)
 
-        with patch.object(db, "_conn", _NoFTS()):
-            count = db.count_search_results("notification")
-
-        assert count == 2
+        with patch.object(db, "_conn", _NoFTS()), pytest.raises(sqlite3.OperationalError, match="custom extension loader failed"):
+            db.count_search_results("notification")
 
     def test_non_fts_error_code_propagates_even_with_legacy_message(self, db: FiligreeDB) -> None:
         db.create_issue("Fix notification system")

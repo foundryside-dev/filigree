@@ -345,6 +345,23 @@ class TestUpdateAndClose:
         assert "expected 'other-agent'" in data["error"]
         assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
+    async def test_update_issue_force_overwrite_corrupt_fields(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("MCP corrupt fields")
+        mcp_db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
+        mcp_db.conn.commit()
+
+        result = await call_tool(
+            "update_issue",
+            {
+                "issue_id": issue.id,
+                "fields": {"restored": True},
+                "force_overwrite_corrupt": True,
+            },
+        )
+
+        data = _parse(result)
+        assert data["fields"] == {"restored": True}
+
     async def test_update_issue_explicit_expected_assignee_overrides_actor_default(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Claim-aware update")
         mcp_db.claim_issue(issue.id, assignee="agent-holder")
@@ -563,6 +580,16 @@ class TestComments:
         assert data["status"] == "open"
         assert "comment_id" in data
 
+    async def test_add_comment_defaults_expected_assignee_to_actor_for_held_issue(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware comment")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool("add_comment", {"issue_id": issue.id, "text": "note", "actor": "other-agent"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
+
     async def test_get_comments(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("With comments")
         mcp_db.add_comment(issue.id, "First", author="alice")
@@ -662,6 +689,18 @@ class TestLabels:
         assert data["code"] == ErrorCode.CONFLICT
         assert "assigned to 'agent-holder'" in data["error"]
         assert "expected 'other-agent'" in data["error"]
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
+
+    async def test_remove_label_defaults_expected_assignee_to_actor_for_held_issue(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware remove label")
+        mcp_db.add_label(issue.id, "needs-review")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool("remove_label", {"issue_id": issue.id, "label": "needs-review", "actor": "other-agent"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
     async def test_add_label_rejects_reserved_type_name(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Labelable")
@@ -1260,16 +1299,15 @@ class TestClaimIssue:
         assert data["status"] == "open"
         assert data["assignee"] == "agent-bravo"
 
-    async def test_claim_closed_issue_is_invalid_transition(self, mcp_db: FiligreeDB) -> None:
+    async def test_claim_closed_issue_is_validation(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Closed claim", type="task")
         mcp_db.close_issue(issue.id, reason="done")
 
         result = await call_tool("claim_issue", {"issue_id": issue.id, "assignee": "agent-1"})
 
         data = _parse(result)
-        assert data["code"] == ErrorCode.INVALID_TRANSITION
-        assert "valid_transitions" in data
-        assert "hint" in data
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "expected open-category state" in data["error"]
 
     async def test_claim_not_found(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("claim_issue", {"issue_id": "mcp-nonexistent", "assignee": "agent-1"})

@@ -29,8 +29,16 @@ from filigree.types.api import (
     ErrorCode,
     InvalidTransitionError,
     IssueDetailEvent,
+    claim_conflict_details,
     classify_value_error,
     errorcode_to_http_status,
+    invalid_transition_details,
+)
+from filigree.types.api import (
+    classify_issue_write_error as _classify_issue_write_error,
+)
+from filigree.types.api import (
+    classify_release_claim_error as _classify_release_claim_error,
 )
 from filigree.types.core import ISOTimestamp
 from filigree.types.planning import CommentRecord
@@ -43,34 +51,13 @@ _ISSUES_LIST_PAGE_SIZE = 1000
 _MISSING = object()
 
 
-def _classify_issue_write_error(exc: BaseException) -> ErrorCode:
-    if isinstance(exc, ClaimConflictError):
-        return ErrorCode.CONFLICT
-    if isinstance(exc, InvalidTransitionError):
-        return ErrorCode.INVALID_TRANSITION
-    return classify_value_error(str(exc))
-
-
-def _classify_release_claim_error(issue_id: str, exc: BaseException) -> ErrorCode:
-    msg = str(exc)
-    if msg.startswith(f"Cannot release {issue_id}:") and "no assignee set" in msg:
-        return ErrorCode.CONFLICT
-    return _classify_issue_write_error(exc)
-
-
-def _claim_conflict_details(exc: ClaimConflictError) -> dict[str, Any]:
-    return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
-
-
 def _invalid_transition_details(exc: BaseException) -> dict[str, Any] | None:
-    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
-        return {"valid_transitions": exc.valid_transitions}
-    return None
+    return invalid_transition_details(exc)
 
 
 def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, ClaimConflictError):
-        return _claim_conflict_details(exc)
+        return claim_conflict_details(exc)
     return _invalid_transition_details(exc)
 
 
@@ -449,6 +436,9 @@ def create_classic_router() -> APIRouter:
         expected_assignee = body.get("expected_assignee")
         if expected_assignee is not None and not isinstance(expected_assignee, str):
             return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
+        force_overwrite_corrupt = body.get("force_overwrite_corrupt", False)
+        if not isinstance(force_overwrite_corrupt, bool):
+            return _error_response("force_overwrite_corrupt must be a boolean", ErrorCode.VALIDATION, 400)
         body.pop("actor", None)
         priority = _validate_priority_field(body)
         if isinstance(priority, JSONResponse):
@@ -481,6 +471,7 @@ def create_classic_router() -> APIRouter:
                 fields=body.get("fields"),
                 actor=actor,
                 expected_assignee=expected_assignee,
+                force_overwrite_corrupt=force_overwrite_corrupt,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -775,11 +766,9 @@ def create_classic_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            if code != ErrorCode.INVALID_TRANSITION:
-                code = ErrorCode.CONFLICT
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue.to_dict())
 
@@ -809,7 +798,7 @@ def create_classic_router() -> APIRouter:
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
@@ -831,8 +820,11 @@ def create_classic_router() -> APIRouter:
             return actor_err
         try:
             issue = db.claim_next(assignee, actor=actor)
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409)
+            code = classify_value_error(str(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(issue.to_dict())
@@ -1253,6 +1245,9 @@ def create_loom_router() -> APIRouter:
         expected_assignee = body.get("expected_assignee")
         if expected_assignee is not None and not isinstance(expected_assignee, str):
             return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
+        force_overwrite_corrupt = body.get("force_overwrite_corrupt", False)
+        if not isinstance(force_overwrite_corrupt, bool):
+            return _error_response("force_overwrite_corrupt must be a boolean", ErrorCode.VALIDATION, 400)
         body.pop("actor", None)
         priority = _validate_priority_field(body)
         if isinstance(priority, JSONResponse):
@@ -1285,6 +1280,7 @@ def create_loom_router() -> APIRouter:
                 fields=body.get("fields"),
                 actor=actor,
                 expected_assignee=expected_assignee,
+                force_overwrite_corrupt=force_overwrite_corrupt,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -1388,11 +1384,9 @@ def create_loom_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            if code != ErrorCode.INVALID_TRANSITION:
-                code = ErrorCode.CONFLICT
             return _error_response(str(e), code, errorcode_to_http_status(code))
         return JSONResponse(issue_to_loom(issue))
 
@@ -1422,7 +1416,7 @@ def create_loom_router() -> APIRouter:
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
@@ -1447,8 +1441,11 @@ def create_loom_router() -> APIRouter:
             return actor_err
         try:
             issue = db.claim_next(assignee, actor=actor)
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409)
+            code = classify_value_error(str(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(issue_to_loom(issue))

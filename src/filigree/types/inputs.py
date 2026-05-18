@@ -85,6 +85,7 @@ class UpdateIssueArgs(TypedDict):
     notes: NotRequired[str]
     parent_issue_id: NotRequired[str]
     fields: NotRequired[dict[str, Any]]
+    force_overwrite_corrupt: NotRequired[bool]
     actor: NotRequired[str]
     expected_assignee: NotRequired[str]
 

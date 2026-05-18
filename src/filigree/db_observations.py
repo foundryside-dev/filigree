@@ -154,9 +154,19 @@ class ObservationsMixin(DBMixinProtocol):
             if cursor.rowcount > 0:
                 logger.debug("Swept %d expired observations", cursor.rowcount)
             return cursor.rowcount, True
-        except (sqlite3.OperationalError, sqlite3.IntegrityError):
-            # Suppress transient errors (locked, busy) and integrity violations — sweep is best-effort.
-            # Let ProgrammingError, InterfaceError propagate — those indicate code bugs.
+        except sqlite3.IntegrityError:
+            logger.error("Observation sweep hit an integrity violation, rolled back", exc_info=True)
+            try:
+                self.conn.execute("ROLLBACK TO SAVEPOINT sweep_obs")
+            finally:
+                try:
+                    self.conn.execute("RELEASE SAVEPOINT sweep_obs")
+                except sqlite3.Error:
+                    logger.warning("Failed to release savepoint after sweep rollback", exc_info=True)
+            raise
+        except sqlite3.OperationalError:
+            # Suppress transient errors (locked, busy) — sweep is best-effort.
+            # Let ProgrammingError and InterfaceError propagate; those indicate code bugs.
             logger.warning("Observation sweep failed, rolled back", exc_info=True)
             try:
                 self.conn.execute("ROLLBACK TO SAVEPOINT sweep_obs")

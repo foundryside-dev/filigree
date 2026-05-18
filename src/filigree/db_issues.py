@@ -328,10 +328,12 @@ def _is_fts_unavailable_error(exc: sqlite3.OperationalError) -> bool:
     or older-driver OperationalErrors may not carry ``sqlite_errorcode``; keep
     a narrow compatibility fallback for the historical messages.
     """
+    message = str(exc).lower()
     code = getattr(exc, "sqlite_errorcode", None)
     if isinstance(code, int):
-        return (code & 0xFF) == sqlite3.SQLITE_ERROR
-    message = str(exc).lower()
+        if (code & 0xFF) != sqlite3.SQLITE_ERROR:
+            return False
+        return "no such table: issues_fts" in message or "no such module: fts" in message
     return "no such table: issues_fts" in message or "no such module: fts" in message
 
 

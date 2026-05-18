@@ -387,13 +387,35 @@ class DBMixinProtocol(Protocol):
     # -- MetaMixin -----------------------------------------------------------
 
     def add_label(
-        self, issue_id: str, label: str, *, actor: str = "", expected_assignee: str | None = None
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        actor: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str, list[str]]: ...
-    def remove_label(self, issue_id: str, label: str, *, actor: str = "", expected_assignee: str | None = None) -> tuple[bool, str]: ...
+    def remove_label(
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        actor: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
+    ) -> tuple[bool, str]: ...
     def batch_remove_label(
         self, issue_ids: list[str], *, label: str, actor: str = "", expected_assignee: str | None = None
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
-    def add_comment(self, issue_id: str, text: str, *, author: str = "", expected_assignee: str | None = None) -> int: ...
+    def add_comment(
+        self,
+        issue_id: str,
+        text: str,
+        *,
+        author: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
+    ) -> int: ...
     def get_comment(self, comment_id: int) -> CommentRecord: ...
 
     # -- PlanningMixin -------------------------------------------------------

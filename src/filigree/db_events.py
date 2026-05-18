@@ -12,7 +12,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
-from filigree.types.events import EventRecord, EventRecordWithTitle, EventType, UndoResult
+from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventRecord, EventRecordWithTitle, EventType, UndoResult
 
 _UNDO_CLAIM_LEASE_HOURS = 48
 
@@ -25,21 +25,7 @@ def _undo_claim_expiry(now: str) -> str:
 # Undo constants (moved from core.py — only used by undo_last)
 # ---------------------------------------------------------------------------
 
-_REVERSIBLE_EVENTS = frozenset(
-    {
-        "status_changed",
-        "title_changed",
-        "priority_changed",
-        "assignee_changed",
-        "claimed",
-        "dependency_added",
-        "dependency_removed",
-        "description_changed",
-        "notes_changed",
-        "fields_changed",
-        "parent_changed",
-    }
-)
+_REVERSIBLE_EVENTS = frozenset(REVERSIBLE_EVENT_TYPES)
 
 
 class EventsMixin(DBMixinProtocol):

@@ -577,7 +577,17 @@ class ClaimConflictError(ValueError):
         super().__init__(message or f"Cannot operate on {issue_id}: assigned to '{observed}' (expected '{expected}')")
 
 
-class AmbiguousTransitionError(Exception):
+def claim_conflict_details(exc: ClaimConflictError) -> dict[str, str]:
+    """Return the stable details payload for claim-aware CONFLICT envelopes."""
+    return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
+
+
+def claim_conflict_envelope(exc: ClaimConflictError) -> ErrorResponse:
+    """Return the canonical ErrorResponse for claim-aware optimistic-lock conflicts."""
+    return ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT, details=claim_conflict_details(exc))
+
+
+class AmbiguousTransitionError(ValueError):
     """Raised when start-work cannot choose between multiple wip-category targets.
 
     Carries the issue type, candidate target states, and optionally the
@@ -665,6 +675,18 @@ class InvalidTransitionError(ValueError):
         )
 
 
+def invalid_transition_details(exc: BaseException) -> dict[str, list[TransitionHint]] | None:
+    """Return the optional details payload for invalid-transition envelopes.
+
+    ``InvalidTransitionError.valid_transitions`` keeps ``None`` as the
+    internal "not yet enriched" sentinel. Public envelopes omit the details
+    key in that state rather than serializing ``valid_transitions: null``.
+    """
+    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
+        return {"valid_transitions": exc.valid_transitions}
+    return None
+
+
 def errorcode_to_http_status(code: ErrorCode) -> int:
     """Map an ErrorCode to the HTTP status the dashboard should return.
 
@@ -736,9 +758,28 @@ def classify_value_error(message: str) -> ErrorCode:
     breaking this rule in a future change trips CI.
     """
     lowered = message.lower()
+    if "expected open-category state or wip-category handoff state" in lowered:
+        return ErrorCode.VALIDATION
     if "status" in lowered or "transition" in lowered or "state" in lowered:
         return ErrorCode.INVALID_TRANSITION
     return ErrorCode.VALIDATION
+
+
+def classify_issue_write_error(exc: BaseException) -> ErrorCode:
+    """Classify claim-aware issue-write failures for dashboard, MCP, and CLI surfaces."""
+    if isinstance(exc, ClaimConflictError):
+        return ErrorCode.CONFLICT
+    if isinstance(exc, (AmbiguousTransitionError, InvalidTransitionError)):
+        return ErrorCode.INVALID_TRANSITION
+    return classify_value_error(str(exc))
+
+
+def classify_release_claim_error(issue_id: str, exc: BaseException) -> ErrorCode:
+    """Classify release-claim failures consistently across public surfaces."""
+    msg = str(exc)
+    if msg.startswith(f"Cannot release {issue_id}:") and "no assignee set" in msg:
+        return ErrorCode.CONFLICT
+    return classify_issue_write_error(exc)
 
 
 # Mapping used only during Stage 2a rollout for developer reference.

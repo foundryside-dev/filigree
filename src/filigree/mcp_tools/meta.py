@@ -25,6 +25,7 @@ from filigree.types.api import (
     JsonlTransferResponse,
     LabelActionResponse,
     PublicIssue,
+    claim_conflict_envelope,
     parse_response_detail,
 )
 from filigree.types.events import EventType
@@ -518,7 +519,7 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+            return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
     issue = tracker.get_issue(args["issue_id"])
@@ -566,7 +567,7 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+            return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
     # Mutual-exclusivity displacement was previously silent — surface it as
@@ -611,7 +612,7 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+            return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     _refresh_summary()
     status = "removed" if removed else "not_found"

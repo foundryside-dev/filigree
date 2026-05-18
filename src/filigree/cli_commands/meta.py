@@ -13,7 +13,13 @@ from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public, label_namespace_to_public
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp
-from filigree.types.api import ClaimConflictError, ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode, ErrorResponse, claim_conflict_envelope
+
+
+def _value_error_envelope(exc: ValueError) -> ErrorResponse:
+    if isinstance(exc, ClaimConflictError):
+        return claim_conflict_envelope(exc)
+    return ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION)
 
 
 @click.command("add-comment")
@@ -48,8 +54,7 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee:
             comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"], expected_assignee=expected_assignee)
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -132,8 +137,7 @@ def add_label(ctx: click.Context, label_name: str, issue_id: str, expected_assig
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -191,8 +195,7 @@ def remove_label(ctx: click.Context, issue_id: str, label_name: str, expected_as
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)

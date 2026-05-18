@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import get_type_hints
+from typing import get_args, get_type_hints
 
 from filigree.types.api import BatchFailure, BatchResponse, ListResponse, SlimIssue
 
@@ -65,6 +65,15 @@ def test_error_code_is_str_subclass() -> None:
     assert isinstance(ErrorCode.VALIDATION, str)
 
 
+def test_event_type_reversibility_classifier_is_total() -> None:
+    from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventType, is_reversible_event_type
+
+    classified = {event_type: is_reversible_event_type(event_type) for event_type in get_args(EventType)}
+    assert {event_type for event_type, reversible in classified.items() if reversible} == set(REVERSIBLE_EVENT_TYPES)
+    assert classified["created"] is False
+    assert classified["status_changed"] is True
+
+
 def test_error_response_flat_shape() -> None:
     from filigree.types.api import ErrorCode, ErrorResponse
 
@@ -108,6 +117,7 @@ def test_transition_errors_exist() -> None:
 
     exc1 = AmbiguousTransitionError("X", ["fixing", "reviewing"])
     assert "fixing" in str(exc1)
+    assert isinstance(exc1, ValueError)
 
     exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", backward=True)
     assert "confirmed" in str(exc2)
@@ -116,6 +126,16 @@ def test_transition_errors_exist() -> None:
     assert str(enriched) == str(exc2)
     assert enriched.backward is True
     assert enriched.valid_transitions == [{"to": "open", "category": "open", "ready": True}]
+
+
+def test_invalid_transition_details_omits_uncomputed_transitions() -> None:
+    from filigree.types.api import InvalidTransitionError, invalid_transition_details
+
+    exc = InvalidTransitionError("X", "confirmed", to_state="closed")
+    assert invalid_transition_details(exc) is None
+
+    enriched = exc.with_valid_transitions([])
+    assert invalid_transition_details(enriched) == {"valid_transitions": []}
 
 
 def test_scan_ingest_response_loom_concrete_shape() -> None:

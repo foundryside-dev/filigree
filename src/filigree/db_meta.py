@@ -12,7 +12,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, ClassVar
 
-from filigree.db_base import DBMixinProtocol, _normalize_iso_to_utc, _now_iso
+from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
 from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES
 from filigree.db_issues import _check_expected_assignee
 from filigree.db_observations import _expires_iso
@@ -32,6 +32,8 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Comments ------------------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("add_comment")
     def add_comment(
         self,
         issue_id: str,
@@ -39,6 +41,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         author: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> int:
         if not text or not text.strip():
             msg = "Comment text cannot be empty"
@@ -50,15 +53,10 @@ class MetaMixin(DBMixinProtocol):
             raise KeyError(msg)
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=author)
         now = _now_iso()
-        try:
-            cursor = self.conn.execute(
-                "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-                (issue_id, author, text, now),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+            (issue_id, author, text, now),
+        )
         rowid = cursor.lastrowid
         if rowid is None:  # pragma: no cover — INSERT always sets lastrowid
             msg = "INSERT did not produce a lastrowid"
@@ -84,6 +82,8 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Labels --------------------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("add_label")
     def add_label(
         self,
         issue_id: str,
@@ -91,6 +91,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         actor: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str, list[str]]:
         """Add label to issue. Returns (added, canonical_label, replaced_labels).
 
@@ -132,23 +133,20 @@ class MetaMixin(DBMixinProtocol):
             # Capture the set of labels we're about to displace so callers can
             # report the silent removal (P2.7).
             replaced = sorted(lbl for lbl in existing_review if lbl != normalized)
-        try:
-            # Mutual exclusivity for review: namespace
-            if normalized.startswith("review:"):
-                self.conn.execute(
-                    "DELETE FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
-                    (issue_id,),
-                )
-            cursor = self.conn.execute(
-                "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
-                (issue_id, normalized),
+        # Mutual exclusivity for review: namespace
+        if normalized.startswith("review:"):
+            self.conn.execute(
+                "DELETE FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
+                (issue_id,),
             )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+            (issue_id, normalized),
+        )
         return cursor.rowcount > 0, normalized, replaced
 
+    @_retry_busy()
+    @_in_immediate_tx("remove_label")
     def remove_label(
         self,
         issue_id: str,
@@ -156,6 +154,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         actor: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str]:
         """Remove label from issue. Returns (removed, canonical_label).
 
@@ -170,15 +169,10 @@ class MetaMixin(DBMixinProtocol):
             raise KeyError(msg)
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=actor)
         normalized = self._validate_label_name(label, allow_priority_like=True)
-        try:
-            cursor = self.conn.execute(
-                "DELETE FROM labels WHERE issue_id = ? AND label = ?",
-                (issue_id, normalized),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "DELETE FROM labels WHERE issue_id = ? AND label = ?",
+            (issue_id, normalized),
+        )
         return cursor.rowcount > 0, normalized
 
     def list_labels(

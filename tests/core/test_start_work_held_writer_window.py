@@ -31,6 +31,15 @@ class _LockWindowTracker:
             self._current.append(sql)
 
 
+def _assert_no_discovery_or_template_sql(statements: list[str]) -> None:
+    """The critical section should not include candidate or template reads."""
+    window = "\n".join(statements).lower()
+    assert "type_templates" not in window
+    assert " from packs" not in window
+    assert "select i.id from issues i" not in window
+    assert "order by i.priority" not in window
+
+
 @pytest.mark.parametrize("with_explicit_target", [True, False])
 def test_start_work_held_writer_window_excludes_template_lookup(
     db: FiligreeDB,
@@ -51,10 +60,7 @@ def test_start_work_held_writer_window_excludes_template_lookup(
     # Exactly one writer-lock window opened during start_work
     # (the _start_work_locked critical section).
     assert len(tracker.windows) == 1, f"expected 1 BEGIN/COMMIT pair, got {tracker.windows}"
-    window = "\n".join(tracker.windows[0]).lower()
-    assert "type_templates" not in window
-    assert " from packs" not in window
-    assert len(tracker.windows[0]) <= 23
+    _assert_no_discovery_or_template_sql(tracker.windows[0])
 
 
 def test_start_next_work_iteration_runs_outside_writer_lock(db: FiligreeDB) -> None:
@@ -73,7 +79,4 @@ def test_start_next_work_iteration_runs_outside_writer_lock(db: FiligreeDB) -> N
     assert result.id in {i.id for i in issues}
     # One writer-lock window per successful start (the first candidate).
     assert len(tracker.windows) == 1
-    window = "\n".join(tracker.windows[0]).lower()
-    assert "type_templates" not in window
-    assert " from packs" not in window
-    assert len(tracker.windows[0]) <= 23
+    _assert_no_discovery_or_template_sql(tracker.windows[0])

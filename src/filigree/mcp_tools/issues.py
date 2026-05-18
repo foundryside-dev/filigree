@@ -40,6 +40,8 @@ from filigree.types.api import (
     PublicIssue,
     SlimIssue,
     TransitionDetail,
+    claim_conflict_envelope,
+    classify_release_claim_error,
     classify_value_error,
     parse_response_detail,
 )
@@ -78,13 +80,7 @@ def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
 
 
 def _claim_conflict_response(exc: ClaimConflictError) -> list[TextContent]:
-    return _text(
-        ErrorResponse(
-            error=str(exc),
-            code=ErrorCode.CONFLICT,
-            details={"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected},
-        )
-    )
+    return _text(claim_conflict_envelope(exc))
 
 
 def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) -> list[TextContent]:
@@ -102,9 +98,12 @@ def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) ->
 
 def _release_claim_value_error_response(tracker: Any, issue_id: str, exc: ValueError) -> list[TextContent]:
     msg = str(exc)
-    if msg.startswith(f"Cannot release {issue_id}:") and "no assignee set" in msg:
-        return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
-    return _issue_value_error_response(tracker, issue_id, exc)
+    code = classify_release_claim_error(issue_id, exc)
+    if code == ErrorCode.CONFLICT:
+        return _text(ErrorResponse(error=msg, code=code))
+    if code == ErrorCode.INVALID_TRANSITION:
+        return _text(_build_transition_error(tracker, issue_id, msg))
+    return _text(ErrorResponse(error=msg, code=code))
 
 
 def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
@@ -267,6 +266,10 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "New parent issue ID (empty string to clear)",
                     },
                     "fields": {"type": "object", "description": "Fields to merge into existing fields"},
+                    "force_overwrite_corrupt": {
+                        "type": "boolean",
+                        "description": "Overwrite corrupt stored fields instead of refusing to merge.",
+                    },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
                     "expected_assignee": {
                         "type": "string",
@@ -919,6 +922,9 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
+    force_overwrite_corrupt = args.get("force_overwrite_corrupt", False)
+    if not isinstance(force_overwrite_corrupt, bool):
+        return _text(ErrorResponse(error="force_overwrite_corrupt must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         before = tracker.get_issue(args["issue_id"])
@@ -937,6 +943,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
             fields=args.get("fields"),
             actor=actor,
             expected_assignee=expected_assignee,
+            force_overwrite_corrupt=force_overwrite_corrupt,
         )
         _refresh_summary()
         changed = [attr for attr in _UPDATE_TRACKED_FIELDS if getattr(issue, attr) != getattr(before, attr)]
@@ -1082,9 +1089,10 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _claim_conflict_response(e)
     except ValueError as e:
         msg = str(e)
-        if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
+        code = classify_value_error(msg)
+        if code == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
-        return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(ErrorResponse(error=msg, code=code))
 
 
 async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
@@ -1486,7 +1494,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
         code = classify_value_error(msg)
         if code == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
-        return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+        return _text(ErrorResponse(error=msg, code=code))
     _refresh_summary()
     return _text(issue_to_public(issue))
 

@@ -153,6 +153,43 @@ def test_busy_timeout_retry_behavior(db: FiligreeDB, monkeypatch: pytest.MonkeyP
     assert attempts["count"] == 3
 
 
+@pytest.mark.parametrize(
+    ("operation", "mutate"),
+    [
+        ("add_comment", lambda db, issue_id: db.add_comment(issue_id, "busy comment")),
+        ("add_label", lambda db, issue_id: db.add_label(issue_id, "busy-label")),
+        ("remove_label", lambda db, issue_id: db.remove_label(issue_id, "busy-label")),
+    ],
+)
+def test_meta_writes_use_busy_retry_and_begin_immediate(
+    db: FiligreeDB,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    mutate: object,
+) -> None:
+    issue = db.create_issue("meta busy retry target")
+    if operation == "remove_label":
+        db.add_label(issue.id, "busy-label")
+    real_begin = db_base._begin_immediate
+    attempts = {"count": 0}
+
+    def flaky_begin(conn: sqlite3.Connection, op: str) -> None:
+        if op == operation and attempts["count"] < 2:
+            attempts["count"] += 1
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY  # type: ignore[attr-defined]
+            raise exc
+        if op == operation:
+            attempts["count"] += 1
+        real_begin(conn, op)
+
+    monkeypatch.setattr(db_base, "_begin_immediate", flaky_begin)
+
+    mutate(db, issue.id)  # type: ignore[operator]
+
+    assert attempts["count"] == 3
+
+
 def test_begin_immediate_retries_real_sqlite_busy(tmp_path: Path) -> None:
     """A real locked SQLite writer is retried until the blocker commits."""
     db_path = tmp_path / "filigree.db"
