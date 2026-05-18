@@ -80,6 +80,43 @@ class TestSchemaV1Constant:
             assert table not in SCHEMA_V1_SQL
 
 
+class TestFileRegistryBackendSchema:
+    """Verify the ADR-014 file registry columns land additively."""
+
+    def test_fresh_schema_contains_file_registry_backend_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+
+        columns = _get_table_columns(conn, "file_records")
+
+        assert columns["content_hash"] == "TEXT"
+        assert columns["registry_backend"] == "TEXT"
+        conn.close()
+
+    def test_migration_v16_to_v17_adds_file_registry_backend_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("PRAGMA user_version = 16")
+        existing_columns = _get_table_columns(conn, "file_records")
+        if "content_hash" in existing_columns:
+            conn.execute("ALTER TABLE file_records DROP COLUMN content_hash")
+        if "registry_backend" in existing_columns:
+            conn.execute("ALTER TABLE file_records DROP COLUMN registry_backend")
+        conn.commit()
+
+        apply_pending_migrations(conn, 17)
+
+        columns = _get_table_columns(conn, "file_records")
+        assert columns["content_hash"] == "TEXT"
+        assert columns["registry_backend"] == "TEXT"
+        row = conn.execute(
+            "INSERT INTO file_records (id, path, first_seen, updated_at) VALUES (?, ?, ?, ?) RETURNING content_hash, registry_backend",
+            ("f-1", "src/a.py", "2026-05-19T00:00:00+00:00", "2026-05-19T00:00:00+00:00"),
+        ).fetchone()
+        assert dict(row) == {"content_hash": "", "registry_backend": "local"}
+        conn.close()
+
+
 class TestClaimLeaseSchema:
     def test_fresh_schema_contains_claim_lease_columns(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

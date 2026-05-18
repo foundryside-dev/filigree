@@ -28,6 +28,38 @@ from filigree.core import (
 class TestReadConfig:
     """Verify read_config handles edge cases."""
 
+    def test_default_registry_backend_is_local(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / ".filigree"
+        filigree_dir.mkdir()
+
+        config = read_config(filigree_dir)
+
+        assert config["registry_backend"] == "local"
+
+    def test_read_config_preserves_clarion_registry_settings(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / ".filigree"
+        filigree_dir.mkdir()
+        write_config(
+            filigree_dir,
+            {
+                "prefix": "proj",
+                "version": 1,
+                "registry_backend": "clarion",
+                "clarion": {
+                    "base_url": "http://localhost:9111",
+                    "timeout_seconds": 3,
+                    "allow_local_fallback": True,
+                },
+            },
+        )
+
+        config = read_config(filigree_dir)
+
+        assert config["registry_backend"] == "clarion"
+        assert config["clarion"]["base_url"] == "http://localhost:9111"
+        assert config["clarion"]["timeout_seconds"] == 3
+        assert config["clarion"]["allow_local_fallback"] is True
+
     def test_non_dict_json_returns_defaults(self, tmp_path: Path) -> None:
         """Config with valid JSON that is not an object falls back to defaults."""
         filigree_dir = tmp_path / ".filigree"
@@ -81,6 +113,17 @@ class TestReadConfig:
 
 class TestFromFiligreeDir:
     """Verify FiligreeDB.from_filigree_dir construction."""
+
+    def test_registry_backend_passed_from_project_config(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / ".filigree"
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "proj", "version": 1, "registry_backend": "clarion"})
+
+        db = FiligreeDB.from_filigree_dir(filigree_dir)
+        try:
+            assert db.registry_backend == "clarion"
+        finally:
+            db.close()
 
     def test_missing_config_uses_defaults(self, tmp_path: Path) -> None:
         """from_filigree_dir with no config.json should succeed with defaults.

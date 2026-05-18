@@ -122,6 +122,8 @@ class FileRecord:
     path: str
     language: str = ""
     file_type: str = ""
+    content_hash: str = ""
+    registry_backend: str = "local"
     created_by: str = ""
     updated_by: str = ""
     first_seen: ISOTimestamp = _EMPTY_TS
@@ -140,6 +142,8 @@ class FileRecord:
             path=self.path,
             language=self.language,
             file_type=self.file_type,
+            content_hash=self.content_hash,
+            registry_backend=self.registry_backend,
             created_by=self.created_by,
             updated_by=self.updated_by,
             first_seen=self.first_seen,

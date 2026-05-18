@@ -1183,6 +1183,25 @@ class TestServerRegisterReload:
 
 
 class TestDashboardServerModePidTracking:
+    def test_dashboard_passes_allow_local_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        observed: dict[str, object] = {}
+
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
+            observed["allow_local_fallback"] = allow_local_fallback
+
+        monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
+
+        result = cli_runner.invoke(cli, ["dashboard", "--no-browser", "--allow-local-fallback"])
+
+        assert result.exit_code == 0
+        assert observed["allow_local_fallback"] is True
+
     def test_dashboard_server_mode_claims_pid_for_status(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
     ) -> None:
@@ -1196,7 +1215,13 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             from filigree.server import SERVER_PID_FILE, daemon_status
 
             status = daemon_status()
@@ -1236,7 +1261,13 @@ class TestDashboardServerModePidTracking:
 
         called = {"main": False}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             called["main"] = True
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
@@ -1263,7 +1294,13 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool, allow_http_force_close: bool = False) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             observed["port_arg"] = port
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)

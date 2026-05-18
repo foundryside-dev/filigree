@@ -10,6 +10,7 @@ import pytest
 
 from filigree.core import FiligreeDB, ScanFinding, _normalize_scan_path
 from filigree.db_files import _safe_json_loads
+from filigree.registry import ResolvedFile
 
 # ---------------------------------------------------------------------------
 # Schema tests
@@ -43,6 +44,34 @@ class TestFileSchema:
 
 class TestRegisterFile:
     """Tests for registering and retrieving file records."""
+
+    def test_register_file_uses_registry_resolved_file_id(self, tmp_path: Path) -> None:
+        class FixedRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                return {
+                    "file_id": "core:file:def456@src/direct.py",
+                    "content_hash": "hash-direct",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                }
+
+            def is_displaced(self) -> bool:
+                return False
+
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=FixedRegistry())
+        try:
+            db.initialize()
+
+            file_record = db.register_file("src/direct.py", language="python")
+
+            assert file_record.id == "core:file:def456@src/direct.py"
+            assert file_record.path == "src/direct.py"
+            assert file_record.language == "python"
+            assert file_record.content_hash == "hash-direct"
+            assert file_record.registry_backend == "clarion"
+        finally:
+            db.close()
 
     def test_register_new_file(self, db: FiligreeDB) -> None:
         f = db.register_file("src/main.py", language="python")
@@ -338,6 +367,47 @@ class TestListFiles:
 
 class TestProcessScanResults:
     """Tests for ingesting scan findings."""
+
+    def test_ingest_uses_registry_resolved_file_id(self, tmp_path: Path) -> None:
+        class FixedRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                return {
+                    "file_id": "core:file:abc123@src/main.py",
+                    "content_hash": "hash-ingest",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                }
+
+            def is_displaced(self) -> bool:
+                return False
+
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=FixedRegistry())
+        try:
+            db.initialize()
+            result = db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {
+                        "path": "src/main.py",
+                        "language": "python",
+                        "rule_id": "E501",
+                        "severity": "low",
+                        "message": "Line too long",
+                    },
+                ],
+            )
+
+            assert result["files_created"] == 1
+            file_record = db.get_file_by_path("src/main.py")
+            assert file_record is not None
+            assert file_record.id == "core:file:abc123@src/main.py"
+            assert file_record.content_hash == "hash-ingest"
+            assert file_record.registry_backend == "clarion"
+            finding = db.get_finding(result["new_finding_ids"][0])
+            assert finding["file_id"] == "core:file:abc123@src/main.py"
+        finally:
+            db.close()
 
     def test_ingest_creates_file_and_findings(self, db: FiligreeDB) -> None:
         result = db.process_scan_results(

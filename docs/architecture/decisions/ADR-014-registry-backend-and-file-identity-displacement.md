@@ -1,6 +1,6 @@
 # ADR-014: `registry_backend` Flag and File-Identity Displacement to Clarion
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-05-19
 **Deciders**: John (project lead)
 **Context**: Closes the Filigree-side hole that Clarion ADR-014 (2026-04-18) named as a v0.1 prerequisite and that Clarion ADR-029 (2026-05-16) explicitly deferred. The work is Filigree's; the sibling decision is Clarion's.
@@ -68,7 +68,7 @@ class ResolvedFile(TypedDict):
 
 Two implementations:
 
-- `LocalRegistry` — current behaviour. `file_id` is `f"{prefix}-f-{uuid4().hex[:10]}"`. `content_hash` is the empty string under `local` mode (column is nullable in the schema; see §3). `is_displaced()` returns `False`.
+- `LocalRegistry` — current behaviour. `file_id` is `f"{prefix}-f-{uuid4().hex[:10]}"`. `content_hash` is the empty string under `local` mode (the schema stores a non-null empty-string default; see §3). `is_displaced()` returns `False`.
 - `ClarionRegistry` — issues `GET {clarion_base}/api/v1/files?path=…&language=…` and returns Clarion's `{entity_id, content_hash, canonical_path, language}` reshaped into `ResolvedFile`. `is_displaced()` returns `True`. Connection failures surface as `RegistryUnavailableError` (see §6).
 
 The protocol is composed into `FiligreeDB` at construction time; the three auto-create surfaces (`_upsert_file_record`, `register_file`, `tracker.register_file`) take a `registry: RegistryProtocol` parameter instead of generating IDs inline.

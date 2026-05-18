@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
+from filigree.registry import ResolvedFile
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
@@ -78,6 +79,37 @@ class TestListFindingsTool:
 
 
 class TestReportFindingTool:
+    async def test_report_finding_uses_registry_resolved_file_id(self, mcp_db: FiligreeDB) -> None:
+        class FixedRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                return {
+                    "file_id": "core:file:report-target@src/report_target.py",
+                    "content_hash": "",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "local",
+                }
+
+            def is_displaced(self) -> bool:
+                return False
+
+        mcp_db.registry = FixedRegistry()
+
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/report_target.py",
+                    "rule_id": "agent-noted-risk",
+                    "message": "Agent spotted a follow-up risk",
+                    "severity": "medium",
+                    "line_start": 7,
+                },
+            )
+        )
+
+        assert data["file_id"] == "core:file:report-target@src/report_target.py"
+
     async def test_report_finding_default_does_not_create_observation(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(

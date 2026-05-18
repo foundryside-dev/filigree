@@ -18,7 +18,7 @@ import sys
 import tempfile
 import uuid as _uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
@@ -45,6 +45,7 @@ from filigree.db_scans import ScansMixin
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 from filigree.db_workflow import WorkflowMixin
 from filigree.models import _EMPTY_TS, FileRecord, Issue, ScanFinding
+from filigree.registry import ClarionRegistry, LocalRegistry, RegistryProtocol
 from filigree.types.core import (
     AssocType,
     FileRecordDict,
@@ -73,14 +74,17 @@ __all__ = [
     "VALID_SEVERITIES",
     "_EMPTY_TS",
     "AssocType",
+    "ClarionRegistry",
     "FileRecord",
     "FileRecordDict",
     "FindingStatus",
     "ISOTimestamp",
     "Issue",
     "IssueDict",
+    "LocalRegistry",
     "PaginatedResult",
     "ProjectConfig",
+    "RegistryProtocol",
     "ScanFinding",
     "ScanFindingDict",
     "Severity",
@@ -441,6 +445,7 @@ def read_conf(conf_path: Path) -> dict[str, Any]:
         if not isinstance(packs, list) or not all(isinstance(p, str) for p in packs):
             msg = f"{conf_path}: 'enabled_packs' must be a list of strings, got {type(packs).__name__}: {packs!r}"
             raise ValueError(msg)
+    _validate_registry_settings(raw, source=conf_path)
     # Trust boundary: a checked-in .filigree.conf must not be able to redirect
     # the database to an arbitrary filesystem path. Reject absolute paths and
     # any path whose resolved location escapes the conf's directory.
@@ -465,7 +470,7 @@ def write_conf(conf_path: Path, data: dict[str, Any]) -> None:
 
 def read_config(filigree_dir: Path) -> ProjectConfig:
     """Read .filigree/config.json. Returns defaults if missing or corrupt."""
-    defaults = ProjectConfig(prefix="filigree", version=1, enabled_packs=["core", "planning", "release"])
+    defaults = ProjectConfig(prefix="filigree", version=1, enabled_packs=["core", "planning", "release"], registry_backend="local")
     config_path = filigree_dir / CONFIG_FILENAME
     if not config_path.exists():
         return defaults
@@ -480,6 +485,9 @@ def read_config(filigree_dir: Path) -> ProjectConfig:
             result["prefix"] = defaults["prefix"]
         if "version" not in result:
             result["version"] = defaults["version"]
+        if "registry_backend" not in result:
+            result["registry_backend"] = defaults["registry_backend"]
+        _validate_registry_settings(cast("dict[str, Any]", result), source=config_path)
         return result
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         logger.warning("Failed to read %s, using defaults: %s", config_path, exc)
@@ -515,6 +523,34 @@ def _raw_config_prefix(config_path: Path) -> str | None:
 
 
 VALID_MODES: frozenset[str] = frozenset({"ethereal", "server"})
+VALID_REGISTRY_BACKENDS: frozenset[str] = frozenset({"local", "clarion"})
+
+
+def _validate_registry_settings(raw: dict[str, Any], *, source: Path) -> None:
+    """Validate ADR-014 registry backend settings in project config."""
+    if "registry_backend" in raw:
+        backend = raw["registry_backend"]
+        if not isinstance(backend, str) or backend not in VALID_REGISTRY_BACKENDS:
+            msg = f"{source}: 'registry_backend' must be one of {sorted(VALID_REGISTRY_BACKENDS)}, got {backend!r}"
+            raise ValueError(msg)
+
+    if "clarion" not in raw:
+        return
+    clarion = raw["clarion"]
+    if not isinstance(clarion, dict):
+        msg = f"{source}: 'clarion' must be a JSON object, got {type(clarion).__name__}: {clarion!r}"
+        raise ValueError(msg)
+    if "base_url" in clarion and (not isinstance(clarion["base_url"], str) or not clarion["base_url"]):
+        msg = f"{source}: 'clarion.base_url' must be a non-empty string, got {clarion['base_url']!r}"
+        raise ValueError(msg)
+    if "timeout_seconds" in clarion:
+        timeout = clarion["timeout_seconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
+            msg = f"{source}: 'clarion.timeout_seconds' must be a positive number, got {timeout!r}"
+            raise ValueError(msg)
+    if "allow_local_fallback" in clarion and not isinstance(clarion["allow_local_fallback"], bool):
+        msg = f"{source}: 'clarion.allow_local_fallback' must be a boolean, got {clarion['allow_local_fallback']!r}"
+        raise ValueError(msg)
 
 
 def get_mode(filigree_dir: Path) -> str:
@@ -643,6 +679,9 @@ class FiligreeDB(
         template_registry: TemplateRegistry | None = None,
         check_same_thread: bool = True,
         project_root: str | Path | None = None,
+        registry: RegistryProtocol | None = None,
+        registry_backend: str = "local",
+        clarion_config: dict[str, Any] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.prefix = prefix
@@ -664,6 +703,23 @@ class FiligreeDB(
         self._conn: sqlite3.Connection | None = None
         self._check_same_thread = check_same_thread
         self._template_registry: TemplateRegistry | None = template_registry
+        if registry_backend not in VALID_REGISTRY_BACKENDS:
+            msg = f"registry_backend must be one of {sorted(VALID_REGISTRY_BACKENDS)}, got {registry_backend!r}"
+            raise ValueError(msg)
+        self.registry_backend = registry_backend
+        self.clarion_config = dict(clarion_config or {})
+        self.allow_local_fallback = bool(self.clarion_config.get("allow_local_fallback", False))
+        if registry is not None:
+            self.registry = registry
+        elif registry_backend == "clarion":
+            if self.allow_local_fallback:
+                self.registry = LocalRegistry(lambda: self._generate_unique_id("file_records", "f"))
+            else:
+                base_url = str(self.clarion_config.get("base_url", "http://localhost:9111"))
+                timeout_seconds = float(self.clarion_config.get("timeout_seconds", 5))
+                self.registry = ClarionRegistry(base_url, timeout_seconds=timeout_seconds)
+        else:
+            self.registry = LocalRegistry(lambda: self._generate_unique_id("file_records", "f"))
 
     @classmethod
     def from_filigree_dir(cls, filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
@@ -688,6 +744,8 @@ class FiligreeDB(
             enabled_packs=config.get("enabled_packs"),
             check_same_thread=check_same_thread,
             project_root=filigree_dir.resolve().parent,
+            registry_backend=config.get("registry_backend", "local"),
+            clarion_config=config.get("clarion"),
         )
         try:
             db.initialize()
@@ -722,6 +780,8 @@ class FiligreeDB(
             enabled_packs=enabled_packs,
             check_same_thread=check_same_thread,
             project_root=conf_path.resolve().parent,
+            registry_backend=data.get("registry_backend", "local"),
+            clarion_config=data.get("clarion"),
         )
         try:
             db.initialize()

@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 _MAX_TREE_DEPTH = 10
 
 
+def _sequence_sort_key(value: object) -> tuple[int, int | str]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (0, value)
+    if isinstance(value, str):
+        try:
+            return (0, int(value))
+        except ValueError:
+            return (1, value)
+    return (0, 999)
+
+
 def _validate_priority(value: Any, label: str) -> None:
     """Validate a plan-input priority up front.
 
@@ -503,7 +514,7 @@ class PlanningMixin(DBMixinProtocol):
         milestone = self.get_issue(milestone_id)
 
         phases = self._list_all_children(milestone_id)
-        phases.sort(key=lambda p: p.fields.get("sequence", 999))
+        phases.sort(key=lambda p: _sequence_sort_key(p.fields.get("sequence", 999)))
 
         phase_list: list[PlanPhase] = []
         total_steps = 0
@@ -511,7 +522,7 @@ class PlanningMixin(DBMixinProtocol):
 
         for phase in phases:
             steps = self._list_all_children(phase.id)
-            steps.sort(key=lambda s: s.fields.get("sequence", 999))
+            steps.sort(key=lambda s: _sequence_sort_key(s.fields.get("sequence", 999)))
 
             completed = sum(1 for s in steps if s.status_category == "done")
             ready = sum(1 for s in steps if s.is_ready)

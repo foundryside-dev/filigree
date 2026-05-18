@@ -4,14 +4,16 @@ MCP shape verification (verified against mcp_tools/files.py handlers):
 
 File shapes:
 - list-files items: EnrichedFileItem — PublicFileRecord + {summary, associations_count, observation_count}
-  PublicFileRecord keys: file_id, path, language, file_type, first_seen, updated_at, metadata, data_warnings
+  PublicFileRecord keys: file_id, path, language, file_type, content_hash, registry_backend,
+        first_seen, updated_at, metadata, data_warnings
 - get-file: FileDetail — {file, associations, recent_findings, summary, observation_count}
 - get-file-timeline: ListResponse of TimelineEntry — {timeline_event_id, type, timestamp, data, typed source ID}
   NOTE: MCP returns raw PaginatedResult; CLI normalizes to ListResponse.
 - get-issue-files: ListResponse of IssueFileAssociation
   NOTE: MCP returns raw list; CLI normalizes to ListResponse.
 - add-file-association: {"status": "created"}
-- register-file: FileRecordDict — {id, path, language, file_type, first_seen, updated_at, metadata, data_warnings}
+- register-file: FileRecordDict — {id, path, language, file_type, content_hash, registry_backend,
+        first_seen, updated_at, metadata, data_warnings}
 - delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations, actor}
 
 Finding shapes:
@@ -42,6 +44,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.registry import ResolvedFile
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,8 @@ _FILE_RECORD_KEYS = frozenset(
         "path",
         "language",
         "file_type",
+        "content_hash",
+        "registry_backend",
         "created_by",
         "updated_by",
         "first_seen",
@@ -561,6 +566,22 @@ class TestRegisterFileCommand:
         assert data["path"] == "src/newfile.py"
         assert data["language"] == "python"
 
+    def test_register_file_displaced_under_clarion_mode(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project = cli_in_project
+        conf_path = project / ".filigree.conf"
+        conf = json.loads(conf_path.read_text())
+        conf["registry_backend"] = "clarion"
+        conf["clarion"] = {"base_url": "http://localhost:9111"}
+        conf_path.write_text(json.dumps(conf))
+
+        result = runner.invoke(cli, ["register-file", "src/newfile.py", "--language", "python", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "FILIGREE_FILE_REGISTRY_DISPLACED"
+        assert "http://localhost:9111/api/v1/files" in data["error"]
+        assert "src/newfile.py" in data["error"]
+
     def test_register_file_infers_language_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         py = runner.invoke(cli, ["register-file", "src/inferred.py", "--json"])
@@ -628,6 +649,124 @@ class TestRegisterFileCommand:
         data = json.loads(result.output)
         assert "error" in data
         assert data["code"] == "VALIDATION"
+
+
+# ---------------------------------------------------------------------------
+# TestMigrateRegistryCommand
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateRegistryCommand:
+    def test_migrate_registry_dry_run_execute_and_rollback(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, project = cli_in_project
+        source_path = project / "src" / "migrate.py"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("print('migration')\n")
+
+        from filigree.cli_common import get_db
+
+        with get_db() as db:
+            file_record = db.register_file("src/migrate.py", metadata={"owner": "before"})
+            old_file_id = file_record.id
+            issue = db.create_issue("Bug in migrated file")
+            db.add_file_association(old_file_id, issue.id, "bug_in")
+            db.create_observation("Active observation", file_path="src/migrate.py")
+            linked_observation = db.create_observation("Linked observation", file_path="src/migrate.py")
+            db.link_observation_to_issue(linked_observation["id"], issue.id)
+            db.annotate_file("src/migrate.py", "Migration annotation", line_start=1, line_end=1)
+            db.create_scan_run(
+                scan_run_id="scan-run-migrate",
+                scanner_name="ruff",
+                scan_source="ruff",
+                file_paths=["src/migrate.py"],
+                file_ids=[old_file_id],
+            )
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": "src/migrate.py", "rule_id": "E501", "severity": "low", "message": "msg"}],
+            )
+            db.register_file("src/migrate.py", metadata={"owner": "after"})
+
+        new_file_id = "core:file:migrated@src/migrate.py"
+
+        class FakeClarionRegistry:
+            def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
+                self.base_url = base_url
+                self.timeout_seconds = timeout_seconds
+
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                return {
+                    "file_id": new_file_id,
+                    "content_hash": "sha256:migrated",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                }
+
+            def is_displaced(self) -> bool:
+                return True
+
+        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        conf_path = project / ".filigree.conf"
+        conf = json.loads(conf_path.read_text())
+        conf["registry_backend"] = "clarion"
+        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf_path.write_text(json.dumps(conf))
+
+        dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
+        assert dry_run.exit_code == 0, dry_run.output
+        dry_payload = json.loads(dry_run.output)
+        assert dry_payload["mode"] == "dry-run"
+        assert dry_payload["planned"][0]["old_file_id"] == old_file_id
+        assert dry_payload["planned"][0]["new_file_id"] == new_file_id
+        with get_db() as db:
+            assert db.get_file(old_file_id).id == old_file_id
+
+        manifest = project / "registry-migration.json"
+        executed = runner.invoke(
+            cli,
+            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+        )
+        assert executed.exit_code == 0, executed.output
+        execute_payload = json.loads(executed.output)
+        assert execute_payload["mode"] == "execute"
+        assert execute_payload["manifest_path"] == str(manifest)
+        assert manifest.exists()
+
+        with get_db() as db:
+            assert db.get_file(new_file_id).registry_backend == "clarion"
+            with pytest.raises(KeyError):
+                db.get_file(old_file_id)
+            assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM file_events WHERE file_id = ?", (new_file_id,)).fetchone()[0] >= 1
+            assert db.conn.execute("SELECT COUNT(*) FROM observations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM observation_links WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
+            scan_run = db.get_scan_run("scan-run-migrate")
+            assert scan_run["file_ids"] == [new_file_id]
+
+        rolled_back = runner.invoke(cli, ["migrate-registry", "--rollback", str(manifest), "--json"])
+        assert rolled_back.exit_code == 0, rolled_back.output
+        rollback_payload = json.loads(rolled_back.output)
+        assert rollback_payload["mode"] == "rollback"
+
+        with get_db() as db:
+            assert db.get_file(old_file_id).registry_backend == "local"
+            with pytest.raises(KeyError):
+                db.get_file(new_file_id)
+            assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM file_events WHERE file_id = ?", (old_file_id,)).fetchone()[0] >= 1
+            assert db.conn.execute("SELECT COUNT(*) FROM observations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM observation_links WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
+            scan_run = db.get_scan_run("scan-run-migrate")
+            assert scan_run["file_ids"] == [old_file_id]
 
 
 # ---------------------------------------------------------------------------

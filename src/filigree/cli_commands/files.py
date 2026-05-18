@@ -12,6 +12,8 @@ from __future__ import annotations
 import json as json_mod
 import sqlite3
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import click
@@ -27,6 +29,7 @@ from filigree.mcp_tools.payloads import (
     timeline_entry_to_mcp,
 )
 from filigree.paths import safe_path
+from filigree.registry import clarion_file_read_url
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import AssocType, FindingStatus
 from filigree.validation import sanitize_actor
@@ -35,6 +38,15 @@ _DISMISS_FINDING_STATUSES = ("acknowledged", "false_positive", "fixed", "unseen_
 _MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
 _MAX_SQLITE_LIMIT = _MAX_SQLITE_OFFSET - 1
 _UNLIMITED_LIST_LIMIT = 10_000_000
+_REGISTRY_MIGRATION_ACTOR = "registry-migration"
+_FILE_ID_REFERENCE_UPDATES = (
+    "UPDATE scan_findings SET file_id = ? WHERE file_id = ?",
+    "UPDATE file_associations SET file_id = ? WHERE file_id = ?",
+    "UPDATE file_events SET file_id = ? WHERE file_id = ?",
+    "UPDATE observations SET file_id = ? WHERE file_id = ?",
+    "UPDATE observation_links SET file_id = ? WHERE file_id = ?",
+    "UPDATE annotations SET file_id = ? WHERE file_id = ?",
+)
 
 
 def _emit_validation_error(msg: str, *, as_json: bool) -> None:
@@ -414,6 +426,18 @@ def register_file_cmd(
         canonical_path = path
 
     with get_db() as db:
+        if db.registry_backend == "clarion":
+            base_url = str(db.clarion_config.get("base_url", "http://localhost:9111"))
+            read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+            msg = (
+                "File registration is displaced to Clarion for this project. "
+                f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+            )
+            if as_json:
+                click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.FILIGREE_FILE_REGISTRY_DISPLACED}))
+            else:
+                click.echo(f"Error: {msg}", err=True)
+            sys.exit(1)
         try:
             file_record = db.register_file(
                 canonical_path,
@@ -439,6 +463,181 @@ def register_file_cmd(
             click.echo(json_mod.dumps(file_record_to_mcp(file_record.to_dict()), indent=2, default=str))
         else:
             click.echo(f"Registered {file_record.id}: {file_record.path}")
+
+
+def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
+    planned: list[dict[str, Any]] = []
+    unresolved: list[dict[str, str]] = []
+    rows = db.conn.execute("SELECT * FROM file_records ORDER BY path").fetchall()
+    for row in rows:
+        old_file_id = row["id"]
+        try:
+            resolved = db.registry.resolve_file(
+                row["path"],
+                language=row["language"] or "",
+                actor=_REGISTRY_MIGRATION_ACTOR,
+            )
+        except Exception as exc:
+            unresolved.append({"file_id": old_file_id, "path": row["path"], "error": str(exc)})
+            continue
+
+        planned.append(
+            {
+                "old_file_id": old_file_id,
+                "new_file_id": resolved["file_id"],
+                "old_path": row["path"],
+                "new_path": resolved["canonical_path"],
+                "old_language": row["language"] or "",
+                "new_language": resolved["language"] or row["language"] or "",
+                "old_content_hash": row["content_hash"] or "",
+                "new_content_hash": resolved["content_hash"],
+                "old_registry_backend": row["registry_backend"] or "local",
+                "new_registry_backend": target_backend,
+            }
+        )
+    return {
+        "version": 1,
+        "to": target_backend,
+        "created_at": datetime.now(UTC).isoformat(),
+        "planned": planned,
+        "unresolved": unresolved,
+    }
+
+
+def _rewrite_scan_run_file_ids(conn: sqlite3.Connection, old_file_id: str, new_file_id: str) -> None:
+    rows = conn.execute("SELECT id, file_ids FROM scan_runs WHERE file_ids LIKE ?", (f'%"{old_file_id}"%',)).fetchall()
+    for row in rows:
+        try:
+            file_ids = json_mod.loads(row["file_ids"] or "[]")
+        except json_mod.JSONDecodeError:
+            continue
+        if not isinstance(file_ids, list):
+            continue
+        rewritten = [new_file_id if item == old_file_id else item for item in file_ids]
+        if rewritten != file_ids:
+            conn.execute("UPDATE scan_runs SET file_ids = ? WHERE id = ?", (json_mod.dumps(rewritten), row["id"]))
+
+
+def _apply_registry_migration(db: Any, entries: list[dict[str, Any]], *, reverse: bool = False) -> None:
+    db.conn.commit()
+    original_fk = int(db.conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    db.conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        db.conn.execute("BEGIN")
+        for entry in entries:
+            old_file_id = entry["new_file_id"] if reverse else entry["old_file_id"]
+            new_file_id = entry["old_file_id"] if reverse else entry["new_file_id"]
+            new_path = entry["old_path"] if reverse else entry["new_path"]
+            new_language = entry["old_language"] if reverse else entry["new_language"]
+            new_content_hash = entry["old_content_hash"] if reverse else entry["new_content_hash"]
+            new_registry_backend = entry["old_registry_backend"] if reverse else entry["new_registry_backend"]
+
+            conflict = db.conn.execute(
+                "SELECT id FROM file_records WHERE id = ? AND id != ?",
+                (new_file_id, old_file_id),
+            ).fetchone()
+            if conflict is not None:
+                msg = f"Cannot rewrite {old_file_id} to {new_file_id}: target file_id already exists"
+                raise ValueError(msg)
+
+            updated = db.conn.execute(
+                "UPDATE file_records SET id = ?, path = ?, language = ?, content_hash = ?, registry_backend = ? WHERE id = ?",
+                (new_file_id, new_path, new_language, new_content_hash, new_registry_backend, old_file_id),
+            ).rowcount
+            if updated != 1:
+                msg = f"File record not found for registry migration: {old_file_id}"
+                raise KeyError(msg)
+            for update_sql in _FILE_ID_REFERENCE_UPDATES:
+                db.conn.execute(update_sql, (new_file_id, old_file_id))
+            _rewrite_scan_run_file_ids(db.conn, old_file_id, new_file_id)
+
+        violations = db.conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            msg = f"Registry migration would leave foreign-key violations: {len(violations)}"
+            raise sqlite3.IntegrityError(msg)
+        db.conn.commit()
+    except Exception:
+        db.conn.rollback()
+        raise
+    finally:
+        db.conn.execute(f"PRAGMA foreign_keys={original_fk}")
+
+
+@click.command("migrate-registry")
+@click.option("--to", "target_backend", type=click.Choice(["clarion"]), default=None, help="Target registry backend")
+@click.option("--dry-run", "dry_run", is_flag=True, help="Plan the migration without changing the database")
+@click.option("--execute", "execute", is_flag=True, help="Apply the migration and write a rollback manifest")
+@click.option("--rollback", "rollback_manifest", type=click.Path(path_type=Path), default=None, help="Rollback using a manifest")
+@click.option("--manifest", "manifest_path", type=click.Path(path_type=Path), default=None, help="Manifest path for execute")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def migrate_registry_cmd(
+    target_backend: str | None,
+    dry_run: bool,
+    execute: bool,
+    rollback_manifest: Path | None,
+    manifest_path: Path | None,
+    as_json: bool,
+) -> None:
+    """Migrate file_records IDs to another registry backend, or rollback."""
+    if rollback_manifest is not None and (target_backend is not None or dry_run or execute):
+        _emit_validation_error("--rollback cannot be combined with --to, --dry-run, or --execute", as_json=as_json)
+    if rollback_manifest is None and target_backend is None:
+        _emit_validation_error("--to is required unless --rollback is used", as_json=as_json)
+    if dry_run and execute:
+        _emit_validation_error("--dry-run and --execute are mutually exclusive", as_json=as_json)
+    if not dry_run and not execute and rollback_manifest is None:
+        dry_run = True
+
+    payload: dict[str, Any]
+    with get_db() as db:
+        try:
+            if rollback_manifest is not None:
+                manifest = json_mod.loads(rollback_manifest.read_text())
+                entries = list(manifest.get("planned", []))
+                _apply_registry_migration(db, entries, reverse=True)
+                payload = {
+                    "mode": "rollback",
+                    "rolled_back": len(entries),
+                    "manifest_path": str(rollback_manifest),
+                }
+            else:
+                if target_backend is None:
+                    msg = "--to is required unless --rollback is used"
+                    raise ValueError(msg)
+                if db.registry_backend != target_backend:
+                    msg = f"Project registry_backend is {db.registry_backend!r}; set it to {target_backend!r} before migration"
+                    raise ValueError(msg)
+                manifest = _registry_migration_plan(db, target_backend=target_backend)
+                if manifest["unresolved"]:
+                    payload = {"mode": "dry-run" if dry_run else "execute", **manifest}
+                    if execute:
+                        msg = f"Cannot execute registry migration with {len(manifest['unresolved'])} unresolved file(s)"
+                        raise ValueError(msg)
+                if execute:
+                    if manifest_path is None:
+                        manifest_path = Path(f"registry-migration-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
+                    _apply_registry_migration(db, list(manifest["planned"]), reverse=False)
+                    manifest_path.write_text(json_mod.dumps(manifest, indent=2, default=str) + "\n")
+                    payload = {"mode": "execute", "migrated": len(manifest["planned"]), "manifest_path": str(manifest_path), **manifest}
+                else:
+                    payload = {"mode": "dry-run", **manifest}
+        except (OSError, json_mod.JSONDecodeError, KeyError, ValueError, sqlite3.Error) as e:
+            if as_json:
+                code = ErrorCode.IO if isinstance(e, sqlite3.Error) else ErrorCode.VALIDATION
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+    if as_json:
+        click.echo(json_mod.dumps(payload, indent=2, default=str))
+        return
+    if payload["mode"] == "dry-run":
+        click.echo(f"Planned {len(payload['planned'])} file registry rewrite(s); unresolved: {len(payload['unresolved'])}")
+    elif payload["mode"] == "execute":
+        click.echo(f"Migrated {payload['migrated']} file record(s). Manifest: {payload['manifest_path']}")
+    else:
+        click.echo(f"Rolled back {payload['rolled_back']} file record(s).")
 
 
 @click.command("delete-file-record")
@@ -875,6 +1074,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(get_issue_files_cmd)
     cli.add_command(add_file_association_cmd)
     cli.add_command(register_file_cmd)
+    cli.add_command(migrate_registry_cmd)
     cli.add_command(delete_file_record_cmd)
     cli.add_command(list_findings_cmd)
     cli.add_command(get_finding_cmd)

@@ -47,6 +47,27 @@ class TestFilesSchemaAPI:
         resp = await client.get("/api/files/_schema")
         assert resp.headers.get("cache-control") == "max-age=3600"
 
+    async def test_schema_returns_registry_backend_config_flags(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+
+        assert data["config_flags"] == {
+            "registry_backend": "local",
+            "registry_backend_features": ["local", "clarion"],
+            "allow_local_fallback": False,
+        }
+
+    async def test_schema_config_flags_reflect_project_backend(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        dashboard_db.db.registry_backend = "clarion"
+        dashboard_db.db.allow_local_fallback = True
+
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+
+        assert data["config_flags"]["registry_backend"] == "clarion"
+        assert data["config_flags"]["registry_backend_features"] == ["local", "clarion"]
+        assert data["config_flags"]["allow_local_fallback"] is True
+
 
 class TestScanRunsAPI:
     """GET /api/scan-runs — scan run history."""

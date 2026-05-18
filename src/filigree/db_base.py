@@ -18,6 +18,7 @@ from filigree.types.core import AssocType, ISOTimestamp, ScanRunStatus, StatusCa
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
+    from filigree.registry import RegistryProtocol
     from filigree.templates import TemplateRegistry, TransitionOption
     from filigree.types.api import BatchFailure
     from filigree.types.core import ObservationDict, ObservationLinkDict, ScanFindingDict
@@ -275,6 +276,7 @@ class DBMixinProtocol(Protocol):
     # direct-path construction — consumers that need it must fall back.
     project_root: Path | None
     prefix: str
+    registry: RegistryProtocol
     _conn: sqlite3.Connection | None
     _template_registry: TemplateRegistry | None
     _enabled_packs_override: list[str] | None

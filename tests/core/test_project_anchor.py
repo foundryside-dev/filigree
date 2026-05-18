@@ -38,6 +38,7 @@ from filigree.core import (
     find_filigree_root,
     read_conf,
     write_conf,
+    write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 
@@ -111,6 +112,23 @@ class TestConfIO:
         write_conf(conf, data)
         assert read_conf(conf) == data
 
+    def test_read_accepts_registry_backend_and_clarion_settings(self, tmp_path: Path) -> None:
+        conf = tmp_path / CONF_FILENAME
+        data = {
+            "version": 1,
+            "project_name": "demo",
+            "prefix": "demo",
+            "db": ".filigree/filigree.db",
+            "registry_backend": "clarion",
+            "clarion": {
+                "base_url": "http://localhost:9111",
+                "timeout_seconds": 3,
+                "allow_local_fallback": True,
+            },
+        }
+        write_conf(conf, data)
+        assert read_conf(conf) == data
+
     def test_read_rejects_non_dict(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         conf.write_text(json.dumps([1, 2, 3]))
@@ -132,8 +150,27 @@ class TestConfIO:
             ({"prefix": "", "db": "filigree.db"}, r"'prefix'"),
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": "core"}, r"enabled_packs"),
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": [1, 2]}, r"enabled_packs"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "sqlite"}, r"registry_backend"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": 1}, r"registry_backend"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": []}, r"clarion"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": 1}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
         ],
-        ids=["db-list", "db-empty", "prefix-list", "prefix-empty", "packs-string", "packs-non-string-items"],
+        ids=[
+            "db-list",
+            "db-empty",
+            "prefix-list",
+            "prefix-empty",
+            "packs-string",
+            "packs-non-string-items",
+            "registry-backend-unknown",
+            "registry-backend-non-string",
+            "clarion-non-dict",
+            "clarion-base-url-non-string",
+            "clarion-timeout-non-numeric",
+            "clarion-fallback-non-bool",
+        ],
     )
     def test_read_rejects_malformed_field_types(self, tmp_path: Path, payload: dict[str, object], match: str) -> None:
         """Bug filigree-0f0e76f4b6: type-check ``prefix``/``db``/``enabled_packs``
@@ -161,6 +198,31 @@ class TestConfIO:
         conf.write_text(json.dumps({"prefix": "x", "db": db_value}))
         with pytest.raises(ValueError, match=r"'db'"):
             read_conf(conf)
+
+    def test_from_conf_passes_registry_backend(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "demo", "version": 1})
+        init_db = FiligreeDB(filigree_dir / "filigree.db", prefix="demo")
+        init_db.initialize()
+        init_db.close()
+        conf = tmp_path / CONF_FILENAME
+        write_conf(
+            conf,
+            {
+                "version": 1,
+                "project_name": "demo",
+                "prefix": "demo",
+                "db": ".filigree/filigree.db",
+                "registry_backend": "clarion",
+            },
+        )
+
+        db = FiligreeDB.from_conf(conf)
+        try:
+            assert db.registry_backend == "clarion"
+        finally:
+            db.close()
 
 
 # ---------------------------------------------------------------------------

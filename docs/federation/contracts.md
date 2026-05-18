@@ -241,6 +241,53 @@ now at full parity with MCP and loom HTTP.
 envelope shape (`--json` output) replaces legacy shapes outright;
 clients pinning to old `--json` output re-pin against the new schema.
 
+## ADR-014 — Registry-Backend File Identity (2026-05-19)
+
+ADR-014 adds a project-scoped `registry_backend` flag for file identity.
+The default remains `local`: Filigree generates and owns `file_records.id`
+as before. In `clarion` mode, auto-create file paths delegate identity
+resolution to Clarion's read API:
+
+`GET /api/v1/files?path=&language=`
+
+Clarion owns the response shape for that endpoint. Filigree expects
+`{entity_id, content_hash, canonical_path, language}` and stores
+`entity_id` as `file_records.id`, `content_hash` as the file drift signal,
+and `registry_backend = 'clarion'` on the row. The classic, loom, and
+living scan-results response shapes are unchanged; only the file ID grammar
+changes under the opt-in backend.
+
+Capability probing is published on `GET /api/files/_schema`:
+
+```json
+{
+  "config_flags": {
+    "registry_backend": "local",
+    "registry_backend_features": ["local", "clarion"],
+    "allow_local_fallback": false
+  }
+}
+```
+
+Federation consumers use this block to distinguish older Filigree builds
+from ADR-014-aware builds, and to detect whether the current project is
+running in `local` or `clarion` mode.
+
+Direct file registration is displaced in `clarion` mode. MCP `register_file`
+and CLI `filigree register-file` return
+`FILIGREE_FILE_REGISTRY_DISPLACED` with the Clarion read URL to use instead.
+Auto-create surfaces (`POST /api/v1/scan-results`,
+`POST /api/loom/scan-results`, `POST /api/scan-results`, observations, and
+scanner helpers) route through the registry backend and should not emit that
+code unless a caller attempts direct local mutation.
+
+Operational launch and migration steps live in
+[`registry-backend-launch-runbook.md`](./registry-backend-launch-runbook.md).
+The Filigree-side contract is pinned by
+`tests/api/test_registry_backend_integration.py`, which runs loom scan ingest
+against both the default local backend and a live loopback implementation of
+Clarion's read API.
+
 ## When a contract evolves
 
 **Non-breaking additions** (new optional response fields, new optional request parameters with safe defaults) may land in-place without a new generation. Fixtures are updated to reflect the new shape; the `_meta.updated` field moves.

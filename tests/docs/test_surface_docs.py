@@ -25,3 +25,14 @@ def test_mcp_docs_use_issue_id_and_prefer_start_work() -> None:
     assert "| `start_next_work` | Claim highest-priority ready issue and transition" in text
     assert "| `claim_issue` | Claim only" in text
     assert "| `claim_next` | Claim highest-priority ready issue only" in text
+
+
+def test_registry_backend_contract_docs_reference_clarion_and_runbook() -> None:
+    contracts = _read_doc("docs/federation/contracts.md")
+    runbook = _read_doc("docs/federation/registry-backend-launch-runbook.md")
+
+    assert "GET /api/v1/files?path=&language=" in contracts
+    assert "FILIGREE_FILE_REGISTRY_DISPLACED" in contracts
+    assert "registry-backend-launch-runbook.md" in contracts
+    assert "migrate-registry --to clarion --dry-run" in runbook
+    assert "--allow-local-fallback" in runbook

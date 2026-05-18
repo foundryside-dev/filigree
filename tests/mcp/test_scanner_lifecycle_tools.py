@@ -15,6 +15,7 @@ import pytest
 from filigree.core import FiligreeDB, write_config
 from filigree.mcp_server import call_tool, list_tools  # type: ignore[attr-defined]
 from filigree.mcp_tools.scanners import _validate_localhost_url
+from filigree.registry import ResolvedFile
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
@@ -63,6 +64,21 @@ class _FakeProc:
 
     def poll(self) -> None:
         return None
+
+
+class _PathRegistry:
+    def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+        file_path = path.replace("/", "-")
+        return {
+            "file_id": f"core:file:{file_path}",
+            "content_hash": "",
+            "canonical_path": path,
+            "language": language,
+            "registry_backend": "local",
+        }
+
+    def is_displaced(self) -> bool:
+        return False
 
 
 class TestPreviewScanTool:
@@ -371,6 +387,29 @@ class TestGetScanStatusTool:
 
 
 class TestTriggerScanBatchTool:
+    async def test_batch_scan_uses_registry_resolved_file_ids(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_registry_a.py", "batch_registry_b.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = _PathRegistry()
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[_FakeProc(100), _FakeProc(101)],
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_registry_a.py", "batch_registry_b.py"]},
+                    )
+                )
+
+            expected_file_ids = ["core:file:batch_registry_a.py", "core:file:batch_registry_b.py"]
+            for child_id, expected_file_id in zip(data["scan_run_ids"], expected_file_ids, strict=True):
+                run = mcp_db.get_scan_run(child_id)
+                assert run["file_ids"] == [expected_file_id]
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_batch_scan_success(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["batch_a.py", "batch_b.py"])
         _write_scanner_toml(mcp_db)
@@ -842,6 +881,25 @@ class TestBatchScanDbTrackingFailure:
 
 class TestTriggerScanCooldownReservation:
     """Regression tests for filigree-ed3be5a092: cooldown is reserved pre-spawn."""
+
+    async def test_trigger_scan_uses_registry_resolved_file_id(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["trigger_registry.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = _PathRegistry()
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "trigger_registry.py"},
+                    )
+                )
+
+            assert data["file_id"] == "core:file:trigger_registry.py"
+            run = mcp_db.get_scan_run(data["scan_run_id"])
+            assert run["file_ids"] == ["core:file:trigger_registry.py"]
+        finally:
+            _cleanup_files(mcp_db, files)
 
     async def test_second_trigger_blocked_by_pending_reservation(self, mcp_db: FiligreeDB) -> None:
         """Trigger #1 leaves a pending reservation row; trigger #2 should see it and

@@ -648,6 +648,12 @@ def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     add_index(conn, "ix_entity_assoc_entity", "entity_associations", ["clarion_entity_id"])
 
 
+def migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """v16 -> v17: Add ADR-014 file registry metadata columns."""
+    add_column(conn, "file_records", "content_hash", "TEXT NOT NULL", "''")
+    add_column(conn, "file_records", "registry_backend", "TEXT NOT NULL", "'local'")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -664,6 +670,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     13: migrate_v13_to_v14,
     14: migrate_v14_to_v15,
     15: migrate_v15_to_v16,
+    16: migrate_v16_to_v17,
 }
 
 

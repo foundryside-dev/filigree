@@ -131,6 +131,8 @@ CREATE TABLE IF NOT EXISTS file_records (
     path        TEXT NOT NULL UNIQUE,
     language    TEXT DEFAULT '',
     file_type   TEXT DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    registry_backend TEXT NOT NULL DEFAULT 'local',
     created_by  TEXT DEFAULT '',
     updated_by  TEXT DEFAULT '',
     first_seen  TEXT NOT NULL,
@@ -511,4 +513,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17

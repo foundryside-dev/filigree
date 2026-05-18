@@ -148,6 +148,8 @@ class FilesMixin(DBMixinProtocol):
             path=row["path"],
             language=row["language"] or "",
             file_type=row["file_type"] or "",
+            content_hash=row["content_hash"] or "",
+            registry_backend=row["registry_backend"] or "local",
             created_by=row["created_by"] or "",
             updated_by=row["updated_by"] or "",
             first_seen=row["first_seen"],
@@ -263,14 +265,35 @@ class FilesMixin(DBMixinProtocol):
                 raise
             return self.get_file(existing["id"])
 
-        file_id = self._generate_unique_id("file_records", "f")
         stored_language = language or inferred_language
+        resolved = self.registry.resolve_file(
+            path,
+            language=stored_language,
+            actor=actor,
+        )
+        file_id = resolved["file_id"]
+        stored_path = resolved["canonical_path"]
+        stored_language = resolved["language"] or stored_language
+        content_hash = resolved["content_hash"]
+        registry_backend = resolved["registry_backend"]
         try:
             self.conn.execute(
                 "INSERT INTO file_records "
-                "(id, path, language, file_type, created_by, updated_by, first_seen, updated_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, file_type, actor, actor, now, now, json.dumps(metadata or {})),
+                "(id, path, language, file_type, content_hash, registry_backend, created_by, updated_by, first_seen, updated_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    file_id,
+                    stored_path,
+                    stored_language,
+                    file_type,
+                    content_hash,
+                    registry_backend,
+                    actor,
+                    actor,
+                    now,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
             )
             self.conn.commit()
         except sqlite3.IntegrityError:
@@ -666,12 +689,22 @@ class FilesMixin(DBMixinProtocol):
             )
             stats["files_updated"] += 1
         else:
-            file_id = self._generate_unique_id("file_records", "f")
             stored_language = language or inferred_language
+            resolved = self.registry.resolve_file(
+                path,
+                language=stored_language,
+                actor=actor,
+            )
+            file_id = resolved["file_id"]
+            stored_path = resolved["canonical_path"]
+            stored_language = resolved["language"] or stored_language
+            content_hash = resolved["content_hash"]
+            registry_backend = resolved["registry_backend"]
             self.conn.execute(
-                "INSERT INTO file_records (id, path, language, created_by, updated_by, first_seen, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, actor, actor, now, now),
+                "INSERT INTO file_records "
+                "(id, path, language, content_hash, registry_backend, created_by, updated_by, first_seen, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (file_id, stored_path, stored_language, content_hash, registry_backend, actor, actor, now, now),
             )
             stats["files_created"] += 1
         return file_id

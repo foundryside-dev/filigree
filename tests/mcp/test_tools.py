@@ -2592,6 +2592,16 @@ class TestFileTools:
         assert "id" not in detail["file"]
         assert detail["file"]["path"] == "src/example.py"
 
+    async def test_register_file_displaced_under_clarion_mode(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.registry_backend = "clarion"
+        mcp_db.clarion_config = {"base_url": "http://localhost:9111"}
+
+        data = _parse(await call_tool("register_file", {"path": "src/example.py", "language": "python"}))
+
+        assert data["code"] == ErrorCode.FILIGREE_FILE_REGISTRY_DISPLACED
+        assert "http://localhost:9111/api/v1/files" in data["error"]
+        assert "src/example.py" in data["error"]
+
     async def test_register_file_infers_language_without_hint(self, mcp_db: FiligreeDB) -> None:
         py = _parse(await call_tool("register_file", {"path": "src/inferred.py"}))
         md = _parse(await call_tool("register_file", {"path": "docs/inferred.md"}))

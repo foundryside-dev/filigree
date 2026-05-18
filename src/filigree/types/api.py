@@ -449,6 +449,7 @@ class ErrorCode(StrEnum):
     NOT_INITIALIZED = "NOT_INITIALIZED"
     IO = "IO"
     INVALID_API_URL = "INVALID_API_URL"
+    FILIGREE_FILE_REGISTRY_DISPLACED = "FILIGREE_FILE_REGISTRY_DISPLACED"
     STOP_FAILED = "STOP_FAILED"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     INTERNAL = "INTERNAL"
@@ -702,7 +703,7 @@ def errorcode_to_http_status(code: ErrorCode) -> int:
             return 403
         case ErrorCode.NOT_FOUND:
             return 404
-        case ErrorCode.CONFLICT | ErrorCode.INVALID_TRANSITION:
+        case ErrorCode.CONFLICT | ErrorCode.INVALID_TRANSITION | ErrorCode.FILIGREE_FILE_REGISTRY_DISPLACED:
             return 409
         case ErrorCode.NOT_INITIALIZED | ErrorCode.SCHEMA_MISMATCH:
             # Service exists but is not in a state where it can answer —

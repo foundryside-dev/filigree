@@ -92,6 +92,20 @@ class TestCreatePlan:
         assert plan["phases"][0]["steps"][0]["fields"]["sequence"] == 1
         assert plan["phases"][0]["steps"][1]["fields"]["sequence"] == 2
 
+    def test_plan_sequence_fields_accept_cli_string_values(self, db: FiligreeDB) -> None:
+        """CLI --field stores values as strings; get_plan should still sort."""
+        ms = db.create_issue("Milestone", type="milestone")
+        db.create_issue("Phase 2", type="phase", parent_id=ms.id, fields={"sequence": 2})
+        db.create_issue("Phase 3", type="phase", parent_id=ms.id, fields={"sequence": "3"})
+        phase1 = db.create_issue("Phase 1", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        db.create_issue("Step 2", type="step", parent_id=phase1.id, fields={"sequence": "2"})
+        db.create_issue("Step 1", type="step", parent_id=phase1.id, fields={"sequence": 1})
+
+        plan = db.get_plan(ms.id)
+
+        assert [phase["phase"]["title"] for phase in plan["phases"]] == ["Phase 1", "Phase 2", "Phase 3"]
+        assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2"]
+
     def test_plan_uses_template_initial_states(self, db: FiligreeDB) -> None:
         plan = db.create_plan(
             {"title": "Initial states"},

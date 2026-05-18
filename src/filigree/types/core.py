@@ -89,6 +89,8 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     name: str
     enabled_packs: list[str]
     mode: str
+    registry_backend: str
+    clarion: dict[str, Any]
 
 
 _T = TypeVar("_T")
@@ -148,6 +150,8 @@ class FileRecordDict(TypedDict):
     path: str
     language: str
     file_type: str
+    content_hash: str
+    registry_backend: str
     created_by: str
     updated_by: str
     first_seen: ISOTimestamp

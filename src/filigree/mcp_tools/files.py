@@ -26,6 +26,7 @@ from filigree.mcp_tools.payloads import (
     finding_to_mcp,
     timeline_entry_to_mcp,
 )
+from filigree.registry import clarion_file_read_url
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
 from filigree.types.core import FindingStatus
 from filigree.types.inputs import (
@@ -543,6 +544,18 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
+    if tracker.registry_backend == "clarion":
+        base_url = str(tracker.clarion_config.get("base_url", "http://localhost:9111"))
+        read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+        return _text(
+            ErrorResponse(
+                error=(
+                    "File registration is displaced to Clarion for this project. "
+                    f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+                ),
+                code=ErrorCode.FILIGREE_FILE_REGISTRY_DISPLACED,
+            )
+        )
     try:
         file_record = tracker.register_file(
             canonical_path,

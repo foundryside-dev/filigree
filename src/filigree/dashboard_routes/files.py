@@ -24,6 +24,7 @@ from filigree.dashboard_routes.common import (
     _parse_pagination,
     _safe_int,
 )
+from filigree.registry import REGISTRY_BACKEND_FEATURES, RegistryUnavailableError
 from filigree.types.api import ErrorCode
 from filigree.types.core import AssocType, FindingStatus, Severity
 
@@ -142,7 +143,7 @@ def create_classic_router() -> APIRouter:
         return JSONResponse(db.get_global_findings_stats())
 
     @router.get("/files/_schema")
-    async def api_files_schema() -> JSONResponse:
+    async def api_files_schema(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """API discovery: valid enum values and endpoint catalog for file/scan features."""
         schema = {
             "valid_severities": sorted(VALID_SEVERITIES),
@@ -150,6 +151,11 @@ def create_classic_router() -> APIRouter:
             "valid_association_types": sorted(VALID_ASSOC_TYPES),
             "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
             "valid_finding_sort_fields": ["severity", "updated_at"],
+            "config_flags": {
+                "registry_backend": db.registry_backend,
+                "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
+                "allow_local_fallback": db.allow_local_fallback,
+            },
             "endpoints": [
                 {
                     "method": "POST",
@@ -354,6 +360,8 @@ def create_classic_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         try:
             result = db.process_scan_results(**parsed)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.IO, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(result)
@@ -412,6 +420,8 @@ def create_loom_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         try:
             result = db.process_scan_results(**parsed)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.IO, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(scan_ingest_result_to_loom(result))
@@ -542,6 +552,8 @@ def create_living_surface_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         try:
             result = db.process_scan_results(**parsed)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.IO, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(scan_ingest_result_to_loom(result))

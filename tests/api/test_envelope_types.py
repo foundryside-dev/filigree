@@ -39,9 +39,11 @@ def test_batch_response_is_generic() -> None:
 def test_error_code_enum_members() -> None:
     from filigree.types.api import ErrorCode
 
-    # Exact 11-member set. SCHEMA_MISMATCH and INTERNAL were added so the
+    # Exact 12-member set. SCHEMA_MISMATCH and INTERNAL were added so the
     # typed SchemaVersionMismatchError and the catch-all except-Exception
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
+    # FILIGREE_FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
+    # conflict code for projects whose file registry is owned by Clarion.
     expected = {
         "VALIDATION",
         "NOT_FOUND",
@@ -51,6 +53,7 @@ def test_error_code_enum_members() -> None:
         "NOT_INITIALIZED",
         "IO",
         "INVALID_API_URL",
+        "FILIGREE_FILE_REGISTRY_DISPLACED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",
         "INTERNAL",

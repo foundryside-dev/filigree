@@ -11,11 +11,37 @@ import pytest
 
 from filigree.core import FiligreeDB
 from filigree.db_base import _now_iso
+from filigree.registry import ResolvedFile
 
 from .._db_factory import make_db
 
 
 class TestCreateObservation:
+    def test_create_observation_file_path_uses_registry_resolved_file_id(self, tmp_path: Path) -> None:
+        class FixedRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                return {
+                    "file_id": "core:file:obs123@src/observed.py",
+                    "content_hash": "",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "local",
+                }
+
+            def is_displaced(self) -> bool:
+                return False
+
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=FixedRegistry())
+        try:
+            db.initialize()
+
+            obs = db.create_observation("file-level bug", file_path="src/observed.py")
+
+            assert obs["file_id"] == "core:file:obs123@src/observed.py"
+            assert db.get_file("core:file:obs123@src/observed.py").path == "src/observed.py"
+        finally:
+            db.close()
+
     def test_create_minimal(self, db: FiligreeDB) -> None:
         obs = db.create_observation("Something looks wrong here")
         assert obs["id"].startswith("test-")

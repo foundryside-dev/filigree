@@ -56,6 +56,7 @@ from filigree.core import (
 # Re-export so test imports continue to work.
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
+from filigree.registry import LocalRegistry
 from filigree.types.api import SchemaVersionMismatchError
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -726,6 +727,7 @@ def main(
     no_browser: bool = False,
     server_mode: bool = False,
     allow_http_force_close: bool = False,
+    allow_local_fallback: bool = False,
 ) -> None:
     """Start the dashboard server.
 
@@ -738,6 +740,10 @@ def main(
     ``POST /api/loom/batch/close``. Without it those routes reject
     ``force=true`` with 400/VALIDATION — the workflow escape lane can only
     be used by the CLI or MCP, never by a passing HTTP client.
+
+    ``allow_local_fallback`` is an ADR-014 recovery flag for single-project
+    ethereal mode: when the project is configured for Clarion registry mode
+    but Clarion is unavailable, auto-create paths use ``LocalRegistry``.
     """
     import uvicorn
 
@@ -773,7 +779,13 @@ def main(
             filigree_dir = project_root / FILIGREE_DIR_NAME
             config = read_config(filigree_dir)
             _config.update(config)
-            _db = _open_db_for_filigree_dir(filigree_dir, check_same_thread=False)
+            db = _open_db_for_filigree_dir(filigree_dir, check_same_thread=False)
+            if allow_local_fallback and db.registry_backend == "clarion":
+                db.allow_local_fallback = True
+                db.clarion_config["allow_local_fallback"] = True
+                db.registry = LocalRegistry(lambda: db._generate_unique_id("file_records", "f"))
+                _config.setdefault("clarion", {})["allow_local_fallback"] = True
+            _db = db
         except SchemaVersionMismatchError as exc:
             # Forward schema mismatch — exit cleanly (code 3, matching
             # `filigree doctor`) with the shared guidance text instead of
