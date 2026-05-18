@@ -355,7 +355,7 @@ class DBMixinProtocol(Protocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        _skip_transition_check: bool = False,
+        backward: bool = False,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

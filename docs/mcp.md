@@ -165,6 +165,10 @@ the observed holder; mismatches return `CONFLICT` and name both holders.
 | `fields` | object | no | Extra fields to set while closing (for enforced workflows) |
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
+| `force` | boolean | no | Use the declared reverse/escape edge for cleanup closes |
+
+`force=true` validates against template `reverse_transitions` and emits
+`transition_forced`; normal close validation remains forward-only.
 
 When an issue has active `critical=true` annotations linked with
 `relationship="must_consider"`, `close_issue` still closes the issue but returns
@@ -532,7 +536,7 @@ Compatibility alias for `get_template`; returns the same canonical workflow defi
 #### `get_template`
 
 Canonical workflow-discovery tool for issue types. Returns pack, states,
-transitions, initial state, and fields schema.
+forward transitions, reverse transitions, initial state, and fields schema.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

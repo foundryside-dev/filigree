@@ -163,6 +163,7 @@ class TypeTemplate:
     initial_state: str
     transitions: tuple[TransitionDefinition, ...]
     fields_schema: tuple[FieldSchema, ...]
+    reverse_transitions: tuple[TransitionDefinition, ...] = ()
     suggested_children: tuple[str, ...] = ()
     suggested_labels: tuple[str, ...] = ()
 
@@ -302,6 +303,7 @@ class TemplateRegistry:
         self._packs: dict[str, WorkflowPack] = {}
         self._category_cache: dict[str, dict[str, StateCategory]] = {}
         self._transition_cache: dict[str, dict[tuple[str, str], TransitionDefinition]] = {}
+        self._reverse_transition_cache: dict[str, dict[tuple[str, str], TransitionDefinition]] = {}
         self._loaded = False
 
     # -- Parsing (from dict/JSON) -------------------------------------------
@@ -351,6 +353,17 @@ class TemplateRegistry:
                 msg = f"Type '{type_name}': transition at index {i} must be a dict, got {type(t).__name__}"
                 raise ValueError(msg)
 
+        raw_reverse_transitions = raw.get("reverse_transitions", [])
+        if raw_reverse_transitions is not None and not isinstance(raw_reverse_transitions, list):
+            msg = f"Type '{type_name}': 'reverse_transitions' must be a list, got {type(raw_reverse_transitions).__name__}"
+            raise ValueError(msg)
+        if raw_reverse_transitions is None:
+            raw_reverse_transitions = []
+        for i, t in enumerate(raw_reverse_transitions):
+            if not isinstance(t, dict):
+                msg = f"Type '{type_name}': reverse_transition at index {i} must be a dict, got {type(t).__name__}"
+                raise ValueError(msg)
+
         raw_fields = raw.get("fields_schema", [])
         if raw_fields is not None and not isinstance(raw_fields, list):
             msg = f"Type '{type_name}': 'fields_schema' must be a list, got {type(raw_fields).__name__}"
@@ -364,7 +377,7 @@ class TemplateRegistry:
 
         # Enforcement validation (filigree-9b9e45: only "hard"/"soft" are valid)
         valid_enforcement = {"hard", "soft"}
-        for t in raw_transitions:
+        for t in [*raw_transitions, *raw_reverse_transitions]:
             enforcement_val = t.get("enforcement")
             if enforcement_val not in valid_enforcement:
                 allowed = ", ".join(sorted(valid_enforcement))
@@ -380,8 +393,9 @@ class TemplateRegistry:
         if len(raw_states) > TemplateRegistry.MAX_STATES:
             msg = f"Type '{type_name}' has {len(raw_states)} states (max {TemplateRegistry.MAX_STATES})"
             raise ValueError(msg)
-        if len(raw_transitions) > TemplateRegistry.MAX_TRANSITIONS:
-            msg = f"Type '{type_name}' has {len(raw_transitions)} transitions (max {TemplateRegistry.MAX_TRANSITIONS})"
+        total_transitions = len(raw_transitions) + len(raw_reverse_transitions)
+        if total_transitions > TemplateRegistry.MAX_TRANSITIONS:
+            msg = f"Type '{type_name}' has {total_transitions} transitions (max {TemplateRegistry.MAX_TRANSITIONS})"
             raise ValueError(msg)
         if len(raw_fields) > TemplateRegistry.MAX_FIELDS:
             msg = f"Type '{type_name}' has {len(raw_fields)} fields (max {TemplateRegistry.MAX_FIELDS})"
@@ -409,6 +423,15 @@ class TemplateRegistry:
             )
             for t in raw_transitions
         )
+        reverse_transitions = tuple(
+            TransitionDefinition(
+                from_state=t["from"],
+                to_state=t["to"],
+                enforcement=t["enforcement"],
+                requires_fields=tuple(t.get("requires_fields", [])),
+            )
+            for t in raw_reverse_transitions
+        )
 
         # Detect duplicate (from_state, to_state) pairs (filigree-ab91b3, filigree-3e3f12)
         seen_transitions: set[tuple[str, str]] = set()
@@ -418,6 +441,13 @@ class TemplateRegistry:
                 msg = f"Type '{type_name}': duplicate transition '{t.from_state}' -> '{t.to_state}'"
                 raise ValueError(msg)
             seen_transitions.add(key)
+        seen_reverse_transitions: set[tuple[str, str]] = set()
+        for t in reverse_transitions:
+            key = (t.from_state, t.to_state)
+            if key in seen_reverse_transitions:
+                msg = f"Type '{type_name}': duplicate reverse_transition '{t.from_state}' -> '{t.to_state}'"
+                raise ValueError(msg)
+            seen_reverse_transitions.add(key)
         fields_schema = tuple(
             FieldSchema(
                 name=f["name"],
@@ -440,6 +470,7 @@ class TemplateRegistry:
             initial_state=raw["initial_state"],
             transitions=transitions,
             fields_schema=fields_schema,
+            reverse_transitions=reverse_transitions,
             suggested_children=tuple(raw.get("suggested_children", [])),
             suggested_labels=tuple(raw.get("suggested_labels", [])),
         )
@@ -478,12 +509,26 @@ class TemplateRegistry:
                 errors.append(f"transition from_state '{t.from_state}' is not in states list")
             if t.to_state not in state_names:
                 errors.append(f"transition to_state '{t.to_state}' is not in states list")
+        seen_reverse_trans: set[tuple[str, str]] = set()
+        for t in tpl.reverse_transitions:
+            key = (t.from_state, t.to_state)
+            if key in seen_reverse_trans:
+                errors.append(f"duplicate reverse_transition '{t.from_state}' -> '{t.to_state}'")
+            seen_reverse_trans.add(key)
+            if t.from_state not in state_names:
+                errors.append(f"reverse_transition from_state '{t.from_state}' is not in states list")
+            if t.to_state not in state_names:
+                errors.append(f"reverse_transition to_state '{t.to_state}' is not in states list")
 
         field_names = {f.name for f in tpl.fields_schema}
         for t in tpl.transitions:
             for rf in t.requires_fields:
                 if rf not in field_names:
                     errors.append(f"transition {t.from_state}->{t.to_state} requires_fields '{rf}' not in fields_schema")
+        for t in tpl.reverse_transitions:
+            for rf in t.requires_fields:
+                if rf not in field_names:
+                    errors.append(f"reverse_transition {t.from_state}->{t.to_state} requires_fields '{rf}' not in fields_schema")
 
         for f in tpl.fields_schema:
             for ra in f.required_at:
@@ -582,6 +627,7 @@ class TemplateRegistry:
 
         # Build transition cache -- O(1) lookup
         self._transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.transitions}
+        self._reverse_transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.reverse_transitions}
 
     def _register_pack(self, pack: WorkflowPack) -> None:
         """Register a workflow pack."""
@@ -701,6 +747,8 @@ class TemplateRegistry:
         from_state: str,
         to_state: str,
         fields: dict[str, Any],
+        *,
+        backward: bool = False,
     ) -> TransitionResult:
         """Validate a state transition.
 
@@ -727,10 +775,14 @@ class TemplateRegistry:
                 ),
             )
 
-        transition_map = self._transition_cache.get(type_name, {})
+        transition_map = self._reverse_transition_cache.get(type_name, {}) if backward else self._transition_cache.get(type_name, {})
         transition = transition_map.get((from_state, to_state))
 
         if transition is None:
+            if backward:
+                from filigree.types.api import InvalidTransitionError
+
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
             # Transition not in table: REJECTED for known types
             return TransitionResult(
                 allowed=False,
@@ -745,8 +797,11 @@ class TemplateRegistry:
         # Check required fields for this transition
         missing = tuple(f for f in transition.requires_fields if not self._is_field_populated(fields.get(f)))
 
-        # Also check fields required_at the target state
-        state_required = self.validate_fields_for_state(type_name, to_state, fields)
+        # Forward workflow transitions also honor fields required at the target
+        # state. Backward/escape edges only enforce their explicit
+        # requires_fields contract so force-close preserves its historical
+        # cleanup semantics instead of inheriting normal close gates.
+        state_required = [] if backward else self.validate_fields_for_state(type_name, to_state, fields)
         all_missing = tuple(dict.fromkeys(list(missing) + state_required))  # dedupe, preserve order
 
         warnings: list[str] = []

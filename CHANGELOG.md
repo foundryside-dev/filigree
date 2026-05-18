@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Workflow templates now declare `reverse_transitions` for controlled
+  escape paths (2.1.0 §4.1).** Built-in packs ship explicit reverse edges
+  for reopen, release-claim revert, and forced close behavior, and
+  `update_issue(..., backward=True)` validates against that reverse table
+  instead of accepting the old internal transition-check bypass. Backward
+  transitions still emit `transition_forced` before `status_changed`, while
+  normal `get_valid_transitions` suggestions remain forward-only. Custom
+  workflow packs that rely on reopen, release revert, or forced close must
+  declare the corresponding `reverse_transitions` edge; missing edges now
+  raise `InvalidTransitionError` instead of silently bypassing workflow
+  validation.
+
 - **`create_issue` now prefix-checks caller-supplied parent and dependency
   IDs before local existence validation (2.1.0 §3.4).** Foreign-prefix
   `parent_id` and `deps` now raise `WrongProjectError` at the same structural

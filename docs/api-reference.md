@@ -234,12 +234,15 @@ def close_issue(
     status: str | None = None,
     fields: dict[str, Any] | None = None,
     expected_assignee: str | None = None,
+    force: bool = False,
 ) -> Issue
 ```
 
 Closes an issue by moving it to a done-category state. Close uses the same
-transition validation as `update_issue()` unless `force=True`, including
-hard-enforcement field gates. Sets `closed_at` automatically.
+forward transition validation as `update_issue()` by default. With
+`force=True`, close validates against the template's `reverse_transitions`
+escape lane instead, emits `transition_forced`, and does not inherit normal
+target-state `required_at` gates. Sets `closed_at` automatically.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -248,6 +251,7 @@ hard-enforcement field gates. Sets `closed_at` automatically.
 | `actor` | `str` | `""` | Identity for the audit trail |
 | `status` | `str \| None` | `None` | Specific done-category state. `None` uses the first done state from the template |
 | `fields` | `dict[str, Any] \| None` | `None` | Additional fields to merge while closing |
+| `force` | `bool` | `False` | Use the declared reverse/escape edge for cleanup closes |
 
 The close `reason` is stored in `fields.close_reason`; a reason-only close also
 records the text on the status-change event comment so history readers can
@@ -898,8 +902,8 @@ def get_template(self, issue_type: str) -> dict[str, Any] | None
 
 Returns the canonical workflow definition for a type as a dict with `type`,
 `display_name`, `description`, `pack`, `states`, `initial_state`,
-`transitions`, and `fields_schema`. Returns `None` if the type is not
-registered.
+`transitions`, `reverse_transitions`, and `fields_schema`. Returns `None` if
+the type is not registered.
 
 #### `list_templates`
 
@@ -1137,7 +1141,8 @@ Returns field names that are required at the given state but not yet populated.
 TemplateRegistry.parse_type_template(raw: dict[str, Any]) -> TypeTemplate
 ```
 
-Parses a type template from a JSON-compatible dict. Enforces size limits (max 50 states, 200 transitions, 50 fields).
+Parses a type template from a JSON-compatible dict. Enforces size limits
+(max 50 states, 200 total forward + reverse transitions, 50 fields).
 
 **Raises:** `ValueError` for invalid data, `KeyError` for missing required keys.
 
@@ -1219,8 +1224,9 @@ Complete workflow definition for an issue type.
 | `pack` | `str` | *(required)* | Workflow pack this type belongs to |
 | `states` | `tuple[StateDefinition, ...]` | *(required)* | All states in the workflow |
 | `initial_state` | `str` | *(required)* | State for newly created issues |
-| `transitions` | `tuple[TransitionDefinition, ...]` | *(required)* | Valid state transitions |
+| `transitions` | `tuple[TransitionDefinition, ...]` | *(required)* | Valid forward state transitions |
 | `fields_schema` | `tuple[FieldSchema, ...]` | *(required)* | Custom fields for this type |
+| `reverse_transitions` | `tuple[TransitionDefinition, ...]` | `()` | Controlled escape transitions used by reopen, release revert, and forced close paths |
 | `suggested_children` | `tuple[str, ...]` | `()` | Suggested child issue types |
 | `suggested_labels` | `tuple[str, ...]` | `()` | Suggested labels |
 

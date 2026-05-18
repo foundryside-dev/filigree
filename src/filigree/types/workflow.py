@@ -50,6 +50,7 @@ class TemplateInfo(TypedDict):
     states: list[StateInfo]
     initial_state: str
     transitions: list[TransitionInfo]
+    reverse_transitions: list[TransitionInfo]
     fields_schema: list[FieldSchemaInfo]
 
 

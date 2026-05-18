@@ -598,19 +598,34 @@ class AmbiguousTransitionError(Exception):
         )
 
 
-class InvalidTransitionError(Exception):
+class InvalidTransitionError(ValueError):
     """Raised by WorkflowPack.canonical_working_status when no wip-category
     target is reachable from the current status.
 
-    Carries type_name + current_status so callers can show *why* no
-    work-state transition is available. Stage 3 wires the raise site;
-    defined here for stable mapping.
+    Carries type_name + current_status so callers can show *why* a workflow
+    transition is unavailable. Subclasses ValueError so existing state-machine
+    error handlers continue to classify it as INVALID_TRANSITION.
     """
 
-    def __init__(self, type_name: str, current_status: str) -> None:
+    def __init__(
+        self,
+        type_name: str,
+        current_status: str,
+        *,
+        to_state: str | None = None,
+        backward: bool = False,
+    ) -> None:
         self.type_name = type_name
         self.current_status = current_status
-        super().__init__(f"No wip-category transition from {current_status!r} for type {type_name!r}.")
+        self.to_state = to_state
+        self.backward = backward
+        if to_state is None:
+            message = f"No wip-category transition from {current_status!r} for type {type_name!r}."
+        elif backward:
+            message = f"Reverse transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
+        else:
+            message = f"Transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
+        super().__init__(message)
 
 
 def errorcode_to_http_status(code: ErrorCode) -> int:

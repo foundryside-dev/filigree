@@ -167,11 +167,11 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
     ``POST /api/loom/batch/close``. Returns kwargs for ``db.batch_close``
     on success, or a 400 ``JSONResponse`` on error.
 
-    Accepts optional ``force`` (bool) to bypass the template transition
-    validator on every item — matches the CLI ``--force`` and MCP
+    Accepts optional ``force`` (bool) to use the template reverse/escape
+    transition on every item — matches the CLI ``--force`` and MCP
     ``force`` argument on ``batch_close``. Use only for cleanup flows
-    that intentionally skip the workflow (e.g. a planning batch in its
-    initial state where the type's default done state is not reachable).
+    that intentionally leave the normal workflow (e.g. a planning batch in
+    its initial state where the type's default done state is not reachable).
     """
     issue_ids = body.get("issue_ids")
     if not isinstance(issue_ids, list):
@@ -195,8 +195,8 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
     if not isinstance(force, bool):
         return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
     if force:
-        # 2.1.0 §1.1: HTTP callers can't bypass the workflow transition
-        # validator unless the dashboard was started with
+        # 2.1.0 §1.1: HTTP callers can't use the workflow escape lane
+        # unless the dashboard was started with
         # ``--allow-http-force-close``. Runtime import avoids forming a
         # cycle at module load (filigree.dashboard already imports from
         # the routes package).
@@ -355,6 +355,9 @@ def create_classic_router() -> APIRouter:
                 "states": [{"name": s.name, "category": s.category} for s in tpl.states],
                 "initial_state": tpl.initial_state,
                 "transitions": [{"from": t.from_state, "to": t.to_state, "enforcement": t.enforcement} for t in tpl.transitions],
+                "reverse_transitions": [
+                    {"from": t.from_state, "to": t.to_state, "enforcement": t.enforcement} for t in tpl.reverse_transitions
+                ],
             }
         )
 

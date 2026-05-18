@@ -241,12 +241,16 @@ Close one or more issues. Accepts multiple IDs.
 |-----------|------|-------------|
 | `ids` | string... | One or more issue IDs (positional, variadic) |
 | `--reason` | string | Close reason |
+| `--status` | string | Explicit done-category target |
+| `--force` | flag | Use the declared reverse/escape edge for cleanup closes |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 When using `--json`, the output includes `succeeded`, `failed`, and
 `newly_unblocked`. Closed issues with active critical `must_consider`
 annotations include an `annotation_warnings` array. Plain-text close prints the
 same warning after the close; V1 warnings are advisory and do not block closure.
+`--force` validates through template `reverse_transitions` and records
+`transition_forced` before `status_changed`.
 
 ### `reopen`
 
@@ -566,6 +570,7 @@ Close multiple issues.
 |-----------|------|-------------|
 | `ids` | string... | Issue IDs (positional, multiple) |
 | `--reason` | string | Close reason |
+| `--force` | flag | Use declared reverse/escape edges for cleanup closes |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `batch-add-label`
@@ -669,7 +674,7 @@ List all registered issue types with their pack and status flow.
 ### `type-info`
 
 Compatibility alias for `get-template`. Shows the same full workflow definition for an issue type:
-pack, statuses, transitions, fields, and enforcement rules.
+pack, statuses, forward transitions, reverse transitions, fields, and enforcement rules.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

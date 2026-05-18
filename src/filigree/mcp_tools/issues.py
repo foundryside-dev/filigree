@@ -259,7 +259,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "status explicitly to land in an alternate done state (e.g. 'wont_fix', 'not_a_bug', "
                 "'cancelled'). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
                 "defined — walk the workflow with update_issue, pass a reachable status, or pass "
-                "force=true to rage-close from any state (skips the template transition validator)."
+                "force=true to use the declared reverse/escape edge for cleanup."
             ),
             inputSchema={
                 "type": "object",
@@ -287,9 +287,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "type": "boolean",
                         "default": False,
                         "description": (
-                            "Bypass the template transition validator and close from any state. "
-                            "Use only for cleanup flows that intentionally skip the workflow; "
-                            "soft transitions are still recorded as transition_warning events."
+                            "Use the template reverse/escape transition and close from any state. "
+                            "Use only for cleanup flows that intentionally leave the normal workflow; "
+                            "transition_forced is recorded before status_changed."
                         ),
                     },
                 },
@@ -666,8 +666,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "type": "boolean",
                         "default": False,
                         "description": (
-                            "Bypass the template transition validator on every item. "
-                            "Use only for cleanup flows that intentionally skip the workflow."
+                            "Use the template reverse/escape transition on every item. "
+                            "Use only for cleanup flows that intentionally leave the normal workflow."
                         ),
                     },
                 },

@@ -730,8 +730,8 @@ def main(
     ``allow_http_force_close`` (2.1.0 §1.1) opts the dashboard into
     accepting ``force=true`` on ``POST /api/batch/close`` and
     ``POST /api/loom/batch/close``. Without it those routes reject
-    ``force=true`` with 400/VALIDATION — the workflow validator can only
-    be bypassed by the CLI or MCP, never by a passing HTTP client.
+    ``force=true`` with 400/VALIDATION — the workflow escape lane can only
+    be used by the CLI or MCP, never by a passing HTTP client.
     """
     import uvicorn
 

@@ -7,6 +7,7 @@ lifecycle operations respect per-type state machines.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -15,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_config
 from filigree.templates import StateDefinition, TransitionOption, TypeTemplate, ValidationResult
-from filigree.types.api import ErrorCode
+from filigree.types.api import ErrorCode, InvalidTransitionError
 from tests._db_factory import make_db
 
 # ---------------------------------------------------------------------------
@@ -283,8 +284,8 @@ class TestUpdateIssueTransitionEnforcement:
         closed = db.close_issue(issue.id, status="wont_fix", reason="duplicate")
         assert closed.status == "wont_fix"
 
-    def test_close_force_bypasses_validator(self, db: FiligreeDB) -> None:
-        """close_issue(force=True) skips the template transition validator.
+    def test_close_force_uses_backward_escape_edge(self, db: FiligreeDB) -> None:
+        """close_issue(force=True) uses the declared backward/escape edge.
 
         Documented escape hatch for cleanup flows that need to rage-close
         regardless of the template — same shape as
@@ -344,49 +345,117 @@ class TestUpdateIssueTransitionEnforcement:
         assert by_id[milestone.id].status == "completed"
         assert by_id[phase.id].status == "completed"
 
-    def test_reopen_bypasses_transition_check(self, db: FiligreeDB) -> None:
-        """Reopen works from done state back to initial."""
+    def test_reopen_uses_backward_edge_not_skip_check(self, db: FiligreeDB) -> None:
+        """Reopen works through a declared reverse edge; skip-check is gone."""
+        skip_kw = "_" + "skip_transition_check"
+        assert skip_kw not in inspect.signature(db.update_issue).parameters
+
         issue = db.create_issue("Bug", type="bug")
         # Use a directly-reachable done state from triage; close_issue now
         # validates transitions (filigree-cb980eee0d).
         db.close_issue(issue.id, status="wont_fix")
-        reopened = db.update_issue(issue.id, status="triage", _skip_transition_check=True)
+        reopened = db.reopen_issue(issue.id, actor="ops")
         assert reopened.status == "triage"
+        events = db.get_issue_events(issue.id, limit=20)
+        assert any(e["event_type"] == "transition_forced" and e["old_value"] == "wont_fix" and e["new_value"] == "triage" for e in events)
 
-    def test_skip_transition_check_flag(self, db: FiligreeDB) -> None:
-        """_skip_transition_check allows any valid state."""
+    def test_legacy_transition_skip_flag_is_not_accepted(self, db: FiligreeDB) -> None:
+        """The legacy skip-check kwarg is no longer part of update_issue."""
+        skip_kw = "_" + "skip_transition_check"
+        assert skip_kw not in inspect.signature(db.update_issue).parameters
         issue = db.create_issue("Bug", type="bug")
-        updated = db.update_issue(issue.id, status="verifying", _skip_transition_check=True)
-        assert updated.status == "verifying"
+        with pytest.raises(TypeError, match=skip_kw):
+            db.update_issue(issue.id, status="confirmed", **{skip_kw: True})  # type: ignore[arg-type]
 
-    def test_forced_transition_emits_audit_event(self, db: FiligreeDB) -> None:
-        """2.1.0 §1.1: bypassing the workflow validator records a
+    def test_backward_transition_emits_audit_event(self, db: FiligreeDB) -> None:
+        """2.1.0 §4.1: declared backward transitions record a
         ``transition_forced`` event alongside ``status_changed``.
 
         Reviewers reading the audit trail must be able to identify every
-        workflow shortcut without inferring it from the absence of a
-        ``transition_warning``. The two events fire in order
-        (forced → changed) so the chain reads causally top-to-bottom.
+        workflow shortcut without inferring it from the absence of a warning.
+        The two events fire in order (forced → changed) so the chain reads
+        causally top-to-bottom.
         """
         issue = db.create_issue("Bug", type="bug")
-        # ``verifying`` is not directly reachable from ``triage`` for bugs;
-        # _skip_transition_check is the only way to land here.
+        db.close_issue(issue.id, status="wont_fix")
         db.update_issue(
             issue.id,
-            status="verifying",
-            _skip_transition_check=True,
+            status="triage",
+            backward=True,
             actor="ops",
         )
         events = db.get_issue_events(issue.id, limit=20)
         forced = [e for e in events if e["event_type"] == "transition_forced"]
         changed = [e for e in events if e["event_type"] == "status_changed"]
         assert len(forced) == 1, f"expected one transition_forced, got {[e['event_type'] for e in events]}"
-        assert forced[0]["old_value"] == "triage"
-        assert forced[0]["new_value"] == "verifying"
+        assert forced[0]["old_value"] == "wont_fix"
+        assert forced[0]["new_value"] == "triage"
         assert forced[0]["actor"] == "ops"
         # status_changed is still emitted; the forced event is additive.
-        assert len(changed) == 1
-        assert changed[0]["new_value"] == "verifying"
+        assert len(changed) == 2
+        assert any(e["old_value"] == "wont_fix" and e["new_value"] == "triage" for e in changed)
+
+    def test_missing_backward_edge_raises_named_error(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        templates_dir = filigree_dir / "templates"
+        templates_dir.mkdir(parents=True)
+        write_config(filigree_dir, {"prefix": "test", "version": 1, "enabled_packs": ["custom_only"]})
+        (templates_dir / "custom_item.json").write_text(
+            json.dumps(
+                {
+                    "type": "custom_item",
+                    "display_name": "Custom Item",
+                    "states": [
+                        {"name": "open", "category": "open"},
+                        {"name": "closed", "category": "done"},
+                    ],
+                    "initial_state": "open",
+                    "transitions": [
+                        {"from": "open", "to": "closed", "enforcement": "soft"},
+                    ],
+                    "fields_schema": [],
+                }
+            )
+        )
+        custom_db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test", enabled_packs=["custom_only"])
+        try:
+            custom_db.initialize()
+            issue = custom_db.create_issue("Custom", type="custom_item")
+            custom_db.close_issue(issue.id)
+
+            with pytest.raises(InvalidTransitionError) as excinfo:
+                custom_db.reopen_issue(issue.id)
+
+            assert excinfo.value.type_name == "custom_item"
+            assert excinfo.value.current_status == "closed"
+        finally:
+            custom_db.close()
+
+    def test_release_claim_validates_backward_edge(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        issue = db.create_issue("Handoff task", type="task")
+        db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
+        original_validate_transition = db.templates.validate_transition
+
+        def fail_backward_validation(
+            type_name: str,
+            from_state: str,
+            to_state: str,
+            fields: dict[str, Any],
+            *,
+            backward: bool = False,
+        ) -> Any:
+            if backward:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state)
+            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+
+        monkeypatch.setattr(db.templates, "validate_transition", fail_backward_validation)
+
+        with pytest.raises(InvalidTransitionError):
+            db.release_claim(issue.id, actor="agent-alpha")
+
+        restored = db.get_issue(issue.id)
+        assert restored.status == "in_progress"
+        assert restored.assignee == "agent-alpha"
 
     def test_validated_transition_does_not_emit_forced_event(self, db: FiligreeDB) -> None:
         """The audit event must fire ONLY when the validator was bypassed —
@@ -479,7 +548,7 @@ class TestCloseIssue:
         assert not any("auto-resolved" in w for w in closed.data_warnings)
         assert closed.fields["close_reason"] == "cleanup"
 
-    def test_close_with_force_bypasses_transition_check(self, db: FiligreeDB) -> None:
+    def test_close_with_force_uses_escape_edge(self, db: FiligreeDB) -> None:
         """force=True is the documented escape hatch for cleanup that needs to
         land in the default done state regardless of reachability.
         """
@@ -544,19 +613,9 @@ class TestCloseIssueHardEnforcement:
     def test_close_bug_from_verifying_requires_fix_verification(self, db: FiligreeDB) -> None:
         """Bug verifying→closed has hard enforcement requiring fix_verification."""
         issue = db.create_issue("Bug", type="bug")
-        db.update_issue(
-            issue.id,
-            status="confirmed",
-            fields={"severity": "major"},
-            _skip_transition_check=True,
-        )
-        db.update_issue(issue.id, status="fixing", _skip_transition_check=True)
-        db.update_issue(
-            issue.id,
-            status="verifying",
-            fields={"fix_verification": "manual test"},
-            _skip_transition_check=True,
-        )
+        db.update_issue(issue.id, status="confirmed", fields={"severity": "major"})
+        db.update_issue(issue.id, status="fixing", fields={"root_cause": "config drift"})
+        db.update_issue(issue.id, status="verifying", fields={"fix_verification": "manual test"})
 
         # verifying→closed requires fix_verification (hard gate)
         # fix_verification is already set, so this should succeed

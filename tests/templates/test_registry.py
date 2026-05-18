@@ -71,6 +71,80 @@ class TestDataclasses:
         assert tpl.type == "task"
         assert tpl.initial_state == "open"
 
+    def test_template_backward_edge_declaration_validates(self) -> None:
+        """reverse_transitions are validated but not suggested as normal next steps."""
+        raw = {
+            "type": "demo",
+            "display_name": "Demo",
+            "description": "A demo workflow",
+            "pack": "custom",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "in_progress", "category": "wip"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [
+                {"from": "open", "to": "in_progress", "enforcement": "soft"},
+                {"from": "in_progress", "to": "closed", "enforcement": "soft"},
+            ],
+            "reverse_transitions": [
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+                {"from": "in_progress", "to": "open", "enforcement": "hard", "requires_fields": ["reason"]},
+            ],
+            "fields_schema": [
+                {"name": "reason", "type": "text"},
+            ],
+        }
+
+        tpl = TemplateRegistry.parse_type_template(raw)
+        assert TemplateRegistry.validate_type_template(tpl) == []
+        assert tpl.reverse_transitions == (
+            TransitionDefinition("closed", "open", "soft"),
+            TransitionDefinition("in_progress", "open", "hard", requires_fields=("reason",)),
+        )
+
+        registry = TemplateRegistry()
+        registry._register_type(tpl)
+
+        result = registry.validate_transition("demo", "closed", "open", {}, backward=True)
+        assert result.allowed is True
+        assert result.enforcement == "soft"
+        assert registry.get_valid_transitions("demo", "closed", {}) == []
+
+        gated = registry.validate_transition("demo", "in_progress", "open", {}, backward=True)
+        assert gated.allowed is False
+        assert gated.missing_fields == ("reason",)
+
+    def test_template_rejects_duplicate_reverse_edges(self) -> None:
+        raw = {
+            "type": "demo",
+            "display_name": "Demo",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [
+                {"from": "open", "to": "closed", "enforcement": "soft"},
+            ],
+            "reverse_transitions": [
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+            ],
+            "fields_schema": [],
+        }
+
+        with pytest.raises(ValueError, match="duplicate reverse_transition 'closed' -> 'open'"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_built_in_templates_validate_with_reverse_transitions(self) -> None:
+        for pack in BUILT_IN_PACKS.values():
+            for raw in pack["types"].values():
+                tpl = TemplateRegistry.parse_type_template(raw)
+                assert TemplateRegistry.validate_type_template(tpl) == []
+                assert tpl.reverse_transitions, f"{tpl.type} must declare workflow escape edges"
+
     def test_transition_result(self) -> None:
         tr = TransitionResult(allowed=True, enforcement="soft", missing_fields=(), warnings=("Watch out",))
         assert tr.allowed is True
@@ -1884,6 +1958,12 @@ class TestGetTemplateEnriched:
         assert tpl is not None
         assert "transitions" in tpl
         assert any(t["from"] == "triage" and t["to"] == "confirmed" for t in tpl["transitions"])
+
+    def test_get_template_includes_reverse_transitions(self, db: FiligreeDB) -> None:
+        tpl = db.get_template("bug")
+        assert tpl is not None
+        assert "reverse_transitions" in tpl
+        assert any(t["from"] == "wont_fix" and t["to"] == "triage" for t in tpl["reverse_transitions"])
 
     def test_get_template_includes_initial_state(self, db: FiligreeDB) -> None:
         tpl = db.get_template("bug")

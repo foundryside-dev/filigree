@@ -673,7 +673,7 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        _skip_transition_check: bool = False,
+        backward: bool = False,
     ) -> Issue:
         self._check_id_prefix(issue_id)
         current = self.get_issue(issue_id)
@@ -725,28 +725,35 @@ class IssuesMixin(DBMixinProtocol):
         if status is not None and status != current.status:
             self._validate_status(status, current.type)
 
-            if not _skip_transition_check:
-                # Atomic transition-with-fields: validate merged fields against target state
-                merged_fields = {**current.fields}
-                if fields is not None:
-                    merged_fields.update(fields)
+            # Atomic transition-with-fields: validate merged fields against target state.
+            # ``backward=True`` routes through the declared reverse/escape edge
+            # table, preserving auditability without the old skip-check bypass.
+            merged_fields = {**current.fields}
+            if fields is not None:
+                merged_fields.update(fields)
 
-                tpl = self.templates.get_type(current.type)
-                if tpl is not None:
-                    _transition_result = self.templates.validate_transition(current.type, current.status, status, merged_fields)
-                    if not _transition_result.allowed:
-                        if _transition_result.missing_fields:
-                            missing_str = ", ".join(_transition_result.missing_fields)
-                            msg = (
-                                f"Cannot transition '{current.status}' -> '{status}' for type "
-                                f"'{current.type}': missing required fields: {missing_str}"
-                            )
-                        else:
-                            msg = (
-                                f"Transition '{current.status}' -> '{status}' is not allowed for type "
-                                f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
-                            )
-                        raise ValueError(msg)
+            tpl = self.templates.get_type(current.type)
+            if tpl is not None:
+                _transition_result = self.templates.validate_transition(
+                    current.type,
+                    current.status,
+                    status,
+                    merged_fields,
+                    backward=backward,
+                )
+                if not _transition_result.allowed:
+                    if _transition_result.missing_fields:
+                        missing_str = ", ".join(_transition_result.missing_fields)
+                        msg = (
+                            f"Cannot transition '{current.status}' -> '{status}' for type "
+                            f"'{current.type}': missing required fields: {missing_str}"
+                        )
+                    else:
+                        msg = (
+                            f"Transition '{current.status}' -> '{status}' is not allowed for type "
+                            f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
+                        )
+                    raise ValueError(msg)
 
         # Validate field patterns and uniqueness for incoming fields
         if fields is not None:
@@ -798,14 +805,12 @@ class IssuesMixin(DBMixinProtocol):
                         comment=warning,
                     )
 
-            # 2.1.0 §1.1: when the transition validator was bypassed
+            # 2.1.0 §4.1: when the declared backward/escape workflow lane is used
             # the audit trail records a ``transition_forced`` event
-            # alongside the ``status_changed`` so reviewers can find
-            # every workflow shortcut without inferring it from the
-            # absence of a ``transition_warning``. Sequenced before
-            # the status_changed event so the chain is causally
-            # ordered (force → change) when read top-to-bottom.
-            if _skip_transition_check:
+            # alongside the ``status_changed`` so reviewers can find every
+            # workflow shortcut. Sequenced before the status_changed event so
+            # the chain is causally ordered when read top-to-bottom.
+            if backward:
                 self._record_event(
                     issue_id,
                     "transition_forced",
@@ -981,18 +986,17 @@ class IssuesMixin(DBMixinProtocol):
 
         Routes through ``update_issue`` so the same template transition
         validator enforces ``triage → closed`` (and similar shortcuts)
-        consistently across both close paths. Pass ``force=True`` to
-        rage-close from any state, skipping the template's transition
-        table — this is the documented escape hatch for cleanup
-        flows that intentionally bypass the workflow.
+        consistently across both close paths. Pass ``force=True`` to use
+        the template's declared reverse/escape edge — this is the documented
+        cleanup lane for flows that intentionally leave the normal workflow.
 
         When ``status`` is omitted, the close target defaults to the first
         done-category state for the type. If that default is not reachable
         from the current status, ``update_issue`` raises INVALID_TRANSITION
         and the caller must either pass ``status=`` explicitly to pick a
         done-category target, walk the workflow forward to a state from
-        which the default is reachable, or pass ``force=True`` to bypass
-        the transition table. The close path never silently picks a done
+        which the default is reachable, or pass ``force=True`` to use the
+        declared escape edge. The close path never silently picks a done
         state on the caller's behalf — that hid intent (a feature in
         ``building`` that's actually shipped should not become ``deferred``
         just because that's the only reachable done-state).
@@ -1042,7 +1046,7 @@ class IssuesMixin(DBMixinProtocol):
             fields=update_fields or None,
             actor=actor,
             expected_assignee=expected_assignee,
-            _skip_transition_check=force,
+            backward=force,
         )
 
     @_retry_busy()
@@ -1064,7 +1068,7 @@ class IssuesMixin(DBMixinProtocol):
             issue_id,
             status=reopen_status,
             actor=actor,
-            _skip_transition_check=True,
+            backward=True,
             _skip_begin=True,
         )
         reopen_fields = _fields_for_reopen(current.fields)
@@ -1225,7 +1229,7 @@ class IssuesMixin(DBMixinProtocol):
                 msg = "expected_assignee or actor is required when if_held=True"
                 raise ValueError(msg)
         self._check_id_prefix(issue_id)
-        row = self.conn.execute("SELECT type, status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        row = self.conn.execute("SELECT type, status, assignee, fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
             msg = f"Issue not found: {issue_id}"
             raise KeyError(msg)
@@ -1244,6 +1248,27 @@ class IssuesMixin(DBMixinProtocol):
             target = self.templates.get_release_target(row["type"], row["status"])
             if target == row["status"]:
                 target = None
+            if target is not None:
+                result = self.templates.validate_transition(
+                    row["type"],
+                    row["status"],
+                    target,
+                    _safe_fields_json(row["fields"], issue_id),
+                    backward=True,
+                )
+                if not result.allowed:
+                    if result.missing_fields:
+                        missing_str = ", ".join(result.missing_fields)
+                        msg = (
+                            f"Cannot transition '{row['status']}' -> '{target}' for type "
+                            f"'{row['type']}': missing required fields: {missing_str}"
+                        )
+                    else:
+                        msg = (
+                            f"Transition '{row['status']}' -> '{target}' is not allowed for type "
+                            f"'{row['type']}'. Use get_valid_transitions() to see allowed transitions."
+                        )
+                    raise ValueError(msg)
 
         now = _now_iso()
         updates = [
@@ -1861,9 +1886,9 @@ class IssuesMixin(DBMixinProtocol):
         single shared precondition. When omitted and ``actor`` is present,
         held issues default the expected holder to actor (ADR-008).
 
-        ``force=True`` skips the template transition validator on every
+        ``force=True`` uses the template reverse/escape transition on every
         item — same escape hatch as ``close_issue(force=True)``. Use only
-        for cleanup flows that intentionally bypass the workflow.
+        for cleanup flows that intentionally leave the normal workflow.
         Senior-user MCP review run e P1.3.
         """
         return self._batch_with_transition_errors(

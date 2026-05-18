@@ -588,8 +588,8 @@ def update_issue_cmd(
     is_flag=True,
     default=False,
     help=(
-        "Bypass the template transition validator and close from any state. Use only "
-        "for cleanup flows that intentionally skip the workflow."
+        "Use the template reverse/escape transition and close from any state. Use only "
+        "for cleanup flows that intentionally leave the normal workflow."
     ),
 )
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")

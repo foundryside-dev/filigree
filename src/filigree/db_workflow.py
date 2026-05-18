@@ -172,6 +172,17 @@ class WorkflowMixin(DBMixinProtocol):
                 )
                 for t in tpl.transitions
             ],
+            reverse_transitions=[
+                TransitionInfo(
+                    **{
+                        "from": t.from_state,
+                        "to": t.to_state,
+                        "enforcement": t.enforcement,
+                        "requires_fields": list(t.requires_fields),
+                    }
+                )
+                for t in tpl.reverse_transitions
+            ],
             fields_schema=fields_schema,
         )
 

@@ -427,7 +427,7 @@ def batch_update(
     "--force",
     is_flag=True,
     default=False,
-    help=("Bypass the template transition validator on every item. Use only for cleanup flows that intentionally skip the workflow."),
+    help=("Use the template reverse/escape transition on every item. Use only for cleanup flows that leave the normal workflow."),
 )
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")

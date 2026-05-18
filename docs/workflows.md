@@ -26,8 +26,10 @@ Every issue in filigree has a **type**, and every type has a **state machine** d
 1. Each issue type defines a set of **states** (e.g., `open`, `in_progress`, `closed`)
 2. Each state belongs to a **category**: `open`, `wip` (work-in-progress), or `done`
 3. **Transitions** define which state changes are valid
-4. Transitions can be **hard** (blocked if invalid) or **soft** (allowed with a warning)
-5. Some transitions **require fields** to be populated before they're allowed
+4. `reverse_transitions` define controlled escape paths for reopen, release
+   revert, and forced close behavior
+5. Transitions can be **hard** (blocked if invalid) or **soft** (allowed with a warning)
+6. Some transitions **require fields** to be populated before they're allowed
 
 ## Runtime Semantics Contract
 
@@ -57,6 +59,15 @@ Hard and soft enforcement share the same field vocabulary:
 - **Soft** transitions succeed, return the warning in `data_warnings[]`, and
   record the same advisory once as a `transition_warning` event.
 
+Reverse transitions are declared separately under `reverse_transitions`.
+They use the same `from` / `to` / `enforcement` / `requires_fields` shape as
+normal transitions, but they are not returned by `get_valid_transitions` and
+do not participate in ordinary reachability. Filigree uses them only when a
+caller opts into the controlled escape lane, such as `reopen_issue`,
+`release_claim`'s wip-to-open revert, or `close_issue(force=True)`. Reverse
+transitions enforce their explicit `requires_fields`; they do not inherit
+target-state `required_at` gates, preserving forced cleanup behavior.
+
 Closing is a transition into a done-category state. If no close target is
 provided, Filigree starts with the type's first done-category state; when that
 default is not reachable but exactly one done-category transition is reachable,
@@ -69,7 +80,8 @@ separate field event.
 Reopening only works from done-category states. It returns the issue to the
 most recent non-done state that transitioned into done, falling back to the
 type's `initial_state` when no usable event exists. Reopen clears close-only
-fields such as `close_reason`.
+fields such as `close_reason`. The target must be declared in
+`reverse_transitions`.
 
 Claiming and handoff also respect categories. Open-category issues are
 claimable for new work; released wip-category issues are claimable for handoff.
@@ -77,7 +89,9 @@ claimable for new work; released wip-category issues are claimable for handoff.
 target and require an explicit target when several wip states are possible.
 `release_claim` reverts wip-category work to the template-defined open
 predecessor by default so unassigned work returns to ready discovery; callers
-may opt out with `revert_status=false`.
+may opt out with `revert_status=false`. Reverts validate through
+`reverse_transitions`; if a type has no reverse target, release clears only
+the assignee and leaves the status unchanged.
 
 ## Packs
 
@@ -640,7 +654,7 @@ Use these CLI commands to explore available workflows:
 
 ```bash
 filigree types                       # List all types with state flows
-filigree get-template task           # Canonical full definition: pack, states, transitions, fields
+filigree get-template task           # Canonical full definition: pack, states, transitions, reverse transitions, fields
 filigree type-info task              # Compatibility alias for get-template
 filigree guide core                  # Workflow guide for the core pack
 filigree transitions <id>            # Valid next states for a specific issue
