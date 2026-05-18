@@ -453,6 +453,11 @@ class IssuesMixin(DBMixinProtocol):
             _validate_string_list(labels, "labels")
         if deps is not None:
             _validate_string_list(deps, "deps")
+        if parent_id:
+            self._check_id_prefix(parent_id)
+        if deps:
+            for dep_id in deps:
+                self._check_id_prefix(dep_id)
         assignee = _normalize_assignee(assignee)
         if labels:
             labels = [self._validate_label_name(label) for label in labels]

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`create_issue` now prefix-checks caller-supplied parent and dependency
+  IDs before local existence validation (2.1.0 §3.4).** Foreign-prefix
+  `parent_id` and `deps` now raise `WrongProjectError` at the same structural
+  boundary as other write surfaces instead of being masked as local
+  not-found validation failures.
+
 - **`update_issue(fields=...)` now refuses to merge over corrupt stored
   fields unless explicitly forced (2.1.0 §3.3).** When the current
   `issues.fields` value cannot be parsed, the default update path raises

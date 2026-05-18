@@ -934,7 +934,7 @@ class TestCreateIssuePartialWriteRollback:
         issues_before = len(db.list_issues())
 
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Orphan candidate", deps=["nonexistent-dep-id"])
+            db.create_issue("Orphan candidate", deps=["test-missing-dep"])
 
         # Force a commit to simulate MCP's long-lived connection
         db.conn.commit()
@@ -949,7 +949,7 @@ class TestCreateIssuePartialWriteRollback:
         events_before = db.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Event orphan candidate", deps=["ghost-id"])
+            db.create_issue("Event orphan candidate", deps=["test-ghost"])
 
         # Force commit
         db.conn.commit()
@@ -964,7 +964,7 @@ class TestCreateIssuePartialWriteRollback:
         labels_before = db.conn.execute("SELECT COUNT(*) FROM labels").fetchone()[0]
 
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Label orphan", labels=["defect", "urgent"], deps=["missing-id"])
+            db.create_issue("Label orphan", labels=["defect", "urgent"], deps=["test-missing"])
 
         db.conn.commit()
 

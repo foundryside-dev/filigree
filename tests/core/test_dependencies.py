@@ -161,15 +161,15 @@ class TestInvalidDepValidation:
     def test_nonexistent_dep_raises_valueerror(self, db: FiligreeDB) -> None:
         """Creating an issue with deps referencing nonexistent IDs raises ValueError."""
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Bad deps", deps=["nonexistent-id"])
+            db.create_issue("Bad deps", deps=["test-missing"])
 
     def test_nonexistent_dep_not_integrity_error(self, db: FiligreeDB) -> None:
         """The error should be ValueError, not sqlite3.IntegrityError."""
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Bad deps 2", deps=["ghost-abc123"])
+            db.create_issue("Bad deps 2", deps=["test-abc123"])
         # Explicitly ensure it's not an IntegrityError
         try:
-            db.create_issue("Bad deps 3", deps=["ghost-xyz789"])
+            db.create_issue("Bad deps 3", deps=["test-xyz789"])
         except ValueError:
             pass  # Expected
         except sqlite3.IntegrityError:

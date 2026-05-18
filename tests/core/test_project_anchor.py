@@ -892,6 +892,26 @@ class TestWrongProjectErrorOnWrites:
         assert issue.id.startswith("alpha-")
         db_p.close()
 
+    def test_create_issue_rejects_foreign_parent_id(self, db_p: FiligreeDB) -> None:
+        before = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+
+        with pytest.raises(WrongProjectError):
+            db_p.create_issue("Child", parent_id="beefdata-abc123")
+
+        after = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        assert after == before
+        db_p.close()
+
+    def test_create_issue_rejects_foreign_dep_id(self, db_p: FiligreeDB) -> None:
+        before = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+
+        with pytest.raises(WrongProjectError):
+            db_p.create_issue("Dependent", deps=["beefdata-abc123"])
+
+        after = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        assert after == before
+        db_p.close()
+
     def test_correct_prefix_passes(self, db_p: FiligreeDB) -> None:
         """Sanity: the prefix check doesn't reject legitimate IDs."""
         issue = db_p.create_issue("Test")
