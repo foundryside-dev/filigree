@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`reopen_issue` now records its status change, close-field cleanup, and
+  `reopened` event in one IMMEDIATE transaction (2.1.0 §3.1).** The method
+  now uses the shared busy-retry / transaction decorator stack and passes
+  `_skip_begin=True` to the inner `update_issue` call, so a failure while
+  recording the terminal `reopened` event rolls back the status and fields
+  writes instead of leaving a reopened issue with no audit signal for
+  `undo_last`.
+
 - **`get_stale_claims` pushes the modern lease-expiry check into SQL
   (2.1.0 §2.3).** Rows with `claim_expires_at IS NOT NULL` are now
   filtered via `datetime(claim_expires_at) <= datetime(?)` in the

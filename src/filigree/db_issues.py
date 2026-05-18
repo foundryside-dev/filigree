@@ -7,7 +7,6 @@ Python's MRO when composed into ``FiligreeDB``.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re as _re
@@ -1025,6 +1024,8 @@ class IssuesMixin(DBMixinProtocol):
             _skip_transition_check=force,
         )
 
+    @_retry_busy()
+    @_in_immediate_tx("reopen_issue")
     def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
 
@@ -1038,7 +1039,13 @@ class IssuesMixin(DBMixinProtocol):
             raise ValueError(msg)
 
         reopen_status = self._reopen_target_status(current)
-        result = self.update_issue(issue_id, status=reopen_status, actor=actor, _skip_transition_check=True)
+        result = self.update_issue(
+            issue_id,
+            status=reopen_status,
+            actor=actor,
+            _skip_transition_check=True,
+            _skip_begin=True,
+        )
         reopen_fields = _fields_for_reopen(current.fields)
         if reopen_fields != current.fields:
             self._record_event(
@@ -1052,19 +1059,8 @@ class IssuesMixin(DBMixinProtocol):
                 "UPDATE issues SET fields = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(reopen_fields), _now_iso(), issue_id),
             )
-            self.conn.commit()
             result = self.get_issue(issue_id)
-        # Record "reopened" event after update_issue has committed the status
-        # change and its own status_changed event.  The state change is already
-        # durable, so a failure here must not propagate — callers would wrongly
-        # assume the reopen failed and retry into a confusing error.
-        try:
-            self._record_event(issue_id, "reopened", actor=actor, old_value=current.status, new_value=reopen_status)
-            self.conn.commit()
-        except Exception:
-            logger.warning("Failed to record reopened event for %s (status change succeeded)", issue_id, exc_info=True)
-            with contextlib.suppress(sqlite3.Error):
-                self.conn.rollback()
+        self._record_event(issue_id, "reopened", actor=actor, old_value=current.status, new_value=reopen_status)
         return result
 
     def _reopen_target_status(self, issue: Issue) -> str:

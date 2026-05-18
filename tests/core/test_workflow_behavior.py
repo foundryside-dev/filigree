@@ -786,6 +786,44 @@ class TestReopenIssue:
         ).fetchall()
         assert len(events) == 1
 
+    def test_reopen_issue_atomic_under_event_failure(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.close_issue(issue.id, reason="not yet")
+        original_record_event = db._record_event
+
+        def fail_reopened(*args: object, **kwargs: object) -> None:
+            if len(args) >= 2 and args[1] == "reopened":
+                raise RuntimeError("boom")
+            original_record_event(*args, **kwargs)
+
+        monkeypatch.setattr(db, "_record_event", fail_reopened)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            db.reopen_issue(issue.id, actor="tester")
+
+        restored = db.get_issue(issue.id)
+        assert restored.status == "closed"
+        assert restored.closed_at is not None
+        assert restored.fields["close_reason"] == "not yet"
+        events = db.conn.execute(
+            "SELECT event_type FROM events WHERE issue_id = ? ORDER BY event_seq ASC",
+            (issue.id,),
+        ).fetchall()
+        assert "reopened" not in [row["event_type"] for row in events]
+
+    def test_reopen_issue_single_transaction(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.close_issue(issue.id, reason="not yet")
+
+        statements: list[str] = []
+        db.conn.set_trace_callback(statements.append)
+        try:
+            db.reopen_issue(issue.id, actor="tester")
+        finally:
+            db.conn.set_trace_callback(None)
+
+        assert [stmt for stmt in statements if stmt == "COMMIT"] == ["COMMIT"]
+
 
 class TestReleaseClaim:
     """release_claim() clears assignee only — does not change status."""
