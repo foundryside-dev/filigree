@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`release_claim` now clears ownership and performs its wip→open revert in
+  one IMMEDIATE transaction (2.1.0 §3.2).** The revert target is resolved
+  before the release update, then a single guarded `UPDATE` clears claim
+  metadata and, when a template reverse target exists, rewrites `status`.
+  The audit trail records `released`, `transition_forced`, and
+  `status_changed` in the same transaction, so failures during forced
+  transition event recording roll back both the status revert and assignee
+  clear.
+
 - **`reopen_issue` now records its status change, close-field cleanup, and
   `reopened` event in one IMMEDIATE transaction (2.1.0 §3.1).** The method
   now uses the shared busy-retry / transaction decorator stack and passes

@@ -651,6 +651,53 @@ class TestClaimIssue:
         # No direct open→verifying transition exists; fall back to initial_state.
         assert released.status == "triage"
 
+    def test_release_claim_revert_is_atomic(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        issue = db.create_issue("Atomic release", type="task")
+        db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
+        original_record_event = db._record_event
+
+        def fail_forced_transition(*args: object, **kwargs: object) -> None:
+            if len(args) >= 2 and args[1] == "transition_forced":
+                raise RuntimeError("boom")
+            original_record_event(*args, **kwargs)
+
+        monkeypatch.setattr(db, "_record_event", fail_forced_transition)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            db.release_claim(issue.id, actor="agent-alpha")
+
+        restored = db.get_issue(issue.id)
+        assert restored.status == "in_progress"
+        assert restored.assignee == "agent-alpha"
+        events = db.conn.execute(
+            "SELECT event_type FROM events WHERE issue_id = ? ORDER BY event_seq ASC",
+            (issue.id,),
+        ).fetchall()
+        assert "released" not in [row["event_type"] for row in events]
+
+    def test_release_claim_emits_one_commit(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Single release commit", type="task")
+        db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
+
+        statements: list[str] = []
+        db.conn.set_trace_callback(statements.append)
+        try:
+            released = db.release_claim(issue.id, actor="agent-alpha")
+        finally:
+            db.conn.set_trace_callback(None)
+
+        assert released.status == "open"
+        assert released.assignee == ""
+        assert [stmt for stmt in statements if stmt == "COMMIT"] == ["COMMIT"]
+        event_types = [
+            row["event_type"]
+            for row in db.conn.execute(
+                "SELECT event_type FROM events WHERE issue_id = ? ORDER BY event_seq ASC",
+                (issue.id,),
+            ).fetchall()
+        ]
+        assert event_types[-3:] == ["released", "transition_forced", "status_changed"]
+
 
 class TestReleaseMyClaims:
     """Bulk release every live claim held by a given actor. F4 — review-h."""

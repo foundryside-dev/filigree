@@ -1159,6 +1159,8 @@ class IssuesMixin(DBMixinProtocol):
         self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
         return self.get_issue(issue_id)
 
+    @_retry_busy()
+    @_in_immediate_tx("release_claim")
     def release_claim(
         self,
         issue_id: str,
@@ -1202,7 +1204,7 @@ class IssuesMixin(DBMixinProtocol):
                 msg = "expected_assignee or actor is required when if_held=True"
                 raise ValueError(msg)
         self._check_id_prefix(issue_id)
-        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        row = self.conn.execute("SELECT type, status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
             msg = f"Issue not found: {issue_id}"
             raise KeyError(msg)
@@ -1216,48 +1218,52 @@ class IssuesMixin(DBMixinProtocol):
             msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
             raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder or "", message=msg)
 
-        try:
-            cursor = self.conn.execute(
-                "UPDATE issues SET assignee = '', claimed_at = NULL, last_heartbeat_at = NULL, "
-                "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND assignee = ?",
-                [_now_iso(), issue_id, observed],
-            )
-
-            if cursor.rowcount == 0:
-                current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-                if current is None:
-                    msg = f"Issue not found: {issue_id}"
-                    raise KeyError(msg)
-                new_assignee = current["assignee"] or ""
-                if not new_assignee:
-                    if if_held:
-                        self.conn.commit()
-                        return self.get_issue(issue_id)
-                    msg = f"Cannot release {issue_id}: already released"
-                    raise ValueError(msg)
-                if if_held:
-                    msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
-                    raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
-                msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
-                raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
-
-            self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-
-        # Auto-revert wip→open so the issue rejoins discovery surfaces. The
-        # status change runs after the assignee-clear commit so a failure to
-        # find a reverse target leaves the release intact rather than rolling
-        # the whole call back. _skip_transition_check=True because we may need
-        # to walk a backward edge (e.g. fixing→confirmed, verifying→triage)
-        # that the forward graph doesn't define. (filigree-cb980eee0d, P1.3.)
+        target: str | None = None
         if revert_status:
-            released = self.get_issue(issue_id)
-            target = self.templates.get_release_target(released.type, released.status)
-            if target is not None and target != released.status:
-                return self.update_issue(issue_id, status=target, actor=actor, _skip_transition_check=True)
+            target = self.templates.get_release_target(row["type"], row["status"])
+            if target == row["status"]:
+                target = None
+
+        now = _now_iso()
+        updates = [
+            "assignee = ''",
+            "claimed_at = NULL",
+            "last_heartbeat_at = NULL",
+            "claim_expires_at = NULL",
+        ]
+        params: list[Any] = []
+        if target is not None:
+            updates.extend(["status = ?", "closed_at = NULL"])
+            params.append(target)
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.extend([issue_id, observed])
+        cursor = self.conn.execute(
+            f"UPDATE issues SET {', '.join(updates)} WHERE id = ? AND assignee = ?",
+            params,
+        )
+
+        if cursor.rowcount == 0:
+            current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if current is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            new_assignee = current["assignee"] or ""
+            if not new_assignee:
+                if if_held:
+                    return self.get_issue(issue_id)
+                msg = f"Cannot release {issue_id}: already released"
+                raise ValueError(msg)
+            if if_held:
+                msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
+                raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
+            msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
+            raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
+
+        self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
+        if target is not None:
+            self._record_event(issue_id, "transition_forced", actor=actor, old_value=row["status"], new_value=target)
+            self._record_event(issue_id, "status_changed", actor=actor, old_value=row["status"], new_value=target)
         return self.get_issue(issue_id)
 
     def release_my_claims(
