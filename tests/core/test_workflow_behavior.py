@@ -472,6 +472,19 @@ class TestUpdateIssueTransitionEnforcement:
 class TestCloseIssue:
     """close_issue() accepts optional status parameter for multi-done types."""
 
+    def test_close_issue_invalid_transition_carries_valid_transitions(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Bug", type="bug")
+
+        with pytest.raises(InvalidTransitionError) as excinfo:
+            db.close_issue(issue.id)
+
+        transitions = excinfo.value.valid_transitions
+        assert transitions is not None
+        assert {t["to"] for t in transitions} == {"confirmed", "wont_fix", "not_a_bug"}
+        confirmed = next(t for t in transitions if t["to"] == "confirmed")
+        assert confirmed["category"] == "open"
+        assert confirmed["ready"] is False
+
     def test_close_bug_default_done_state(self, db: FiligreeDB) -> None:
         """close_issue() without status uses first done-category state, but
         the transition must be reachable from the current status. For bug,
@@ -627,6 +640,25 @@ class TestCloseIssueHardEnforcement:
         issue = db.create_issue("Bug", type="bug")
         with pytest.raises(TypeError, match="fields must be a dict"):
             db.close_issue(issue.id, fields=5)  # type: ignore[arg-type]
+
+    def test_batch_close_unwraps_invalid_transition_attribute(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        issue = db.create_issue("Bug", type="bug")
+
+        def fail_transition_lookup(issue_id: str) -> list[TransitionOption]:
+            raise KeyError(issue_id)
+
+        monkeypatch.setattr(db, "get_valid_transitions", fail_transition_lookup)
+
+        closed, errors = db.batch_close([issue.id], reason="cleanup")
+
+        assert closed == []
+        assert len(errors) == 1
+        assert errors[0]["code"] == ErrorCode.INVALID_TRANSITION
+        assert {t["to"] for t in errors[0]["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
 
 
 class TestClaimIssue:

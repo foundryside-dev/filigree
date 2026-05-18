@@ -27,6 +27,7 @@ from filigree.types.api import (
     DepDetail,
     EnrichedIssueDetail,
     ErrorCode,
+    InvalidTransitionError,
     IssueDetailEvent,
     classify_value_error,
     errorcode_to_http_status,
@@ -45,7 +46,15 @@ _MISSING = object()
 def _classify_issue_write_error(exc: BaseException) -> ErrorCode:
     if isinstance(exc, ClaimConflictError):
         return ErrorCode.CONFLICT
+    if isinstance(exc, InvalidTransitionError):
+        return ErrorCode.INVALID_TRANSITION
     return classify_value_error(str(exc))
+
+
+def _invalid_transition_details(exc: BaseException) -> dict[str, Any] | None:
+    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
+        return {"valid_transitions": exc.valid_transitions}
+    return None
 
 
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
@@ -462,7 +471,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/close")
@@ -502,7 +511,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/reopen")

@@ -26,8 +26,8 @@ from filigree.db_base import (
     _safe_json_loads,
 )
 from filigree.models import Issue
-from filigree.templates import TransitionResult, validate_field_pattern
-from filigree.types.api import BatchFailure, ClaimConflictError, ErrorCode, classify_value_error
+from filigree.templates import TransitionOption, TransitionResult, validate_field_pattern
+from filigree.types.api import BatchFailure, ClaimConflictError, ErrorCode, InvalidTransitionError, TransitionHint, classify_value_error
 from filigree.types.core import StatusCategory
 
 if TYPE_CHECKING:
@@ -88,6 +88,11 @@ def _transition_data_warnings(result: TransitionResult) -> list[str]:
     if not warnings and result.enforcement == "soft" and result.missing_fields:
         warnings.append(f"Missing recommended fields: {', '.join(result.missing_fields)}")
     return warnings
+
+
+def _transition_hints(options: list[TransitionOption]) -> list[TransitionHint]:
+    """Return the compact structured transition hints used in error envelopes."""
+    return [{"to": t.to, "category": t.category, "ready": t.ready} for t in options]
 
 
 def _fields_for_reopen(fields: dict[str, Any]) -> dict[str, Any]:
@@ -742,6 +747,7 @@ class IssuesMixin(DBMixinProtocol):
                     backward=backward,
                 )
                 if not _transition_result.allowed:
+                    valid_transitions = _transition_hints(self.templates.get_valid_transitions(current.type, current.status, merged_fields))
                     if _transition_result.missing_fields:
                         missing_str = ", ".join(_transition_result.missing_fields)
                         msg = (
@@ -753,7 +759,13 @@ class IssuesMixin(DBMixinProtocol):
                             f"Transition '{current.status}' -> '{status}' is not allowed for type "
                             f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
                         )
-                    raise ValueError(msg)
+                    raise InvalidTransitionError(
+                        current.type,
+                        current.status,
+                        to_state=status,
+                        valid_transitions=valid_transitions,
+                        message=msg,
+                    )
 
         # Validate field patterns and uniqueness for incoming fields
         if fields is not None:
@@ -1860,12 +1872,19 @@ class IssuesMixin(DBMixinProtocol):
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
+                if isinstance(e, ClaimConflictError):
+                    code = ErrorCode.CONFLICT
+                elif isinstance(e, InvalidTransitionError):
+                    code = ErrorCode.INVALID_TRANSITION
+                else:
+                    code = classify_value_error(msg)
                 err = BatchFailure(id=issue_id, error=str(e), code=code)
-                if code == ErrorCode.INVALID_TRANSITION:
+                if isinstance(e, InvalidTransitionError) and e.valid_transitions is not None:
+                    err["valid_transitions"] = e.valid_transitions
+                elif code == ErrorCode.INVALID_TRANSITION:
                     try:
                         transitions = self.get_valid_transitions(issue_id)
-                        err["valid_transitions"] = [{"to": t.to, "category": t.category} for t in transitions]
+                        err["valid_transitions"] = _transition_hints(transitions)
                     except KeyError:
                         logger.debug("batch: could not enrich error with transitions for %s", issue_id)
                 errors.append(err)

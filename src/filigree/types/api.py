@@ -614,11 +614,17 @@ class InvalidTransitionError(ValueError):
         *,
         to_state: str | None = None,
         backward: bool = False,
+        valid_transitions: list[TransitionHint] | None = None,
+        message: str | None = None,
     ) -> None:
         self.type_name = type_name
         self.current_status = current_status
         self.to_state = to_state
         self.backward = backward
+        self.valid_transitions = valid_transitions
+        if message is not None:
+            super().__init__(message)
+            return
         if to_state is None:
             message = f"No wip-category transition from {current_status!r} for type {type_name!r}."
         elif backward:

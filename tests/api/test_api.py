@@ -525,6 +525,23 @@ class TestCloseReopenAPI:
         assert resp.status_code == 409
         assert "error" in resp.json()
 
+    async def test_close_invalid_transition_includes_valid_transitions(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        bug = dashboard_db.db.create_issue("API invalid close", type="bug")
+
+        resp = await client.post(
+            f"/api/issue/{bug.id}/close",
+            json={"reason": "cleanup"},
+        )
+
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["code"] == "INVALID_TRANSITION"
+        assert {t["to"] for t in data["details"]["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
+
     async def test_close_not_found(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api/issue/nonexistent/close",

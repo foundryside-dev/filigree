@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raise `InvalidTransitionError` instead of silently bypassing workflow
   validation.
 
+- **Invalid transition failures now carry structured `valid_transitions`
+  details (2.1.0 §4.2).** `InvalidTransitionError` includes a
+  `valid_transitions` attribute, `close_issue` populates it from the failing
+  issue's current workflow state, batch close unwraps the attribute into
+  per-item failures, and HTTP/MCP/CLI error envelopes include the same
+  structured hints without requiring callers to parse message text or make a
+  second transition lookup.
+
 - **`create_issue` now prefix-checks caller-supplied parent and dependency
   IDs before local existence validation (2.1.0 §3.4).** Foreign-prefix
   `parent_id` and `deps` now raise `WrongProjectError` at the same structural

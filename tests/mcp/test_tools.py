@@ -383,6 +383,13 @@ class TestUpdateAndClose:
         data = _parse(result)
         assert data["status"] == "closed"
 
+    async def test_close_invalid_transition_includes_valid_transitions(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Invalid close", type="bug")
+        result = await call_tool("close_issue", {"issue_id": issue.id, "reason": "cleanup"})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.INVALID_TRANSITION
+        assert {t["to"] for t in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
+
     async def test_close_not_found(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("close_issue", {"issue_id": "mcp-nonexistent"})
         data = _parse(result)

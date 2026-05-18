@@ -257,7 +257,10 @@ The close `reason` is stored in `fields.close_reason`; a reason-only close also
 records the text on the status-change event comment so history readers can
 display it without reconstructing field deltas.
 
-**Raises:** `ValueError` if the issue is already closed or the specified status is not a done-category state.
+**Raises:** `InvalidTransitionError` (a `ValueError` subclass) with
+`valid_transitions` when the current status cannot reach the close target;
+`ValueError` if the issue is already closed or the specified status is not a
+done-category state.
 
 #### `reopen_issue`
 

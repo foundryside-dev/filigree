@@ -919,7 +919,8 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
-            return _text(_build_transition_error(tracker, args["issue_id"], msg))
+            transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
+            return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
@@ -966,7 +967,8 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
             return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
-        return _text(_build_transition_error(tracker, args["issue_id"], msg))
+        transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
+        return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
 
 
 async def _handle_reopen_issue(arguments: dict[str, Any]) -> list[TextContent]:

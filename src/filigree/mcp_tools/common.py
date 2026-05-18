@@ -17,7 +17,7 @@ from filigree.models import Issue
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
-from filigree.types.api import ErrorCode, ErrorResponse, ListResponse, ReadyIssue, SlimIssue, TransitionError
+from filigree.types.api import ErrorCode, ErrorResponse, ListResponse, ReadyIssue, SlimIssue, TransitionError, TransitionHint
 from filigree.validation import sanitize_actor
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,7 @@ def _build_transition_error(
     error: str,
     *,
     include_ready: bool = True,
+    valid_transitions: list[TransitionHint] | None = None,
 ) -> TransitionError:
     """Build a structured error dict with valid-transition hints.
 
@@ -166,6 +167,18 @@ def _build_transition_error(
     filigree-55c5347992).
     """
     data: TransitionError = {"error": error, "code": ErrorCode.INVALID_TRANSITION}
+    if valid_transitions is not None:
+        data["valid_transitions"] = valid_transitions
+        try:
+            if not valid_transitions and tracker.get_issue(issue_id).status_category == "done":
+                data["reopen_available"] = True
+                data["hint"] = "Use reopen_issue to return this closed issue to the last non-done status before closure"
+            else:
+                data["hint"] = "Use get_valid_transitions to see allowed state changes"
+        except Exception:
+            data["hint"] = "Use get_valid_transitions to see allowed state changes"
+            logger.debug("Could not resolve issue status for %s", issue_id, exc_info=True)
+        return data
     try:
         transitions = tracker.get_valid_transitions(issue_id)
         if include_ready:

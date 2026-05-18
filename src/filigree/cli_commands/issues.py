@@ -1234,13 +1234,17 @@ def start_work(
                 if code == ErrorCode.INVALID_TRANSITION:
                     # Build enriched transition error (best-effort).
                     payload: dict[str, Any] = {"error": msg, "code": ErrorCode.INVALID_TRANSITION}
-                    try:
-                        transitions = db.get_valid_transitions(issue_id)
-                        payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                    if isinstance(e, InvalidTransitionError) and e.valid_transitions is not None:
+                        payload["valid_transitions"] = e.valid_transitions
                         payload["hint"] = "Use get_valid_transitions to see allowed state changes"
-                    except Exception:
-                        # Enrichment is best-effort — must never mask the original error.
-                        logger.debug("Could not resolve transitions for %s", issue_id, exc_info=True)
+                    else:
+                        try:
+                            transitions = db.get_valid_transitions(issue_id)
+                            payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                            payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                        except Exception:
+                            # Enrichment is best-effort — must never mask the original error.
+                            logger.debug("Could not resolve transitions for %s", issue_id, exc_info=True)
                     click.echo(json_mod.dumps(payload))
                 else:
                     click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.CONFLICT}))
