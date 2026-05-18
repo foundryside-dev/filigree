@@ -142,10 +142,16 @@ class ForeignDatabaseError(ProjectNotInitialisedError):
     ``filigree doctor``).
     """
 
+    SAFE_MESSAGE = "Filigree is not initialized for this project"
+
     def __init__(self, *, cwd: Path, found_anchor: Path, git_boundary: Path) -> None:
         self.cwd = cwd
         self.found_anchor = found_anchor
         self.git_boundary = git_boundary
+        malformed_git_hint = ""
+        git_path = git_boundary / ".git"
+        if _classify_git_entry(git_path) == "malformed_file":
+            malformed_git_hint = f"\n\nIf `{git_path}` is malformed, fix or remove it before running `filigree init`."
         msg = (
             "Refusing to latch onto another project's filigree database.\n"
             "\n"
@@ -163,8 +169,14 @@ class ForeignDatabaseError(ProjectNotInitialisedError):
             "after `filigree init` so it picks up the new project's "
             "database. To operate on the outer project intentionally, `cd` "
             "above the git boundary."
+            f"{malformed_git_hint}"
         )
         super().__init__(msg)
+
+    @property
+    def safe_message(self) -> str:
+        """Generic, path-free wording suitable for structured logs."""
+        return self.SAFE_MESSAGE
 
 
 class WrongProjectError(ValueError):
@@ -227,19 +239,11 @@ def _resolve_to_main_worktree(start: Path) -> Path:
         if git_path.is_dir():
             return start
         # ``.git`` is a file — worktree pointer or submodule pointer.
-        try:
-            content = git_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        gitdir = _read_gitdir_pointer(git_path)
+        if gitdir is None:
             return start
-        gitdir_line = next(
-            (line for line in content.splitlines() if line.startswith("gitdir:")),
-            None,
-        )
-        if gitdir_line is None:
-            return start
-        gitdir_raw = gitdir_line.split(":", 1)[1].strip()
-        gitdir = Path(gitdir_raw)
-        gitdir = gitdir.resolve() if gitdir.is_absolute() else (parent / gitdir).resolve()
+        if not gitdir.is_absolute():
+            gitdir = (parent / gitdir).resolve()
         # Worktree shape: <main_repo>/.git/worktrees/<name>
         # Submodule shape: <parent_repo>/.git/modules/<name> — leave alone.
         if gitdir.parent.name != "worktrees":
@@ -249,6 +253,41 @@ def _resolve_to_main_worktree(start: Path) -> Path:
             return start
         return main_git_dir.parent
     return start
+
+
+def _read_gitdir_pointer(git_path: Path) -> Path | None:
+    """Return the raw gitdir pointer from a ``.git`` file, if it is parseable."""
+    try:
+        content = git_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    gitdir_line = next(
+        (line for line in content.splitlines() if line.startswith("gitdir:")),
+        None,
+    )
+    if gitdir_line is None:
+        return None
+    gitdir_raw = gitdir_line.split(":", 1)[1].strip()
+    if not gitdir_raw:
+        return None
+    return Path(gitdir_raw)
+
+
+def _classify_git_entry(git_path: Path) -> str:
+    """Classify a ``.git`` filesystem entry for discovery diagnostics."""
+    if git_path.is_dir():
+        return "directory"
+    if not git_path.exists() or not git_path.is_file():
+        return "malformed_file"
+    gitdir = _read_gitdir_pointer(git_path)
+    if gitdir is None:
+        return "malformed_file"
+    if not gitdir.is_absolute():
+        gitdir = (git_path.parent / gitdir).resolve()
+    main_git_dir = gitdir.parent.parent
+    if gitdir.parent.name == "worktrees" and main_git_dir.name == ".git" and main_git_dir.is_dir():
+        return "worktree_pointer"
+    return "gitdir_file"
 
 
 def find_filigree_conf(start: Path | None = None) -> Path:

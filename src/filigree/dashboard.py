@@ -708,10 +708,16 @@ def _idle_watchdog(timeout: float, check_interval: float) -> None:
 
 def _exit_dashboard_config_error(exc: BaseException) -> None:
     """Exit dashboard startup cleanly for expected project configuration errors."""
-    logger.warning("dashboard_project_config_error", extra={"tool": "dashboard", "args_data": {"error": str(exc)}})
+    logger.warning("dashboard_project_config_error", extra={"tool": "dashboard", "args_data": {"error": _safe_log_error(exc)}})
     print(f"Error loading dashboard project: {exc}", file=sys.stderr)
     print("Run `filigree doctor` for diagnosis.", file=sys.stderr)
     sys.exit(1)
+
+
+def _safe_log_error(exc: BaseException) -> str:
+    """Return a path/redaction-safe message for structured log payloads."""
+    safe = getattr(exc, "safe_message", None)
+    return safe if isinstance(safe, str) else str(exc)
 
 
 def main(
@@ -794,7 +800,7 @@ def main(
             # is reserved for forward schema mismatch.
             logger.warning(
                 "dashboard_db_open_failed",
-                extra={"tool": "dashboard", "args_data": {"error": str(exc)}},
+                extra={"tool": "dashboard", "args_data": {"error": _safe_log_error(exc)}},
             )
             print(f"Error opening project database: {exc}", file=sys.stderr)
             print("Run `filigree doctor` for diagnosis.", file=sys.stderr)

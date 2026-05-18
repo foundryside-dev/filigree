@@ -10,6 +10,7 @@ tests/api/test_api.py are intentionally NOT duplicated here.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -19,7 +20,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_conf, write_config
+from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, ForeignDatabaseError, write_conf, write_config
 from filigree.dashboard import (
     IDLE_TIMEOUT_SECONDS,
     ProjectStore,
@@ -369,6 +370,39 @@ class TestMainGlobalReset:
         assert ".filigree.conf" in stderr
         assert "Run `filigree doctor`" in stderr
         assert "Traceback" not in stderr
+
+    def test_dashboard_structured_log_does_not_leak_paths(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Structured startup logs use safe wording; stderr keeps the rich diagnostic."""
+        cwd = tmp_path / "inner"
+        cwd.mkdir()
+        found_anchor = tmp_path / CONF_FILENAME
+        write_conf(found_anchor, {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"})
+        exc = ForeignDatabaseError(cwd=cwd, found_anchor=found_anchor, git_boundary=cwd)
+
+        def raise_foreign_database_error() -> None:
+            raise exc
+
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", raise_foreign_database_error)
+        monkeypatch.setattr("uvicorn.run", lambda *a, **kw: pytest.fail("uvicorn should not start"))
+
+        with caplog.at_level(logging.WARNING, logger="filigree.dashboard"), pytest.raises(SystemExit) as excinfo:
+            dash_module.main(port=9999, no_browser=True, server_mode=False)
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert str(cwd) in stderr
+        records = [record for record in caplog.records if record.message == "dashboard_project_config_error"]
+        assert records
+        logged_error = records[-1].args_data["error"]
+        assert str(cwd) not in logged_error
+        assert str(found_anchor) not in logged_error
+        assert "filigree init" not in logged_error
 
 
 class TestGetDbErrorPaths:

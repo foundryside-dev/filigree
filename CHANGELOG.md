@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ForeignDatabaseError` now points out malformed `.git` files in its
+  remediation text (2.1.0 §6.1).** Discovery classifies `.git` boundaries as
+  directories, valid worktree-pointer files, ordinary gitdir files, or
+  malformed files; when the boundary is malformed, the diagnostic tells the
+  operator to fix or remove that `.git` file before running `filigree init`.
+
 - **Simultaneous claim contention now surfaces `ClaimConflictError` (2.1.0
   §5.1).** When two agents race to claim the same issue, the losing writer
   now raises the typed conflict error instead of a plain `ValueError`, keeping
@@ -154,6 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserved.
 
 ### Security
+
+- **Dashboard startup structured logs now redact path-rich project discovery
+  failures (2.1.0 §6.2).** Structured log payloads use `exc.safe_message`
+  when available, while stderr still prints the rich `str(exc)` form for
+  human diagnostics and `filigree doctor` follow-up.
 
 - **HTTP batch-close rejects `force=true` by default (2.1.0 §1.1).**
   `POST /api/batch/close` and `POST /api/loom/batch/close` now return

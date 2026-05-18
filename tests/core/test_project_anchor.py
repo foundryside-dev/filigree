@@ -625,6 +625,22 @@ class TestGitWorktreeDiscovery:
         with pytest.raises(ForeignDatabaseError):
             find_filigree_anchor(weird)
 
+    def test_foreign_database_error_remediation_for_malformed_git_file(self, tmp_path: Path) -> None:
+        """Malformed ``.git`` files get a specific remediation hint."""
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        weird = tmp_path / "weird"
+        weird.mkdir()
+        (weird / ".git").write_text("# not a gitdir pointer\n")
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(weird)
+
+        git_file = weird.resolve() / ".git"
+        assert f"If `{git_file}` is malformed, fix or remove it before running `filigree init`." in str(excinfo.value)
+
 
 # ---------------------------------------------------------------------------
 # FiligreeDB.from_project / from_conf — discovery integration
