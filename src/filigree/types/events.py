@@ -28,6 +28,7 @@ EventType = Literal[
     "dependency_removed",
     "transition_warning",
     "transition_forced",
+    "entity_association_removed",
     "undone",
     "archived",
 ]

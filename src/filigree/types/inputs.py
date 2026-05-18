@@ -21,7 +21,16 @@ Safety note on cast():
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from filigree.types.core import AssocType, FindingStatus, ISOTimestamp, Severity, StatusCategory
+from filigree.types.core import (
+    AssocType,
+    ClarionEntityId,
+    ContentHash,
+    FindingStatus,
+    ISOTimestamp,
+    IssueId,
+    Severity,
+    StatusCategory,
+)
 
 # ---------------------------------------------------------------------------
 # issues.py handlers
@@ -615,23 +624,24 @@ class RegisterFileArgs(TypedDict):
 
 
 class AddEntityAssociationArgs(TypedDict):
-    issue_id: str
-    entity_id: str
-    content_hash: str
+    issue_id: IssueId
+    entity_id: ClarionEntityId
+    content_hash: ContentHash
     actor: NotRequired[str]
 
 
 class RemoveEntityAssociationArgs(TypedDict):
-    issue_id: str
-    entity_id: str
+    issue_id: IssueId
+    entity_id: ClarionEntityId
+    actor: NotRequired[str]
 
 
 class ListEntityAssociationsArgs(TypedDict):
-    issue_id: str
+    issue_id: IssueId
 
 
 class ListAssociationsByEntityArgs(TypedDict):
-    entity_id: str
+    entity_id: ClarionEntityId
 
 
 class TriggerScanArgs(TypedDict):

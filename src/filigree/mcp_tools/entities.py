@@ -1,6 +1,6 @@
 """MCP tools for entity_associations (ADR-029, Clarion B.7 / WP9-A).
 
-Three tools binding Filigree issues to Clarion entities:
+Four tools binding Filigree issues to Clarion entities:
 
 - ``add_entity_association`` — attach (or refresh) a Clarion entity to
   an issue, snapshotting the current content hash.
@@ -8,6 +8,8 @@ Three tools binding Filigree issues to Clarion entities:
 - ``list_entity_associations`` — enumerate bindings for an issue;
   returns raw rows (drift comparison is the caller's job per
   ADR-029 §"Decision 3").
+- ``list_associations_by_entity`` — reverse lookup from opaque entity ID
+  to every bound issue in this project.
 
 The Clarion entity ID is opaque to Filigree — these tools do not parse
 or validate the grammar (federation enrich-only rule, ``loom.md`` §5).
@@ -90,6 +92,10 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "entity_id": {
                         "type": "string",
                         "description": "Clarion entity ID (opaque string)",
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identity recorded on the removal audit event",
                     },
                 },
                 "required": ["issue_id", "entity_id"],
@@ -175,11 +181,10 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
     except WrongProjectError as exc:
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
         return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
+    except KeyError:
+        return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
-        # Distinguish "issue not found" from generic validation so the
-        # caller can react. The data-layer message starts with that phrase.
-        code = ErrorCode.NOT_FOUND if "Issue not found" in str(exc) else ErrorCode.VALIDATION
-        return _text(ErrorResponse(error=str(exc), code=code))
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     return _text(dict(row))
 
 
@@ -191,6 +196,9 @@ async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[T
     tracker = _get_db()
     issue_id = args.get("issue_id", "")
     entity_id = args.get("entity_id", "")
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
 
     for err in (
         _require_nonempty_str(issue_id, "issue_id"),
@@ -200,7 +208,7 @@ async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[T
             return err
 
     try:
-        removed = tracker.remove_entity_association(issue_id, entity_id)
+        removed = tracker.remove_entity_association(issue_id, entity_id, actor=actor)
     except WrongProjectError as exc:
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
         return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
@@ -241,6 +249,7 @@ async def _handle_list_entity_associations(arguments: dict[str, Any]) -> list[Te
 
 
 async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.core import WrongProjectError
     from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListAssociationsByEntityArgs)
@@ -253,6 +262,8 @@ async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list
 
     try:
         rows = tracker.list_associations_by_entity(entity_id)
+    except WrongProjectError as exc:
+        return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     return _text({"associations": [dict(row) for row in rows]})

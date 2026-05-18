@@ -18,7 +18,7 @@ target state.
 ```json
 {
   "reverse_transitions": [
-    {"from": "closed", "to": "open", "enforcement": "soft"}
+    {"from": "closed", "to": "open", "enforcement": "soft", "requires_fields": ["reopen_reason"]}
   ]
 }
 ```
@@ -51,3 +51,24 @@ Built-in packs declare reverse edges for:
 
 When a reverse edge is used, Filigree records `transition_forced` before the
 normal `status_changed` event.
+
+## Migrating Custom Packs to 2.1.0
+
+Custom workflow packs that rely on cleanup or recovery paths must declare those
+paths explicitly under `reverse_transitions`. In 2.1.0, `reopen_issue`,
+`release_claim` status reverts, and `close_issue(force=True)` validate against
+the reverse table instead of bypassing transition checks. Missing reverse edges
+raise `InvalidTransitionError`.
+
+Mirror each escape path your pack supports:
+
+- Add done-state back edges for statuses that `reopen_issue` may restore.
+- Add wip-state back edges to the open predecessor used by `release_claim`.
+- Add non-done to done-category edges for force-close targets you intend to
+  allow.
+
+Built-in packs seed these edges automatically from
+`_BUILT_IN_REVERSE_TRANSITION_EDGES`; custom packs need equivalent explicit
+YAML/JSON entries. Use `requires_fields` on a reverse edge only for fields that
+the escape path itself must collect. Reverse transitions do not inherit the
+target state's normal `required_at` gates.

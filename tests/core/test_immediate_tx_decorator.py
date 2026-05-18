@@ -17,6 +17,13 @@ from filigree.core import FiligreeDB
 from filigree.db_base import _in_immediate_tx, _retry_busy
 
 
+def _sqlite_operational_error(message: str, code: int | None = None) -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError(message)
+    if code is not None:
+        exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+    return exc
+
+
 def test_immediate_transaction_decorator_rolls_back_on_exception(db: FiligreeDB) -> None:
     """Body that raises mid-transaction must rollback all writes."""
     issue = db.create_issue("decorator rollback target", priority=2)
@@ -69,7 +76,7 @@ def _make_busy_fn(busy_for: int):
     def fn(self: object) -> int:
         calls["n"] += 1
         if calls["n"] <= busy_for:
-            raise sqlite3.OperationalError("database is locked")
+            raise _sqlite_operational_error("database is locked", sqlite3.SQLITE_BUSY)
         return calls["n"]
 
     fn.calls = calls  # type: ignore[attr-defined]
@@ -84,6 +91,23 @@ def test_busy_retry_decorator_transparently_recovers() -> None:
     result = wrapped(object())
     assert result == 3  # third call succeeded
     assert slept == [0.01, 0.02]  # backoff before retries 2 and 3
+
+
+def test_busy_retry_decorator_uses_sqlite_errorcode_not_message() -> None:
+    """A BUSY error with non-standard text still consumes the retry budget."""
+    slept: list[float] = []
+    calls = {"n": 0}
+
+    def fn(self: object) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _sqlite_operational_error("WAL checkpoint is unavailable", sqlite3.SQLITE_BUSY)
+        return calls["n"]
+
+    wrapped = _retry_busy(attempts=2, base=0.01, sleep=slept.append)(fn)
+
+    assert wrapped(object()) == 2
+    assert slept == [0.01]
 
 
 def test_busy_retry_decorator_re_raises_after_exhaustion() -> None:
@@ -113,7 +137,7 @@ def test_busy_retry_decorator_passes_through_when_skip_begin_true(db: FiligreeDB
     @_in_immediate_tx("inner_op")
     def inner(self: FiligreeDB) -> None:
         calls["n"] += 1
-        raise sqlite3.OperationalError("database is locked")
+        raise _sqlite_operational_error("database is locked", sqlite3.SQLITE_BUSY)
 
     bound = types.MethodType(inner, db)
     # Open an outer tx so _skip_begin makes sense.

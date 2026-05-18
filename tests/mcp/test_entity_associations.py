@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, WrongProjectError
 from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
@@ -214,6 +214,23 @@ class TestListAssociationsByEntityMCP:
     async def test_rejects_blank_entity_id(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "   "}))
         assert result["code"] == ErrorCode.VALIDATION
+
+    async def test_wrong_project_error_uses_safe_message(
+        self,
+        mcp_db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def raise_wrong_project(_entity_id: str) -> list[object]:
+            raise WrongProjectError("foreign prefix other does not match mcp")
+
+        monkeypatch.setattr(mcp_db, "list_associations_by_entity", raise_wrong_project)
+
+        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "py:func:x"}))
+
+        assert result["code"] == ErrorCode.VALIDATION
+        assert result["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "other" not in result["error"]
+        assert "mcp" not in result["error"]
 
 
 class TestRoundTrip:

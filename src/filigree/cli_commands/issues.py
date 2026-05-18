@@ -848,6 +848,37 @@ def _release_impl(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except InvalidTransitionError as e:
+            if as_json:
+                payload: dict[str, Any] = {"error": str(e), "code": ErrorCode.INVALID_TRANSITION}
+                if e.valid_transitions is not None:
+                    payload["valid_transitions"] = e.valid_transitions
+                    payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                else:
+                    try:
+                        transitions = db.get_valid_transitions(issue_id)
+                        payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                    except Exception:
+                        logger.debug("Could not resolve transitions for %s", issue_id, exc_info=True)
+                click.echo(json_mod.dumps(payload))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except ClaimConflictError as e:
+            if as_json:
+                click.echo(
+                    json_mod.dumps(
+                        {
+                            "error": str(e),
+                            "code": ErrorCode.CONFLICT,
+                            "details": {"issue_id": e.issue_id, "observed": e.observed, "expected": e.expected},
+                        }
+                    )
+                )
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
@@ -1217,7 +1248,21 @@ def start_work(
             sys.exit(1)
         except (AmbiguousTransitionError, InvalidTransitionError) as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.INVALID_TRANSITION}))
+                transition_payload: dict[str, Any] = {"error": str(e), "code": ErrorCode.INVALID_TRANSITION}
+                if isinstance(e, InvalidTransitionError):
+                    if e.valid_transitions is not None:
+                        transition_payload["valid_transitions"] = e.valid_transitions
+                        transition_payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                    else:
+                        try:
+                            transitions = db.get_valid_transitions(issue_id)
+                            transition_payload["valid_transitions"] = [
+                                {"to": t.to, "category": t.category, "ready": t.ready} for t in transitions
+                            ]
+                            transition_payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                        except Exception:
+                            logger.debug("Could not resolve transitions for %s", issue_id, exc_info=True)
+                click.echo(json_mod.dumps(transition_payload))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)

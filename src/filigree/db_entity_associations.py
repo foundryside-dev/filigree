@@ -10,7 +10,7 @@ hands ``content_hash_at_attach`` back at query time so the consumer
 (Clarion's ``issues_for`` MCP tool, lands separately in B.6) can
 compute drift.
 
-Three operations form the surface:
+Four operations form the surface:
 
 - :meth:`EntityAssociationsMixin.add_entity_association` — idempotent
   on ``(issue_id, entity_id)``; re-attach refreshes
@@ -20,6 +20,8 @@ Three operations form the surface:
   key, not a surrogate.
 - :meth:`EntityAssociationsMixin.list_entity_associations` — returns
   raw rows; drift detection is the consumer's job.
+- :meth:`EntityAssociationsMixin.list_associations_by_entity` — reverse
+  lookup from opaque entity ID to every bound issue in this project.
 """
 
 from __future__ import annotations
@@ -27,15 +29,16 @@ from __future__ import annotations
 from typing import TypedDict
 
 from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.types.core import ClarionEntityId, ContentHash, ISOTimestamp, IssueId
 
 
 class EntityAssociationRow(TypedDict):
     """One row of the entity_associations table."""
 
-    issue_id: str
-    clarion_entity_id: str
-    content_hash_at_attach: str
-    attached_at: str
+    issue_id: IssueId
+    clarion_entity_id: ClarionEntityId
+    content_hash_at_attach: ContentHash
+    attached_at: ISOTimestamp
     attached_by: str
 
 
@@ -49,9 +52,9 @@ class EntityAssociationsMixin(DBMixinProtocol):
 
     def add_entity_association(
         self,
-        issue_id: str,
-        entity_id: str,
-        content_hash: str,
+        issue_id: IssueId | str,
+        entity_id: ClarionEntityId | str,
+        content_hash: ContentHash | str,
         *,
         actor: str = "",
     ) -> EntityAssociationRow:
@@ -76,8 +79,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
             The resulting row as an :class:`EntityAssociationRow`.
 
         Raises:
-            ValueError: ``issue_id`` doesn't exist, or arguments are
-                blank where they must not be.
+            KeyError: ``issue_id`` doesn't exist.
+            ValueError: arguments are blank where they must not be.
         """
         self._check_id_prefix(issue_id)
         if not entity_id or not entity_id.strip():
@@ -90,8 +93,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
         # error is less informative than a typed ValueError).
         row = self.conn.execute("SELECT 1 FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
-            msg = f'Issue not found: "{issue_id}". Verify the issue exists before attaching an entity.'
-            raise ValueError(msg)
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
 
         now = _now_iso()
         try:
@@ -134,14 +137,20 @@ class EntityAssociationsMixin(DBMixinProtocol):
             msg = f"entity_associations row for ({issue_id!r}, {entity_id!r}) vanished between insert and read"
             raise RuntimeError(msg)
         return EntityAssociationRow(
-            issue_id=stored["issue_id"],
-            clarion_entity_id=stored["clarion_entity_id"],
-            content_hash_at_attach=stored["content_hash_at_attach"],
-            attached_at=stored["attached_at"],
+            issue_id=IssueId(stored["issue_id"]),
+            clarion_entity_id=ClarionEntityId(stored["clarion_entity_id"]),
+            content_hash_at_attach=ContentHash(stored["content_hash_at_attach"]),
+            attached_at=ISOTimestamp(stored["attached_at"]),
             attached_by=stored["attached_by"],
         )
 
-    def remove_entity_association(self, issue_id: str, entity_id: str) -> bool:
+    def remove_entity_association(
+        self,
+        issue_id: IssueId | str,
+        entity_id: ClarionEntityId | str,
+        *,
+        actor: str = "",
+    ) -> bool:
         """Remove the association identified by the composite key.
 
         Returns:
@@ -157,13 +166,20 @@ class EntityAssociationsMixin(DBMixinProtocol):
                 "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
                 (issue_id, entity_id),
             )
+            if cursor.rowcount > 0:
+                self._record_event(
+                    str(issue_id),
+                    "entity_association_removed",
+                    actor=actor,
+                    old_value=str(entity_id),
+                )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
         return cursor.rowcount > 0
 
-    def list_entity_associations(self, issue_id: str) -> list[EntityAssociationRow]:
+    def list_entity_associations(self, issue_id: IssueId | str) -> list[EntityAssociationRow]:
         """Return all entity associations for an issue.
 
         Returns raw rows in attach-time order. Drift detection is the
@@ -184,16 +200,16 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ).fetchall()
         return [
             EntityAssociationRow(
-                issue_id=r["issue_id"],
-                clarion_entity_id=r["clarion_entity_id"],
-                content_hash_at_attach=r["content_hash_at_attach"],
-                attached_at=r["attached_at"],
+                issue_id=IssueId(r["issue_id"]),
+                clarion_entity_id=ClarionEntityId(r["clarion_entity_id"]),
+                content_hash_at_attach=ContentHash(r["content_hash_at_attach"]),
+                attached_at=ISOTimestamp(r["attached_at"]),
                 attached_by=r["attached_by"],
             )
             for r in rows
         ]
 
-    def list_associations_by_entity(self, entity_id: str) -> list[EntityAssociationRow]:
+    def list_associations_by_entity(self, entity_id: ClarionEntityId | str) -> list[EntityAssociationRow]:
         """Return all issue bindings for a given Clarion entity.
 
         The reverse of :meth:`list_entity_associations`: given an
@@ -223,10 +239,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ).fetchall()
         return [
             EntityAssociationRow(
-                issue_id=r["issue_id"],
-                clarion_entity_id=r["clarion_entity_id"],
-                content_hash_at_attach=r["content_hash_at_attach"],
-                attached_at=r["attached_at"],
+                issue_id=IssueId(r["issue_id"]),
+                clarion_entity_id=ClarionEntityId(r["clarion_entity_id"]),
+                content_hash_at_attach=ContentHash(r["content_hash_at_attach"]),
+                attached_at=ISOTimestamp(r["attached_at"]),
                 attached_by=r["attached_by"],
             )
             for r in rows

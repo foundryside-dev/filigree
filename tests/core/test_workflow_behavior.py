@@ -371,8 +371,7 @@ class TestUpdateIssueTransitionEnforcement:
 
     def test_reopen_uses_backward_edge_not_skip_check(self, db: FiligreeDB) -> None:
         """Reopen works through a declared reverse edge; skip-check is gone."""
-        skip_kw = "_" + "skip_transition_check"
-        assert skip_kw not in inspect.signature(db.update_issue).parameters
+        assert "_skip_transition_check" not in inspect.signature(db.update_issue).parameters
 
         issue = db.create_issue("Bug", type="bug")
         # Use a directly-reachable done state from triage; close_issue now
@@ -385,7 +384,7 @@ class TestUpdateIssueTransitionEnforcement:
 
     def test_legacy_transition_skip_flag_is_not_accepted(self, db: FiligreeDB) -> None:
         """The legacy skip-check kwarg is no longer part of update_issue."""
-        skip_kw = "_" + "skip_transition_check"
+        skip_kw = "_skip_transition_check"
         assert skip_kw not in inspect.signature(db.update_issue).parameters
         issue = db.create_issue("Bug", type="bug")
         with pytest.raises(TypeError, match=skip_kw):

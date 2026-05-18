@@ -47,7 +47,7 @@ class TestAddEntityAssociation:
     def test_attach_rejects_missing_issue(self, db: FiligreeDB) -> None:
         # Use the test fixture's project prefix so the prefix guard passes
         # and we exercise the actual "issue not found" path.
-        with pytest.raises(ValueError, match="Issue not found"):
+        with pytest.raises(KeyError, match="Issue not found"):
             db.add_entity_association("test-nonexistent", "py:func:foo", content_hash="hash")
 
     def test_attach_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
@@ -100,6 +100,18 @@ class TestRemoveEntityAssociation:
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
         assert rows[0]["clarion_entity_id"] == "py:func:b"
+
+    def test_remove_records_audit_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, "py:func:a", content_hash="h1")
+
+        assert db.remove_entity_association(issue.id, "py:func:a", actor="alice") is True
+
+        events = db.get_issue_events(issue.id, limit=10)
+        removed = [event for event in events if event["event_type"] == "entity_association_removed"]
+        assert len(removed) == 1
+        assert removed[0]["actor"] == "alice"
+        assert removed[0]["old_value"] == "py:func:a"
 
     def test_remove_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)

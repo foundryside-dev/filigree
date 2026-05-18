@@ -270,7 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface (`GET /api/entity-associations?entity_id=…`,
   `list_associations_by_entity`) answers "what issues are about this
   code I'm reading?" in one round trip and uses the
-  `idx_entity_associations_entity` index. The binding is idempotent
+  `ix_entity_assoc_entity` index. The binding is idempotent
   on the composite key: re-attaching refreshes `content_hash_at_attach`
   and `attached_at` while preserving the original `attached_by`, so
   drift refreshes don't overwrite the audit signal of who first
@@ -2658,7 +2658,12 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
-[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v2.0.3...HEAD
+[2.0.3]: https://github.com/tachyon-beep/filigree/compare/v2.0.2...v2.0.3
+[2.0.2]: https://github.com/tachyon-beep/filigree/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/tachyon-beep/filigree/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/tachyon-beep/filigree/compare/v1.6.1...v2.0.0
+[1.6.1]: https://github.com/tachyon-beep/filigree/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/tachyon-beep/filigree/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/tachyon-beep/filigree/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tachyon-beep/filigree/compare/v1.5.0...v1.5.1

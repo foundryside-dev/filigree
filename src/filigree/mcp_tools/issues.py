@@ -77,6 +77,16 @@ def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
     return _text(ErrorResponse(error=exc.safe_message, code=ErrorCode.VALIDATION))
 
 
+def _claim_conflict_response(exc: ClaimConflictError) -> list[TextContent]:
+    return _text(
+        ErrorResponse(
+            error=str(exc),
+            code=ErrorCode.CONFLICT,
+            details={"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected},
+        )
+    )
+
+
 def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
     """Return (tool_definitions, handler_map) for issue-domain tools."""
     tools = [
@@ -917,7 +927,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+            return _claim_conflict_response(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
             return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
@@ -966,7 +976,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(ErrorResponse(error=msg, code=ErrorCode.CONFLICT))
+            return _claim_conflict_response(e)
         transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
         return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
 
@@ -1050,6 +1060,8 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except WrongProjectError as e:
         return _wrong_project_response(e)
+    except ClaimConflictError as e:
+        return _claim_conflict_response(e)
     except ValueError as e:
         msg = str(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
@@ -1092,6 +1104,10 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except WrongProjectError as e:
         return _wrong_project_response(e)
+    except InvalidTransitionError as e:
+        return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
+    except ClaimConflictError as e:
+        return _claim_conflict_response(e)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.CONFLICT))
 
@@ -1139,6 +1155,8 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
             revert_status=revert_status,
             reason=reason,
         )
+    except WrongProjectError as exc:
+        return _wrong_project_response(exc)
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     if not dry_run:
@@ -1206,6 +1224,8 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except WrongProjectError as e:
         return _wrong_project_response(e)
+    except ClaimConflictError as e:
+        return _claim_conflict_response(e)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.CONFLICT))
 
@@ -1269,6 +1289,8 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
     except WrongProjectError as e:
         return _wrong_project_response(e)
+    except ClaimConflictError as e:
+        return _claim_conflict_response(e)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.CONFLICT))
 
@@ -1438,6 +1460,8 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         return _wrong_project_response(e)
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
+        if isinstance(e, InvalidTransitionError):
+            return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
     except ValueError as e:
         msg = str(e)

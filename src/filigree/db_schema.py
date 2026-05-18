@@ -58,8 +58,9 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL,
     -- v16: per-issue monotonic sequence so same-second emissions don't
     -- collide on the dedup index. _record_event computes the next value
-    -- inline via COALESCE((SELECT MAX(event_seq) FROM events WHERE
-    -- issue_id = ?), -1) + 1; legacy rows default to 0.
+    -- inline under the caller-held writer transaction via
+    -- COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
+    -- -1) + 1; legacy rows default to 0.
     event_seq  INTEGER NOT NULL DEFAULT 0
 );
 

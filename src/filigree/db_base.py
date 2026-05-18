@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from filigree.types.planning import CommentRecord
 
 logger = logging.getLogger(__name__)
+_SQLITE_TRANSIENT_LOCK_CODES = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 # Shared internal API — used by DB mixins across modules.
 __all__ = [
@@ -123,6 +124,14 @@ def _augment_signature_with_skip_begin(fn: Callable[..., Any]) -> inspect.Signat
     return sig.replace(parameters=params)
 
 
+def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
+    """Return True for SQLITE_BUSY / SQLITE_LOCKED, including extended codes."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return False
+    return code in _SQLITE_TRANSIENT_LOCK_CODES or (code & 0xFF) in _SQLITE_TRANSIENT_LOCK_CODES
+
+
 def _retry_busy(
     *,
     attempts: int = 3,
@@ -131,12 +140,12 @@ def _retry_busy(
 ) -> Callable[[Callable[..., _R]], Callable[..., _R]]:
     """Retry a wrapped op on transient ``SQLITE_BUSY`` / ``SQLITE_LOCKED``.
 
-    Catches ``sqlite3.OperationalError`` whose message contains "database is
-    locked" or "database is busy", sleeps ``base * 2 ** attempt`` seconds,
-    and retries up to ``attempts`` times. Other ``OperationalError``
-    subclasses propagate. After the budget is exhausted the original
-    exception is re-raised so call sites surface a real lock failure rather
-    than a synthetic RuntimeError.
+    Catches ``sqlite3.OperationalError`` carrying a transient SQLite lock
+    error code, sleeps ``base * 2 ** attempt`` seconds, and retries up to
+    ``attempts`` times. Other ``OperationalError`` subclasses propagate.
+    After the budget is exhausted the original exception is re-raised so
+    call sites surface a real lock failure rather than a synthetic
+    RuntimeError.
 
     Pass-through when ``_skip_begin=True``: the inner call is inside an
     outer caller's open transaction, where retrying alone cannot recover
@@ -157,8 +166,7 @@ def _retry_busy(
                 try:
                     return fn(self, *args, **kwargs)
                 except sqlite3.OperationalError as exc:
-                    msg = str(exc).lower()
-                    if "database is locked" not in msg and "database is busy" not in msg:
+                    if not _is_transient_sqlite_lock(exc):
                         raise
                     if attempt == attempts - 1:
                         raise

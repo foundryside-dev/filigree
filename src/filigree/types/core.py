@@ -8,6 +8,9 @@ if TYPE_CHECKING:
     from filigree.models import Issue
 
 ISOTimestamp = NewType("ISOTimestamp", str)
+IssueId = NewType("IssueId", str)
+ClarionEntityId = NewType("ClarionEntityId", str)
+ContentHash = NewType("ContentHash", str)
 
 # Constrained-string Literal types — canonical definitions.
 # core.py re-exports these; db_files.py derives frozensets via get_args().

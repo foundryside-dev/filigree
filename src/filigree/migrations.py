@@ -608,7 +608,8 @@ def migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
     IGNORE`` — the silent-failure C3 surface from the 2.1.0 panel review.
 
     The new column ``event_seq INTEGER NOT NULL DEFAULT 0`` extends the
-    dedup tuple. ``_record_event`` computes the next value inline via
+    dedup tuple. ``_record_event`` computes the next value inline under the
+    caller-held writer transaction via
     ``COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
     -1) + 1`` so bursts at the same second land distinct rows. Historical
     rows default to 0; since the old behaviour was to silently drop the

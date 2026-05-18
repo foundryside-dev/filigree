@@ -11,7 +11,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
 from filigree.types.events import EventRecord, EventRecordWithTitle, EventType, UndoResult
 
 _UNDO_CLAIM_LEASE_HOURS = 48
@@ -96,9 +96,10 @@ class EventsMixin(DBMixinProtocol):
         # 2.1.0 §0.2: plain INSERT (not INSERT OR IGNORE) so true-duplicate
         # collisions bubble up to the caller's transaction for rollback.
         # ``event_seq`` is computed inline as the next per-issue monotonic
-        # value via COALESCE+MAX subquery — multi-process-safe (no
-        # in-memory counter), survives crashes, and runs atomically inside
-        # the caller's open transaction. Same-second emissions (heartbeat
+        # value via COALESCE+MAX subquery. The caller-held writer transaction
+        # serializes concurrent writers while avoiding in-memory counters, so
+        # this survives crashes and stays atomic with the issue mutation.
+        # Same-second emissions (heartbeat
         # bursts, batch ops sharing _now_iso()) get distinct sequence
         # numbers and stop silently colliding on the dedup index.
         self.conn.execute(
@@ -447,6 +448,8 @@ class EventsMixin(DBMixinProtocol):
 
     # -- Archival / Compaction ------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("archive_closed")
     def archive_closed(self, *, days_old: int = 30, actor: str = "", label: str | None = None) -> list[str]:
         """Archive done-category issues older than `days_old` days.
 
@@ -492,20 +495,16 @@ class EventsMixin(DBMixinProtocol):
             return []
 
         now = _now_iso()
-        try:
-            for issue_id in archived_ids:
-                self.conn.execute(
-                    "UPDATE issues SET status = 'archived', updated_at = ? WHERE id = ?",
-                    (now, issue_id),
-                )
-                self._record_event(issue_id, "archived", actor=actor)
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        for issue_id in archived_ids:
+            self.conn.execute(
+                "UPDATE issues SET status = 'archived', updated_at = ? WHERE id = ?",
+                (now, issue_id),
+            )
+            self._record_event(issue_id, "archived", actor=actor)
         return archived_ids
 
+    @_retry_busy()
+    @_in_immediate_tx("compact_events")
     def compact_events(self, *, keep_recent: int = 50, actor: str = "") -> int:
         """Remove old events for archived issues, keeping only the most recent ones.
 
@@ -519,26 +518,18 @@ class EventsMixin(DBMixinProtocol):
             return 0
 
         total_deleted = 0
-        try:
-            for row in archived:
-                issue_id = row["id"]
-                event_count = self.conn.execute("SELECT COUNT(*) as cnt FROM events WHERE issue_id = ?", (issue_id,)).fetchone()["cnt"]
+        for row in archived:
+            issue_id = row["id"]
+            event_count = self.conn.execute("SELECT COUNT(*) as cnt FROM events WHERE issue_id = ?", (issue_id,)).fetchone()["cnt"]
 
-                if event_count <= keep_recent:
-                    continue
+            if event_count <= keep_recent:
+                continue
 
-                cursor = self.conn.execute(
-                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ?)",
-                    (issue_id, event_count - keep_recent),
-                )
-                total_deleted += cursor.rowcount
-
-            if total_deleted > 0:
-                self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-
+            cursor = self.conn.execute(
+                "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ?)",
+                (issue_id, event_count - keep_recent),
+            )
+            total_deleted += cursor.rowcount
         return total_deleted
 
     def vacuum(self) -> None:

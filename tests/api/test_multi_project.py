@@ -587,6 +587,19 @@ class TestServerModeCrossProjectReadBlocking:
         assert cross.json()["code"] == "NOT_FOUND"
         assert same.json()["code"] == "NOT_FOUND"
 
+    async def test_patch_foreign_prefix_uses_safe_message(self, multi_client: AsyncClient) -> None:
+        """Write-side WrongProjectError should not leak either project prefix."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.patch("/api/p/alpha/issue/bravo-deadbeef00", json={"title": "probe"})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "alpha" not in body["error"]
+        assert "bravo" not in body["error"]
+
 
 class TestGetIssueReadToleranceLocally:
     """2.1.0 §1.3: db.get_issue keeps its documented read-tolerance for

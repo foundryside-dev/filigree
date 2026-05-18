@@ -263,9 +263,9 @@ def _check_expected_assignee(
     When ``expected_assignee`` is omitted but ``actor`` is present and the issue
     is currently held, the actor becomes the expected holder by default
     (ADR-008). Actorless writes to held issues remain permissive for local/manual
-    workflows. When set or derived, raises ``ValueError`` with a message shaped
-    like the heartbeat / reclaim / release-claim CONFLICT envelope so the MCP /
-    CLI / dashboard surfaces classify it as ``CONFLICT`` consistently.
+    workflows. When set or derived, raises ``ClaimConflictError`` carrying the
+    observed and expected assignee fields so the MCP / CLI / dashboard surfaces
+    can render a structured ``CONFLICT`` envelope without message parsing.
 
     The compare normalises whitespace via ``_normalize_assignee`` so callers
     don't have to think about leading/trailing whitespace differences.
@@ -1052,13 +1052,14 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
+        use_reverse_transition = force
         return self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
             actor=actor,
             expected_assignee=expected_assignee,
-            backward=force,
+            backward=use_reverse_transition,
         )
 
     @_retry_busy()
@@ -1261,13 +1262,20 @@ class IssuesMixin(DBMixinProtocol):
             if target == row["status"]:
                 target = None
             if target is not None:
-                result = self.templates.validate_transition(
-                    row["type"],
-                    row["status"],
-                    target,
-                    _safe_fields_json(row["fields"], issue_id),
-                    backward=True,
-                )
+                fields = _safe_fields_json(row["fields"], issue_id)
+                valid_transitions = _transition_hints(self.templates.get_valid_transitions(row["type"], row["status"], fields))
+                try:
+                    result = self.templates.validate_transition(
+                        row["type"],
+                        row["status"],
+                        target,
+                        fields,
+                        backward=True,
+                    )
+                except InvalidTransitionError as exc:
+                    if exc.valid_transitions is None:
+                        exc.valid_transitions = valid_transitions
+                    raise
                 if not result.allowed:
                     if result.missing_fields:
                         missing_str = ", ".join(result.missing_fields)
@@ -1280,7 +1288,14 @@ class IssuesMixin(DBMixinProtocol):
                             f"Transition '{row['status']}' -> '{target}' is not allowed for type "
                             f"'{row['type']}'. Use get_valid_transitions() to see allowed transitions."
                         )
-                    raise ValueError(msg)
+                    raise InvalidTransitionError(
+                        row["type"],
+                        row["status"],
+                        to_state=target,
+                        backward=True,
+                        valid_transitions=valid_transitions,
+                        message=msg,
+                    )
 
         now = _now_iso()
         updates = [
@@ -1387,6 +1402,8 @@ class IssuesMixin(DBMixinProtocol):
         # trail. Releasing them would erase the "X closed this" signal.
         live = [issue for issue in candidates if self._resolve_status_category(issue.type, issue.status) != "done"]
 
+        from filigree.core import WrongProjectError
+
         released: list[Issue] = []
         failures: list[BatchFailure] = []
         for issue in live:
@@ -1402,6 +1419,8 @@ class IssuesMixin(DBMixinProtocol):
                     reason=reason,
                 )
                 released.append(result)
+            except WrongProjectError:
+                raise
             except (ValueError, KeyError) as exc:
                 msg = str(exc)
                 if isinstance(exc, KeyError):

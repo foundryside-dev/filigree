@@ -667,8 +667,41 @@ class TestClaimAPI:
         )
 
         assert resp.status_code == 409
-        assert resp.json()["code"] == "CONFLICT"
+        body = resp.json()
+        assert body["code"] == "CONFLICT"
+        assert body["details"] == {"issue_id": ids["a"], "observed": "agent-2", "expected": "agent-1"}
         assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-2"
+
+    async def test_release_claim_invalid_reverse_transition_returns_invalid_transition(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from filigree.types.api import InvalidTransitionError
+
+        ids = dashboard_db.ids
+        dashboard_db.db.start_work(ids["a"], assignee="agent-1", actor="agent-1")
+        original_validate_transition = dashboard_db.db.templates.validate_transition
+
+        def fail_backward_validation(
+            type_name: str,
+            from_state: str,
+            to_state: str,
+            fields: dict[str, Any],
+            *,
+            backward: bool = False,
+        ) -> Any:
+            if backward:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
+            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+
+        monkeypatch.setattr(dashboard_db.db.templates, "validate_transition", fail_backward_validation)
+
+        resp = await client.post(f"/api/issue/{ids['a']}/release", json={"actor": "agent-1"})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "INVALID_TRANSITION"
 
     async def test_claim_next(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         resp = await client.post(

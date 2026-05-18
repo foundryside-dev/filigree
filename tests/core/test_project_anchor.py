@@ -907,6 +907,23 @@ class TestWrongProjectErrorOnWrites:
             db_p.release_claim("beefdata-abc123")
         db_p.close()
 
+    def test_release_my_claims_aborts_on_wrong_project(
+        self,
+        db_p: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        issue = db_p.create_issue("claimed task")
+        db_p.claim_issue(issue.id, assignee="alice", actor="alice")
+
+        def raise_wrong_project(*_args: object, **_kwargs: object) -> object:
+            raise WrongProjectError("foreign prefix beefdata does not match alpha")
+
+        monkeypatch.setattr(db_p, "release_claim", raise_wrong_project)
+
+        with pytest.raises(WrongProjectError):
+            db_p.release_my_claims(actor="alice")
+        db_p.close()
+
     def test_add_comment_with_wrong_prefix_raises(self, db_p: FiligreeDB) -> None:
         with pytest.raises(WrongProjectError):
             db_p.add_comment("beefdata-abc123", "hi")

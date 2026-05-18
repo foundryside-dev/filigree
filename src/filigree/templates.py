@@ -757,6 +757,11 @@ class TemplateRegistry:
             from_state: Current state.
             to_state: Target state.
             fields: Current issue fields dict.
+            backward: If True, validate against ``reverse_transitions`` and
+                raise ``InvalidTransitionError`` when the reverse edge is
+                undeclared; reverse edges enforce only their explicit
+                ``requires_fields`` and do not inherit target ``required_at``
+                gates.
 
         Returns:
             TransitionResult indicating whether the transition is allowed,

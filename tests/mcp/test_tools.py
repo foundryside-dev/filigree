@@ -343,6 +343,7 @@ class TestUpdateAndClose:
         assert data["code"] == ErrorCode.CONFLICT
         assert "assigned to 'agent-holder'" in data["error"]
         assert "expected 'other-agent'" in data["error"]
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
     async def test_update_issue_explicit_expected_assignee_overrides_actor_default(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Claim-aware update")
@@ -1240,6 +1241,7 @@ class TestClaimIssue:
         result = await call_tool("claim_issue", {"issue_id": issue.id, "assignee": "agent-2"})
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-1", "expected": "agent-2"}
 
     async def test_claim_released_wip_issue_for_handoff(self, mcp_db: FiligreeDB) -> None:
         """release_claim auto-reverts wip→open (filigree-cb980eee0d, P1.3),
@@ -1388,6 +1390,7 @@ class TestClaimLeaseTools:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-current", "expected": "agent-old"}
 
 
 class TestGetChanges:
@@ -3719,7 +3722,38 @@ class TestMCPReleaseClaim:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-2", "expected": "agent-1"}
         assert mcp_db.get_issue(issue.id).assignee == "agent-2"
+
+    async def test_release_claim_invalid_reverse_transition_via_mcp(
+        self,
+        mcp_db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from filigree.types.api import InvalidTransitionError
+
+        issue = mcp_db.create_issue("Reverse transition MCP")
+        mcp_db.start_work(issue.id, assignee="agent-1", actor="agent-1")
+        original_validate_transition = mcp_db.templates.validate_transition
+
+        def fail_backward_validation(
+            type_name: str,
+            from_state: str,
+            to_state: str,
+            fields: dict[str, Any],
+            *,
+            backward: bool = False,
+        ) -> Any:
+            if backward:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
+            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+
+        monkeypatch.setattr(mcp_db.templates, "validate_transition", fail_backward_validation)
+
+        result = await call_tool("release_claim", {"issue_id": issue.id, "actor": "agent-1"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.INVALID_TRANSITION
 
     async def test_release_not_found_via_mcp(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("release_claim", {"issue_id": "mcp-nonexistent"})

@@ -260,6 +260,25 @@ class TestEntityAssociationsSchema:
         assert len(idx_info) == 7
         conn.close()
 
+    def test_migration_v15_to_v16_adds_event_seq_to_true_v15_database(self, tmp_path: Path) -> None:
+        """The v15→v16 migration must exercise the ALTER TABLE path."""
+        conn = _make_db(tmp_path)
+        try:
+            conn.executescript(SCHEMA_V1_SQL)
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
+
+            apply_pending_migrations(conn, 15)
+            assert _get_schema_version(conn) == 15
+            assert "event_seq" not in _get_table_columns(conn, "events")
+
+            apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+
+            assert _get_schema_version(conn) == CURRENT_SCHEMA_VERSION
+            assert "event_seq" in _get_table_columns(conn, "events")
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Migration runner tests

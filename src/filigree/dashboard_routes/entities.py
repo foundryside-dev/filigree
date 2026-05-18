@@ -1,6 +1,6 @@
 """Entity-association HTTP routes (ADR-029, Clarion B.7 / WP9-A).
 
-Mirrors the three MCP tools on the HTTP surface so cross-product
+Mirrors the four MCP tools on the HTTP surface so cross-product
 callers (notably Clarion's ``issues_for`` MCP tool, which runs on the
 Clarion side and reaches into Filigree via HTTP) can read and write
 the binding without going through MCP.
@@ -8,6 +8,7 @@ the binding without going through MCP.
 Routes:
 
 - ``GET    /api/issue/{issue_id}/entity-associations`` — list rows
+- ``GET    /api/entity-associations?entity_id=…`` — reverse lookup
 - ``POST   /api/issue/{issue_id}/entity-associations`` — attach (body)
 - ``DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`` — remove
 
@@ -99,6 +100,8 @@ def create_classic_router() -> APIRouter:
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
         try:
             rows = db.list_associations_by_entity(entity_id)
+        except WrongProjectError as exc:
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"associations": [dict(row) for row in rows]})
@@ -132,10 +135,10 @@ def create_classic_router() -> APIRouter:
             row = db.add_entity_association(issue_id, entity_id, content_hash, actor=actor)
         except WrongProjectError as exc:
             return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
+        except KeyError:
+            return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except ValueError as exc:
-            code = ErrorCode.NOT_FOUND if "Issue not found" in str(exc) else ErrorCode.VALIDATION
-            status = 404 if code == ErrorCode.NOT_FOUND else 400
-            return _error_response(str(exc), code, status)
+            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse(dict(row), status_code=201)
 
     @router.delete("/issue/{issue_id}/entity-associations")
@@ -149,8 +152,11 @@ def create_classic_router() -> APIRouter:
         entity_id = request.query_params.get("entity_id", "")
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(request.query_params.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
         try:
-            removed = db.remove_entity_association(issue_id, entity_id)
+            removed = db.remove_entity_association(issue_id, entity_id, actor=actor)
         except WrongProjectError as exc:
             return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as exc:

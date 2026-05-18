@@ -51,10 +51,20 @@ def _classify_issue_write_error(exc: BaseException) -> ErrorCode:
     return classify_value_error(str(exc))
 
 
+def _claim_conflict_details(exc: ClaimConflictError) -> dict[str, Any]:
+    return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
+
+
 def _invalid_transition_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
         return {"valid_transitions": exc.valid_transitions}
     return None
+
+
+def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
+    if isinstance(exc, ClaimConflictError):
+        return _claim_conflict_details(exc)
+    return _invalid_transition_details(exc)
 
 
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
@@ -467,11 +477,13 @@ def create_classic_router() -> APIRouter:
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        except WrongProjectError as e:
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/close")
@@ -507,11 +519,13 @@ def create_classic_router() -> APIRouter:
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        except WrongProjectError as e:
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/reopen")
@@ -563,7 +577,7 @@ def create_classic_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         # Fetch just the single comment to get the real created_at timestamp
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
@@ -749,6 +763,8 @@ def create_classic_router() -> APIRouter:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
             if code != ErrorCode.INVALID_TRANSITION:
@@ -774,6 +790,15 @@ def create_classic_router() -> APIRouter:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
+        except InvalidTransitionError as e:
+            return _error_response(
+                str(e),
+                ErrorCode.INVALID_TRANSITION,
+                errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
+                _invalid_transition_details(e),
+            )
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse(issue.to_dict())
@@ -1249,11 +1274,13 @@ def create_loom_router() -> APIRouter:
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        except WrongProjectError as e:
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue_to_loom(issue))
 
     @router.post("/issues/{issue_id}/close")
@@ -1292,11 +1319,13 @@ def create_loom_router() -> APIRouter:
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
+        except WrongProjectError as e:
+            return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         result: dict[str, Any] = dict(issue_to_loom(issue))
@@ -1342,6 +1371,8 @@ def create_loom_router() -> APIRouter:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
             if code != ErrorCode.INVALID_TRANSITION:
@@ -1367,6 +1398,15 @@ def create_loom_router() -> APIRouter:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
+        except InvalidTransitionError as e:
+            return _error_response(
+                str(e),
+                ErrorCode.INVALID_TRANSITION,
+                errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
+                _invalid_transition_details(e),
+            )
+        except ClaimConflictError as e:
+            return _error_response(str(e), ErrorCode.CONFLICT, 409, _claim_conflict_details(e))
         except ValueError as e:
             return _error_response(str(e), ErrorCode.CONFLICT, 409)
         return JSONResponse(issue_to_loom(issue))
@@ -1427,7 +1467,7 @@ def create_loom_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)
