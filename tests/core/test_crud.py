@@ -486,6 +486,46 @@ class TestUpdateIssuePaths:
         updated = db.update_issue(issue.id, fields={"b": "updated", "c": "3"})
         assert updated.fields == {"a": "1", "b": "updated", "c": "3"}
 
+    def test_update_issue_refuses_corrupt_fields_merge(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Corrupt fields merge")
+        raw_fields = b"{bad json"
+        db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (raw_fields, issue.id))
+        db.conn.commit()
+
+        with pytest.raises(ValueError, match="Refusing to merge fields"):
+            db.update_issue(issue.id, fields={"b": "2"})
+
+        row = db.conn.execute("SELECT fields FROM issues WHERE id = ?", (issue.id,)).fetchone()
+        assert row["fields"] == raw_fields
+        events = db.conn.execute(
+            "SELECT event_type FROM events WHERE issue_id = ? AND event_type = 'corrupt_fields_overwritten'",
+            (issue.id,),
+        ).fetchall()
+        assert events == []
+
+    def test_update_issue_force_overwrite_corrupt_emits_event_with_raw_bytes(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Force corrupt fields overwrite")
+        raw_fields = b"{bad json"
+        db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (raw_fields, issue.id))
+        db.conn.commit()
+
+        updated = db.update_issue(issue.id, fields={"b": "2"}, actor="tester", force_overwrite_corrupt=True)
+
+        assert updated.fields == {"b": "2"}
+        event = db.conn.execute(
+            "SELECT actor, old_value, new_value FROM events WHERE issue_id = ? AND event_type = 'corrupt_fields_overwritten'",
+            (issue.id,),
+        ).fetchone()
+        assert event is not None
+        assert event["actor"] == "tester"
+        assert event["old_value"] == raw_fields
+        assert json.loads(event["new_value"]) == {"b": "2"}
+        fields_changed = db.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'fields_changed'",
+            (issue.id,),
+        ).fetchone()[0]
+        assert fields_changed == 0
+
     def test_update_no_changes(self, db: FiligreeDB) -> None:
         """Update with no actual changes should not error."""
         issue = db.create_issue("No change")

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`update_issue(fields=...)` now refuses to merge over corrupt stored
+  fields unless explicitly forced (2.1.0 §3.3).** When the current
+  `issues.fields` value cannot be parsed, the default update path raises
+  instead of laundering the corrupt bytes into a clean JSON object. Callers
+  can pass `force_overwrite_corrupt=True` to replace the corrupt value; that
+  path records a `corrupt_fields_overwritten` event whose `old_value` is the
+  raw stored column value and whose `new_value` is the replacement JSON.
+
 - **`release_claim` now clears ownership and performs its wip→open revert in
   one IMMEDIATE transaction (2.1.0 §3.2).** The revert target is resolved
   before the release update, then a single guarded `UPDATE` clears claim

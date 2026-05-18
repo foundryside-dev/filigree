@@ -17,6 +17,7 @@ EventType = Literal[
     "description_changed",
     "notes_changed",
     "fields_changed",
+    "corrupt_fields_overwritten",
     "parent_changed",
     "claimed",
     "released",

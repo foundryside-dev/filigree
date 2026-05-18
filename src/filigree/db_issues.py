@@ -667,6 +667,7 @@ class IssuesMixin(DBMixinProtocol):
         fields: dict[str, Any] | None = None,
         actor: str = "",
         expected_assignee: str | None = None,
+        force_overwrite_corrupt: bool = False,
         _skip_transition_check: bool = False,
     ) -> Issue:
         self._check_id_prefix(issue_id)
@@ -688,6 +689,13 @@ class IssuesMixin(DBMixinProtocol):
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
             raise TypeError(msg)
+        corrupt_fields_raw: Any | None = None
+        if fields is not None and getattr(current.fields, "_filigree_corrupt", False):
+            if not force_overwrite_corrupt:
+                msg = "Refusing to merge fields: current value is corrupt; pass force_overwrite_corrupt=True to overwrite"
+                raise ValueError(msg)
+            raw_row = self.conn.execute("SELECT fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            corrupt_fields_raw = raw_row["fields"] if raw_row is not None else None
         if title is not None and not title.strip():
             # filigree-365dff403e: mirror create_issue's invariant on update.
             msg = "Title cannot be empty"
@@ -894,9 +902,17 @@ class IssuesMixin(DBMixinProtocol):
 
         if fields is not None:
             # Merge into existing fields
-            merged = {**current.fields, **fields}
-            if merged != current.fields:
-                if not _close_reason_only:
+            merged = dict(fields) if corrupt_fields_raw is not None else {**current.fields, **fields}
+            if corrupt_fields_raw is not None or merged != current.fields:
+                if corrupt_fields_raw is not None:
+                    self._record_event(
+                        issue_id,
+                        "corrupt_fields_overwritten",
+                        actor=actor,
+                        old_value=corrupt_fields_raw,
+                        new_value=json.dumps(merged),
+                    )
+                elif not _close_reason_only:
                     # Skip the event for the close-with-reason-only path —
                     # the reason is already audit-trailed on the status_changed
                     # event's ``comment``. The fields column update still runs

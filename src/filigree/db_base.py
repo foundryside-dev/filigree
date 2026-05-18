@@ -354,6 +354,7 @@ class DBMixinProtocol(Protocol):
         fields: dict[str, Any] | None = None,
         actor: str = "",
         expected_assignee: str | None = None,
+        force_overwrite_corrupt: bool = False,
         _skip_transition_check: bool = False,
         _skip_begin: bool = False,
     ) -> Issue: ...
