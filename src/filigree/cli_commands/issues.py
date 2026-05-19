@@ -728,7 +728,7 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
     """Reopen one or more closed issues to their last non-done statuses."""
     with get_db() as db:
         reopened: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         for issue_id in issue_ids:
             try:
                 issue = db.reopen_issue(issue_id, actor=ctx.obj["actor"])
@@ -749,7 +749,13 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
                 if not as_json:
                     click.echo(f"Not found: {issue_id}", err=True)
             except ValueError as e:
-                errors.append({"id": issue_id, "error": str(e), "code": classify_value_error(str(e))})
+                msg = str(e)
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
+                error_item: dict[str, Any] = {"id": issue_id, "error": msg, "code": code}
+                if isinstance(e, ClaimConflictError):
+                    envelope = claim_conflict_envelope(e)
+                    error_item["details"] = envelope["details"]
+                errors.append(error_item)
                 if not as_json:
                     click.echo(f"Error reopening {issue_id}: {e}", err=True)
         if as_json:
