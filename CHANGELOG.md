@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-19
+
 ### Changed
 
 - **Workflow templates now declare `reverse_transitions` for controlled
@@ -2658,7 +2660,8 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
-[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/tachyon-beep/filigree/compare/v2.0.3...v2.1.0
 [2.0.3]: https://github.com/tachyon-beep/filigree/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/tachyon-beep/filigree/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/tachyon-beep/filigree/compare/v2.0.0...v2.0.1
