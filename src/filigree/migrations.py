@@ -26,7 +26,6 @@ SQLite ALTER TABLE limitations (why helpers exist):
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import re
 import sqlite3
@@ -735,6 +734,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, target_version: int) -> i
             raise MigrationError(version, version + 1, KeyError(msg))
 
         logger.info("Applying migration v%d → v%d ...", version, version + 1)
+        migration_failed = False
         try:
             # Disable FK enforcement so rebuild_table() can atomically
             # DROP + RENAME FK-referenced tables within the transaction.
@@ -752,14 +752,27 @@ def apply_pending_migrations(conn: sqlite3.Connection, target_version: int) -> i
             applied += 1
             logger.info("Migration v%d → v%d complete.", version, version + 1)
         except Exception as exc:
+            migration_failed = True
             conn.rollback()
             raise MigrationError(version, version + 1, exc) from exc
         finally:
             # Restore caller's original FK enforcement setting.
             # After commit/rollback the connection is in autocommit mode,
             # so this PRAGMA takes effect immediately.
-            with contextlib.suppress(sqlite3.Error):
+            try:
                 conn.execute(f"PRAGMA foreign_keys={'ON' if original_fk else 'OFF'}")
+            except sqlite3.Error as exc:
+                logger.error(
+                    "foreign_key_restore_failed",
+                    extra={
+                        "from_version": version,
+                        "to_version": version + 1,
+                        "original_foreign_keys": original_fk,
+                    },
+                    exc_info=True,
+                )
+                if not migration_failed:
+                    raise MigrationError(version, version + 1, exc) from exc
 
     return applied
 

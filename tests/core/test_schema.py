@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -689,6 +690,61 @@ class TestMigrationRunnerFKPreservation:
 
             fk_after = conn.execute("PRAGMA foreign_keys").fetchone()[0]
             assert fk_after == 0  # must be restored to OFF
+        finally:
+            migrations.MIGRATIONS.clear()
+            migrations.MIGRATIONS.update(original)
+            conn.close()
+
+    def test_fk_restore_failure_is_reported(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """If FK restoration fails after commit, the runner must surface it."""
+        conn = _make_db(tmp_path)
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+        class RestoreFailingConnection:
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self.inner = inner
+                self.restore_attempts = 0
+
+            @property
+            def in_transaction(self) -> bool:
+                return self.inner.in_transaction
+
+            def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+                if sql == "PRAGMA foreign_keys=ON":
+                    self.restore_attempts += 1
+                    raise sqlite3.OperationalError("restore failed")
+                return self.inner.execute(sql, *args)
+
+            def commit(self) -> None:
+                self.inner.commit()
+
+            def rollback(self) -> None:
+                self.inner.rollback()
+
+        from filigree import migrations
+
+        original = migrations.MIGRATIONS.copy()
+
+        def noop(c: sqlite3.Connection) -> None:
+            pass
+
+        migrations.MIGRATIONS[1] = noop  # type: ignore[assignment]
+        wrapped = RestoreFailingConnection(conn)
+        try:
+            with caplog.at_level(logging.ERROR, logger="filigree.migrations"), pytest.raises(MigrationError, match="restore failed"):
+                apply_pending_migrations(wrapped, 2)  # type: ignore[arg-type]
+
+            assert wrapped.restore_attempts == 1
+            assert _get_schema_version(conn) == 2
+            assert "foreign_key_restore_failed" in caplog.text
         finally:
             migrations.MIGRATIONS.clear()
             migrations.MIGRATIONS.update(original)
