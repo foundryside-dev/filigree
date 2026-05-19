@@ -99,7 +99,12 @@ _last_request_time: float = 0.0  # monotonic clock; set at startup
 _current_project_key: ContextVar[str] = ContextVar("project_key", default="")
 
 
-def _open_db_for_filigree_dir(filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
+def _open_db_for_filigree_dir(
+    filigree_dir: Path,
+    *,
+    check_same_thread: bool = True,
+    allow_local_fallback_override: bool | None = None,
+) -> FiligreeDB:
     """Open the project DB for *filigree_dir*, honouring ``.filigree.conf``.
 
     Mirrors the canonical CLI pattern (``cli_common._build_db``): when a
@@ -109,11 +114,25 @@ def _open_db_for_filigree_dir(filigree_dir: Path, *, check_same_thread: bool = T
     Without this, the dashboard silently opened ``.filigree/filigree.db`` while
     the CLI/MCP — which goes through ``cli_common.py`` — opened the conf-
     declared path, producing a split-brain view. (filigree-da8d5aba0f)
+
+    ``allow_local_fallback_override`` is forwarded so the dashboard's
+    ``--allow-local-fallback`` flag flows into the ADR-014 capability probe
+    *before* it runs at ``FiligreeDB.__init__`` — otherwise a project whose
+    config disables fallback would fail to construct against an offline
+    Clarion even though the operator just asked for fallback at startup.
     """
     conf_path = filigree_dir.parent / CONF_FILENAME
     if conf_path.is_file():
-        return FiligreeDB.from_conf(conf_path, check_same_thread=check_same_thread)
-    return FiligreeDB.from_filigree_dir(filigree_dir, check_same_thread=check_same_thread)
+        return FiligreeDB.from_conf(
+            conf_path,
+            check_same_thread=check_same_thread,
+            allow_local_fallback_override=allow_local_fallback_override,
+        )
+    return FiligreeDB.from_filigree_dir(
+        filigree_dir,
+        check_same_thread=check_same_thread,
+        allow_local_fallback_override=allow_local_fallback_override,
+    )
 
 
 class ProjectStore:
@@ -778,7 +797,11 @@ def main(
             filigree_dir = project_root / FILIGREE_DIR_NAME
             config = read_config(filigree_dir)
             _config.update(config)
-            db = _open_db_for_filigree_dir(filigree_dir, check_same_thread=False)
+            db = _open_db_for_filigree_dir(
+                filigree_dir,
+                check_same_thread=False,
+                allow_local_fallback_override=True if allow_local_fallback else None,
+            )
             if allow_local_fallback and db.registry_backend == "clarion":
                 logger.warning("dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates")
                 db.enable_local_registry_fallback()

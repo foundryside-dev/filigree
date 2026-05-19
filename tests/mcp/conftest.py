@@ -39,6 +39,9 @@ def _make_mcp_db(
         prefix="mcp",
         registry_backend=registry_backend,
         clarion_config=clarion_config,
+        # MCP fixtures stub Clarion absence; skip the startup capability
+        # probe so the placeholder base_url doesn't abort __init__.
+        skip_clarion_capability_probe=True,
     )
     d.initialize()
 

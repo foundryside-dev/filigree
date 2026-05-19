@@ -110,6 +110,41 @@ hand-written local rollback against a live database.
   `FILE_REGISTRY_DISPLACED`. Use Clarion's read API instead.
 - `entity_associations` is a peer primitive and is not migrated by
   `migrate-registry`; file identity displacement is additive over it.
+- **Briefing-blocked files surface as `RegistryFileNotFoundError` (HTTP 404
+  from Clarion).** A scan-results POST that targets a file whose Clarion entity
+  is `briefing_blocked` will fail rather than mint a shadow row. To diagnose:
+  1. Query Clarion directly: `curl 'http://127.0.0.1:9111/api/v1/files?path=<path>&language=<lang>'`.
+     A 404 with the file otherwise present in the project is the briefing-block
+     signature.
+  2. Inspect the entity properties in Clarion to confirm `briefing_blocked` is
+     set, then lift the block in Clarion (or accept that findings for the
+     blocked file will not be ingested while the block is in place).
+  3. Re-run the failed scan-results ingest once the block is lifted.
+  This behaviour is intentional under ADR-014 §"Briefing-block masking".
+
+## Validating Against a Live Clarion Build
+
+The Filigree test suite ships a Phase D end-to-end test that spawns
+`clarion serve` against a tempdir project and asserts that a Filigree
+scan-results ingest threads Clarion's entity ID into stored file records.
+The test is opt-in by tool availability:
+
+```bash
+# Prerequisite: both binaries built and on PATH.
+which clarion filigree
+
+# Run only the e2e test (skips automatically when clarion is absent):
+uv run pytest tests/integration/test_clarion_phase_d_e2e.py -m integration -v
+
+# Or filter to the integration marker across the suite:
+uv run pytest -m integration
+```
+
+The test creates its own tempdir project (calls `clarion install`,
+writes `clarion.yaml` with an HTTP bind on a free loopback port, spawns
+`clarion serve`) so no project layout is required on disk. CI lanes that
+also build Clarion can opt in by including the integration marker in
+their pytest invocation; lanes that do not will silently skip.
 
 ## Ownership Boundary
 

@@ -1328,6 +1328,15 @@ def start_work(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except ClaimConflictError as e:
+            # Optimistic-lock conflict — distinct error code so JSON
+            # consumers can branch on CONFLICT vs VALIDATION; mirrors the
+            # ``claim``, ``release``, and ``reclaim`` CLI paths.
+            if as_json:
+                click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             msg = str(e)
             code = classify_value_error(msg)

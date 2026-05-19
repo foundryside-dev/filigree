@@ -155,23 +155,29 @@ class TestFromFiligreeDir:
     """Verify FiligreeDB.from_filigree_dir construction."""
 
     def test_registry_backend_passed_from_project_config(self, tmp_path: Path) -> None:
+        from tests._fakes.clarion_http import clarion_stub
+
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
-        write_config(
-            filigree_dir,
-            {
-                "prefix": "proj",
-                "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
-            },
-        )
+        # Real ``from_filigree_dir`` runs the ADR-014 capability probe at
+        # __init__; point it at a live stub so the probe handshake succeeds
+        # and the test stays focused on config plumbing rather than network.
+        with clarion_stub() as (base_url, _state):
+            write_config(
+                filigree_dir,
+                {
+                    "prefix": "proj",
+                    "version": 1,
+                    "registry_backend": "clarion",
+                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                },
+            )
 
-        db = FiligreeDB.from_filigree_dir(filigree_dir)
-        try:
-            assert db.registry_backend == "clarion"
-        finally:
-            db.close()
+            db = FiligreeDB.from_filigree_dir(filigree_dir)
+            try:
+                assert db.registry_backend == "clarion"
+            finally:
+                db.close()
 
     def test_missing_config_uses_defaults(self, tmp_path: Path) -> None:
         """from_filigree_dir with no config.json should succeed with defaults.

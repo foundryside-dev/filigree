@@ -45,7 +45,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
-from filigree.registry import ResolvedFile
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ class TestDeleteFileRecordCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         result = runner.invoke(cli, ["delete-file-record", file_record.id, "--json"])
@@ -594,7 +594,12 @@ class TestRegisterFileCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://localhost:9111"}
+        # ``allow_local_fallback`` is set so the ADR-014 capability probe at
+        # ``FiligreeDB.__init__`` downgrades the http://localhost:9111
+        # unreachability to a WARN — the test's intent is to verify the
+        # ``register-file`` CLI displaces on a Clarion-mode project, which
+        # is a state check independent of whether Clarion is reachable.
+        conf["clarion"] = {"base_url": "http://localhost:9111", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         with caplog.at_level(logging.WARNING, logger="filigree.cli_commands.files"):
@@ -766,7 +771,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "missing-parent" / "registry-migration.json"
@@ -818,7 +823,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
@@ -891,7 +896,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
@@ -972,7 +977,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
@@ -987,6 +992,82 @@ class TestMigrateRegistryCommand:
         assert not manifest.exists()
         with get_db() as db:
             assert db.get_file(old_file_id).id == old_file_id
+
+    def test_migrate_registry_rejects_local_fallback_resolution_under_clarion_target(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Migration to ``clarion`` must NOT accept a local-fallback resolution.
+
+        Reproduces P1: when Clarion is unreachable and
+        ``allow_local_fallback=true``, the wrapping
+        ``_ClarionLocalFallbackRegistry`` silently returns a local
+        ``ResolvedFile`` with empty ``content_hash`` and a local-prefix
+        ``file_id``. Without the guard in ``_registry_migration_plan``, the
+        plan would record those rows as ``new_registry_backend=clarion`` and
+        rewrite issue/file associations to local IDs marked as Clarion-backed.
+        The guard surfaces such rows as ``unresolved`` so operators can
+        diagnose (and the migration aborts cleanly).
+        """
+        runner, project = cli_in_project
+
+        from filigree.cli_common import get_db
+
+        with get_db() as db:
+            file_record = db.register_file("src/fallback_resolves.py")
+            old_file_id = file_record.id
+
+        class UnreachableClarionRegistry:
+            def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
+                self.base_url = base_url
+                self.timeout_seconds = timeout_seconds
+
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "stubbed unreachable",
+                    url=f"{self.base_url}/api/v1/files",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return True
+
+        monkeypatch.setattr("filigree.core.ClarionRegistry", UnreachableClarionRegistry)
+        conf_path = project / ".filigree.conf"
+        conf = json.loads(conf_path.read_text())
+        conf["registry_backend"] = "clarion"
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf_path.write_text(json.dumps(conf))
+
+        # Dry-run surfaces the diagnostic in the unresolved payload.
+        dry_run = runner.invoke(
+            cli,
+            ["migrate-registry", "--to", "clarion", "--dry-run", "--json"],
+        )
+        assert dry_run.exit_code == 0, dry_run.output
+        dry_data = json.loads(dry_run.output)
+        unresolved_entries = [entry for entry in dry_data["unresolved"] if entry.get("file_id") == old_file_id]
+        assert unresolved_entries, dry_data
+        error_message = unresolved_entries[0]["error"]
+        assert "allow_local_fallback" in error_message
+        assert "registry_backend='local'" in error_message
+        assert dry_data["planned"] == []
+
+        # Execute aborts with a non-zero exit before mutating the database.
+        manifest = project / "registry-migration.json"
+        executed = runner.invoke(
+            cli,
+            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+        )
+        assert executed.exit_code == 1, executed.output
+        data = json.loads(executed.output)
+        assert "Cannot execute registry migration with 1 unresolved file(s)" in data["error"]
+        assert not manifest.exists()
+        with get_db() as db:
+            assert db.get_file(old_file_id).id == old_file_id
+            assert db.get_file(old_file_id).registry_backend == "local"
 
     def test_migrate_registry_execute_rolls_back_on_target_id_conflict(
         self,
@@ -1023,7 +1104,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
@@ -1191,7 +1272,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
         subdir = project / "nested"
         subdir.mkdir()
@@ -1263,7 +1344,7 @@ class TestMigrateRegistryCommand:
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test"}
+        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         return runner, project, old_file_id, new_file_id, project / "registry-migration.json"

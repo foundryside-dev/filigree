@@ -209,30 +209,36 @@ class TestConfIO:
             read_conf(conf)
 
     def test_from_conf_passes_registry_backend(self, tmp_path: Path) -> None:
+        from tests._fakes.clarion_http import clarion_stub
+
         filigree_dir = tmp_path / FILIGREE_DIR_NAME
         filigree_dir.mkdir()
         write_config(filigree_dir, {"prefix": "demo", "version": 1})
         init_db = FiligreeDB(filigree_dir / "filigree.db", prefix="demo")
         init_db.initialize()
         init_db.close()
-        conf = tmp_path / CONF_FILENAME
-        write_conf(
-            conf,
-            {
-                "version": 1,
-                "project_name": "demo",
-                "prefix": "demo",
-                "db": ".filigree/filigree.db",
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
-            },
-        )
+        # Real ``from_conf`` runs the ADR-014 capability probe at __init__;
+        # use a live stub so the probe handshake succeeds and the test
+        # remains focused on conf-loading rather than network reachability.
+        with clarion_stub() as (base_url, _state):
+            conf = tmp_path / CONF_FILENAME
+            write_conf(
+                conf,
+                {
+                    "version": 1,
+                    "project_name": "demo",
+                    "prefix": "demo",
+                    "db": ".filigree/filigree.db",
+                    "registry_backend": "clarion",
+                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                },
+            )
 
-        db = FiligreeDB.from_conf(conf)
-        try:
-            assert db.registry_backend == "clarion"
-        finally:
-            db.close()
+            db = FiligreeDB.from_conf(conf)
+            try:
+                assert db.registry_backend == "clarion"
+            finally:
+                db.close()
 
 
 # ---------------------------------------------------------------------------

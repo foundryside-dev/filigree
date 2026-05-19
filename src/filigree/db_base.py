@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
 
 from filigree.models import FileRecord, Issue
-from filigree.types.core import AssocType, ISOTimestamp, ScanRunStatus, StatusCategory
+from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRunStatus, StatusCategory
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
@@ -277,6 +277,11 @@ class DBMixinProtocol(Protocol):
     project_root: Path | None
     prefix: str
     registry: RegistryProtocol
+    # ADR-014 — always populated by ``FiligreeDB.__init__`` (defaults to
+    # ``"local"`` / ``False``). Mixins read these directly without
+    # ``getattr(..., default)`` guards.
+    registry_backend: RegistryBackend
+    allow_local_fallback: bool
     _conn: sqlite3.Connection | None
     _template_registry: TemplateRegistry | None
     _enabled_packs_override: list[str] | None

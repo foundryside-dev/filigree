@@ -1237,6 +1237,28 @@ class TestStartWork:
         data = _parse(result)
         assert data["code"] == ErrorCode.NOT_FOUND
 
+    async def test_start_work_returns_conflict_for_already_claimed_issue(self, mcp_db: FiligreeDB) -> None:
+        """MCP start_work must surface a CONFLICT envelope on an ownership race.
+
+        Mirrors the ``claim_issue`` MCP test pattern: a claim already held by
+        another assignee raises ``ClaimConflictError`` deep in the DB layer;
+        the tool must emit ``ErrorCode.CONFLICT`` with structured details so
+        MCP consumers can branch correctly. Falling through to the generic
+        ``ValueError`` handler would mis-tag the race as VALIDATION.
+        """
+        issue = mcp_db.create_issue("mcp-start-work-race", type="task")
+        mcp_db.claim_issue(issue.id, assignee="agent-holder")
+
+        result = await call_tool("start_work", {"issue_id": issue.id, "assignee": "agent-challenger"})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {
+            "issue_id": issue.id,
+            "observed": "agent-holder",
+            "expected": "agent-challenger",
+        }
+
     async def test_start_next_work_picks_highest_priority(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("mcp-d6-next-low", type="task", priority=4)
         high = mcp_db.create_issue("mcp-d6-next-high", type="task", priority=0)

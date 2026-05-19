@@ -57,6 +57,11 @@ class TestFilesSchemaAPI:
             "registry_backend": "local",
             "registry_backend_features": ["local", "clarion"],
             "allow_local_fallback": False,
+            # F-1: probe identity is unset under local-mode; the keys are still
+            # emitted so the dashboard JS does not need a separate code path.
+            "clarion_instance_id": None,
+            "clarion_api_version": None,
+            "clarion_instance_rotated": False,
         }
 
     async def test_schema_config_flags_reflect_project_backend(self, clarion_fallback_client: AsyncClient) -> None:

@@ -206,17 +206,28 @@ async function loadDashboardConfig() {
 
 async function loadRegistryFallbackBanner() {
   const banner = document.getElementById("registryFallbackBanner");
-  if (!banner) return;
+  const rotationBanner = document.getElementById("clarionRotationBanner");
+  if (!banner && !rotationBanner) return;
   try {
     const schema = await fetchFileSchema();
-    if (schema?.config_flags?.allow_local_fallback) {
-      banner.classList.remove("hidden");
-    } else {
-      banner.classList.add("hidden");
+    if (banner) {
+      if (schema?.config_flags?.allow_local_fallback) {
+        banner.classList.remove("hidden");
+      } else {
+        banner.classList.add("hidden");
+      }
+    }
+    if (rotationBanner) {
+      if (schema?.config_flags?.clarion_instance_rotated) {
+        rotationBanner.classList.remove("hidden");
+      } else {
+        rotationBanner.classList.add("hidden");
+      }
     }
   } catch (err) {
     console.warn("[loadRegistryFallbackBanner] Failed to load file schema:", err);
-    banner.classList.add("hidden");
+    if (banner) banner.classList.add("hidden");
+    if (rotationBanner) rotationBanner.classList.add("hidden");
   }
 }
 

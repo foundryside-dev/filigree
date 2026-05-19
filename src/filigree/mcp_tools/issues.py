@@ -1489,6 +1489,13 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(e, InvalidTransitionError):
             return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
+    except ClaimConflictError as e:
+        # Optimistic-lock conflict — emit a structured CONFLICT envelope so
+        # MCP consumers can distinguish ownership races from validation
+        # failures. Mirrors the ``claim`` / ``release_claim`` / ``reclaim``
+        # MCP handlers; without this branch the conflict falls through to
+        # the generic ``ValueError`` arm and is misclassified as VALIDATION.
+        return _claim_conflict_response(e)
     except ValueError as e:
         msg = str(e)
         code = classify_value_error(msg)

@@ -241,6 +241,18 @@ tailwind.config = {
   </div>
 </div>
 
+<div id="clarionRotationBanner"
+     role="status"
+     aria-live="polite"
+     class="hidden shrink-0 px-4 py-2 text-xs border-b"
+     style="background:#1E1B4B;color:#C7D2FE;border-color:#4338CA">
+  <div class="max-w-7xl mx-auto flex items-center gap-2">
+    <span aria-hidden="true">&#8635;</span>
+    <span class="font-medium">Clarion instance rotated</span>
+    <span>Clarion was re-indexed during this session; stored Clarion file IDs may be stale. Re-run scans against a clean instance to refresh identity.</span>
+  </div>
+</div>
+
 <!-- Main content area -->
 <main class="flex flex-1 overflow-hidden relative">
   <!-- Graph view -->
