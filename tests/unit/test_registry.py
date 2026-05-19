@@ -8,6 +8,7 @@ import socket
 import threading
 from dataclasses import FrozenInstanceError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from inspect import getdoc
 from pathlib import Path
 from typing import get_args, get_type_hints
 from urllib.parse import parse_qs, urlparse
@@ -57,6 +58,16 @@ def test_registry_backend_literal_is_shared_config_model_source_of_truth() -> No
     assert project_hints["registry_backend"] is RegistryBackend
     assert file_record_hints["registry_backend"] is RegistryBackend
     assert file_record_dict_hints["registry_backend"] is RegistryBackend
+
+
+def test_file_record_documents_content_hash_backend_invariant() -> None:
+    doc = getdoc(FileRecord)
+
+    assert doc is not None
+    assert "content_hash == ''" in doc
+    assert "registry_backend == 'local'" in doc
+    assert "Clarion" in doc
+    assert "non-empty" in doc
 
 
 def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> None:

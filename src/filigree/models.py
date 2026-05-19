@@ -119,6 +119,14 @@ class Issue:
 
 @dataclass
 class FileRecord:
+    """Stored file identity and registry metadata.
+
+    ``content_hash == ''`` is the intentional sentinel for
+    ``registry_backend == 'local'`` because the local backend cannot compute a
+    drift hash. Clarion-backed records must carry a non-empty hash; the
+    Clarion registry client rejects blank hashes before rows are written.
+    """
+
     id: str
     path: str
     language: str = ""
