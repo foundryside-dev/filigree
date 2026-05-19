@@ -39,11 +39,17 @@ def test_batch_response_is_generic() -> None:
 def test_error_code_enum_members() -> None:
     from filigree.types.api import ErrorCode
 
-    # Exact 13-member set. SCHEMA_MISMATCH and INTERNAL were added so the
+    # Exact 15-member set. SCHEMA_MISMATCH and INTERNAL were added so the
     # typed SchemaVersionMismatchError and the catch-all except-Exception
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
     # FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
     # conflict code for projects whose file registry is owned by Clarion.
+    # CLARION_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
+    # Clarion advertises an api_version this Filigree was not built for.
+    # BRIEFING_BLOCKED is the Clarion 1.0 cross-product code (CONTRACT-3):
+    # Clarion returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
+    # intentionally withholds; surfaces as HTTP 403 to the dashboard caller
+    # and MUST NOT engage the local-registry fallback.
     expected = {
         "VALIDATION",
         "NOT_FOUND",
@@ -55,6 +61,8 @@ def test_error_code_enum_members() -> None:
         "INVALID_API_URL",
         "FILE_REGISTRY_DISPLACED",
         "REGISTRY_UNAVAILABLE",
+        "CLARION_REGISTRY_VERSION_MISMATCH",
+        "BRIEFING_BLOCKED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",
         "INTERNAL",

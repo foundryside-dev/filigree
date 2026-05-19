@@ -411,7 +411,9 @@ class TestScanResultsEndpointEnhancements:
         assert resp.status_code == 503
         data = resp.json()
         assert data["code"] == "REGISTRY_UNAVAILABLE"
-        assert "Clarion registry unavailable" in data["error"]
+        # CONTRACT-1: scan-results goes through the batch endpoint now;
+        # the unreachable message has the batch-resolve prefix.
+        assert "Clarion batch resolve unreachable" in data["error"]
 
     async def test_new_finding_ids_in_response(self, client: AsyncClient) -> None:
         resp = await client.post(

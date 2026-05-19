@@ -451,6 +451,13 @@ class ErrorCode(StrEnum):
     INVALID_API_URL = "INVALID_API_URL"
     FILE_REGISTRY_DISPLACED = "FILE_REGISTRY_DISPLACED"
     REGISTRY_UNAVAILABLE = "REGISTRY_UNAVAILABLE"
+    CLARION_REGISTRY_VERSION_MISMATCH = "CLARION_REGISTRY_VERSION_MISMATCH"
+    # Surfaces a Clarion 403 + code="BRIEFING_BLOCKED" response. Distinct from
+    # NOT_FOUND (the file exists, Clarion is intentionally withholding it) and
+    # distinct from PERMISSION (the caller's auth is fine; the *file* is
+    # blocked by Clarion-side briefing policy). The auto-create path MUST
+    # propagate this rather than re-attaching the file under a local file_id.
+    BRIEFING_BLOCKED = "BRIEFING_BLOCKED"
     STOP_FAILED = "STOP_FAILED"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     INTERNAL = "INTERNAL"
@@ -700,16 +707,23 @@ def errorcode_to_http_status(code: ErrorCode) -> int:
     match code:
         case ErrorCode.VALIDATION | ErrorCode.INVALID_API_URL:
             return 400
-        case ErrorCode.PERMISSION:
+        case ErrorCode.PERMISSION | ErrorCode.BRIEFING_BLOCKED:
             return 403
         case ErrorCode.NOT_FOUND:
             return 404
         case ErrorCode.CONFLICT | ErrorCode.INVALID_TRANSITION | ErrorCode.FILE_REGISTRY_DISPLACED:
             return 409
-        case ErrorCode.NOT_INITIALIZED | ErrorCode.SCHEMA_MISMATCH | ErrorCode.REGISTRY_UNAVAILABLE:
+        case (
+            ErrorCode.NOT_INITIALIZED
+            | ErrorCode.SCHEMA_MISMATCH
+            | ErrorCode.REGISTRY_UNAVAILABLE
+            | ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        ):
             # Service exists but is not in a state where it can answer —
             # 503 lets clients retry once the project is initialized or
-            # the schema is migrated.
+            # the schema is migrated. Version-mismatch surfaces at startup
+            # only today; if a dashboard route ever propagates it, 503 is
+            # the right "operator must reconcile builds" signal.
             return 503
         case ErrorCode.IO | ErrorCode.STOP_FAILED | ErrorCode.INTERNAL:
             return 500

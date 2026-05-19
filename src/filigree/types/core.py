@@ -96,11 +96,19 @@ class _ProjectConfigRequired(TypedDict):
 
 
 class ClarionConfig(TypedDict, total=False):
-    """ADR-014 Clarion registry backend configuration."""
+    """ADR-014 Clarion registry backend configuration.
+
+    ``token_env`` names the environment variable that carries the Bearer
+    token the Clarion read API expects (Authorization header). Defaults to
+    ``"CLARION_LOOM_TOKEN"``. Per the Clarion 1.0 cross-product contract,
+    Clarion accepts unauthenticated calls on loopback bind and rejects them
+    on non-loopback; if the env var is unset, Filigree sends no header.
+    """
 
     base_url: str
     timeout_seconds: int | float
     allow_local_fallback: bool
+    token_env: str
 
 
 class ProjectConfig(_ProjectConfigRequired, total=False):

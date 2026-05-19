@@ -46,12 +46,20 @@ from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 from filigree.db_workflow import WorkflowMixin
 from filigree.models import _EMPTY_TS, FileRecord, Issue, ScanFinding
 from filigree.registry import (
+    DEFAULT_CLARION_TOKEN_ENV,
+    BatchQuery,
+    BatchResolution,
+    ClarionCapabilities,
     ClarionRegistry,
     LocalRegistry,
     RegistryProtocol,
     RegistryUnavailableError,
+    RegistryVersionMismatchError,
     ResolvedFile,
     normalize_clarion_base_url,
+    probe_clarion_capabilities,
+    resolve_files_batch_via_loop,
+    validate_clarion_capabilities,
 )
 from filigree.types.core import (
     AssocType,
@@ -586,8 +594,65 @@ class _ClarionLocalFallbackRegistry:
             )
             return self._fallback.resolve_file(path, language=language, actor=actor)
 
+    def resolve_files_batch(
+        self,
+        queries: list[BatchQuery],
+        *,
+        actor: str = "",
+    ) -> BatchResolution:
+        """Whole-batch fallback semantics: if Clarion is unreachable for the
+        batch, every item in the batch resolves through ``LocalRegistry`` and
+        a single WARN log captures the cause.
+
+        Per-item failures (``not_found`` / ``briefing_blocked`` / ``errors``)
+        from a *successful* batch call pass through verbatim — those are not
+        availability failures and must NOT be silently re-attached locally
+        (briefing-blocked in particular is a security-bearing refusal).
+
+        For primaries that only implement ``resolve_file`` (test fakes
+        predating CONTRACT-1), the loop helper from ``filigree.registry``
+        adapts the legacy single-item API.
+        """
+        primary_batch = getattr(self._primary, "resolve_files_batch", None)
+        try:
+            if primary_batch is not None:
+                result: BatchResolution = primary_batch(queries, actor=actor)
+                return result
+            return resolve_files_batch_via_loop(self._primary, queries, actor=actor)
+        except RegistryUnavailableError as exc:
+            logger.warning(
+                "Clarion registry backend unavailable for batch resolve; using local file registry fallback",
+                extra={
+                    "registry_backend": "clarion",
+                    "clarion_base_url": self._base_url,
+                    "batch_size": len(queries),
+                    "url": exc.url,
+                    "cause_kind": exc.cause_kind,
+                },
+            )
+            return self._fallback.resolve_files_batch(queries, actor=actor)
+
     def is_displaced(self) -> bool:
         return self._primary.is_displaced()
+
+
+def _apply_allow_local_fallback_override(
+    clarion_config: ClarionConfig | None,
+    override: bool | None,
+) -> ClarionConfig | None:
+    """Apply a ``--allow-local-fallback`` startup override to a clarion config.
+
+    Returns the input untouched when ``override is None`` (no flag passed).
+    Otherwise produces a new dict with ``allow_local_fallback`` set to the
+    override value. Used by the dashboard / CLI startup paths to thread the
+    operator's recovery flag into the constructor before the capability
+    probe runs.
+    """
+    if override is None:
+        return clarion_config
+    merged: ClarionConfig = dict(clarion_config or {})  # type: ignore[assignment]
+    merged["allow_local_fallback"] = override
+    return merged
 
 
 def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_clarion_base_url: bool = True) -> None:
@@ -607,7 +672,7 @@ def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_cl
     if not isinstance(clarion, dict):
         msg = f"{source}: 'clarion' must be a JSON object, got {type(clarion).__name__}: {clarion!r}"
         raise ValueError(msg)
-    allowed_clarion_keys = {"base_url", "timeout_seconds", "allow_local_fallback"}
+    allowed_clarion_keys = {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
     unknown_clarion_keys = sorted(set(clarion) - allowed_clarion_keys)
     if unknown_clarion_keys:
         msg = f"{source}: unknown clarion setting(s): {', '.join(unknown_clarion_keys)}"
@@ -629,6 +694,11 @@ def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_cl
     if "allow_local_fallback" in clarion and not isinstance(clarion["allow_local_fallback"], bool):
         msg = f"{source}: 'clarion.allow_local_fallback' must be a boolean, got {clarion['allow_local_fallback']!r}"
         raise ValueError(msg)
+    if "token_env" in clarion:
+        token_env = clarion["token_env"]
+        if not isinstance(token_env, str) or not token_env.strip():
+            msg = f"{source}: 'clarion.token_env' must be a non-empty string naming an env var, got {token_env!r}"
+            raise ValueError(msg)
 
 
 def get_mode(filigree_dir: Path) -> str:
@@ -760,7 +830,11 @@ class FiligreeDB(
         registry: RegistryProtocol | None = None,
         registry_backend: RegistryBackend = "local",
         clarion_config: ClarionConfig | None = None,
+        skip_clarion_capability_probe: bool = False,
     ) -> None:
+        # ``skip_clarion_capability_probe`` exists for unit tests that stand up
+        # stub HTTP servers serving only ``/api/v1/files``; production callers
+        # should leave it ``False`` so ADR-014's fail-closed handshake runs.
         self.db_path = Path(db_path)
         self.prefix = prefix
         # ``project_root`` anchors filesystem paths stored relative to the
@@ -795,6 +869,16 @@ class FiligreeDB(
         self.registry_backend = registry_backend
         self.clarion_config = cast("ClarionConfig", dict(clarion_config or {}))
         self.allow_local_fallback = bool(self.clarion_config.get("allow_local_fallback", False))
+        # Clarion capability-probe state — populated by the startup probe (or by
+        # ``reprobe_clarion_capabilities`` later). ``clarion_instance_rotated`` is
+        # set when a mid-session re-probe sees a different ``instance_id`` than
+        # the startup probe; it is read by ``GET /api/files/_schema`` so the
+        # dashboard can surface a "Clarion was re-indexed; stored file IDs may
+        # be stale" banner without a separate endpoint.
+        self.clarion_capabilities: ClarionCapabilities | None = None
+        self.clarion_instance_id: str | None = None
+        self.clarion_api_version: int | None = None
+        self.clarion_instance_rotated: bool = False
         if registry is not None:
             backend_displaced = registry_backend == "clarion"
             registry_displaced = registry.is_displaced()
@@ -815,7 +899,16 @@ class FiligreeDB(
             base_url = normalize_clarion_base_url(base_url_value)
             self.clarion_config["base_url"] = base_url
             timeout_seconds = float(self.clarion_config.get("timeout_seconds", 5))
-            self.registry = ClarionRegistry(base_url, timeout_seconds=timeout_seconds)
+            auth_token = self._resolve_clarion_auth_token()
+            # Pass auth_token only when set — keeps test fakes that monkeypatch
+            # ClarionRegistry with the older 2-arg signature working without
+            # forcing every test to add a keyword argument they don't use.
+            registry_kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+            if auth_token is not None:
+                registry_kwargs["auth_token"] = auth_token
+            self.registry = ClarionRegistry(base_url, **registry_kwargs)
+            if not skip_clarion_capability_probe:
+                self._run_initial_clarion_capability_probe(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
             if self.allow_local_fallback:
                 self.enable_local_registry_fallback()
         else:
@@ -823,6 +916,141 @@ class FiligreeDB(
 
     def _make_local_registry(self) -> LocalRegistry:
         return LocalRegistry(lambda: self._generate_unique_id("file_records", "f"))
+
+    def _clarion_base_url(self) -> str | None:
+        """Return the configured Clarion base URL, or ``None`` if absent.
+
+        ``ClarionConfig`` is ``TypedDict(total=False)`` so ``.get("base_url")``
+        is typed as ``str | None``; this wrapper centralises the access so
+        callers don't have to re-derive the contract at each call site.
+        """
+        value = self.clarion_config.get("base_url")
+        if not isinstance(value, str) or not value:
+            return None
+        return value
+
+    def _clarion_timeout_seconds(self) -> float:
+        """Return the configured Clarion HTTP timeout in seconds."""
+        return float(self.clarion_config.get("timeout_seconds", 5))
+
+    def _resolve_clarion_auth_token(self) -> str | None:
+        """Resolve the Bearer token for Clarion calls from the configured env var.
+
+        Per the Clarion 1.0 cross-product contract: ``ClarionConfig.token_env``
+        names the env var (default ``CLARION_LOOM_TOKEN``); if it resolves to
+        a non-empty value, send ``Authorization: Bearer <token>``; if it is
+        unset or empty, send no auth header. When ``token_env`` was set
+        explicitly in config but the env var is missing or empty, emit a WARN
+        so operators can notice silent loopback-only fallback.
+        """
+        token_env_name = self.clarion_config.get("token_env", DEFAULT_CLARION_TOKEN_ENV)
+        token_env_was_explicit = "token_env" in self.clarion_config
+        value = os.environ.get(token_env_name, "")
+        if value:
+            return value
+        if token_env_was_explicit:
+            logger.warning(
+                "Clarion token_env %r is configured but the environment variable is missing or empty; "
+                "sending no Authorization header. Clarion will accept on loopback bind and reject on non-loopback.",
+                token_env_name,
+                extra={"token_env": token_env_name, "clarion_base_url": self.clarion_config.get("base_url", "")},
+            )
+        return None
+
+    def _run_initial_clarion_capability_probe(self, base_url: str, *, timeout_seconds: float, auth_token: str | None = None) -> None:
+        """Probe Clarion's ``_capabilities`` endpoint at startup and capture identity.
+
+        Fail-closed semantics per ADR-014 §7:
+        - api_version mismatch always raises (no fallback can save a wire-break).
+        - reachable Clarion that declines the registry-backend role raises
+          ``RegistryUnavailableError`` (transient; respects ``allow_local_fallback``).
+        - probe-time HTTP/network failure raises ``RegistryUnavailableError``
+          (caller's ``allow_local_fallback`` decides whether to downgrade).
+
+        Version-mismatch failures bypass the fallback policy because they
+        signal a permanent protocol incompatibility; transient/reachability
+        failures fall through to the existing fallback wrapping in
+        ``__init__``.
+        """
+        try:
+            capabilities = probe_clarion_capabilities(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
+            validate_clarion_capabilities(capabilities, base_url=base_url)
+        except RegistryVersionMismatchError:
+            raise
+        except RegistryUnavailableError as exc:
+            if self.allow_local_fallback:
+                logger.warning(
+                    "Clarion capability probe failed at startup; allow_local_fallback=true, "
+                    "auto-creates will route through LocalRegistry until Clarion recovers",
+                    extra={
+                        "url": exc.url,
+                        "cause_kind": exc.cause_kind,
+                        "registry_backend": "clarion",
+                    },
+                )
+                return
+            raise
+        self.clarion_capabilities = capabilities
+        self.clarion_instance_id = capabilities["instance_id"]
+        self.clarion_api_version = capabilities["api_version"]
+        logger.info(
+            "Clarion capability probe succeeded",
+            extra={
+                "clarion_base_url": base_url,
+                "instance_id": capabilities["instance_id"],
+                "api_version": capabilities["api_version"],
+            },
+        )
+
+    def reprobe_clarion_capabilities(self) -> ClarionCapabilities | None:
+        """Re-issue the capability probe and flag a banner on instance_id rotation.
+
+        Returns ``None`` if this DB is not running in ``clarion`` mode, or if
+        Clarion is unreachable (the unavailability is logged at WARN; callers
+        that need fail-closed behaviour should call ``resolve_file`` instead,
+        which already has the strict policy). Returns the probe payload
+        otherwise.
+
+        On instance_id rotation — Clarion was re-indexed mid-session and any
+        stored Clarion file IDs may be stale — sets
+        ``clarion_instance_rotated=True`` and logs at WARN. The dashboard
+        surfaces this through ``GET /api/files/_schema``.
+        """
+        if self.registry_backend != "clarion":
+            return None
+        base_url_value = self._clarion_base_url()
+        if base_url_value is None:
+            return None
+        timeout_seconds = self._clarion_timeout_seconds()
+        auth_token = self._resolve_clarion_auth_token()
+        try:
+            capabilities = probe_clarion_capabilities(base_url_value, timeout_seconds=timeout_seconds, auth_token=auth_token)
+            validate_clarion_capabilities(capabilities, base_url=base_url_value)
+        except RegistryUnavailableError as exc:
+            logger.warning(
+                "Clarion capability re-probe unreachable",
+                extra={
+                    "url": exc.url,
+                    "cause_kind": exc.cause_kind,
+                    "registry_backend": "clarion",
+                },
+            )
+            return None
+        previous_instance_id = self.clarion_instance_id
+        self.clarion_capabilities = capabilities
+        self.clarion_instance_id = capabilities["instance_id"]
+        self.clarion_api_version = capabilities["api_version"]
+        if previous_instance_id is not None and previous_instance_id != capabilities["instance_id"]:
+            self.clarion_instance_rotated = True
+            logger.warning(
+                "Clarion instance_id rotated mid-session; stored Clarion file IDs may be stale",
+                extra={
+                    "previous_instance_id": previous_instance_id,
+                    "current_instance_id": capabilities["instance_id"],
+                    "clarion_base_url": base_url_value,
+                },
+            )
+        return capabilities
 
     def enable_local_registry_fallback(self) -> None:
         """Allow Clarion projects to use local IDs only after Clarion is unavailable."""
@@ -837,11 +1065,17 @@ class FiligreeDB(
         self.registry = _ClarionLocalFallbackRegistry(
             self.registry,
             self._make_local_registry(),
-            base_url=str(self.clarion_config.get("base_url", "")),
+            base_url=self._clarion_base_url() or "",
         )
 
     @classmethod
-    def from_filigree_dir(cls, filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
+    def from_filigree_dir(
+        cls,
+        filigree_dir: Path,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
         """Create a FiligreeDB from an existing ``.filigree/`` directory.
 
         When ``config.json`` is missing or omits the ``prefix`` key, fall back
@@ -850,13 +1084,18 @@ class FiligreeDB(
         (prefix defaults to ``cwd.name``) and prevents a legacy install from
         silently opening with the wrong identity — every write to its own
         pre-existing issues would otherwise raise ``WrongProjectError``.
+
+        ``allow_local_fallback_override`` is the dashboard / CLI escape hatch
+        for ADR-014 §7: an operator passing ``--allow-local-fallback`` at
+        startup wants to override whatever ``allow_local_fallback`` is in the
+        project's ``.filigree/config.json``, so the capability probe at
+        ``__init__`` time downgrades to a WARN instead of aborting when
+        Clarion is offline.
         """
         config = read_config(filigree_dir)
-        # ``read_config`` backfills a "filigree" prefix into its return value
-        # for missing/partial configs, so inspect the raw JSON to detect
-        # whether the user ever declared one explicitly.
         configured_prefix = _raw_config_prefix(filigree_dir / CONFIG_FILENAME)
         prefix = configured_prefix if configured_prefix is not None else (filigree_dir.parent.name or "filigree")
+        clarion_config = _apply_allow_local_fallback_override(config.get("clarion"), allow_local_fallback_override)
         db = cls(
             filigree_dir / DB_FILENAME,
             prefix=prefix,
@@ -864,7 +1103,7 @@ class FiligreeDB(
             check_same_thread=check_same_thread,
             project_root=filigree_dir.resolve().parent,
             registry_backend=config.get("registry_backend", "local"),
-            clarion_config=config.get("clarion"),
+            clarion_config=clarion_config,
         )
         try:
             db.initialize()
@@ -879,10 +1118,18 @@ class FiligreeDB(
         return db
 
     @classmethod
-    def from_conf(cls, conf_path: Path, *, check_same_thread: bool = True) -> FiligreeDB:
+    def from_conf(
+        cls,
+        conf_path: Path,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
         """Create a FiligreeDB from a ``.filigree.conf`` anchor file (v2.0).
 
         Resolves the DB path relative to the conf file's directory.
+
+        ``allow_local_fallback_override`` — see :meth:`from_filigree_dir`.
         """
         data = read_conf(conf_path)
         db_path = (conf_path.parent / data["db"]).resolve()
@@ -893,6 +1140,7 @@ class FiligreeDB(
             config = read_config(conf_path.parent / FILIGREE_DIR_NAME)
             enabled_packs = config.get("enabled_packs")
             enabled_packs_from_project_config = enabled_packs is not None
+        clarion_config = _apply_allow_local_fallback_override(data.get("clarion"), allow_local_fallback_override)
         db = cls(
             db_path,
             prefix=prefix,
@@ -900,7 +1148,7 @@ class FiligreeDB(
             check_same_thread=check_same_thread,
             project_root=conf_path.resolve().parent,
             registry_backend=cast("RegistryBackend", data.get("registry_backend", "local")),
-            clarion_config=data.get("clarion"),
+            clarion_config=clarion_config,
         )
         try:
             db.initialize()

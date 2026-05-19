@@ -217,8 +217,13 @@ The work has a fixed one-way dependency: Filigree's `clarion` mode is a no-op un
 | **C** | Filigree | Add `registry_backend` config flag, `ClarionRegistry` impl, capability probe (`_schema.config_flags`), `FILE_REGISTRY_DISPLACED` error code, fail-closed startup, `--allow-local-fallback` escape, the `migrate-registry` CLI verb. |
 | **D** | Both | Cross-process integration tests against a live Clarion read API. Parity tests parameterised over `registry_backend ∈ {local, clarion}`. Capability-probe handshake tests. |
 | **E** | Both | Documentation: Filigree `docs/federation/contracts.md` references the Clarion read surface; Clarion's `loom.md` §2 claim is restated as factual rather than aspirational; cross-project launch runbook published. |
+| **F** | Both | Clarion 1.0 wire-contract closures (landed 2026-05-19, day-of-1.0 prep): batch resolve via `POST /api/v1/files/batch` (CONTRACT-1, chunked at 256); Bearer auth via `Authorization` header sourced from env var named by `clarion.token_env` (CONTRACT-2, default `CLARION_LOOM_TOKEN`); briefing-blocked surfaces as HTTP 403 + `{"code": "BRIEFING_BLOCKED"}` and propagates uncaught past the local-registry fallback (CONTRACT-3). |
 
-Phase A must ship before Phase C can land an integration that does anything observable; B is independent and can ship first behind a flagless refactor.
+### Path normalization (CONTRACT-4)
+
+Paths sent to Clarion on both `GET /api/v1/files` and `POST /api/v1/files/batch` are **lexical**, **forward-slash**, **project-relative** strings. Filigree normalizes paths at the boundary (`db_files._normalize_scan_path`); backslashes are converted to forward slashes and `.` / `..` segments are removed. **Disk presence is not required**: Clarion looks up entries by its `source_file_path` catalog column, not a filesystem probe. A path that resolves cleanly inside the project root but has no file on disk still has an entry in Clarion's catalog and resolves successfully (this is the normal case for synthetic findings produced by static scanners against transient build artefacts).
+
+Phase A must ship before Phase C can land an integration that does anything observable; B is independent and can ship first behind a flagless refactor. Phase F lands once Clarion 1.0 freezes its wire surface.
 
 ## Related Decisions
 

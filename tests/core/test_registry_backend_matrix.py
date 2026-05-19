@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import json
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 import filigree.registry as registry_module
 from filigree.core import FiligreeDB
 from filigree.registry import DEFAULT_TEST_REGISTRY_BACKENDS, RegistryBackend, ResolvedFile
+from tests._fakes.clarion_http import ClarionStubState, clarion_stub
 
 
 class _DisplacedRegistry:
@@ -36,49 +33,9 @@ class _DisplacedRegistry:
 
 
 @contextmanager
-def _live_clarion_registry() -> Iterator[tuple[str, list[dict[str, list[str]]]]]:
-    requests: list[dict[str, list[str]]] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            parsed = urlparse(self.path)
-            query = parse_qs(parsed.query)
-            requests.append(query)
-            assert parsed.path == "/api/v1/files"
-            path = query.get("path", [""])[0]
-            language = query.get("language", [""])[0]
-            body = json.dumps(
-                {
-                    "entity_id": f"core:file:matrix@{path}",
-                    "content_hash": f"sha256:{path}",
-                    "canonical_path": path,
-                    "language": language,
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *args: object) -> None:
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=1)
-
-
-@contextmanager
-def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tuple[FiligreeDB, list[dict[str, list[str]]]]]:
+def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tuple[FiligreeDB, ClarionStubState | None]]:
     if registry_backend == "clarion":
-        with _live_clarion_registry() as (base_url, requests):
+        with clarion_stub() as (base_url, state):
             db = FiligreeDB(
                 tmp_path / "filigree.db",
                 prefix="test",
@@ -88,7 +45,7 @@ def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tu
             )
             try:
                 db.initialize()
-                yield db, requests
+                yield db, state
             finally:
                 db.close()
         return
@@ -96,13 +53,13 @@ def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tu
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test", project_root=tmp_path)
     try:
         db.initialize()
-        yield db, []
+        yield db, None
     finally:
         db.close()
 
 
 def _expected_file_id(registry_backend: RegistryBackend, path: str) -> str:
-    return f"core:file:matrix@{path}" if registry_backend == "clarion" else ""
+    return f"core:file:stub@{path}" if registry_backend == "clarion" else ""
 
 
 def _assert_registry_file_record(db: FiligreeDB, registry_backend: RegistryBackend, path: str) -> None:
@@ -124,18 +81,19 @@ def test_default_registry_backend_matrix_covers_local_and_clarion() -> None:
 
 @pytest.mark.parametrize("registry_backend", DEFAULT_TEST_REGISTRY_BACKENDS)
 def test_register_file_round_trips_default_registry_backend(tmp_path: Path, registry_backend: RegistryBackend) -> None:
-    with _matrix_db(tmp_path, registry_backend) as (db, requests):
+    with _matrix_db(tmp_path, registry_backend) as (db, state):
         file_record = db.register_file("src/default_backend.py", language="python")
 
         _assert_registry_file_record(db, registry_backend, "src/default_backend.py")
         assert file_record.id == db.get_file_by_path("src/default_backend.py").id  # type: ignore[union-attr]
         if registry_backend == "clarion":
-            assert requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
+            assert state is not None
+            assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
 
 @pytest.mark.parametrize("registry_backend", DEFAULT_TEST_REGISTRY_BACKENDS)
 def test_scan_ingest_round_trips_default_registry_backend(tmp_path: Path, registry_backend: RegistryBackend) -> None:
-    with _matrix_db(tmp_path, registry_backend) as (db, requests):
+    with _matrix_db(tmp_path, registry_backend) as (db, state):
         result = db.process_scan_results(
             scan_source="ruff",
             findings=[
@@ -155,22 +113,26 @@ def test_scan_ingest_round_trips_default_registry_backend(tmp_path: Path, regist
         assert file_record is not None
         assert finding["file_id"] == file_record.id
         if registry_backend == "clarion":
-            assert requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
+            assert state is not None
+            # CONTRACT-1: scan-results batches via POST /api/v1/files/batch.
+            assert state.file_requests == []
+            assert state.batch_requests == [{"queries": [{"path": "src/default_backend.py", "language": "python"}]}]
 
 
 @pytest.mark.parametrize("registry_backend", DEFAULT_TEST_REGISTRY_BACKENDS)
 def test_observation_file_path_round_trips_default_registry_backend(tmp_path: Path, registry_backend: RegistryBackend) -> None:
-    with _matrix_db(tmp_path, registry_backend) as (db, requests):
+    with _matrix_db(tmp_path, registry_backend) as (db, state):
         db.create_observation(summary="Observed", file_path="src/default_backend.py")
 
         _assert_registry_file_record(db, registry_backend, "src/default_backend.py")
         if registry_backend == "clarion":
-            assert requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
+            assert state is not None
+            assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
 
 @pytest.mark.parametrize("registry_backend", DEFAULT_TEST_REGISTRY_BACKENDS)
 def test_annotation_file_path_round_trips_default_registry_backend(tmp_path: Path, registry_backend: RegistryBackend) -> None:
-    with _matrix_db(tmp_path, registry_backend) as (db, requests):
+    with _matrix_db(tmp_path, registry_backend) as (db, state):
         source = tmp_path / "src" / "default_backend.py"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("alpha\nbeta\n")
@@ -182,7 +144,8 @@ def test_annotation_file_path_round_trips_default_registry_backend(tmp_path: Pat
         assert file_record is not None
         assert annotation["file_id"] == file_record.id
         if registry_backend == "clarion":
-            assert requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
+            assert state is not None
+            assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
 
 def test_implicit_auto_create_paths_thread_displaced_registry_ids(tmp_path: Path) -> None:

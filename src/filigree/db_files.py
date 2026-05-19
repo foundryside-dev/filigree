@@ -18,6 +18,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
 from filigree.db_base import DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
 from filigree.models import FileRecord, ScanFinding
+from filigree.registry import (
+    BatchQuery,
+    BatchResolution,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    resolve_files_batch_via_loop,
+)
 from filigree.types.core import AssocType, FindingStatus, Severity
 from filigree.types.files import ScanIngestResult
 
@@ -185,11 +193,10 @@ class FilesMixin(DBMixinProtocol):
         )
 
     def _is_local_registry_fallback_row(self, registry_backend: str) -> bool:
-        return (
-            getattr(self, "registry_backend", "local") == "clarion"
-            and bool(getattr(self, "allow_local_fallback", False))
-            and registry_backend == "local"
-        )
+        # ``registry_backend`` and ``allow_local_fallback`` are always set on
+        # ``FiligreeDB.__init__`` before any DB call reaches a mixin method;
+        # attribute access is safe without a default.
+        return self.registry_backend == "clarion" and bool(self.allow_local_fallback) and registry_backend == "local"
 
     def _record_registry_fallback_event(self, file_id: str, *, actor: str, now: str) -> None:
         self.conn.execute(
@@ -216,6 +223,14 @@ class FilesMixin(DBMixinProtocol):
         identity regardless of caller (MCP tool, scan ingestion, etc.).
 
         Returns the FileRecord (created or updated).
+
+        Implementation note: a registry that canonicalises the requested path
+        (case-fold, whitespace, slash normalisation) may resolve a fresh-looking
+        call to the storage path of an already-registered row. The previous
+        version of this method handled that by recursing back into
+        ``register_file`` with the canonical path; this flat variant calls
+        :meth:`_update_existing_file_record` directly so there is exactly one
+        update code path (mirroring ``_upsert_file_record``'s pattern).
         """
         path = _normalize_scan_path(path)
         if not path:
@@ -225,84 +240,16 @@ class FilesMixin(DBMixinProtocol):
         inferred_language = _infer_language_from_path(path)
 
         if existing is not None:
-            updates: list[str] = []
-            params: list[Any] = []
-            # Detect field changes and emit events
-            changes: list[tuple[str, str, str]] = []  # (field, old, new)
-            current_language = existing["language"] or ""
-            next_language = language or (inferred_language if not current_language else "")
-            if self.registry.is_displaced():
-                resolved = self.registry.resolve_file(
-                    path,
-                    language=next_language or current_language,
-                    actor=actor,
-                )
-                if resolved["file_id"] != existing["id"]:
-                    msg = (
-                        f"Existing file {path!r} resolves to registry id {resolved['file_id']!r}, "
-                        f"but stored file id is {existing['id']!r}; run migrate-registry before re-registering"
-                    )
-                    raise ValueError(msg)
-                for field, next_value in (
-                    ("content_hash", resolved["content_hash"]),
-                    ("registry_backend", resolved["registry_backend"]),
-                ):
-                    current_value = existing[field] or ""
-                    if next_value != current_value:
-                        updates.append(f"{field} = ?")
-                        params.append(next_value)
-                        changes.append((field, current_value, next_value))
-            if next_language and next_language != current_language:
-                updates.append("language = ?")
-                params.append(next_language)
-                changes.append(("language", current_language, next_language))
-            if file_type and file_type != (existing["file_type"] or ""):
-                updates.append("file_type = ?")
-                params.append(file_type)
-                changes.append(("file_type", existing["file_type"] or "", file_type))
-            # `is not None` (not truthy) so `metadata={}` can explicitly clear
-            # existing metadata; `metadata=None` means "leave unchanged".
-            if metadata is not None:
-                old_meta_raw = existing["metadata"] or "{}"
-                try:
-                    old_meta_parsed = json.loads(old_meta_raw)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(
-                        "Corrupt metadata for file %s (id=%s), treating as empty",
-                        existing["path"],
-                        existing["id"],
-                    )
-                    old_meta_parsed = {}
-                if old_meta_parsed != metadata:
-                    new_meta = json.dumps(metadata)
-                    updates.append("metadata = ?")
-                    params.append(new_meta)
-                    changes.append(("metadata", old_meta_raw, new_meta))
-            if not updates:
-                # No actual changes — return existing record without phantom update
-                return self.get_file(existing["id"])
-            updates.append("updated_at = ?")
-            params.append(now)
-            updates.append("updated_by = ?")
-            params.append(actor)
-            params.append(existing["id"])
-            try:
-                self.conn.execute(
-                    f"UPDATE file_records SET {', '.join(updates)} WHERE id = ?",
-                    params,
-                )
-                for field, old_val, new_val in changes:
-                    self.conn.execute(
-                        "INSERT INTO file_events "
-                        "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-                        "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
-                        (existing["id"], field, old_val, new_val, actor, now),
-                    )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-            return self.get_file(existing["id"])
+            return self._update_existing_file_record(
+                existing,
+                path=path,
+                language=language,
+                inferred_language=inferred_language,
+                file_type=file_type,
+                metadata=metadata,
+                actor=actor,
+                now=now,
+            )
 
         stored_language = language or inferred_language
         resolved = self.registry.resolve_file(
@@ -316,16 +263,19 @@ class FilesMixin(DBMixinProtocol):
         content_hash = resolved["content_hash"]
         registry_backend = resolved["registry_backend"]
         storage_existing = self.conn.execute(
-            "SELECT path FROM file_records WHERE path = ? OR id = ?",
+            "SELECT * FROM file_records WHERE path = ? OR id = ?",
             (stored_path, file_id),
         ).fetchone()
         if storage_existing is not None:
-            return self.register_file(
-                storage_existing["path"],
+            return self._update_existing_file_record(
+                storage_existing,
+                path=storage_existing["path"],
                 language=language,
+                inferred_language=_infer_language_from_path(storage_existing["path"]),
                 file_type=file_type,
                 metadata=metadata,
                 actor=actor,
+                now=now,
             )
         try:
             self.conn.execute(
@@ -352,22 +302,121 @@ class FilesMixin(DBMixinProtocol):
         except sqlite3.IntegrityError:
             self.conn.rollback()
             storage_existing = self.conn.execute(
-                "SELECT path FROM file_records WHERE path IN (?, ?) OR id = ?",
+                "SELECT * FROM file_records WHERE path IN (?, ?) OR id = ?",
                 (path, stored_path, file_id),
             ).fetchone()
             if storage_existing is not None:
-                return self.register_file(
-                    storage_existing["path"],
+                return self._update_existing_file_record(
+                    storage_existing,
+                    path=storage_existing["path"],
                     language=language,
+                    inferred_language=_infer_language_from_path(storage_existing["path"]),
                     file_type=file_type,
                     metadata=metadata,
                     actor=actor,
+                    now=now,
                 )
             raise
         except Exception:
             self.conn.rollback()
             raise
         return self.get_file(file_id)
+
+    def _update_existing_file_record(
+        self,
+        existing: sqlite3.Row,
+        *,
+        path: str,
+        language: str,
+        inferred_language: str,
+        file_type: str,
+        metadata: dict[str, Any] | None,
+        actor: str,
+        now: str,
+    ) -> FileRecord:
+        """Update an already-stored ``file_records`` row from a register call.
+
+        Centralises the diff-detect/emit-events/UPDATE path so both the
+        same-path-match branch and the canonical-collision recovery branch
+        of :meth:`register_file` go through the same code (mirrors the flat
+        ``update_existing_file`` pattern in :meth:`_upsert_file_record`).
+        """
+        updates: list[str] = []
+        params: list[Any] = []
+        changes: list[tuple[str, str, str]] = []  # (field, old, new)
+        current_language = existing["language"] or ""
+        next_language = language or (inferred_language if not current_language else "")
+        if self.registry.is_displaced():
+            resolved = self.registry.resolve_file(
+                path,
+                language=next_language or current_language,
+                actor=actor,
+            )
+            if resolved["file_id"] != existing["id"]:
+                msg = (
+                    f"Existing file {path!r} resolves to registry id {resolved['file_id']!r}, "
+                    f"but stored file id is {existing['id']!r}; run migrate-registry before re-registering"
+                )
+                raise ValueError(msg)
+            for field, next_value in (
+                ("content_hash", resolved["content_hash"]),
+                ("registry_backend", resolved["registry_backend"]),
+            ):
+                current_value = existing[field] or ""
+                if next_value != current_value:
+                    updates.append(f"{field} = ?")
+                    params.append(next_value)
+                    changes.append((field, current_value, next_value))
+        if next_language and next_language != current_language:
+            updates.append("language = ?")
+            params.append(next_language)
+            changes.append(("language", current_language, next_language))
+        if file_type and file_type != (existing["file_type"] or ""):
+            updates.append("file_type = ?")
+            params.append(file_type)
+            changes.append(("file_type", existing["file_type"] or "", file_type))
+        # ``is not None`` (not truthy) so ``metadata={}`` can explicitly clear
+        # existing metadata; ``metadata=None`` means "leave unchanged".
+        if metadata is not None:
+            old_meta_raw = existing["metadata"] or "{}"
+            try:
+                old_meta_parsed = json.loads(old_meta_raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "Corrupt metadata for file %s (id=%s), treating as empty",
+                    existing["path"],
+                    existing["id"],
+                )
+                old_meta_parsed = {}
+            if old_meta_parsed != metadata:
+                new_meta = json.dumps(metadata)
+                updates.append("metadata = ?")
+                params.append(new_meta)
+                changes.append(("metadata", old_meta_raw, new_meta))
+        if not updates:
+            return self.get_file(existing["id"])
+        updates.append("updated_at = ?")
+        params.append(now)
+        updates.append("updated_by = ?")
+        params.append(actor)
+        params.append(existing["id"])
+        try:
+            self.conn.execute(
+                f"UPDATE file_records SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            for field, old_val, new_val in changes:
+                self.conn.execute(
+                    "INSERT INTO file_events "
+                    "(file_id, event_type, field, old_value, new_value, actor, created_at) "
+                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
+                    (existing["id"], field, old_val, new_val, actor, now),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return self.get_file(existing["id"])
 
     def get_file(self, file_id: str) -> FileRecord:
         """Get a file record by ID. Raises KeyError if not found."""
@@ -795,19 +844,62 @@ class FilesMixin(DBMixinProtocol):
         return file_id
 
     def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
-        """Resolve new scan file identities before the write transaction opens."""
-        resolved_files: dict[str, ResolvedFile] = {}
+        """Resolve new scan file identities before the write transaction opens.
+
+        CONTRACT-1 (Clarion 1.0): unfamiliar paths are batched into a single
+        ``resolve_files_batch`` call (chunked at 256 by the protocol). One HTTP
+        round-trip per chunk replaces the prior N-round-trip per-finding loop.
+        Briefing-blocked / not_found / structured-error per-item failures are
+        promoted back to the existing per-finding raise behaviour so the
+        scan-results POST keeps its fail-closed semantics.
+        """
+        # Deduplicate unfamiliar paths and capture the language to send.
+        seen_paths: set[str] = set()
+        queries: list[BatchQuery] = []
         for f in findings:
             path = f["path"]
-            if path in resolved_files:
+            if path in seen_paths:
                 continue
             existing_file = self.conn.execute("SELECT 1 FROM file_records WHERE path = ?", (path,)).fetchone()
             if existing_file is not None:
+                seen_paths.add(path)
                 continue
             inferred_language = _infer_language_from_path(path) if "language" not in f else ""
             stored_language = f.get("language", "") or inferred_language
-            resolved_files[path] = self.registry.resolve_file(path, language=stored_language, actor=actor)
-        return resolved_files
+            queries.append(BatchQuery(path=path, language=stored_language))
+            seen_paths.add(path)
+
+        if not queries:
+            return {}
+
+        # Use the registry's native batch when available; fall back to
+        # looping ``resolve_file`` for registries that only implement the
+        # single-item API (test fakes predating CONTRACT-1).
+        batch_method = getattr(self.registry, "resolve_files_batch", None)
+        batch: BatchResolution
+        if batch_method is not None:
+            batch = batch_method(queries, actor=actor)
+        else:
+            batch = resolve_files_batch_via_loop(self.registry, queries, actor=actor)
+        # Promote per-item failures to the same exceptions the per-finding
+        # loop used to raise (preserves caller / dashboard error mapping).
+        # Use ``batch["messages"]`` to preserve the original registry-side
+        # exception text when the loop-fallback adapter populated it (wire
+        # batch responses leave it empty, so we fall back to a derived msg).
+        messages = batch.get("messages", {})
+        if batch["briefing_blocked"]:
+            first = batch["briefing_blocked"][0]
+            msg = messages.get(first) or f"Clarion registry refuses briefing-blocked file at {first!r} (batch resolve)"
+            raise RegistryBriefingBlockedError(msg, status_code=403, url="")
+        if batch["not_found"]:
+            first = batch["not_found"][0]
+            msg = messages.get(first) or f"Clarion registry could not resolve file at {first!r} (batch resolve)"
+            raise RegistryFileNotFoundError(msg, status_code=404, url="")
+        if batch["errors"]:
+            err = batch["errors"][0]
+            msg = f"Clarion registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
+            raise RegistryResolutionError(msg, status_code=400, url="")
+        return batch["resolved"]
 
     def _upsert_finding(
         self,

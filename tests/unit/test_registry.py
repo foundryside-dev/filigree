@@ -17,7 +17,17 @@ import pytest
 
 from filigree.core import VALID_REGISTRY_BACKENDS, FiligreeDB
 from filigree.models import FileRecord
-from filigree.registry import ClarionRegistry, LocalRegistry, RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
+from filigree.registry import (
+    CLARION_BATCH_MAX_QUERIES,
+    BatchQuery,
+    ClarionRegistry,
+    LocalRegistry,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    RegistryUnavailableError,
+    ResolvedFile,
+)
 from filigree.types.core import ClarionConfig, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
 
 
@@ -46,7 +56,7 @@ def test_project_config_uses_typed_clarion_config() -> None:
     hints = get_type_hints(ProjectConfig)
 
     assert hints["clarion"] is ClarionConfig
-    assert set(get_type_hints(ClarionConfig)) == {"base_url", "timeout_seconds", "allow_local_fallback"}
+    assert set(get_type_hints(ClarionConfig)) == {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
 
 
 def test_registry_backend_literal_is_shared_config_model_source_of_truth() -> None:
@@ -68,6 +78,71 @@ def test_file_record_documents_content_hash_backend_invariant() -> None:
     assert "registry_backend == 'local'" in doc
     assert "Clarion" in doc
     assert "non-empty" in doc
+
+
+def test_filigree_db_reads_clarion_token_from_named_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CONTRACT-2: ``ClarionConfig.token_env`` names the env var; the resolved
+    token threads into ``ClarionRegistry.auth_token``."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "live-token-value")
+    with clarion_stub() as (base_url, state):
+        state.required_token = "live-token-value"  # noqa: S105 — test fixture
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            check_same_thread=False,
+            registry_backend="clarion",
+            clarion_config={
+                "base_url": base_url,
+                "timeout_seconds": 1,
+                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+            },
+        )
+        db.initialize()
+        try:
+            assert isinstance(db.registry, ClarionRegistry)
+            assert db.registry.auth_token == "live-token-value"  # noqa: S105 — test fixture
+            # Capability probe at startup sent the Bearer header.
+            assert state.auth_headers_seen[0] == "Bearer live-token-value"
+        finally:
+            db.close()
+
+
+def test_filigree_db_warns_when_clarion_token_env_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CONTRACT-2: ``token_env`` explicitly configured but env var empty →
+    WARN log, no header sent, Clarion accepts on loopback."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    monkeypatch.delenv("FILIGREE_TEST_LOOM_TOKEN_MISSING", raising=False)
+    with clarion_stub() as (base_url, state):
+        # required_token stays None — Clarion accepts unauthenticated on loopback.
+        with caplog.at_level(logging.WARNING, logger="filigree.core"):
+            db = FiligreeDB(
+                tmp_path / "filigree.db",
+                prefix="test",
+                check_same_thread=False,
+                registry_backend="clarion",
+                clarion_config={
+                    "base_url": base_url,
+                    "timeout_seconds": 1,
+                    "token_env": "FILIGREE_TEST_LOOM_TOKEN_MISSING",
+                },
+            )
+            db.initialize()
+        try:
+            assert isinstance(db.registry, ClarionRegistry)
+            assert db.registry.auth_token is None
+            assert state.auth_headers_seen
+            assert state.auth_headers_seen[0] is None
+            warns = [r for r in caplog.records if "token_env" in r.getMessage()]
+            assert warns, "expected token_env-empty WARN"
+        finally:
+            db.close()
 
 
 def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> None:
@@ -228,6 +303,169 @@ def test_clarion_registry_distinguishes_unknown_file_from_unavailable() -> None:
         thread.join(timeout=1)
 
 
+def test_local_registry_resolve_files_batch_returns_per_query_resolution() -> None:
+    """CONTRACT-1: LocalRegistry mints local IDs for every query, no per-item failure paths."""
+    issued = iter(f"local-{i:04d}" for i in range(100))
+
+    def make_id() -> str:
+        return next(issued)
+
+    registry = LocalRegistry(make_id)
+    batch = registry.resolve_files_batch(
+        [BatchQuery(path="a.py", language="python"), BatchQuery(path="b.py", language=""), BatchQuery(path="a.py", language="python")]
+    )
+
+    # Deduplicated by path.
+    assert set(batch["resolved"].keys()) == {"a.py", "b.py"}
+    assert batch["not_found"] == []
+    assert batch["briefing_blocked"] == []
+    assert batch["errors"] == []
+
+
+def test_clarion_registry_resolve_files_batch_chunks_at_256() -> None:
+    """CONTRACT-1: 300 queries → 2 HTTP POSTs (chunks 256 + 44)."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    paths = [f"src/file_{i:04d}.py" for i in range(300)]
+    queries = [BatchQuery(path=p, language="python") for p in paths]
+    with clarion_stub() as (base_url, state):
+        registry = ClarionRegistry(base_url, timeout_seconds=2)
+
+        batch = registry.resolve_files_batch(queries)
+
+    assert len(batch["resolved"]) == 300
+    assert len(state.batch_requests) == 2
+    assert len(state.batch_requests[0]["queries"]) == CLARION_BATCH_MAX_QUERIES
+    assert len(state.batch_requests[1]["queries"]) == 300 - CLARION_BATCH_MAX_QUERIES
+
+
+def test_clarion_registry_resolve_files_batch_separates_resolved_and_briefing_blocked() -> None:
+    """CONTRACT-1: structured response splits ``resolved`` from ``briefing_blocked``."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    with clarion_stub() as (base_url, state):
+        state.briefing_blocked_paths.add("src/secrets.py")
+        registry = ClarionRegistry(base_url, timeout_seconds=2)
+
+        batch = registry.resolve_files_batch(
+            [
+                BatchQuery(path="src/ok.py", language="python"),
+                BatchQuery(path="src/secrets.py", language="python"),
+            ]
+        )
+
+    assert set(batch["resolved"].keys()) == {"src/ok.py"}
+    assert batch["briefing_blocked"] == ["src/secrets.py"]
+    assert batch["errors"] == []
+
+
+def test_clarion_registry_sends_no_authorization_header_when_no_token_configured() -> None:
+    """CONTRACT-2 baseline: with ``auth_token=None`` (default), no
+    Authorization header is sent — Clarion's loopback bind accepts."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    with clarion_stub() as (base_url, state):
+        registry = ClarionRegistry(base_url, timeout_seconds=1)
+
+        resolved = registry.resolve_file("src/x.py", language="python")
+
+    assert resolved["registry_backend"] == "clarion"
+    # capability probe is not invoked by ClarionRegistry itself; the only
+    # request issued here was /api/v1/files, so exactly one header tracked.
+    assert state.auth_headers_seen == [None]
+
+
+def test_clarion_registry_sends_bearer_authorization_when_token_provided() -> None:
+    """CONTRACT-2 happy path: token set → ``Authorization: Bearer <token>``
+    on every outbound request."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    with clarion_stub() as (base_url, state):
+        state.required_token = "test-loom-token"  # noqa: S105 — test fixture
+        registry = ClarionRegistry(base_url, timeout_seconds=1, auth_token="test-loom-token")  # noqa: S106 — test fixture
+
+        resolved = registry.resolve_file("src/x.py", language="python")
+        registry.resolve_file("src/y.py", language="python")
+
+    assert resolved["registry_backend"] == "clarion"
+    assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
+
+
+def test_clarion_registry_maps_401_to_registry_unavailable_with_auth_cause_kind() -> None:
+    """CONTRACT-2: wrong token → Clarion returns 401 → ``RegistryUnavailableError``
+    with ``cause_kind="auth"`` so fallback policy can engage uniformly."""
+    from tests._fakes.clarion_http import clarion_stub
+
+    with clarion_stub() as (base_url, state):
+        state.required_token = "expected-token"  # noqa: S105 — test fixture
+        registry = ClarionRegistry(base_url, timeout_seconds=1, auth_token="wrong-token")  # noqa: S106 — test fixture
+
+        with pytest.raises(RegistryUnavailableError) as exc_info:
+            registry.resolve_file("src/x.py", language="python")
+
+    assert exc_info.value.cause_kind == "auth"
+    assert "401" in str(exc_info.value)
+
+
+def test_clarion_registry_raises_briefing_blocked_on_403_with_code() -> None:
+    """CONTRACT-3: Clarion 1.0 returns 403 + ``{"code": "BRIEFING_BLOCKED"}``
+    for paths it intentionally withholds. Filigree must raise
+    ``RegistryBriefingBlockedError`` — a separate class that the fallback
+    wrapper does NOT swallow.
+    """
+    from tests._fakes.clarion_http import clarion_stub
+
+    with clarion_stub() as (base_url, state):
+        state.briefing_blocked_paths.add("src/secrets.py")
+        registry = ClarionRegistry(base_url, timeout_seconds=1)
+
+        with pytest.raises(RegistryBriefingBlockedError) as exc_info:
+            registry.resolve_file("src/secrets.py", language="python")
+
+    assert exc_info.value.status_code == 403
+    assert "briefing-blocked" in str(exc_info.value)
+    # Inheritance chain: a caller that catches RegistryResolutionError still
+    # sees this, but a caller that catches only RegistryUnavailableError
+    # (the fallback wrapper) does NOT — which is the whole point.
+    assert isinstance(exc_info.value, RegistryResolutionError)
+    assert not isinstance(exc_info.value, RegistryUnavailableError)
+    assert not isinstance(exc_info.value, RegistryFileNotFoundError)
+
+
+def test_clarion_registry_treats_403_without_code_as_generic_resolution_error() -> None:
+    """A bare 403 (no ``code: BRIEFING_BLOCKED`` body) must NOT be promoted
+    to ``RegistryBriefingBlockedError`` — that would mis-attribute an
+    auth/policy refusal as a briefing block.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps({"error": "access denied", "code": "FORBIDDEN"}).encode()
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryResolutionError) as exc_info:
+            registry.resolve_file("src/main.py", language="python")
+        assert not isinstance(exc_info.value, RegistryBriefingBlockedError)
+        assert exc_info.value.status_code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_clarion_registry_rejects_malformed_response() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -294,57 +532,36 @@ def test_clarion_registry_rejects_blank_content_hash() -> None:
 
 
 def test_filigree_db_composes_clarion_registry_when_configured(tmp_path: Path) -> None:
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            body = json.dumps(
-                {
-                    "entity_id": "core:file:configured@src/main.py",
-                    "content_hash": "sha256:configured",
-                    "canonical_path": "src/main.py",
-                    "language": "python",
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    from tests._fakes.clarion_http import clarion_stub
 
-        def log_message(self, format: str, *args: object) -> None:
-            return
+    with clarion_stub() as (base_url, _state):
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="clarion",
+            clarion_config={"base_url": base_url, "timeout_seconds": 1},
+        )
+        try:
+            db.initialize()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    db = FiligreeDB(
-        tmp_path / "filigree.db",
-        prefix="test",
-        registry_backend="clarion",
-        clarion_config={"base_url": f"http://127.0.0.1:{server.server_port}", "timeout_seconds": 1},
-    )
-    try:
-        db.initialize()
+            file_record = db.register_file("src/main.py", language="python")
 
-        file_record = db.register_file("src/main.py", language="python")
-
-        assert file_record.id == "core:file:configured@src/main.py"
-        assert file_record.content_hash == "sha256:configured"
-        assert file_record.registry_backend == "clarion"
-        assert db.registry.is_displaced() is True
-    finally:
-        db.close()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=1)
+            assert file_record.id == "core:file:stub@src/main.py"
+            assert file_record.content_hash == "sha256:src/main.py"
+            assert file_record.registry_backend == "clarion"
+            assert db.registry.is_displaced() is True
+        finally:
+            db.close()
 
 
 def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     resolutions: list[str] = []
 
     class FakeClarionRegistry:
-        def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
+        def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
             self.base_url = base_url
             self.timeout_seconds = timeout_seconds
+            self.auth_token = auth_token
 
         def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
             resolutions.append(path)
@@ -397,9 +614,10 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
     resolution_attempts: list[str] = []
 
     class FailingClarionRegistry:
-        def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
+        def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
             self.base_url = base_url
             self.timeout_seconds = timeout_seconds
+            self.auth_token = auth_token
 
         def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
             resolution_attempts.append(path)
@@ -450,7 +668,9 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         assert event["old_value"] == "clarion"
         assert event["new_value"] == "local"
         assert result["files_created"] == 1
-        assert "Clarion registry backend unavailable; using local file registry fallback" in caplog.text
+        # CONTRACT-1: scan-results now goes through resolve_files_batch, so
+        # the fallback WARN message is the batch-resolve variant.
+        assert "using local file registry fallback" in caplog.text
     finally:
         db.close()
 
@@ -470,6 +690,10 @@ def test_filigree_db_logs_hybrid_registry_state_on_startup(tmp_path: Path, caplo
             prefix="test",
             registry_backend="clarion",
             clarion_config={"base_url": "http://clarion.test"},
+            # Test exercises hybrid-state detection logic on initialize(),
+            # not the capability handshake — skip the probe so the
+            # unreachable URL doesn't abort __init__.
+            skip_clarion_capability_probe=True,
         )
         try:
             db.initialize()

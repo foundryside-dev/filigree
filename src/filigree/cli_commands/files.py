@@ -483,20 +483,89 @@ def register_file_cmd(
 
 
 def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
+    """Build the migration plan via batched resolution.
+
+    CONTRACT-1 (Clarion 1.0): rows are resolved through ``resolve_files_batch``
+    rather than one HTTP round-trip per row. Batching is owned by the
+    protocol (chunks at 256 internally). Per-row blockers (rewrite blockers,
+    fallback downgrade) are still computed per-row.
+    """
+    from filigree.registry import BatchQuery as _BatchQuery
+    from filigree.registry import resolve_files_batch_via_loop as _via_loop
+
     planned: list[dict[str, Any]] = []
     unresolved: list[dict[str, str]] = []
     rows = db.conn.execute("SELECT * FROM file_records ORDER BY path").fetchall()
+    # Pre-pass: collect rewrite blockers per-row (no HTTP), build batch queries.
+    queries: list[_BatchQuery] = []
+    for row in rows:
+        unresolved.extend(_scan_run_file_id_rewrite_blockers(db.conn, row["id"], row["path"]))
+        queries.append(_BatchQuery(path=row["path"], language=row["language"] or ""))
+
+    batch_method = getattr(db.registry, "resolve_files_batch", None)
+    try:
+        if batch_method is not None:
+            batch = batch_method(queries, actor=_REGISTRY_MIGRATION_ACTOR)
+        else:
+            batch = _via_loop(db.registry, queries, actor=_REGISTRY_MIGRATION_ACTOR)
+    except Exception as exc:  # whole-batch failure
+        for row in rows:
+            unresolved.append({"file_id": row["id"], "path": row["path"], "error": str(exc)})
+        return {
+            "version": 1,
+            "to": target_backend,
+            "created_at": datetime.now(UTC).isoformat(),
+            "project": _registry_manifest_project_identity(db),
+            "planned": planned,
+            "unresolved": unresolved,
+        }
+
+    # Promote per-item channels into per-row error diagnostics.
+    item_errors: dict[str, str] = {}
+    for path in batch.get("not_found", []):
+        item_errors[path] = f"Clarion could not resolve file at {path!r}"
+    for path in batch.get("briefing_blocked", []):
+        item_errors[path] = f"Clarion refuses briefing-blocked file at {path!r}"
+    for err in batch.get("errors", []):
+        item_errors[err["requested_path"]] = f"{err['code']}: {err['message']}"
+
+    resolved_map = batch.get("resolved", {})
     for row in rows:
         old_file_id = row["id"]
-        unresolved.extend(_scan_run_file_id_rewrite_blockers(db.conn, old_file_id, row["path"]))
-        try:
-            resolved = db.registry.resolve_file(
-                row["path"],
-                language=row["language"] or "",
-                actor=_REGISTRY_MIGRATION_ACTOR,
+        if row["path"] in item_errors:
+            unresolved.append({"file_id": old_file_id, "path": row["path"], "error": item_errors[row["path"]]})
+            continue
+        resolved = resolved_map.get(row["path"])
+        if resolved is None:
+            unresolved.append({"file_id": old_file_id, "path": row["path"], "error": "registry returned no resolution for path"})
+            continue
+
+        # When ``allow_local_fallback=true`` is configured and the project's
+        # ``ClarionRegistry`` is wrapped in ``_ClarionLocalFallbackRegistry``,
+        # an unreachable Clarion is silently downgraded to a local resolution
+        # at the registry boundary. The migration plan must NOT accept that
+        # downgrade — recording ``new_registry_backend=target_backend`` while
+        # storing a local file_id and blank content_hash would silently
+        # corrupt the file_records / file_associations metadata under the
+        # operator's intent to migrate. Treat the row as unresolved with a
+        # diagnostic operators can act on (lift the fallback, bring Clarion
+        # up, re-run the plan).
+        if resolved["registry_backend"] != target_backend:
+            unresolved.append(
+                {
+                    "file_id": old_file_id,
+                    "path": row["path"],
+                    "error": (
+                        f"Registry resolved {row['path']!r} to "
+                        f"registry_backend={resolved['registry_backend']!r} "
+                        f"(file_id={resolved['file_id']!r}); migration target is "
+                        f"{target_backend!r}. This typically means Clarion is "
+                        "unreachable and the project is running with "
+                        "allow_local_fallback=true. Bring Clarion up, disable "
+                        "fallback for the migration, and re-run the plan."
+                    ),
+                }
             )
-        except Exception as exc:
-            unresolved.append({"file_id": old_file_id, "path": row["path"], "error": str(exc)})
             continue
 
         planned.append(
@@ -510,7 +579,7 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
                 "old_content_hash": row["content_hash"] or "",
                 "new_content_hash": resolved["content_hash"],
                 "old_registry_backend": row["registry_backend"] or "local",
-                "new_registry_backend": target_backend,
+                "new_registry_backend": resolved["registry_backend"],
             }
         )
     return {

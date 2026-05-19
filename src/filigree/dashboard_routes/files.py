@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any, cast
@@ -25,7 +26,13 @@ from filigree.dashboard_routes.common import (
     _parse_pagination,
     _safe_int,
 )
-from filigree.registry import REGISTRY_BACKEND_FEATURES, RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry import (
+    REGISTRY_BACKEND_FEATURES,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    RegistryUnavailableError,
+)
 from filigree.types.api import ErrorCode
 from filigree.types.core import AssocType, FindingStatus, Severity
 
@@ -33,8 +40,21 @@ logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 
+# CONTRACT-E: process_scan_results runs in a worker thread via asyncio.to_thread
+# (keeps the event loop responsive during the Clarion HTTP wait). The shared
+# FiligreeDB connection is opened with check_same_thread=False but is NOT
+# safe for concurrent worker-thread access (writes can race at the sqlite3.
+# Connection level). This module-level asyncio.Lock serializes scan-results
+# handler calls across the three router factories so concurrent POSTs serialize
+# (no DB race) while OTHER endpoints stay responsive during the wait.
+# True parallelism for scan-results requires a per-thread DB connection pool —
+# tracked separately as a follow-up.
+_SCAN_RESULTS_LOCK = asyncio.Lock()
+
 
 def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONResponse:
+    if isinstance(exc, RegistryBriefingBlockedError):
+        return _error_response(str(exc), ErrorCode.BRIEFING_BLOCKED, 403)
     if isinstance(exc, RegistryFileNotFoundError):
         return _error_response(str(exc), ErrorCode.NOT_FOUND, 404)
     return _error_response(str(exc), ErrorCode.VALIDATION, 400)
@@ -163,6 +183,9 @@ def create_classic_router() -> APIRouter:
                 "registry_backend": db.registry_backend,
                 "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
                 "allow_local_fallback": db.allow_local_fallback,
+                "clarion_instance_id": db.clarion_instance_id,
+                "clarion_api_version": db.clarion_api_version,
+                "clarion_instance_rotated": db.clarion_instance_rotated,
             },
             "endpoints": [
                 {
@@ -366,8 +389,15 @@ def create_classic_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
+        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). asyncio.to_thread + the module-level
+        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
+        # during the wait while serializing scan-results POSTs to avoid the
+        # shared-sqlite-connection race documented at the lock.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(db.process_scan_results, **parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -428,8 +458,15 @@ def create_loom_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
+        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). asyncio.to_thread + the module-level
+        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
+        # during the wait while serializing scan-results POSTs to avoid the
+        # shared-sqlite-connection race documented at the lock.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(db.process_scan_results, **parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -562,8 +599,15 @@ def create_living_surface_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
+        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). asyncio.to_thread + the module-level
+        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
+        # during the wait while serializing scan-results POSTs to avoid the
+        # shared-sqlite-connection race documented at the lock.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(db.process_scan_results, **parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
