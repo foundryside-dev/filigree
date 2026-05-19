@@ -95,6 +95,71 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   lookup under blocked sockets so the §5 invariant covers Clarion's
   primary call path.
 
+- **ADR-014 file-identity displacement to Clarion (`registry_backend`
+  flag).** Filigree now treats Clarion as the federation file-identity
+  authority when configured. A new `RegistryProtocol` abstraction with
+  `LocalRegistry` (default, in-process SQLite) and `ClarionRegistry`
+  (HTTP) implementations sits behind every `file_id` resolution path,
+  selected by the `registry_backend` setting (`local` | `clarion`).
+  `_ClarionLocalFallbackRegistry` wraps the Clarion backend so transient
+  HTTP failures fall back to local resolution under
+  `RegistryUnavailableError` only — semantic refusals (briefing-blocked,
+  see Security) deliberately bypass the wrapper. The single-file path is
+  `GET /api/v1/files`; see Phase D additions below for the batch and
+  capabilities surfaces.
+
+- **Clarion 1.0 wire CONTRACT-1 — batched file resolution
+  (`resolve_files_batch` / `POST /api/v1/files/batch`).**
+  `RegistryProtocol.resolve_files_batch` returns a `BatchResolution`
+  TypedDict with four channels — `resolved`, `not_found`,
+  `briefing_blocked`, `errors` — and a `messages` sidecar that the
+  loop-fallback adapter populates from single-item exceptions so call
+  sites can promote channel entries back into per-item exceptions
+  without losing the original context. `ClarionRegistry` chunks
+  requests at `CLARION_BATCH_MAX_QUERIES = 256` (Clarion's hard cap,
+  returning 400/`BATCH_TOO_LARGE` on overflow). The scan-results
+  pre-resolve path (`db_files._pre_resolve_scan_file_records`) and the
+  migration-planning path (`cli_commands._registry_migration_plan`)
+  were refactored to one batch call instead of N per-finding HTTP
+  round-trips; a regression test asserts 300 scan-result findings
+  produce exactly two batch HTTP POSTs
+  (`tests/api/test_registry_backend_integration.py`).
+  `_ClarionLocalFallbackRegistry.resolve_files_batch_via_loop`
+  gracefully services primaries that only implement `resolve_file`
+  (legacy fakes) so the abstraction is back-compatible.
+
+- **Clarion 1.0 wire CONTRACT-2 — Bearer auth via env-var-named
+  token.** `ClarionConfig` gains an optional `token_env` field
+  (default `CLARION_LOOM_TOKEN`); `_resolve_clarion_auth_token` reads
+  it at construction and threads `Authorization: Bearer <token>` onto
+  every outbound request via `Request` objects (replacing the prior
+  bare `urllib.urlopen` calls). 401 responses map to
+  `RegistryUnavailableError(cause_kind="auth")` so the standard
+  fallback policy applies uniformly. When `token_env` is configured
+  but the named env var resolves to empty, startup emits a WARN so
+  operators can spot silent loopback-only fallback. Opt-in: when
+  `token_env` is unset, no `Authorization` header is sent and Clarion
+  serves loopback-bound deployments unauthenticated per the 1.0
+  cross-product contract.
+
+- **Phase D federation handshake — `GET /api/v1/_capabilities` probe
+  and dashboard rotation banner.** ClarionRegistry now performs a
+  capabilities handshake on first use and surfaces `clarion_instance_id`,
+  `clarion_api_version`, and `clarion_instance_rotated` on the
+  dashboard's schema endpoint. The dashboard frontend
+  (`static/dashboard.html`, `static/js/app.js`) renders a rotation
+  banner when Clarion's `instance_id` changes between handshakes,
+  alerting operators to a Clarion restart that may invalidate
+  cached file identities. `EXPECTED_CLARION_API_VERSION = 1` pins the
+  resolver protocol version; mismatches refuse startup under
+  `clarion` mode because no in-process fallback can mask a wire-
+  contract change. Test coverage in
+  `tests/unit/test_clarion_capabilities_probe.py` and the
+  cross-process scaffolding in `tests/integration/` (live-Clarion
+  end-to-end runs). The federation launch runbook
+  (`docs/federation/registry-backend-launch-runbook.md`) was updated
+  with the Phase D handshake checklist.
+
 ### Changed
 
 - **Workflow templates now declare `reverse_transitions` for controlled
@@ -213,6 +278,29 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   rows backfill to ``event_seq=0``. Closes silent-failure C3 from
   the 2.1.0 panel review.
 
+- **Scan-results handlers no longer block the event loop on Clarion
+  HTTP waits.** All three `POST /api/.../scan-results` routes (classic,
+  loom, living-surface) in `dashboard_routes/files.py` now wrap
+  `db.process_scan_results` in `asyncio.to_thread`, so the event loop
+  stays responsive for other handlers while Clarion is being awaited.
+  A module-level `_SCAN_RESULTS_LOCK` (`asyncio.Lock`) serialises
+  concurrent scan-results POSTs to protect the shared
+  `sqlite3.Connection` from the race the move-off-event-loop would
+  otherwise enable. True parallelism of scan-results awaits a
+  per-thread connection pool, filed as a 2.2 follow-up
+  (filigree-d4237f486f).
+
+- **Clarion path-normalisation contract documented (CONTRACT-4).**
+  Both single-file (`GET /api/v1/files`) and batch
+  (`POST /api/v1/files/batch`) lookups send *lexical*, forward-slash,
+  project-relative paths normalised at the boundary by
+  `db_files._normalize_scan_path`; disk presence is not required
+  because Clarion resolves by its `source_file_path` catalog key, not
+  by filesystem probe. The `registry.py` module docstring and the
+  ADR-014 Phase D section now record this invariant so future
+  consumers don't add disk-existence guards that would break valid
+  catalog-only lookups.
+
 ### Fixed
 
 - **`ForeignDatabaseError` now points out malformed `.git` files in its
@@ -246,6 +334,47 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   ``heartbeat_work``, and ``reclaim_issue``. Unassigned issues do not
   trigger the guard — ADR-008 read-tolerance for unheld writes is
   preserved.
+
+- **Registry error envelopes no longer leak transport exceptions
+  across surfaces.** Scanner-lifecycle and observation/annotation
+  paths that touch `registry_errors` now classify
+  `RegistryUnavailableError`, `RegistryResolutionError`, and the new
+  `RegistryBriefingBlockedError` into structured envelopes at the CLI,
+  HTTP, and MCP boundaries instead of returning a `urllib`/`socket`
+  exception text. Regression coverage spans
+  `tests/cli/test_scanners_commands.py`,
+  `tests/cli/test_annotations_commands.py`,
+  `tests/cli/test_observations_commands.py`,
+  `tests/mcp/test_scanner_lifecycle_tools.py`,
+  `tests/mcp/test_annotations.py`, `tests/mcp/test_observations.py`,
+  and `tests/api/test_files_api.py`.
+
+- **JSONL import preserves registry metadata across round-trip.**
+  `import_jsonl` was dropping `registry_backend` and the resolved
+  `file_id` provenance fields when re-hydrating file rows, so a
+  Clarion-backed project that exported and re-imported through JSONL
+  silently lost its federation identity. The importer now forwards
+  the full registry-metadata block; pin in `tests/core/test_crud.py`.
+
+- **`start_next_work` skips incompatible candidates instead of
+  failing the whole iteration.** When the candidate set contained
+  rows in states the caller's actor was not permitted to claim
+  (priority filter, type filter, or workflow-state filter), the
+  iterator previously raised on the first incompatible row and
+  abandoned the remaining ready queue. The iterator now skips
+  incompatible candidates and continues, matching `claim_next`'s
+  documented "next eligible" semantics and the CLI contract that the
+  call resolves to either a claim or `nothing_ready`. Closes the
+  PR #43 release-blocker race where two agents requesting `start-next`
+  could both receive `nothing_ready` while ready work existed.
+
+- **`report_finding` no longer leaks fallback scoping when the
+  scanner registry is partially unavailable.** The finding-triage
+  fallback path scoped the registry lookup to the wrong session when
+  a registered scanner's lifecycle row was missing, so subsequent
+  triage operations in the same call could see an empty registry view.
+  The fallback now re-resolves against the live scanner registry per
+  call; pin in `tests/mcp/test_finding_triage_tools.py`.
 
 ### Security
 
@@ -317,6 +446,26 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   silent-failure H7 in the 2.1.0 panel review — the same class of
   cross-project confusion that PR #41's `core.py` anchor-discovery
   hardening addressed on the read side.
+
+- **Briefing-blocked files bypass the Clarion fallback wrapper
+  (Clarion 1.0 CONTRACT-3).** Clarion 1.0 returns HTTP 403 with body
+  `{"code": "BRIEFING_BLOCKED", ...}` for files it intentionally
+  withholds (secret-bearing, owner-locked). `ClarionRegistry` maps
+  that response to the new `RegistryBriefingBlockedError`, which
+  subclasses `RegistryResolutionError` — deliberately *not*
+  `RegistryUnavailableError` — so the `_ClarionLocalFallbackRegistry`
+  wrapper does not engage. Without this distinction, a briefing-blocked
+  secret-bearing file would be silently re-attached under a local
+  `file_id` and re-enter Filigree's index outside Clarion's access
+  controls. A new `ErrorCode.BRIEFING_BLOCKED` maps to HTTP 403 in
+  `errorcode_to_http_status`, and the batch resolver exposes a
+  dedicated `briefing_blocked` channel so call sites distinguish
+  refusal from absence (`not_found`) and transport failure
+  (`errors` / `RegistryUnavailableError`). The end-to-end audit is
+  pinned in `tests/api/test_registry_backend_integration.py`
+  (briefing-blocked via `POST /api/loom/scan-results`: no row
+  created, no fallback event emitted) and the wire-shape tests in
+  `tests/unit/test_registry.py`.
 
 ## [2.0.3] - 2026-05-17
 
