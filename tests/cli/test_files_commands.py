@@ -1208,11 +1208,11 @@ class TestMigrateRegistryCommand:
         assert manifest_path.parent == project.resolve()
         assert manifest_path.exists()
 
-    def test_migrate_registry_dry_run_execute_and_rollback(
+    def _seed_migrate_registry_project(
         self,
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    ) -> tuple[CliRunner, Path, str, str, Path]:
         runner, project = cli_in_project
         source_path = project / "src" / "migrate.py"
         source_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1268,6 +1268,28 @@ class TestMigrateRegistryCommand:
         conf["clarion"] = {"base_url": "http://clarion.test"}
         conf_path.write_text(json.dumps(conf))
 
+        return runner, project, old_file_id, new_file_id, project / "registry-migration.json"
+
+    def _assert_migration_references(self, db: object, file_id: str) -> None:
+        assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (file_id,)).fetchone()[0] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (file_id,)).fetchone()[0] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM file_events WHERE file_id = ?", (file_id,)).fetchone()[0] >= 1
+        assert db.conn.execute("SELECT COUNT(*) FROM observations WHERE file_id = ?", (file_id,)).fetchone()[0] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM observation_links WHERE file_id = ?", (file_id,)).fetchone()[0] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE file_id = ?", (file_id,)).fetchone()[0] == 1
+        scan_run = db.get_scan_run("scan-run-migrate")
+        assert scan_run["file_ids"] == [file_id]
+
+    def test_migrate_registry_dry_run_plans_without_rewriting(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _project, old_file_id, new_file_id, _manifest = self._seed_migrate_registry_project(
+            cli_in_project, monkeypatch
+        )
+        from filigree.cli_common import get_db
+
         dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
         assert dry_run.exit_code == 0, dry_run.output
         dry_payload = json.loads(dry_run.output)
@@ -1277,7 +1299,16 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             assert db.get_file(old_file_id).id == old_file_id
 
-        manifest = project / "registry-migration.json"
+    def test_migrate_registry_execute_rewrites_file_identity_and_manifest(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(
+            cli_in_project, monkeypatch
+        )
+        from filigree.cli_common import get_db
+
         executed = runner.invoke(
             cli,
             ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
@@ -1296,14 +1327,23 @@ class TestMigrateRegistryCommand:
             assert db.get_file(new_file_id).registry_backend == "clarion"
             with pytest.raises(KeyError):
                 db.get_file(old_file_id)
-            assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM file_events WHERE file_id = ?", (new_file_id,)).fetchone()[0] >= 1
-            assert db.conn.execute("SELECT COUNT(*) FROM observations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM observation_links WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE file_id = ?", (new_file_id,)).fetchone()[0] == 1
-            scan_run = db.get_scan_run("scan-run-migrate")
-            assert scan_run["file_ids"] == [new_file_id]
+            self._assert_migration_references(db, new_file_id)
+
+    def test_migrate_registry_rollback_restores_file_identity_references(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(
+            cli_in_project, monkeypatch
+        )
+        from filigree.cli_common import get_db
+
+        executed = runner.invoke(
+            cli,
+            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+        )
+        assert executed.exit_code == 0, executed.output
 
         rolled_back = runner.invoke(cli, ["migrate-registry", "--rollback", str(manifest), "--json"])
         assert rolled_back.exit_code == 0, rolled_back.output
@@ -1314,14 +1354,7 @@ class TestMigrateRegistryCommand:
             assert db.get_file(old_file_id).registry_backend == "local"
             with pytest.raises(KeyError):
                 db.get_file(new_file_id)
-            assert db.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM file_associations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM file_events WHERE file_id = ?", (old_file_id,)).fetchone()[0] >= 1
-            assert db.conn.execute("SELECT COUNT(*) FROM observations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM observation_links WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
-            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE file_id = ?", (old_file_id,)).fetchone()[0] == 1
-            scan_run = db.get_scan_run("scan-run-migrate")
-            assert scan_run["file_ids"] == [old_file_id]
+            self._assert_migration_references(db, old_file_id)
 
 
 # ---------------------------------------------------------------------------
