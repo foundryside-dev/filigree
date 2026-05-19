@@ -42,6 +42,32 @@ _LOCALHOST_HOSTS = frozenset(("localhost", "127.0.0.1", "::1"))
 _ALLOWED_URL_SCHEMES = frozenset(("http", "https"))
 
 _logger = logging.getLogger(__name__)
+_SCAN_RUN_LIFECYCLE_ERRORS = (sqlite3.Error, KeyError, ValueError)
+
+
+def _mark_scan_run_failed(
+    tracker: Any,
+    scan_run_id: str,
+    *,
+    error_message: str,
+    context: str,
+    exit_code: int | None = None,
+) -> str | None:
+    kwargs: dict[str, Any] = {"error_message": error_message}
+    if exit_code is not None:
+        kwargs["exit_code"] = exit_code
+    try:
+        tracker.update_scan_run_status(scan_run_id, "failed", **kwargs)
+    except _SCAN_RUN_LIFECYCLE_ERRORS as exc:
+        _logger.error(
+            "Failed to mark scan run %s failed during %s: %s",
+            scan_run_id,
+            context,
+            exc,
+            exc_info=True,
+        )
+        return str(exc)
+    return None
 
 
 def _prompt_pack_schema() -> dict[str, Any]:
@@ -854,11 +880,19 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             prompt=prompt,
         )
     except ScannerSpawnError as exc:
-        with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-            tracker.update_scan_run_status(scan_run_id, "failed", error_message="Scanner process failed to spawn")
+        status_update_error = _mark_scan_run_failed(
+            tracker,
+            scan_run_id,
+            error_message="Scanner process failed to spawn",
+            context="single spawn failure",
+        )
         err_resp = ErrorResponse(error=str(exc), code=exc.code)
         if exc.details:
             err_resp["details"] = exc.details
+        if status_update_error:
+            spawn_failure_details = dict(err_resp.get("details", {}))
+            spawn_failure_details["status_update_error"] = status_update_error
+            err_resp["details"] = spawn_failure_details
         return _text(err_resp)
 
     proc = spawn_result["proc"]
@@ -888,9 +922,10 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     await asyncio.sleep(0.2)
     exit_code = proc.poll()
     if exit_code is not None and exit_code != 0:
-        tracker.update_scan_run_status(
+        status_update_error = _mark_scan_run_failed(
+            tracker,
             scan_run_id,
-            "failed",
+            context="single immediate exit",
             exit_code=exit_code,
             error_message=f"Scanner exited immediately with code {exit_code}",
         )
@@ -899,17 +934,20 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             log_hint = f" Check log: {log_rel}"
         elif spawn_result.get("log_warning"):
             log_hint = f" Note: {spawn_result['log_warning']}"
+        details: dict[str, Any] = {
+            "scanner": scanner_name,
+            "file_id": file_record.id,
+            "scan_run_id": scan_run_id,
+            "exit_code": exit_code,
+            "log_path": log_rel,
+        }
+        if status_update_error:
+            details["status_update_error"] = status_update_error
         return _text(
             ErrorResponse(
                 error=f"Scanner process exited immediately with code {exit_code}.{log_hint}",
                 code=ErrorCode.IO,
-                details={
-                    "scanner": scanner_name,
-                    "file_id": file_record.id,
-                    "scan_run_id": scan_run_id,
-                    "exit_code": exit_code,
-                    "log_path": log_rel,
-                },
+                details=details,
             )
         )
 
@@ -1101,13 +1139,16 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             )
         except ScannerSpawnError as exc:
             reason = str(exc)
-            spawn_errors.append({"file_path": cp, "reason": reason})
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(
-                    child_run_id,
-                    "failed",
-                    error_message=f"Scanner process failed to spawn: {reason}",
-                )
+            error_item = {"file_path": cp, "reason": reason}
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                child_run_id,
+                error_message=f"Scanner process failed to spawn: {reason}",
+                context="batch spawn failure",
+            )
+            if status_update_error:
+                error_item["status_update_error"] = status_update_error
+            spawn_errors.append(error_item)
             continue
         entry["spawn_result"] = spawn_result
         spawned.append(entry)
@@ -1168,17 +1209,26 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     # Quick check: did any process exit immediately with error?
     await asyncio.sleep(0.2)
     immediate_failures = 0
+    status_update_errors: list[dict[str, str]] = []
     for entry in finalized:
         proc = entry["spawn_result"]["proc"]
         ec = proc.poll()
         if ec is not None and ec != 0:
             immediate_failures += 1
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(
-                    entry["scan_run_id"],
-                    "failed",
-                    exit_code=ec,
-                    error_message="Scanner exited immediately",
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                entry["scan_run_id"],
+                exit_code=ec,
+                error_message="Scanner exited immediately",
+                context="batch immediate exit",
+            )
+            if status_update_error:
+                status_update_errors.append(
+                    {
+                        "scan_run_id": entry["scan_run_id"],
+                        "file_path": entry["canonical_path"],
+                        "error": status_update_error,
+                    }
                 )
 
     scan_run_ids = [entry["scan_run_id"] for entry in finalized]
@@ -1202,6 +1252,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                     "batch_id": batch_id,
                     "scan_run_ids": scan_run_ids,
                     "per_file": per_file,
+                    **({"status_update_errors": status_update_errors} if status_update_errors else {}),
                 },
             )
         )
@@ -1226,6 +1277,8 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         result["skipped"] = skipped
     if immediate_failures:
         result["immediate_failures"] = immediate_failures
+    if status_update_errors:
+        result["status_update_errors"] = status_update_errors
     log_warnings = [entry["spawn_result"]["log_warning"] for entry in finalized if entry["spawn_result"].get("log_warning")]
     if log_warnings:
         result["warnings"] = log_warnings

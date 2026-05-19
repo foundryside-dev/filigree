@@ -863,6 +863,61 @@ class TestBatchScanDbTrackingFailure:
         finally:
             _cleanup_files(mcp_db, files)
 
+    async def test_spawn_failure_status_update_failure_is_reported(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["spawn_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("spawn broken")),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["spawn_status_fail.py"]},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["spawn_errors"][0]["status_update_error"] == "status update broken"
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_immediate_batch_failure_status_update_failure_is_reported(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_immediate_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=9))
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_immediate_status_fail.py"]},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["status_update_errors"][0]["error"] == "status update broken"
+        finally:
+            _cleanup_files(mcp_db, files)
+
 
 class TestTriggerScanCooldownReservation:
     """Regression tests for filigree-ed3be5a092: cooldown is reserved pre-spawn."""
@@ -954,5 +1009,34 @@ class TestTriggerScanCooldownReservation:
             # The cooldown query should no longer find a blocking run — failed
             # rows are excluded from the cooldown window.
             assert mcp_db.check_scan_cooldown("test-scanner", "spawn_fail_target.py") is None
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_immediate_exit_status_update_failure_preserves_scanner_error(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["immediate_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=7))
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "immediate_status_fail.py"},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert "Scanner process exited immediately with code 7" in data["error"]
+            assert data["details"]["status_update_error"] == "status update broken"
         finally:
             _cleanup_files(mcp_db, files)
