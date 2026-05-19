@@ -87,15 +87,14 @@ class EventsMixin(DBMixinProtocol):
         equivalent transaction serialization before depending on the per-issue
         ``event_seq`` monotonicity guarantee. This helper never commits.
         """
-        # 2.1.0 §0.2: plain INSERT (not INSERT OR IGNORE) so true-duplicate
-        # collisions bubble up to the caller's transaction for rollback.
+        # 2.1.0 §0.2: plain INSERT (not INSERT OR IGNORE) so unexpected
+        # same-key collisions bubble up to the caller's transaction for rollback.
         # ``event_seq`` is computed inline as the next per-issue monotonic
         # value via COALESCE+MAX subquery. The caller-held writer transaction
         # serializes concurrent writers while avoiding in-memory counters, so
         # this survives crashes and stays atomic with the issue mutation.
-        # Same-second emissions (heartbeat
-        # bursts, batch ops sharing _now_iso()) get distinct sequence
-        # numbers and stop silently colliding on the dedup index.
+        # Ensure same-second emissions get distinct sequence numbers; heartbeat
+        # bursts and batch ops sharing _now_iso() persist as separate audit rows.
         self.conn.execute(
             "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",

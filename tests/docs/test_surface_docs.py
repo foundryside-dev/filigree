@@ -82,3 +82,17 @@ def test_adr014_documents_clarion_resolution_batch_retry_boundary() -> None:
 
     assert "`ClarionRegistry` does not retry failed HTTP calls in this release" in adr
     assert "Batched resolution and retry policy are deferred together" in adr
+
+
+def test_event_seq_source_docs_describe_ordering_not_dedup_semantics() -> None:
+    migrations = _read_doc("src/filigree/migrations.py")
+    schema = _read_doc("src/filigree/db_schema.py")
+    events = _read_doc("src/filigree/db_events.py")
+    combined = "\n".join((migrations, schema, events))
+
+    assert "per-issue event ordering key" in migrations
+    assert "same-second emissions get distinct event_seq values" in schema
+    assert "same-second emissions get distinct sequence numbers" in events
+    assert "rebuild dedup UNIQUE index" not in combined
+    assert "extends the dedup tuple" not in combined
+    assert "colliding on the dedup index" not in combined

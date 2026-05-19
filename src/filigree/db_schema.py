@@ -56,9 +56,10 @@ CREATE TABLE IF NOT EXISTS events (
     new_value  TEXT,
     comment    TEXT DEFAULT '',
     created_at TEXT NOT NULL,
-    -- v16: per-issue monotonic sequence so same-second emissions don't
-    -- collide on the dedup index. _record_event computes the next value
-    -- inline under the caller-held writer transaction via
+    -- v16: same-second emissions get distinct event_seq values. This
+    -- per-issue event ordering key is part of the legacy-named unique event
+    -- index, so ordinary bursts persist as separate audit rows. _record_event
+    -- computes the next value inline under the caller-held writer transaction via
     -- COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
     -- -1) + 1; legacy rows default to 0.
     event_seq  INTEGER NOT NULL DEFAULT 0
