@@ -675,7 +675,7 @@ class FilesMixin(DBMixinProtocol):
             with path.open("rb") as handle:
                 return sum(1 for _ in handle)
         except OSError as exc:
-            logger.debug("Could not count lines for %s: %s", path, exc)
+            logger.debug("Could not count lines for %s: %s", path, exc, exc_info=True)
             return None
 
     def _normalize_line_attribution_for_existing_files(self, findings: list[dict[str, Any]]) -> list[str]:

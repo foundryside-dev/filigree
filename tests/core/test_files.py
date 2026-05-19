@@ -443,6 +443,9 @@ class TestProcessScanResults:
         assert result is None
         assert "Could not count lines for" in caplog.text
         assert str(missing) in caplog.text
+        records = [record for record in caplog.records if record.message.startswith("Could not count lines for")]
+        assert records
+        assert records[0].exc_info is not None
 
     def test_ingest_uses_registry_resolved_file_id(self, tmp_path: Path) -> None:
         class FixedRegistry:
