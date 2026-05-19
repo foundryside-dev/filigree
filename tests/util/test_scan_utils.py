@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from filigree.core import FILIGREE_DIR_NAME, write_config
 from filigree.scanner_scripts.scan_utils import (
     PROMPT_TEMPLATE,
     _analyse_files,
@@ -172,6 +173,47 @@ class TestRunScannerPipeline:
 
         assert rc == 0
         assert "src/target.py" in capsys.readouterr().out
+
+    async def test_default_api_url_uses_active_ephemeral_dashboard_port(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        filigree_dir = project_root / FILIGREE_DIR_NAME
+        src.mkdir(parents=True)
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "tst", "version": 1})
+        (filigree_dir / "ephemeral.port").write_text("9444\n")
+        (src / "target.py").write_text("x = 1\n")
+        post_calls: list[dict[str, Any]] = []
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--file", "src/target.py", "--scan-run-id", "run-1"],
+        )
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **kwargs: (post_calls.append(kwargs) or (True, "")),
+        )
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 0
+        assert post_calls
+        assert {call["api_url"] for call in post_calls} == {"http://localhost:9444"}
 
     async def test_rejects_invalid_prompt_pack(
         self,

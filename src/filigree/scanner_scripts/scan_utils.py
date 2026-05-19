@@ -25,11 +25,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from filigree.core import ForeignDatabaseError, ProjectNotInitialisedError, find_filigree_root
+from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, expand_prompt_pack_names
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────
+
+DEFAULT_SCANNER_API_URL = "http://localhost:8377"
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -512,6 +516,15 @@ def _resolve_target_file(*, repo_root: Path, root_dir: Path, file_arg: str) -> P
     return target
 
 
+def _default_api_url_for_repo(repo_root: Path) -> str:
+    """Resolve the active local dashboard URL for direct scanner entrypoints."""
+    try:
+        filigree_dir = find_filigree_root(repo_root)
+    except (ProjectNotInitialisedError, ForeignDatabaseError):
+        return DEFAULT_SCANNER_API_URL
+    return resolve_scanner_api_url_with_source(filigree_dir).url
+
+
 async def _analyse_files(
     *,
     files: list[Path],
@@ -701,7 +714,7 @@ async def run_scanner_pipeline(
     parser.add_argument("--timeout", type=int, default=300, help="Per-file timeout in seconds (default: 300)")
     parser.add_argument("--dry-run", action="store_true", help="List files with count and token estimate")
     parser.add_argument("--max-files", type=int, default=50, help="Maximum files to scan (default: 50)")
-    parser.add_argument("--api-url", default="http://localhost:8377", help="Filigree dashboard URL")
+    parser.add_argument("--api-url", default=None, help="Filigree dashboard URL")
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
     parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
@@ -765,13 +778,18 @@ async def run_scanner_pipeline(
 
     context = load_context(repo_root)
     scan_run_id = args.scan_run_id or f"{scan_source}-{datetime.now(UTC).isoformat()}"
+    try:
+        api_url = args.api_url.strip().rstrip("/") if args.api_url is not None else _default_api_url_for_repo(repo_root)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     model_display = f", model={args.model}" if args.model else ""
     print(f"Analysing {len(files)} files (batch={args.batch_size}{model_display}) ...", file=sys.stderr)
     if not args.no_cache_warmup and args.batch_size > 1 and len(files) > 1:
         print("  Cache warm-up: first file runs before parallel batches.", file=sys.stderr)
     if not args.no_ingest:
-        print(f"  API: {args.api_url}  run_id: {scan_run_id}", file=sys.stderr)
+        print(f"  API: {api_url}  run_id: {scan_run_id}", file=sys.stderr)
 
     stats = await _analyse_files(
         files=files,
@@ -783,7 +801,7 @@ async def run_scanner_pipeline(
         context=context,
         skip_existing=args.skip_existing,
         timeout=args.timeout,
-        api_url=args.api_url,
+        api_url=api_url,
         no_ingest=args.no_ingest,
         scan_run_id=scan_run_id,
         scan_source=scan_source,

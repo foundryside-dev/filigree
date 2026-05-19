@@ -1236,9 +1236,14 @@ filigree-scanner-codex --root <project-root> --file <path> --max-files 1 \
 
 Runners execute with the project as their current working directory and post
 results to the living scan-results endpoint, `/api/scan-results`, which aliases
-the recommended Loom generation. If a future runner flag changes, refresh
-managed project registrations with `filigree scanner enable <name> --force`;
-`filigree doctor` reports bundled registrations that look stale.
+the recommended Loom generation. When `--api-url` is omitted during a direct
+runner invocation, the runner resolves the same active local dashboard target
+used by `trigger-scan`: `.filigree/ephemeral.port` in ethereal mode, the
+configured daemon port in server mode, and `http://localhost:8377` only as a
+legacy fallback outside an initialized Filigree project. If a future runner flag
+changes, refresh managed project registrations with `filigree scanner enable
+<name> --force`; `filigree doctor` reports bundled registrations that look
+stale.
 
 ### `trigger-scan`
 
