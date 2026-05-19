@@ -1005,6 +1005,64 @@ class TestReportFindingCommand:
 
 
 class TestTriggerScanCommand:
+    def test_trigger_scan_registry_unavailable_returns_structured_code(
+        self,
+        project_with_scanner: SeededProject,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=target.py",
+                path=path,
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", unavailable_register_file)
+            result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "target.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_batch_registry_unavailable_returns_structured_code(
+        self,
+        project_with_scanner: SeededProject,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=target.py",
+                path=path,
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", unavailable_register_file)
+            result = runner.invoke(cli, ["trigger-scan-batch", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "target.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+        finally:
+            os.chdir(original)
+
     def test_trigger_scan_success(self, project_with_scanner: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()

@@ -15,6 +15,7 @@ import pytest
 from filigree.core import FiligreeDB, write_config
 from filigree.mcp_server import call_tool, list_tools  # type: ignore[attr-defined]
 from filigree.mcp_tools.scanners import _validate_localhost_url
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
 from tests._fakes.registry import PathRegistry
 from tests.mcp._helpers import _parse
@@ -372,6 +373,38 @@ class TestGetScanStatusTool:
 
 
 class TestTriggerScanBatchTool:
+    async def test_batch_scan_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=batch_registry_a.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        files = _make_target_files(mcp_db, ["batch_registry_a.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = UnavailableRegistry()
+        try:
+            data = _parse(
+                await call_tool(
+                    "trigger_scan_batch",
+                    {"scanner": "test-scanner", "file_paths": ["batch_registry_a.py"]},
+                )
+            )
+
+            assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "batch_registry_a.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=batch_registry_a.py"
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_batch_scan_uses_registry_resolved_file_ids(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["batch_registry_a.py", "batch_registry_b.py"])
         _write_scanner_toml(mcp_db)
@@ -921,6 +954,33 @@ class TestBatchScanDbTrackingFailure:
 
 class TestTriggerScanCooldownReservation:
     """Regression tests for filigree-ed3be5a092: cooldown is reserved pre-spawn."""
+
+    async def test_trigger_scan_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=trigger_registry.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        files = _make_target_files(mcp_db, ["trigger_registry.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = UnavailableRegistry()
+        try:
+            data = _parse(await call_tool("trigger_scan", {"scanner": "test-scanner", "file_path": "trigger_registry.py"}))
+
+            assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "trigger_registry.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=trigger_registry.py"
+        finally:
+            _cleanup_files(mcp_db, files)
 
     async def test_trigger_scan_uses_registry_resolved_file_id(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["trigger_registry.py"])

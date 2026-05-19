@@ -197,7 +197,7 @@ class TestRunScannerPipeline:
         )
         monkeypatch.setattr(
             "filigree.scanner_scripts.scan_utils.post_to_api",
-            lambda **kwargs: (post_calls.append(kwargs) or (True, "")),
+            lambda **kwargs: post_calls.append(kwargs) or (True, ""),
         )
 
         async def fake_executor(**kwargs: object) -> None:

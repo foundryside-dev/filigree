@@ -472,11 +472,7 @@ def _default_scan_root(repo_root: Path) -> str:
     if repo_named_package.is_dir():
         return str(repo_named_package.relative_to(repo_root))
 
-    package_dirs = sorted(
-        path
-        for path in src_dir.iterdir()
-        if path.is_dir() and (path / "__init__.py").is_file()
-    )
+    package_dirs = sorted(path for path in src_dir.iterdir() if path.is_dir() and (path / "__init__.py").is_file())
     if len(package_dirs) == 1:
         return str(package_dirs[0].relative_to(repo_root))
 

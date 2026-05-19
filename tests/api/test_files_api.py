@@ -77,8 +77,7 @@ class TestScanResultsRegistryErrors:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: "
-                    "HTTP 404 not indexed",
+                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
                     url="http://clarion.test/api/v1/files?path=missing.py",
                 )

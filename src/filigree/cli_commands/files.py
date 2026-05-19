@@ -746,9 +746,7 @@ def migrate_registry_cmd(
                 if manifest["unresolved"]:
                     payload = {"mode": "dry-run" if dry_run else "execute", **manifest}
                     if execute:
-                        malformed_scan_runs = [
-                            item for item in manifest["unresolved"] if item.get("kind") == "malformed_scan_run_file_ids"
-                        ]
+                        malformed_scan_runs = [item for item in manifest["unresolved"] if item.get("kind") == "malformed_scan_run_file_ids"]
                         if malformed_scan_runs:
                             msg = (
                                 f"Cannot execute registry migration: {len(malformed_scan_runs)} scan_runs "

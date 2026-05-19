@@ -39,6 +39,7 @@ def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONRes
         return _error_response(str(exc), ErrorCode.NOT_FOUND, 404)
     return _error_response(str(exc), ErrorCode.VALIDATION, 400)
 
+
 # ---------------------------------------------------------------------------
 # Shared request parsing
 # ---------------------------------------------------------------------------

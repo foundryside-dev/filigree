@@ -15,6 +15,7 @@ from filigree.mcp_tools.common import (
     _apply_has_more,
     _list_response,
     _parse_args,
+    _registry_error_text,
     _resolve_pagination,
     _slim_issue,
     _text,
@@ -23,6 +24,7 @@ from filigree.mcp_tools.common import (
     _validate_str,
 )
 from filigree.mcp_tools.payloads import observation_link_to_mcp, observation_to_mcp
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
 from filigree.types.inputs import (
     BatchDismissObservationsArgs,
@@ -387,6 +389,8 @@ async def _handle_observe(arguments: dict[str, Any]) -> list[TextContent]:
             priority=args.get("priority", 3),
             actor=actor,
         )
+    except (RegistryResolutionError, RegistryUnavailableError) as e:
+        return _registry_error_text(e, action="recording observation")
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except sqlite3.Error as e:

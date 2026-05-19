@@ -417,9 +417,7 @@ class TestMainGlobalReset:
         with caplog.at_level(logging.WARNING, logger="filigree.dashboard"):
             dash_module.main(port=9999, no_browser=True, server_mode=False, allow_local_fallback=True)
 
-        assert (
-            "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
-        )
+        assert "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
         assert "Clarion registry backend unavailable; using local file registry fallback" not in caplog.text
         assert captured["allow_local_fallback"] is True
         assert captured["registry_displaced"] is True

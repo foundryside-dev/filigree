@@ -884,6 +884,25 @@ class TestClaimNextExhaustion:
         mock_logger.warning.assert_called_once()
         assert "failed to claim" in str(mock_logger.warning.call_args)
 
+    def test_claim_next_skips_status_mismatch_candidate(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A claim-phase status mismatch means this ready candidate went stale."""
+        stale = db.create_issue("Stale candidate", priority=0)
+        survivor = db.create_issue("Survivor candidate", priority=1)
+        real_claim_issue = db.claim_issue
+
+        def status_mismatch_once(issue_id: str, *args: object, **kwargs: object) -> object:
+            if issue_id == stale.id:
+                raise ValueError(f"Cannot claim {issue_id}: status is 'closed', expected open-category state or wip-category handoff state")
+            return real_claim_issue(issue_id, *args, **kwargs)
+
+        monkeypatch.setattr(db, "claim_issue", status_mismatch_once)
+
+        result = db.claim_next("agent2")
+
+        assert result is not None
+        assert result.id == survivor.id
+        assert result.assignee == "agent2"
+
     def test_claim_next_propagates_validation_bug_from_claim_phase(self, db: FiligreeDB) -> None:
         """Bug-class ValueError from claim_issue must not be hidden as a race."""
         db.create_issue("Target")
@@ -1173,6 +1192,84 @@ class TestImportJsonl:
         assert fresh.conn.execute("SELECT COUNT(*) FROM file_associations").fetchone()[0] == 1
         assert fresh.conn.execute("SELECT COUNT(*) FROM file_events").fetchone()[0] == 1
         fresh.close()
+
+    def test_import_preserves_file_registry_metadata(self, tmp_path: Path) -> None:
+        jsonl = tmp_path / "clarion-file.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "file_record",
+                    "id": "core:file:src/imported.py",
+                    "path": "src/imported.py",
+                    "language": "python",
+                    "file_type": "source",
+                    "content_hash": "sha256:imported",
+                    "registry_backend": "clarion",
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "metadata": {"owner": "clarion"},
+                }
+            )
+            + "\n"
+        )
+
+        fresh = FiligreeDB(tmp_path / "fresh-clarion-file.db", prefix="test")
+        fresh.initialize()
+        fresh.import_jsonl(jsonl)
+
+        row = fresh.conn.execute(
+            "SELECT id, content_hash, registry_backend, metadata FROM file_records WHERE path = ?",
+            ("src/imported.py",),
+        ).fetchone()
+        assert dict(row) == {
+            "id": "core:file:src/imported.py",
+            "content_hash": "sha256:imported",
+            "registry_backend": "clarion",
+            "metadata": '{"owner": "clarion"}',
+        }
+        fresh.close()
+
+    def test_import_rejects_invalid_file_registry_backend(self, db: FiligreeDB, tmp_path: Path) -> None:
+        jsonl = tmp_path / "bad-file-registry.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "file_record",
+                    "id": "test-file-bad-registry",
+                    "path": "src/bad_registry.py",
+                    "registry_backend": "remote",
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="Invalid registry_backend"):
+            db.import_jsonl(jsonl)
+
+    def test_import_legacy_file_record_defaults_registry_metadata(self, db: FiligreeDB, tmp_path: Path) -> None:
+        jsonl = tmp_path / "legacy-file-record.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "file_record",
+                    "id": "test-file-legacy",
+                    "path": "src/legacy.py",
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        )
+
+        db.import_jsonl(jsonl)
+
+        row = db.conn.execute(
+            "SELECT content_hash, registry_backend FROM file_records WHERE id = ?",
+            ("test-file-legacy",),
+        ).fetchone()
+        assert dict(row) == {"content_hash": "", "registry_backend": "local"}
 
     def test_import_roundtrip_reconciles_seeded_future_singleton(self, db: FiligreeDB, tmp_path: Path) -> None:
         out = tmp_path / "future-roundtrip.jsonl"

@@ -138,8 +138,7 @@ class TestReportFindingTool:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: "
-                    "HTTP 404 not indexed",
+                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
                     url="http://clarion.test/api/v1/files?path=missing.py",
                 )
@@ -242,6 +241,52 @@ class TestReportFindingTool:
         assert data["observations_created"] == 1
         assert data["observation_id"] == observations[0]["id"]
         assert data["observation_ids"] == [observations[0]["id"]]
+
+    async def test_report_finding_update_fallback_is_scoped_to_reported_file(self, mcp_db: FiligreeDB) -> None:
+        finding_shape = {
+            "rule_id": "same-risk",
+            "message": "Identical finding text",
+            "severity": "medium",
+            "line_start": 7,
+        }
+        mcp_db.process_scan_results(
+            scan_source="agent",
+            findings=[{"path": "src/alpha.py", **finding_shape}],
+            create_observations=True,
+        )
+        mcp_db.process_scan_results(
+            scan_source="agent",
+            findings=[{"path": "src/beta.py", **finding_shape}],
+            create_observations=True,
+        )
+        alpha_file = mcp_db.get_file_by_path("src/alpha.py")
+        beta_file = mcp_db.get_file_by_path("src/beta.py")
+        assert alpha_file is not None
+        assert beta_file is not None
+        alpha_finding = mcp_db.list_findings_global(file_id=alpha_file.id, scan_source="agent")["findings"][0]
+        beta_finding = mcp_db.list_findings_global(file_id=beta_file.id, scan_source="agent")["findings"][0]
+        beta_observation = mcp_db.list_observations(file_id=beta_file.id)[0]
+        mcp_db.conn.execute(
+            "UPDATE scan_findings SET updated_at = ? WHERE id = ?",
+            ("2999-01-01T00:00:00+00:00", alpha_finding["id"]),
+        )
+        mcp_db.conn.commit()
+
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/beta.py",
+                    "create_observation": True,
+                    **finding_shape,
+                },
+            )
+        )
+
+        assert data["finding_result"] == "updated"
+        assert data["file_id"] == beta_file.id
+        assert data["finding_id"] == beta_finding["id"]
+        assert data["observation_id"] == beta_observation["id"]
 
 
 class TestUpdateFindingTool:

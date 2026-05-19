@@ -7,11 +7,36 @@ from unittest.mock import patch
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
 
 class TestObserveTool:
+    async def test_observe_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        mcp_db.registry = UnavailableRegistry()
+
+        result = await call_tool("observe", {"summary": "registry-backed note", "file_path": "src/observed.py"})
+        data = _parse(result)
+
+        assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+        assert data["details"]["cause"] == "registry_unavailable"
+        assert data["details"]["cause_kind"] == "network"
+        assert data["details"]["path"] == "src/observed.py"
+        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fobserved.py"
+
     async def test_observe_creates_observation(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("observe", {"summary": "Something looks wrong"})
         data = _parse(result)

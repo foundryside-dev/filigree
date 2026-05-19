@@ -14,6 +14,7 @@ from mcp.types import TextContent
 
 from filigree.issue_payloads import issue_to_ready, issue_to_slim
 from filigree.models import Issue
+from filigree.registry_errors import RegistryPublicError, registry_error_response
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
@@ -46,6 +47,10 @@ def _text(content: object) -> list[TextContent]:
     if isinstance(content, str):
         return [TextContent(type="text", text=content)]
     return [TextContent(type="text", text=json.dumps(content, indent=2, default=str))]
+
+
+def _registry_error_text(exc: RegistryPublicError, *, action: str) -> list[TextContent]:
+    return _text(registry_error_response(exc, action=action))
 
 
 def _slim_issue(issue: Issue) -> SlimIssue:

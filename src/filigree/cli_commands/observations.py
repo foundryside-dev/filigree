@@ -13,6 +13,8 @@ from filigree.cli_common import get_db, refresh_summary
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import observation_link_to_mcp, observation_to_mcp
 from filigree.models import Issue
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
+from filigree.registry_errors import registry_error_response
 from filigree.types.api import BatchFailure, ErrorCode
 
 
@@ -34,8 +36,15 @@ def _emit_validation_error(msg: str, *, as_json: bool) -> None:
     error is shaped. Click rejects ``IntRange`` violations before the body
     runs, which would emit a stderr usage error with exit 2 instead.
     """
+    _emit_error(msg, ErrorCode.VALIDATION, as_json=as_json)
+
+
+def _emit_error(msg: str, code: ErrorCode, *, as_json: bool, details: dict[str, object] | None = None) -> None:
     if as_json:
-        click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.VALIDATION}))
+        envelope: dict[str, object] = {"error": msg, "code": code}
+        if details:
+            envelope["details"] = details
+        click.echo(json_mod.dumps(envelope))
     else:
         click.echo(f"Error: {msg}", err=True)
     sys.exit(1)
@@ -109,6 +118,9 @@ def observe_cmd(
                 priority=priority,
                 actor=ctx.obj["actor"],
             )
+        except (RegistryResolutionError, RegistryUnavailableError) as e:
+            response = registry_error_response(e, action="recording observation")
+            _emit_error(response["error"], response["code"], as_json=as_json, details=response.get("details"))
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))

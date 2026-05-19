@@ -17,7 +17,8 @@ from mcp.types import TextContent, Tool
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.core import VALID_SEVERITIES
-from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
+from filigree.db_files import INGESTED_FILE_ID_KEY
+from filigree.mcp_tools.common import _list_response, _parse_args, _registry_error_text, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
 from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
 from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
@@ -158,6 +159,7 @@ def _reported_finding_record(
     tracker: Any,
     result: ScanIngestResult,
     *,
+    file_id: str | None,
     rule_id: str,
     line_start: int | None,
     message: str,
@@ -171,7 +173,7 @@ def _reported_finding_record(
 
     matching_findings = cast(
         list[dict[str, Any]],
-        tracker.list_findings_global(scan_source="agent", limit=10000)["findings"],
+        tracker.list_findings_global(scan_source="agent", file_id=file_id, limit=10000)["findings"],
     )
     return next(
         (
@@ -739,9 +741,11 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))
 
     line_start = args.get("line_start")
+    reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
     finding_record = _reported_finding_record(
         tracker,
         result,
+        file_id=reported_file_id if isinstance(reported_file_id, str) else None,
         rule_id=rule_id,
         line_start=line_start,
         message=message,
@@ -827,7 +831,10 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
 
-    file_record = tracker.register_file(canonical_path)
+    try:
+        file_record = tracker.register_file(canonical_path)
+    except (RegistryResolutionError, RegistryUnavailableError) as exc:
+        return _registry_error_text(exc, action="triggering scan")
     project_root = filigree_dir.parent
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     scan_run_id = f"{scanner_name}-{ts}-{secrets.token_hex(3)}"
@@ -1057,7 +1064,10 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             skipped.append({"file_path": fp, "reason": "duplicate"})
             continue
         seen_canonical.add(cp)
-        file_record = tracker.register_file(cp)
+        try:
+            file_record = tracker.register_file(cp)
+        except (RegistryResolutionError, RegistryUnavailableError) as exc:
+            return _registry_error_text(exc, action="triggering batch scan")
         canonical_paths.append(cp)
         file_ids.append(file_record.id)
 

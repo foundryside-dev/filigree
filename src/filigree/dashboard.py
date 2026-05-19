@@ -780,9 +780,7 @@ def main(
             _config.update(config)
             db = _open_db_for_filigree_dir(filigree_dir, check_same_thread=False)
             if allow_local_fallback and db.registry_backend == "clarion":
-                logger.warning(
-                    "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates"
-                )
+                logger.warning("dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates")
                 db.enable_local_registry_fallback()
             _db = db
         except SchemaVersionMismatchError as exc:

@@ -24,6 +24,7 @@ import click
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.cli_common import get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
+from filigree.db_files import INGESTED_FILE_ID_KEY
 from filigree.mcp_tools.scanners import (
     _load_scanner_or_error,
     _report_finding_observation_ids,
@@ -32,6 +33,7 @@ from filigree.mcp_tools.scanners import (
 )
 from filigree.paths import safe_path
 from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry_errors import registry_error_response
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
@@ -80,6 +82,11 @@ def _emit_error(msg: str, code: Any, *, as_json: bool, details: dict[str, Any] |
     else:
         click.echo(f"Error: {msg}", err=True)
     sys.exit(1)
+
+
+def _emit_registry_error(exc: RegistryResolutionError | RegistryUnavailableError, *, action: str, as_json: bool) -> None:
+    response = registry_error_response(exc, action=action)
+    _emit_error(response["error"], response["code"], as_json=as_json, details=response.get("details"))
 
 
 def _mark_reserved_scan_failed(tracker: Any, scan_run_id: str, error_message: str) -> None:
@@ -385,7 +392,11 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
     canonical_path = str(target.relative_to(project_root.resolve()))
 
     with get_db() as tracker:
-        file_record = tracker.register_file(canonical_path)
+        try:
+            file_record = tracker.register_file(canonical_path)
+        except (RegistryResolutionError, RegistryUnavailableError) as exc:
+            _emit_registry_error(exc, action="triggering scan", as_json=as_json)
+            return
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         scan_run_id = f"{scanner}-{ts}-{secrets.token_hex(3)}"
 
@@ -582,7 +593,11 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 skipped.append({"file_path": fp, "reason": "duplicate"})
                 continue
             seen_canonical.add(cp)
-            file_record = tracker.register_file(cp)
+            try:
+                file_record = tracker.register_file(cp)
+            except (RegistryResolutionError, RegistryUnavailableError) as exc:
+                _emit_registry_error(exc, action="triggering batch scan", as_json=as_json)
+                return
             canonical_paths.append(cp)
             file_ids.append(file_record.id)
 
@@ -1079,9 +1094,11 @@ def report_finding_cmd(
             _logger.error("report_finding storage failure: %s", exc)
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
+        reported_file_id = finding_record.get(INGESTED_FILE_ID_KEY)
         ingested_finding = _reported_finding_record(
             tracker,
             result,
+            file_id=reported_file_id if isinstance(reported_file_id, str) else None,
             rule_id=rule_id,
             line_start=line_start,
             message=message,

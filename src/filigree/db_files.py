@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+INGESTED_FILE_ID_KEY = "_filigree_ingested_file_id"
+
 # ---------------------------------------------------------------------------
 # Constants for file-domain validation
 # ---------------------------------------------------------------------------
@@ -1064,6 +1066,7 @@ class FilesMixin(DBMixinProtocol):
                     actor=actor,
                     resolved_file=file_resolutions.get(f["path"]),
                 )
+                f[INGESTED_FILE_ID_KEY] = file_id
                 self._upsert_finding(
                     f=f,
                     file_id=file_id,

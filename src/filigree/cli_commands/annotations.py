@@ -15,6 +15,8 @@ from filigree.core import (
     VALID_ANNOTATION_STATUSES,
     VALID_ANNOTATION_TARGET_TYPES,
 )
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
+from filigree.registry_errors import registry_error_response
 from filigree.types.api import ErrorCode
 
 _ANCHOR_STATES = ("current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing")
@@ -22,9 +24,12 @@ _MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
 _MAX_SQLITE_LIMIT = _MAX_SQLITE_OFFSET - 1
 
 
-def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> None:
+def _emit_error(message: str, code: ErrorCode, *, as_json: bool, details: dict[str, object] | None = None) -> None:
     if as_json:
-        click.echo(json_mod.dumps({"error": message, "code": code}))
+        envelope: dict[str, object] = {"error": message, "code": code}
+        if details:
+            envelope["details"] = details
+        click.echo(json_mod.dumps(envelope))
     else:
         click.echo(f"Error: {message}", err=True)
     sys.exit(1)
@@ -66,6 +71,9 @@ def _parse_links(raw_links: tuple[str, ...], *, as_json: bool) -> list[dict[str,
 
 
 def _handle_annotation_exception(exc: Exception, *, as_json: bool) -> None:
+    if isinstance(exc, (RegistryResolutionError, RegistryUnavailableError)):
+        response = registry_error_response(exc, action="creating annotation")
+        _emit_error(response["error"], response["code"], as_json=as_json, details=response.get("details"))
     if isinstance(exc, KeyError):
         _emit_error(f"Not found: {exc.args[0]}", ErrorCode.NOT_FOUND, as_json=as_json)
     if isinstance(exc, sqlite3.Error):
@@ -115,7 +123,7 @@ def annotate_file_cmd(
                 actor=ctx.obj["actor"],
                 session_ref=session_ref,
             )
-        except (KeyError, ValueError, sqlite3.Error) as exc:
+        except (KeyError, RegistryResolutionError, RegistryUnavailableError, ValueError, sqlite3.Error) as exc:
             _handle_annotation_exception(exc, as_json=as_json)
         if as_json:
             click.echo(json_mod.dumps(annotation, indent=2, default=str))

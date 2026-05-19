@@ -124,8 +124,8 @@ def main() -> None:
                             "priority": 1,
                             "description": "Main dashboard with charts and tables",
                             "deps": [
-                                0,       # depends on step 0 in this phase (component library)
-                                "0.1",   # depends on phase 0, step 1 (Implement endpoints)
+                                0,  # depends on step 0 in this phase (component library)
+                                "0.1",  # depends on phase 0, step 1 (Implement endpoints)
                             ],
                         },
                         {

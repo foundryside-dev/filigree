@@ -927,13 +927,11 @@ class TestMigrateRegistryCommand:
         new_file_id = "core:file:new_def"
         with get_db() as db:
             db.conn.execute(
-                "INSERT INTO scan_runs (id, scanner_name, scan_source, file_ids, started_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO scan_runs (id, scanner_name, scan_source, file_ids, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 ("scan-exact", "ruff", "ruff", json.dumps([old_file_id]), now, now),
             )
             db.conn.execute(
-                "INSERT INTO scan_runs (id, scanner_name, scan_source, file_ids, started_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO scan_runs (id, scanner_name, scan_source, file_ids, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 ("scan-wildcard-overmatch", "ruff", "ruff", f'["{unrelated_like_match}",', now, now),
             )
             db.conn.commit()
@@ -1285,9 +1283,7 @@ class TestMigrateRegistryCommand:
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        runner, _project, old_file_id, new_file_id, _manifest = self._seed_migrate_registry_project(
-            cli_in_project, monkeypatch
-        )
+        runner, _project, old_file_id, new_file_id, _manifest = self._seed_migrate_registry_project(cli_in_project, monkeypatch)
         from filigree.cli_common import get_db
 
         dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
@@ -1304,9 +1300,7 @@ class TestMigrateRegistryCommand:
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        runner, project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(
-            cli_in_project, monkeypatch
-        )
+        runner, project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(cli_in_project, monkeypatch)
         from filigree.cli_common import get_db
 
         executed = runner.invoke(
@@ -1334,9 +1328,7 @@ class TestMigrateRegistryCommand:
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        runner, _project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(
-            cli_in_project, monkeypatch
-        )
+        runner, _project, old_file_id, new_file_id, manifest = self._seed_migrate_registry_project(cli_in_project, monkeypatch)
         from filigree.cli_common import get_db
 
         executed = runner.invoke(

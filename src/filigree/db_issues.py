@@ -55,6 +55,14 @@ class _ClaimCandidateVanishedError(Exception):
     """Internal sentinel for a candidate deleted between discovery and claim."""
 
 
+_CLAIM_STATUS_MISMATCH_MARKER = "expected open-category state or wip-category handoff state"
+
+
+def _is_claim_status_mismatch(exc: ValueError) -> bool:
+    """Return True when claim_issue reports a stale/non-claimable candidate."""
+    return _CLAIM_STATUS_MISMATCH_MARKER in str(exc)
+
+
 _LIST_ISSUE_SORT_COLUMNS = {
     "created_at": "i.created_at",
     "updated_at": "i.updated_at",
@@ -1857,8 +1865,14 @@ class IssuesMixin(DBMixinProtocol):
                 prior_assignee = row["assignee"] or ""
                 try:
                     claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _skip_begin=_skip_begin)
+                except ClaimConflictError:
+                    raise
                 except KeyError as exc:
                     raise _ClaimCandidateVanishedError(issue.id) from exc
+                except ValueError as exc:
+                    if _is_claim_status_mismatch(exc):
+                        raise _ClaimCandidateVanishedError(issue.id) from exc
+                    raise
             except (ClaimConflictError, _ClaimCandidateVanishedError) as exc:
                 skipped += 1
                 logger.debug("claim_next: skipping %s: %s", issue.id, exc)
@@ -2044,6 +2058,10 @@ class IssuesMixin(DBMixinProtocol):
             self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
         except (ClaimConflictError, KeyError) as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
+        except ValueError as exc:
+            if _is_claim_status_mismatch(exc):
+                raise _StartCandidateUnclaimableError(issue_id) from exc
+            raise
         try:
             return self.update_issue(issue_id, status=target_status, actor=actor, _skip_begin=True)
         except InvalidTransitionError as exc:

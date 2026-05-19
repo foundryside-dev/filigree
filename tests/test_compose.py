@@ -308,6 +308,30 @@ class TestStartNextWork:
         with pytest.raises(InvalidTransitionError):
             db.start_next_work(assignee="alice", actor="alice")
 
+    def test_claim_status_mismatch_candidate_between_ready_and_claim_is_skipped(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A candidate that races out of claimable status should not abort iteration."""
+        stale = db.create_issue("d6-next-stale-status", type="task", priority=0)
+        survivor = db.create_issue("d6-next-status-survivor", type="task", priority=1)
+        real_claim_issue = db.claim_issue
+
+        def status_mismatch_once(issue_id: str, *args: object, **kwargs: object) -> object:
+            if issue_id == stale.id:
+                raise ValueError(f"Cannot claim {issue_id}: status is 'closed', expected open-category state or wip-category handoff state")
+            return real_claim_issue(issue_id, *args, **kwargs)
+
+        monkeypatch.setattr(db, "claim_issue", status_mismatch_once)
+
+        result = db.start_next_work(assignee="alice", actor="alice")
+
+        assert result is not None
+        assert result.id == survivor.id
+        assert result.status == "in_progress"
+        assert result.assignee == "alice"
+
     def test_deleted_candidate_between_ready_and_claim_is_skipped(
         self,
         db: FiligreeDB,

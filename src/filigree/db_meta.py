@@ -20,6 +20,8 @@ from filigree.types.planning import CommentRecord, StatsResult
 
 logger = logging.getLogger(__name__)
 
+_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "clarion"})
+
 
 class MetaMixin(DBMixinProtocol):
     """Comments, labels, stats, bulk operations, and export/import.
@@ -609,14 +611,25 @@ class MetaMixin(DBMixinProtocol):
     ) -> int:
         src_id = record["id"]
         path = record["path"]
+        registry_backend = record.get("registry_backend", "local") or "local"
+        if not isinstance(registry_backend, str) or registry_backend not in _VALID_FILE_REGISTRY_BACKENDS:
+            msg = f"Invalid registry_backend {registry_backend!r} for imported file_record {src_id!r}"
+            raise ValueError(msg)
+        content_hash = record.get("content_hash", "") or ""
+        if not isinstance(content_hash, str):
+            msg = f"Invalid content_hash for imported file_record {src_id!r}: expected string"
+            raise ValueError(msg)
         cursor = self.conn.execute(
-            f"INSERT {conflict} INTO file_records (id, path, language, file_type, first_seen, updated_at, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT {conflict} INTO file_records "
+            "(id, path, language, file_type, content_hash, registry_backend, first_seen, updated_at, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 src_id,
                 path,
                 record.get("language", ""),
                 record.get("file_type", ""),
+                content_hash,
+                registry_backend,
                 _normalize_iso_to_utc(record.get("first_seen")) or _now_iso(),
                 _normalize_iso_to_utc(record.get("updated_at")) or _now_iso(),
                 self._json_text(record.get("metadata", {})),

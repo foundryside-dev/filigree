@@ -2593,9 +2593,7 @@ class TestFileTools:
         assert "id" not in detail["file"]
         assert detail["file"]["path"] == "src/example.py"
 
-    async def test_register_file_displaced_under_clarion_mode(
-        self, clarion_mcp_db: FiligreeDB, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_register_file_displaced_under_clarion_mode(self, clarion_mcp_db: FiligreeDB, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="filigree.mcp_tools.files"):
             data = _parse(await call_tool("register_file", {"path": "src/example.py", "language": "python"}))
 
