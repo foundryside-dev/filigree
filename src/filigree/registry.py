@@ -592,6 +592,12 @@ class ClarionRegistry:
             if exc.code == 401:
                 msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
+            if exc.code == 403 and _is_briefing_blocked_body(exc):
+                msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
+                raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
+            if 400 <= exc.code < 500:
+                msg = f"Clarion batch resolve rejected request at {url}: HTTP {exc.code} {reason}"
+                raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
             msg = f"Clarion batch resolve failed at {url}: HTTP {exc.code} {reason}"
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -610,8 +616,17 @@ class ClarionRegistry:
         return self._parse_batch_response(payload, url=url)
 
     def _parse_batch_response(self, payload: dict[str, Any], *, url: str) -> BatchResolution:
+        def require_list(field: str) -> list[Any]:
+            if field not in payload:
+                return []
+            value = payload[field]
+            if not isinstance(value, list):
+                msg = f"Clarion batch resolve at {url}: '{field}' must be a list"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            return value
+
         resolved: dict[str, ResolvedFile] = {}
-        for item in payload.get("resolved", []) or []:
+        for item in require_list("resolved"):
             if not isinstance(item, dict):
                 msg = f"Clarion batch resolve at {url}: 'resolved' item must be an object"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
@@ -633,17 +648,30 @@ class ClarionRegistry:
                 registry_backend="clarion",
             )
 
-        not_found = [p for p in payload.get("not_found", []) or [] if isinstance(p, str)]
-        briefing_blocked = [p for p in payload.get("briefing_blocked", []) or [] if isinstance(p, str)]
+        not_found: list[str] = []
+        for item in require_list("not_found"):
+            if not isinstance(item, str):
+                msg = f"Clarion batch resolve at {url}: 'not_found' item must be a string"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            not_found.append(item)
+        briefing_blocked: list[str] = []
+        for item in require_list("briefing_blocked"):
+            if not isinstance(item, str):
+                msg = f"Clarion batch resolve at {url}: 'briefing_blocked' item must be a string"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            briefing_blocked.append(item)
         errors: list[BatchResolutionError] = []
-        for item in payload.get("errors", []) or []:
+        for item in require_list("errors"):
             if not isinstance(item, dict):
-                continue
-            requested = item.get("requested_path", "")
-            code = item.get("code", "")
-            message = item.get("message", "")
-            if isinstance(requested, str) and isinstance(code, str) and isinstance(message, str):
-                errors.append(BatchResolutionError(requested_path=requested, code=code, message=message))
+                msg = f"Clarion batch resolve at {url}: 'errors' item must be an object"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            requested = item.get("requested_path")
+            code = item.get("code")
+            message = item.get("message")
+            if not isinstance(requested, str) or not isinstance(code, str) or not isinstance(message, str):
+                msg = f"Clarion batch resolve at {url}: errors entry missing string field(s): requested_path, code, message"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            errors.append(BatchResolutionError(requested_path=requested, code=code, message=message))
 
         return BatchResolution(
             resolved=resolved,

@@ -29,7 +29,7 @@ from click.testing import CliRunner
 from filigree.cli import cli
 from filigree.cli_common import get_db
 from filigree.core import FiligreeDB, write_config
-from filigree.registry import RegistryUnavailableError
+from filigree.registry import RegistryBriefingBlockedError, RegistryUnavailableError
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -864,6 +864,31 @@ class TestReportFindingCommand:
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "src/foo.py"
             assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Ffoo.py"
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_registry_briefing_blocked_returns_structured_code(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def briefing_blocked(self: FiligreeDB, **kwargs: object) -> object:
+            raise RegistryBriefingBlockedError(
+                "Clarion registry refuses briefing-blocked file",
+                status_code=403,
+                url="http://clarion.test/api/v1/files?path=secret.py",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "process_scan_results", briefing_blocked)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "BRIEFING_BLOCKED"
+            assert data["details"]["cause"] == "registry_briefing_blocked"
         finally:
             os.chdir(original)
 

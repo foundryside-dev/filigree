@@ -949,6 +949,43 @@ class TestMigrateRegistryCommand:
             assert json.loads(exact["file_ids"]) == [new_file_id]
             assert overmatch["file_ids"] == f'["{unrelated_like_match}",'
 
+    def test_migrate_registry_rollback_rejects_non_list_planned_manifest(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        from filigree.cli_commands.files import _registry_manifest_project_identity
+        from filigree.cli_common import get_db
+
+        runner, project = cli_in_project
+        with get_db() as db:
+            project_identity = _registry_manifest_project_identity(db)
+        manifest = project / "bad-rollback-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "to": "clarion",
+                    "project": project_identity,
+                    "planned": {"old_file_id": "not-a-list"},
+                }
+            )
+        )
+
+        result = runner.invoke(cli, ["migrate-registry", "--rollback", str(manifest), "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "planned" in data["error"]
+
+    def test_migrate_registry_rollback_missing_manifest_is_io(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project = cli_in_project
+        missing_manifest = project / "missing-rollback-manifest.json"
+
+        result = runner.invoke(cli, ["migrate-registry", "--rollback", str(missing_manifest), "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "missing-rollback-manifest.json" in data["error"]
+
     def test_migrate_registry_execute_aborts_with_unresolved_files(
         self,
         cli_in_project: tuple[CliRunner, Path],

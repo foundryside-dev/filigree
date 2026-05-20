@@ -63,6 +63,21 @@ if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
 
+
+def _validate_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _validate_optional_string_list(value: object, field_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{field_name} must be a list of strings")
+    return value
+
+
 _LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".c": "c",
     ".cc": "cpp",
@@ -105,6 +120,14 @@ def _normalize_scan_path(path: str) -> str:
     """Normalize scanner-provided paths for stable file identity."""
     normalized = os.path.normpath(path.replace("\\", "/"))
     return "" if normalized == "." else normalized
+
+
+def _is_project_relative_scan_path(path: str) -> bool:
+    if Path(path).is_absolute():
+        return False
+    if len(path) >= 3 and path[1:3] == ":/":
+        return False
+    return path != ".." and not path.startswith("../")
 
 
 def _infer_language_from_path(path: str) -> str:
@@ -232,9 +255,13 @@ class FilesMixin(DBMixinProtocol):
         :meth:`_update_existing_file_record` directly so there is exactly one
         update code path (mirroring ``_upsert_file_record``'s pattern).
         """
+        if not isinstance(path, str):
+            raise ValueError(f"File path must be a string, got {type(path).__name__}")
         path = _normalize_scan_path(path)
         if not path:
             raise ValueError("File path cannot be empty after normalization")
+        if not _is_project_relative_scan_path(path):
+            raise ValueError("File path must be project-relative")
         now = _now_iso()
         existing = self.conn.execute("SELECT * FROM file_records WHERE path = ?", (path,)).fetchone()
         inferred_language = _infer_language_from_path(path)
@@ -675,6 +702,8 @@ class FilesMixin(DBMixinProtocol):
             f["path"] = _normalize_scan_path(f["path"])
             if not f["path"]:
                 raise ValueError(f"findings[{i}] path is empty after normalization")
+            if not _is_project_relative_scan_path(f["path"]):
+                raise ValueError(f"findings[{i}] path must be project-relative")
             _req(f, "rule_id", i, non_empty=True)
             _req(f, "message", i, non_empty=True)
             severity = f.get("severity", "info")
@@ -688,6 +717,10 @@ class FilesMixin(DBMixinProtocol):
                 # the unique index `coalesce(line_start, -1)` (db_schema.py:159-160).
                 if isinstance(ln_val, int) and not isinstance(ln_val, bool) and ln_val < 0:
                     raise ValueError(f"findings[{i}] {ln_field} must be >= 0, got {ln_val}")
+            line_start = f.get("line_start")
+            line_end = f.get("line_end")
+            if isinstance(line_start, int) and isinstance(line_end, int) and line_end < line_start:
+                raise ValueError(f"findings[{i}] line_end must be >= line_start, got {line_end} < {line_start}")
             if "suggestion" in f:
                 suggestion = f["suggestion"]
                 if not isinstance(suggestion, str):
@@ -1701,6 +1734,8 @@ class FilesMixin(DBMixinProtocol):
         promoted issue. The ``from-finding`` label is always added in
         addition. Senior-user MCP review run e P2.12.
         """
+        actor = _validate_string(actor, "actor")
+        labels = _validate_optional_string_list(labels, "labels")
         finding = self.get_finding(finding_id)
         if priority is None:
             priority = self._SEVERITY_TO_PRIORITY.get(finding["severity"], 3)

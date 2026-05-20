@@ -2063,7 +2063,7 @@ class IssuesMixin(DBMixinProtocol):
                 raise _StartCandidateUnclaimableError(issue_id) from exc
             raise
         try:
-            return self.update_issue(issue_id, status=target_status, actor=actor, _skip_begin=True)
+            return self.update_issue(issue_id, status=target_status, actor=actor, expected_assignee=assignee, _skip_begin=True)
         except InvalidTransitionError as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:

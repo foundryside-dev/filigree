@@ -617,6 +617,36 @@ def _validate_registry_manifest_project_identity(db: Any, manifest: dict[str, An
             raise ValueError(msg)
 
 
+def _registry_manifest_planned_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    planned = manifest.get("planned")
+    if not isinstance(planned, list):
+        msg = "Rollback manifest 'planned' must be a list"
+        raise ValueError(msg)
+    required = {
+        "old_file_id",
+        "new_file_id",
+        "old_path",
+        "new_path",
+        "old_language",
+        "new_language",
+        "old_content_hash",
+        "new_content_hash",
+        "old_registry_backend",
+        "new_registry_backend",
+    }
+    entries: list[dict[str, Any]] = []
+    for index, entry in enumerate(planned):
+        if not isinstance(entry, dict):
+            msg = f"Rollback manifest planned[{index}] must be an object"
+            raise ValueError(msg)
+        missing = sorted(required - set(entry))
+        if missing:
+            msg = f"Rollback manifest planned[{index}] missing required field(s): {', '.join(missing)}"
+            raise ValueError(msg)
+        entries.append(entry)
+    return entries
+
+
 def _scan_run_file_id_rewrite_blockers(conn: sqlite3.Connection, old_file_id: str, path: str) -> list[dict[str, str]]:
     unresolved: list[dict[str, str]] = []
     rows = _scan_run_rows_referencing_file_id(conn, old_file_id)
@@ -797,7 +827,7 @@ def migrate_registry_cmd(
                     msg = "Rollback manifest must be a JSON object"
                     raise ValueError(msg)
                 _validate_registry_manifest_project_identity(db, manifest)
-                entries = list(manifest.get("planned", []))
+                entries = _registry_manifest_planned_entries(manifest)
                 _apply_registry_migration(db, entries, reverse=True)
                 payload = {
                     "mode": "rollback",
@@ -840,7 +870,7 @@ def migrate_registry_cmd(
                     payload = {"mode": "dry-run", **manifest}
         except (OSError, json_mod.JSONDecodeError, KeyError, ValueError, sqlite3.Error) as e:
             if as_json:
-                code = ErrorCode.IO if isinstance(e, sqlite3.Error) else ErrorCode.VALIDATION
+                code = ErrorCode.IO if isinstance(e, (OSError, sqlite3.Error)) else ErrorCode.VALIDATION
                 click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)

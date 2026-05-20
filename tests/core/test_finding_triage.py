@@ -226,6 +226,21 @@ class TestPromoteFindingToIssue:
         assert "warnings" in second
         assert any("already linked" in warning for warning in second["warnings"])
 
+    def test_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_finding_to_issue(ids["sqli"], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_finding_to_issue(ids["sqli"], labels=["cluster:test", 123])  # type: ignore[list-item]
+
+    def test_rejects_non_string_actor(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(ValueError, match="actor must be a string"):
+            db.promote_finding_to_issue(ids["sqli"], actor=123)  # type: ignore[arg-type]
+
 
 class TestProcessScanResultsBreakingChange:
     """The old create_issues parameter was removed — callers must use create_observations."""

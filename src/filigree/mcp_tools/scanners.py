@@ -20,7 +20,7 @@ from filigree.core import VALID_SEVERITIES
 from filigree.db_files import INGESTED_FILE_ID_KEY
 from filigree.mcp_tools.common import _list_response, _parse_args, _registry_error_text, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
-from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
@@ -713,29 +713,10 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
         )
     except RegistryResolutionError as exc:
         _logger.error("report_finding registry resolution failed: %s", exc)
-        code = ErrorCode.NOT_FOUND if isinstance(exc, RegistryFileNotFoundError) else ErrorCode.VALIDATION
-        cause = "registry_file_not_found" if isinstance(exc, RegistryFileNotFoundError) else "registry_resolution_rejected"
-        return _text(
-            ErrorResponse(
-                error=f"Registry could not resolve file while reporting finding: {exc}",
-                code=code,
-                details={"cause": cause},
-            )
-        )
+        return _registry_error_text(exc, action="reporting finding")
     except RegistryUnavailableError as exc:
         _logger.error("report_finding registry unavailable: %s", exc)
-        return _text(
-            ErrorResponse(
-                error=f"Registry unavailable while reporting finding: {exc}",
-                code=ErrorCode.REGISTRY_UNAVAILABLE,
-                details={
-                    "cause": "registry_unavailable",
-                    "cause_kind": exc.cause_kind,
-                    "path": exc.path,
-                    "url": exc.url,
-                },
-            )
-        )
+        return _registry_error_text(exc, action="reporting finding")
     except (ValueError, sqlite3.Error) as exc:
         _logger.error("report_finding failed: %s", exc)
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))

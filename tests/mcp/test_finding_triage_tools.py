@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
-from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
+from filigree.registry import RegistryBriefingBlockedError, RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
 from filigree.types.core import make_entity_id
 from tests._fakes.registry import FixedRegistry
@@ -162,6 +162,35 @@ class TestReportFindingTool:
 
         assert data["code"] == ErrorCode.NOT_FOUND
         assert data["details"]["cause"] == "registry_file_not_found"
+
+    async def test_report_finding_registry_briefing_blocked_returns_briefing_blocked(self, mcp_db: FiligreeDB) -> None:
+        class BriefingBlockedRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryBriefingBlockedError(
+                    "Clarion registry refuses briefing-blocked file",
+                    status_code=403,
+                    url="http://clarion.test/api/v1/files?path=secret.py",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        mcp_db.registry = BriefingBlockedRegistry()
+
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "secret.py",
+                    "rule_id": "agent-noted-risk",
+                    "message": "Agent spotted a follow-up risk",
+                    "severity": "medium",
+                },
+            )
+        )
+
+        assert data["code"] == ErrorCode.BRIEFING_BLOCKED
+        assert data["details"]["cause"] == "registry_briefing_blocked"
 
     async def test_report_finding_does_not_register_file_after_ingest(self, mcp_db: FiligreeDB) -> None:
         class CountingCanonicalRegistry:

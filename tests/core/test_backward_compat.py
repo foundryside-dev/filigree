@@ -165,14 +165,14 @@ class TestFileRecordToDictStability:
     """FileRecord.to_dict() must include all expected keys."""
 
     def test_to_dict_keys(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         files = db.list_files_paginated(limit=1)
         fr = files["results"][0]
         required_keys = {"id", "path", "language", "file_type", "first_seen", "updated_at", "metadata"}
         assert required_keys.issubset(set(fr.keys()))
 
     def test_to_dict_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         files = db.list_files_paginated(limit=1)
         fr = files["results"][0]
         assert isinstance(fr["id"], str)
@@ -184,12 +184,12 @@ class TestScanFindingToDictStability:
     """ScanFinding.to_dict() must include all expected keys."""
 
     def test_to_dict_keys(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
             findings=[
                 {
-                    "path": "/src/main.py",
+                    "path": "src/main.py",
                     "rule_id": "R001",
                     "message": "test finding",
                     "severity": "high",
@@ -227,12 +227,12 @@ class TestScanFindingToDictStability:
         assert set(sf.keys()) == required_keys
 
     def test_to_dict_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
             findings=[
                 {
-                    "path": "/src/main.py",
+                    "path": "src/main.py",
                     "rule_id": "R001",
                     "message": "test",
                     "severity": "high",

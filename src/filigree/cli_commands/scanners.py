@@ -32,7 +32,7 @@ from filigree.mcp_tools.scanners import (
     _validate_localhost_url,
 )
 from filigree.paths import safe_path
-from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.registry_errors import registry_error_response
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
@@ -1060,28 +1060,11 @@ def report_finding_cmd(
             )
         except RegistryResolutionError as exc:
             _logger.warning("report_finding registry resolution failed: %s", exc)
-            code = ErrorCode.NOT_FOUND if isinstance(exc, RegistryFileNotFoundError) else ErrorCode.VALIDATION
-            cause = "registry_file_not_found" if isinstance(exc, RegistryFileNotFoundError) else "registry_resolution_rejected"
-            _emit_error(
-                f"Registry could not resolve file while reporting finding: {exc}",
-                code,
-                as_json=as_json,
-                details={"cause": cause},
-            )
+            _emit_registry_error(exc, action="reporting finding", as_json=as_json)
             return
         except RegistryUnavailableError as exc:
             _logger.warning("report_finding registry unavailable: %s", exc)
-            _emit_error(
-                f"Registry unavailable while reporting finding: {exc}",
-                ErrorCode.REGISTRY_UNAVAILABLE,
-                as_json=as_json,
-                details={
-                    "cause": "registry_unavailable",
-                    "cause_kind": exc.cause_kind,
-                    "path": exc.path,
-                    "url": exc.url,
-                },
-            )
+            _emit_registry_error(exc, action="reporting finding", as_json=as_json)
             return
         except ValueError as exc:
             # Mirrors the HTTP route at dashboard_routes/files.py: a ValueError

@@ -60,6 +60,15 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="summary"):
             db.create_observation("")
 
+    def test_create_non_string_summary_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="summary must be a string"):
+            db.create_observation(123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["detail", "source_issue_id", "source_finding_id", "actor"])
+    def test_create_non_string_text_fields_raise(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.create_observation("bad text field", **{field: 123})  # type: ignore[arg-type]
+
     def test_create_with_source_issue_id(self, db: FiligreeDB) -> None:
         obs = db.create_observation("odd behavior", source_issue_id="test-abc123")
         assert obs["source_issue_id"] == "test-abc123"
@@ -201,9 +210,18 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="priority"):
             db.create_observation("bad priority", priority=-1)
 
+    @pytest.mark.parametrize("priority", [True, "high"])
+    def test_create_non_integer_priority_raises(self, db: FiligreeDB, priority: object) -> None:
+        with pytest.raises(ValueError, match="priority must be an integer"):
+            db.create_observation("bad priority", priority=priority)  # type: ignore[arg-type]
+
     def test_create_negative_line_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="line"):
             db.create_observation("bad line", line=-1)
+
+    def test_create_bool_line_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="line must be an integer"):
+            db.create_observation("bad line", line=True)  # type: ignore[arg-type]
 
     def test_create_whitespace_only_summary_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="summary"):
@@ -218,6 +236,19 @@ class TestCreateObservation:
         assert obs["file_id"] is not None
         f = db.get_file(obs["file_id"])
         assert f.path == "src/main.py"
+
+    def test_create_observation_rejects_non_string_file_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.create_observation("bad path", file_path=123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("auto_commit", [True, False])
+    def test_create_observation_rejects_non_project_relative_file_path(self, db: FiligreeDB, auto_commit: bool) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.create_observation("bad path", file_path="../outside.py", auto_commit=auto_commit)
+
+    def test_create_observation_rejects_absolute_file_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.create_observation("rooted path", file_path="/etc/passwd")
 
     def test_create_observation_insert_failure_removes_newly_created_file_record(self, db: FiligreeDB) -> None:
         """filigree-8b285ec210: orphaned file_record must not linger when obs insert fails."""
@@ -411,6 +442,20 @@ class TestListObservations:
         result = db.list_observations(actor="alpha", priority_max=1)
         assert len(result) == 1
         assert result[0]["summary"] == "alpha-p1"
+
+    def test_list_rejects_non_string_file_path_filter(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.list_observations(file_path=123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["file_id", "actor", "source_issue_id", "sort_by", "direction"])
+    def test_list_rejects_non_string_text_filters(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: 123})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["priority_min", "priority_max", "older_than_hours"])
+    def test_list_rejects_bool_numeric_filters(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: True})  # type: ignore[arg-type]
 
     def test_list_sweeps_expired(self, db: FiligreeDB) -> None:
         """Expired observations are auto-removed on list and logged to audit trail."""
@@ -640,6 +685,12 @@ class TestDismissObservation:
         with pytest.raises(ValueError, match="not found"):
             db.dismiss_observation("nope-123")
 
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_dismiss_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("To dismiss")
+        with pytest.raises(ValueError, match=field):
+            db.dismiss_observation(obs["id"], **{field: 123})  # type: ignore[arg-type]
+
     def test_batch_dismiss(self, db: FiligreeDB) -> None:
         o1 = db.create_observation("One")
         o2 = db.create_observation("Two")
@@ -657,6 +708,20 @@ class TestDismissObservation:
     def test_batch_dismiss_empty_list(self, db: FiligreeDB) -> None:
         result = db.batch_dismiss_observations([])
         assert result == {"dismissed": 0, "not_found": []}
+
+    def test_batch_dismiss_rejects_non_list_ids(self, db: FiligreeDB) -> None:
+        with pytest.raises(TypeError, match="obs_ids must be a list of strings"):
+            db.batch_dismiss_observations("obs-123")  # type: ignore[arg-type]
+
+    def test_batch_dismiss_rejects_non_string_id_items(self, db: FiligreeDB) -> None:
+        with pytest.raises(TypeError, match="obs_ids must be a list of strings"):
+            db.batch_dismiss_observations(["obs-123", 123])  # type: ignore[list-item]
+
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_batch_dismiss_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("To dismiss")
+        with pytest.raises(ValueError, match=field):
+            db.batch_dismiss_observations([obs["id"]], **{field: 123})  # type: ignore[arg-type]
 
     def test_batch_dismiss_duplicate_ids(self, db: FiligreeDB) -> None:
         o1 = db.create_observation("Only one")
@@ -714,6 +779,22 @@ class TestPromoteObservation:
         assert "from-observation" in labels
         assert "cluster:mcp-review-e" in labels
         assert "review:needed" in labels
+
+    @pytest.mark.parametrize("field", ["title", "extra_description", "actor"])
+    def test_promote_rejects_non_string_text_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("bad promote input")
+        with pytest.raises(ValueError, match=field):
+            db.promote_observation(obs["id"], **{field: 123})  # type: ignore[arg-type]
+
+    def test_promote_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observation(obs["id"], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_promote_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observation(obs["id"], labels=["cluster:test", 123])  # type: ignore[list-item]
 
     def test_promote_with_file_creates_association(self, db: FiligreeDB) -> None:
         obs = db.create_observation("bug", file_path="src/core.py")
@@ -968,6 +1049,14 @@ class TestPromoteObservation:
         assert audit is not None
         assert audit["reason"] == f"linked:duplicate:{issue.id}: covered by existing issue"
 
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_link_observation_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        issue = db.create_issue("Existing tracked work")
+        obs = db.create_observation("Attach me")
+
+        with pytest.raises(ValueError, match=field):
+            db.link_observation_to_issue(obs["id"], issue.id, **{field: 123})  # type: ignore[arg-type]
+
     def test_batch_link_observations_reports_per_item_failures(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Existing tracked work")
         obs = db.create_observation("Attach me")
@@ -1006,6 +1095,22 @@ class TestPromoteObservation:
         assert db.list_observations() == []
         linked = db.conn.execute("SELECT obs_id FROM observation_links WHERE issue_id = ? ORDER BY id", (issue.id,)).fetchall()
         assert [row["obs_id"] for row in linked] == [obs1["id"], obs2["id"]]
+
+    @pytest.mark.parametrize("field", ["title", "extra_description", "actor"])
+    def test_promote_many_rejects_non_string_text_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("bad promote input")
+        with pytest.raises(ValueError, match=field):
+            db.promote_observations_to_issue([obs["id"]], **{field: 123})  # type: ignore[arg-type]
+
+    def test_promote_many_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observations_to_issue([obs["id"]], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_promote_many_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observations_to_issue([obs["id"]], labels=["cluster:test", 123])  # type: ignore[list-item]
 
     def test_promote_expired_observation_raises(self, db: FiligreeDB) -> None:
         """Promoting an expired observation should fail, not create a stale issue."""

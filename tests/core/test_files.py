@@ -92,6 +92,19 @@ class TestRegisterFile:
         assert f.language == "python"
         assert f.id.startswith("test-f-")
 
+    @pytest.mark.parametrize("path", ["../outside.py", "src/../../outside.py"])
+    def test_register_file_rejects_non_project_relative_path(self, db: FiligreeDB, path: str) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.register_file(path)
+
+    def test_register_file_rejects_project_root_absolute_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.register_file("/src/main.py", language="python")
+
+    def test_register_file_rejects_non_string_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="File path must be a string"):
+            db.register_file(123)  # type: ignore[arg-type]
+
     def test_register_file_records_actor_on_record_and_metadata_event(self, db: FiligreeDB) -> None:
         created = db.register_file("src/owned.py", language="python", actor="scanner-a")
 
@@ -266,6 +279,10 @@ class TestRegisterFile:
         """Path that normalizes to empty (e.g. '.') should be rejected."""
         with pytest.raises(ValueError, match="empty after normalization"):
             db.register_file(".")
+
+    def test_register_rejects_absolute_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.register_file("/etc/passwd")
 
     def test_register_explicit_empty_metadata_clears_existing(self, db: FiligreeDB) -> None:
         """filigree-822d514ec7: register_file(metadata={}) must clear stored metadata.
@@ -893,6 +910,21 @@ class TestProcessScanResults:
                 findings=[{"path": 123, "rule_id": "E1", "severity": "low", "message": "m"}],
             )
 
+    @pytest.mark.parametrize("path", ["../outside.py", "src/../../outside.py"])
+    def test_scan_result_paths_must_be_project_relative(self, db: FiligreeDB, path: str) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": path, "rule_id": "E1", "severity": "low", "message": "m"}],
+            )
+
+    def test_scan_result_rejects_absolute_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": "/etc/passwd", "rule_id": "E1", "severity": "low", "message": "m"}],
+            )
+
     def test_non_integer_line_start_rejected(self, db: FiligreeDB) -> None:
         """Bug filigree-0dbe1a: non-integer line_start must raise ValueError."""
         with pytest.raises(ValueError, match="line_start must be"):
@@ -950,6 +982,22 @@ class TestProcessScanResults:
                 scan_source="ruff",
                 findings=[
                     {"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m", "line_end": -5},
+                ],
+            )
+
+    def test_line_end_before_line_start_rejected(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="line_end must be >= line_start"):
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {
+                        "path": "a.py",
+                        "rule_id": "E1",
+                        "severity": "low",
+                        "message": "m",
+                        "line_start": 10,
+                        "line_end": 2,
+                    },
                 ],
             )
 
@@ -2925,6 +2973,9 @@ class TestNormalizeScanPath:
 
     def test_parent_traversal(self) -> None:
         assert _normalize_scan_path("src/../main.py") == "main.py"
+
+    def test_absolute_path_keeps_leading_slash_for_validation(self) -> None:
+        assert _normalize_scan_path("/etc/passwd") == "/etc/passwd"
 
     def test_normal_path_unchanged(self) -> None:
         assert _normalize_scan_path("src/main.py") == "src/main.py"

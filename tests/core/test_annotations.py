@@ -108,6 +108,14 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_annotate_file_rejects_absolute_path(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            with pytest.raises(ValueError, match="project-relative"):
+                db.annotate_file("/etc/passwd", "bad path")
+        finally:
+            db.close()
+
     def test_anchor_drift_is_computed_on_read(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:

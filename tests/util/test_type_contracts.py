@@ -193,7 +193,7 @@ class TestProjectConfigShape:
 
 class TestFileRecordDictShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         row = db.conn.execute("SELECT * FROM file_records LIMIT 1").fetchone()
         fr = FileRecord(
             id=row["id"],
@@ -206,7 +206,7 @@ class TestFileRecordDictShape:
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         row = db.conn.execute("SELECT * FROM file_records LIMIT 1").fetchone()
         fr = FileRecord(
             id=row["id"],
@@ -222,10 +222,10 @@ class TestFileRecordDictShape:
 
 class TestScanFindingDictShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -235,10 +235,10 @@ class TestScanFindingDictShape:
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high", "line_start": 1}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high", "line_start": 1}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -251,7 +251,7 @@ class TestScanFindingDictShape:
 
 class TestFileAssociationShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         issue = db.create_issue("Bug in main", type="bug")
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -262,7 +262,7 @@ class TestFileAssociationShape:
         assert set(result[0].keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         issue = db.create_issue("Bug in main", type="bug")
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -276,7 +276,7 @@ class TestFileAssociationShape:
 
 class TestIssueFileAssociationShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         issue = db.create_issue("Bug in main", type="bug")
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -287,7 +287,7 @@ class TestIssueFileAssociationShape:
         assert set(result[0].keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         issue = db.create_issue("Bug in main", type="bug")
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -301,10 +301,10 @@ class TestIssueFileAssociationShape:
 
 class TestFindingsSummaryShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -313,10 +313,10 @@ class TestFindingsSummaryShape:
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -329,20 +329,20 @@ class TestFindingsSummaryShape:
 
 class TestGlobalFindingsStatsShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         result = db.get_global_findings_stats()
         hints = get_type_hints(GlobalFindingsStats)
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         result = db.get_global_findings_stats()
         assert isinstance(result["total_findings"], int)
@@ -353,10 +353,10 @@ class TestGlobalFindingsStatsShape:
 
 class TestFileDetailShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -365,10 +365,10 @@ class TestFileDetailShape:
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]
@@ -381,10 +381,10 @@ class TestFileDetailShape:
 
 class TestFileHotspotShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "critical"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "critical"}],
         )
         result = db.get_file_hotspots(limit=1)
         assert len(result) >= 1
@@ -392,10 +392,10 @@ class TestFileHotspotShape:
         assert set(result[0].keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "critical"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "critical"}],
         )
         result = db.get_file_hotspots(limit=1)[0]
         assert isinstance(result["file"], dict)
@@ -405,11 +405,11 @@ class TestFileHotspotShape:
 
 class TestScanRunRecordShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
             scan_run_id="run-001",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         result = db.get_scan_runs(limit=1)
         assert len(result) >= 1
@@ -417,11 +417,11 @@ class TestScanRunRecordShape:
         assert set(result[0].keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
             scan_run_id="run-001",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         result = db.get_scan_runs(limit=1)[0]
         assert isinstance(result["scan_run_id"], str)
@@ -432,19 +432,19 @@ class TestScanRunRecordShape:
 
 class TestScanIngestResultShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         result = db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         hints = get_type_hints(ScanIngestResult)
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         result = db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         assert isinstance(result["files_created"], int)
         assert isinstance(result["files_updated"], int)
@@ -477,7 +477,7 @@ class TestObservationDictShape:
         assert set(result.keys()) == set(hints.keys())
 
     def test_value_types(self, db: FiligreeDB) -> None:
-        result = db.create_observation("Test obs", file_path="/foo.py", line=10, priority=2)
+        result = db.create_observation("Test obs", file_path="foo.py", line=10, priority=2)
         assert isinstance(result["id"], str)
         assert isinstance(result["summary"], str)
         assert isinstance(result["priority"], int)
@@ -533,7 +533,7 @@ class TestPromoteObservationResultShape:
 
 class TestEnrichedFileItemShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         paginated = db.list_files_paginated(limit=1)
         assert len(paginated["results"]) >= 1
         item = paginated["results"][0]
@@ -543,10 +543,10 @@ class TestEnrichedFileItemShape:
 
 class TestTimelineEntryShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
-        db.register_file("/src/main.py", language="python", file_type="source")
+        db.register_file("src/main.py", language="python", file_type="source")
         db.process_scan_results(
             scan_source="test",
-            findings=[{"path": "/src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
+            findings=[{"path": "src/main.py", "rule_id": "R1", "message": "m", "severity": "high"}],
         )
         files = db.list_files_paginated(limit=1)
         file_id = files["results"][0]["id"]

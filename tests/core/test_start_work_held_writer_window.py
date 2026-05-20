@@ -80,3 +80,26 @@ def test_start_next_work_iteration_runs_outside_writer_lock(db: FiligreeDB) -> N
     # One writer-lock window per successful start (the first candidate).
     assert len(tracker.windows) == 1
     _assert_no_discovery_or_template_sql(tracker.windows[0])
+
+
+@pytest.mark.parametrize("method_name", ["start_work", "start_next_work"])
+def test_start_work_allows_audit_actor_to_differ_from_assignee(db: FiligreeDB, method_name: str) -> None:
+    """Coordinator actors may start work for a named assignee.
+
+    The claim holder remains the assignee; the actor is only the audit
+    identity for the composed operation.
+    """
+    issue = db.create_issue(f"{method_name} split actor", type="task")
+
+    if method_name == "start_work":
+        result = db.start_work(issue.id, assignee="alice", actor="scheduler")
+    else:
+        result = db.start_next_work(assignee="alice", actor="scheduler", type_filter="task")
+
+    assert result is not None
+    assert result.id == issue.id
+    assert result.assignee == "alice"
+    events = db.get_issue_events(issue.id)
+    start_events = [event for event in events if event["event_type"] in {"claimed", "status_changed"}]
+    assert {event["event_type"] for event in start_events} == {"claimed", "status_changed"}
+    assert {event["actor"] for event in start_events} == {"scheduler"}

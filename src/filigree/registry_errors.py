@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from filigree.registry import RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry import RegistryBriefingBlockedError, RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
 from filigree.types.api import ErrorCode, ErrorResponse
 
 RegistryPublicError = RegistryResolutionError | RegistryUnavailableError
@@ -25,6 +25,17 @@ def registry_error_response(exc: RegistryPublicError, *, action: str) -> ErrorRe
             error=f"Registry unavailable while {action}: {exc}",
             code=ErrorCode.REGISTRY_UNAVAILABLE,
             details=details,
+        )
+
+    if isinstance(exc, RegistryBriefingBlockedError):
+        return ErrorResponse(
+            error=f"Registry could not resolve file while {action}: {exc}",
+            code=ErrorCode.BRIEFING_BLOCKED,
+            details={
+                "cause": "registry_briefing_blocked",
+                "status_code": exc.status_code,
+                "url": exc.url,
+            },
         )
 
     cause = "registry_file_not_found" if isinstance(exc, RegistryFileNotFoundError) else "registry_resolution_rejected"

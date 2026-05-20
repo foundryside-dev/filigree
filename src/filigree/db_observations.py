@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from filigree.db_base import DBMixinProtocol, _begin_immediate, _escape_like, _now_iso
-from filigree.db_files import _normalize_scan_path
+from filigree.db_files import _is_project_relative_scan_path, _normalize_scan_path
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import (
     BatchDismissResult,
@@ -39,6 +39,26 @@ STALE_THRESHOLD_HOURS = 48
 _LIST_OBSERVATIONS_SORT_COLUMNS = frozenset({"priority", "created_at", "expires_at"})
 _LIST_OBSERVATIONS_DIRECTIONS = frozenset({"asc", "desc"})
 VALID_OBSERVATION_LINK_DISPOSITIONS = frozenset({"evidence", "duplicate", "superseded", "related"})
+
+
+def _require_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _require_optional_string(value: object, field_name: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string or null, got {type(value).__name__}")
+    return value
+
+
+def _require_string_list(value: object, field_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{field_name} must be a list of strings")
+    return value
 
 
 def _alive_clause(sweep: bool, now_iso: str) -> tuple[str, str, tuple[str, ...]]:
@@ -223,12 +243,25 @@ class ObservationsMixin(DBMixinProtocol):
         ``create_observation`` is called inside an outer transaction to
         avoid committing partial work.
         """
+        summary = _require_string(summary, "summary")
+        for field_name, value in (
+            ("detail", detail),
+            ("source_issue_id", source_issue_id),
+            ("source_finding_id", source_finding_id),
+            ("actor", actor),
+        ):
+            _require_string(value, field_name)
         if not summary or not summary.strip():
             raise ValueError("Observation summary cannot be empty")
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise ValueError(f"priority must be an integer, got {type(priority).__name__}")
         if not (0 <= priority <= 4):
             raise ValueError(f"priority must be between 0 and 4, got {priority}")
-        if line is not None and line < 0:
-            raise ValueError(f"line must be >= 0, got {line}")
+        if line is not None:
+            if isinstance(line, bool) or not isinstance(line, int):
+                raise ValueError(f"line must be an integer or null, got {type(line).__name__}")
+            if line < 0:
+                raise ValueError(f"line must be >= 0, got {line}")
 
         file_id: str | None = None
         # Track whether THIS call created a new file_record so we can compensate
@@ -236,7 +269,10 @@ class ObservationsMixin(DBMixinProtocol):
         # file_record is orphaned (register_file commits independently).
         created_file_id: str | None = None
         if file_path:
+            file_path = _require_string(file_path, "file_path")
             file_path = _normalize_scan_path(file_path)
+            if not _is_project_relative_scan_path(file_path):
+                raise ValueError("file_path must be project-relative")
             if auto_commit:
                 # Standalone call — register_file commits, which is fine.
                 existing_fr = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
@@ -438,6 +474,21 @@ class ObservationsMixin(DBMixinProtocol):
         if direction not in _LIST_OBSERVATIONS_DIRECTIONS:
             msg = f"direction must be one of {sorted(_LIST_OBSERVATIONS_DIRECTIONS)}, got {direction!r}"
             raise ValueError(msg)
+        for field_name, value in (
+            ("file_path", file_path),
+            ("file_id", file_id),
+            ("actor", actor),
+            ("source_issue_id", source_issue_id),
+        ):
+            _require_string(value, field_name)
+        for field_name, value in (
+            ("priority_min", priority_min),
+            ("priority_max", priority_max),
+            ("older_than_hours", older_than_hours),
+        ):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                msg = f"{field_name} must be an integer, got {type(value).__name__}"
+                raise ValueError(msg)
         if priority_min is not None and not (0 <= priority_min <= 4):
             msg = f"priority_min must be between 0 and 4, got {priority_min}"
             raise ValueError(msg)
@@ -591,6 +642,8 @@ class ObservationsMixin(DBMixinProtocol):
         actor: str = "",
         reason: str = "",
     ) -> None:
+        _require_string(actor, "actor")
+        _require_string(reason, "reason")
         # Serialize the SELECT/INSERT/DELETE so two concurrent dismissals don't
         # both write audit rows for the same row. Without BEGIN IMMEDIATE the
         # losing racer's stale pre-read still produces an audit insert and a
@@ -622,6 +675,11 @@ class ObservationsMixin(DBMixinProtocol):
         actor: str = "",
         reason: str = "",
     ) -> BatchDismissResult:
+        if not isinstance(obs_ids, list) or not all(isinstance(obs_id, str) for obs_id in obs_ids):
+            msg = "obs_ids must be a list of strings"
+            raise TypeError(msg)
+        _require_string(actor, "actor")
+        _require_string(reason, "reason")
         if not obs_ids:
             return {"dismissed": 0, "not_found": []}
         # Deduplicate in Python to avoid relying on SQL IN dedup behavior
@@ -673,6 +731,8 @@ class ObservationsMixin(DBMixinProtocol):
         in ``observation_links`` and the dismissal audit trail records the
         structured disposition.
         """
+        _require_string(actor, "actor")
+        _require_string(reason, "reason")
         if disposition not in VALID_OBSERVATION_LINK_DISPOSITIONS:
             msg = f"disposition must be one of {sorted(VALID_OBSERVATION_LINK_DISPOSITIONS)}, got {disposition!r}"
             raise ValueError(msg)
@@ -796,6 +856,10 @@ class ObservationsMixin(DBMixinProtocol):
         if not isinstance(obs_ids, list) or not obs_ids or not all(isinstance(obs_id, str) for obs_id in obs_ids):
             msg = "obs_ids must be a non-empty list of strings"
             raise TypeError(msg)
+        title = _require_optional_string(title, "title")
+        extra_description = _require_string(extra_description, "extra_description")
+        actor = _require_string(actor, "actor")
+        labels = _require_string_list(labels, "labels")
         unique_ids = list(dict.fromkeys(obs_ids))
 
         now = _now_iso()
@@ -899,6 +963,10 @@ class ObservationsMixin(DBMixinProtocol):
         ``from-observation`` label is always added in addition.
         Senior-user MCP review run e P2.12.
         """
+        title = _require_optional_string(title, "title")
+        extra_description = _require_string(extra_description, "extra_description")
+        actor = _require_string(actor, "actor")
+        labels = _require_string_list(labels, "labels")
         # Idempotency check: if a prior promote already created an issue for this
         # obs_id (recorded in issue.fields.source_observation_id), return that
         # issue instead of creating a duplicate.  Handles the retry case where

@@ -359,6 +359,114 @@ def test_clarion_registry_resolve_files_batch_separates_resolved_and_briefing_bl
     assert batch["errors"] == []
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("not_found", "src/missing.py", "not_found"),
+        ("briefing_blocked", {"path": "src/secrets.py"}, "briefing_blocked"),
+        ("errors", [{"requested_path": "src/x.py", "code": "ERR"}], "errors"),
+    ],
+)
+def test_clarion_registry_rejects_malformed_batch_failure_channels(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            payload: dict[str, object] = {
+                "resolved": [],
+                "not_found": [],
+                "briefing_blocked": [],
+                "errors": [],
+            }
+            payload[field] = value
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/x.py", language="python")])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_batch_http_403_briefing_blocked_bypasses_unavailable_fallback() -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps({"error": "blocked", "code": "BRIEFING_BLOCKED"}).encode()
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryBriefingBlockedError) as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/secrets.py", language="python")])
+
+        assert exc_info.value.status_code == 403
+        assert not isinstance(exc_info.value, RegistryUnavailableError)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_batch_http_400_is_resolution_error_not_unavailable() -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps({"error": "bad request", "code": "BAD_BATCH"}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryResolutionError) as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/bad.py", language="python")])
+
+        assert exc_info.value.status_code == 400
+        assert not isinstance(exc_info.value, RegistryUnavailableError)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_clarion_registry_sends_no_authorization_header_when_no_token_configured() -> None:
     """CONTRACT-2 baseline: with ``auth_token=None`` (default), no
     Authorization header is sent — Clarion's loopback bind accepts."""
