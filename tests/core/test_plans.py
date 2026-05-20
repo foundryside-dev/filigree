@@ -139,6 +139,77 @@ class TestCreatePlan:
         plan = db.get_plan(ms.id)
         assert [step["title"] for step in plan["phases"][1]["steps"]] == ["Target step 1", "Target step 2", "Move me"]
 
+    def test_retarget_plan_dependency_swaps_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0]},
+                        {"title": "New blocker"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        new_blocker_id = steps[2]["id"]
+
+        updated = db.retarget_plan_dependency(blocked_step_id, old_blocker_id, new_blocker_id)
+
+        assert updated.blocked_by == [new_blocker_id]
+
+    def test_retarget_plan_dependency_to_existing_edge_removes_old_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget duplicate"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0, 2]},
+                        {"title": "Existing blocker"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        existing_blocker_id = steps[2]["id"]
+
+        updated = db.retarget_plan_dependency(blocked_step_id, old_blocker_id, existing_blocker_id)
+
+        assert updated.blocked_by == [existing_blocker_id]
+
+    def test_retarget_plan_dependency_rejects_cycle_without_removing_old_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget cycle"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0]},
+                        {"title": "Cycle candidate"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        cycle_candidate_id = steps[2]["id"]
+        db.add_dependency(cycle_candidate_id, blocked_step_id)
+
+        with pytest.raises(ValueError, match="would create a cycle"):
+            db.retarget_plan_dependency(blocked_step_id, old_blocker_id, cycle_candidate_id)
+
+        assert db.get_issue(blocked_step_id).blocked_by == [old_blocker_id]
+
     def test_plan_uses_template_initial_states(self, db: FiligreeDB) -> None:
         plan = db.create_plan(
             {"title": "Initial states"},
