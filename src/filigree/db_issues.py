@@ -257,6 +257,22 @@ def _validate_string_list(value: object, name: str) -> None:
         raise TypeError(msg)
 
 
+def _validate_fields_payload(fields: object) -> None:
+    """Validate the caller-supplied custom-fields payload shape."""
+    if fields is None:
+        return
+    if not isinstance(fields, dict):
+        msg = "fields must be a dict"
+        raise TypeError(msg)
+    for key in fields:
+        if not isinstance(key, str):
+            msg = "field keys must be strings"
+            raise TypeError(msg)
+        if not key.strip():
+            msg = "Field key cannot be empty"
+            raise ValueError(msg)
+
+
 def _normalize_assignee(value: object) -> str:
     """Strip whitespace from an assignee value; whitespace-only becomes ``""`` (unassigned).
 
@@ -482,14 +498,7 @@ class IssuesMixin(DBMixinProtocol):
             msg = "Title cannot be empty"
             raise ValueError(msg)
         _validate_priority_value(priority)
-        if fields is not None and not isinstance(fields, dict):
-            msg = "fields must be a dict"
-            raise TypeError(msg)
-        if fields:
-            for k in fields:
-                if not k or not k.strip():
-                    msg = "Field key cannot be empty"
-                    raise ValueError(msg)
+        _validate_fields_payload(fields)
         # Validate container shape before iterating — a bare str would otherwise
         # be iterated character-by-character (see filigree-0b4fcb6d30).
         if labels is not None:
@@ -786,9 +795,7 @@ class IssuesMixin(DBMixinProtocol):
         now = _now_iso()
 
         # --- Validate all inputs BEFORE any writes to prevent partial commits ---
-        if fields is not None and not isinstance(fields, dict):
-            msg = "fields must be a dict"
-            raise TypeError(msg)
+        _validate_fields_payload(fields)
         corrupt_fields_raw: Any | None = None
         if fields is not None and getattr(current.fields, "_filigree_corrupt", False):
             if not force_overwrite_corrupt:
@@ -809,8 +816,8 @@ class IssuesMixin(DBMixinProtocol):
             if parent_id == issue_id:
                 msg = f"Issue {issue_id} cannot be its own parent"
                 raise ValueError(msg)
-            self._validate_parent_id(parent_id)
             self._check_id_prefix(parent_id)
+            self._validate_parent_id(parent_id)
             if self._would_create_parent_cycle(issue_id, parent_id):
                 msg = f"Setting parent_id to '{parent_id}' would create a circular parent chain"
                 raise ValueError(msg)

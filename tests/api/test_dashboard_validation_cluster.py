@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 from httpx import AsyncClient
 
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, WrongProjectError
 from tests._db_factory import make_db
 
 # ---------------------------------------------------------------------------
@@ -185,6 +185,14 @@ class TestPatchParentId:
         resp = await client.patch(f"/api/issue/{issue['id']}", json={"parent_id": 123})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
+
+    async def test_patch_parent_id_foreign_prefix_uses_safe_message(self, client: AsyncClient) -> None:
+        issue = (await client.post("/api/issues", json={"title": "Target"})).json()
+        resp = await client.patch(f"/api/issue/{issue['id']}", json={"parent_id": "foreign-123abc"})
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
 
 
 # ---------------------------------------------------------------------------

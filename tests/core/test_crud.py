@@ -673,6 +673,19 @@ class TestUpdateFieldValidation:
         with pytest.raises(TypeError, match="fields must be a dict"):
             db.update_issue(issue.id, fields=["not", "a", "dict"])  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("key", ["", "  "], ids=["empty", "whitespace"])
+    def test_update_rejects_blank_field_key(self, db: FiligreeDB, key: str) -> None:
+        issue = db.create_issue("Mutable")
+        with pytest.raises(ValueError, match="Field key cannot be empty"):
+            db.update_issue(issue.id, fields={key: "value"})
+        assert db.get_issue(issue.id).fields == {}
+
+    def test_update_rejects_non_string_field_key(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Mutable")
+        with pytest.raises(TypeError, match="field keys must be strings"):
+            db.update_issue(issue.id, fields={1: "value"})  # type: ignore[dict-item]
+        assert db.get_issue(issue.id).fields == {}
+
 
 class TestClaimIssue:
     def test_claim_success(self, db: FiligreeDB) -> None:
@@ -752,7 +765,13 @@ class TestReparenting:
     def test_update_parent_id_invalid_parent_raises(self, db: FiligreeDB) -> None:
         child = db.create_issue("Child")
         with pytest.raises(ValueError, match="does not reference"):
-            db.update_issue(child.id, parent_id="nonexistent-123456")
+            db.update_issue(child.id, parent_id=f"{db.prefix}-123456")
+
+    def test_update_parent_id_foreign_prefix_raises_wrong_project_before_existence(self, db: FiligreeDB) -> None:
+        child = db.create_issue("Child")
+        with pytest.raises(WrongProjectError):
+            db.update_issue(child.id, parent_id="foreign-123abc")
+        assert db.get_issue(child.id).parent_id is None
 
     def test_update_parent_id_self_reference_raises(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Issue")
