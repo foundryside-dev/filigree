@@ -458,9 +458,16 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 prompt=prompt,
             )
         except ScannerSpawnError as exc:
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(scan_run_id, "failed", error_message="Scanner process failed to spawn")
-            _emit_error(str(exc), exc.code, as_json=as_json, details=exc.details or None)
+            status_update_error = _mark_reserved_scan_failed(
+                tracker,
+                scan_run_id,
+                "Scanner process failed to spawn",
+                context="single spawn failure",
+            )
+            details = dict(exc.details)
+            if status_update_error:
+                details["status_update_error"] = status_update_error
+            _emit_error(str(exc), exc.code, as_json=as_json, details=details or None)
             return
 
         proc = spawn_result["proc"]
@@ -473,16 +480,18 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
         except (sqlite3.Error, KeyError, ValueError) as exc:
             with contextlib.suppress(OSError):
                 proc.kill()
-            _mark_reserved_scan_failed(
+            status_update_error = _mark_reserved_scan_failed(
                 tracker,
                 scan_run_id,
                 f"Scanner process terminated after DB tracking failed: {exc}",
                 context="single DB tracking failure",
             )
+            details = {"status_update_error": status_update_error} if status_update_error else None
             _emit_error(
                 f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
                 ErrorCode.IO,
                 as_json=as_json,
+                details=details,
             )
             return
 
@@ -490,28 +499,32 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
         time.sleep(0.2)
         exit_code = proc.poll()
         if exit_code is not None and exit_code != 0:
-            tracker.update_scan_run_status(
+            status_update_error = _mark_reserved_scan_failed(
+                tracker,
                 scan_run_id,
-                "failed",
+                f"Scanner exited immediately with code {exit_code}",
+                context="single immediate exit",
                 exit_code=exit_code,
-                error_message=f"Scanner exited immediately with code {exit_code}",
             )
             log_hint = ""
             if scan_log_path.exists() and scan_log_path.stat().st_size > 0:
                 log_hint = f" Check log: {log_rel}"
             elif spawn_result.get("log_warning"):
                 log_hint = f" Note: {spawn_result['log_warning']}"
+            details: dict[str, Any] = {
+                "scanner": scanner,
+                "file_id": file_record.id,
+                "scan_run_id": scan_run_id,
+                "exit_code": exit_code,
+                "log_path": log_rel,
+            }
+            if status_update_error:
+                details["status_update_error"] = status_update_error
             _emit_error(
                 f"Scanner process exited immediately with code {exit_code}.{log_hint}",
                 ErrorCode.IO,
                 as_json=as_json,
-                details={
-                    "scanner": scanner,
-                    "file_id": file_record.id,
-                    "scan_run_id": scan_run_id,
-                    "exit_code": exit_code,
-                    "log_path": log_rel,
-                },
+                details=details,
             )
             return
 

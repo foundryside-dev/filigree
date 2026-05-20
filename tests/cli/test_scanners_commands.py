@@ -1256,6 +1256,30 @@ class TestTriggerScanCommand:
         finally:
             os.chdir(original)
 
+    def test_trigger_scan_spawn_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("mock spawn fail")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
     def test_trigger_scan_backfill_failure_marks_reserved_run_failed(self, project_with_scanner: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -1276,6 +1300,66 @@ class TestTriggerScanCommand:
             assert row is not None
             assert row["status"] == "failed"
             assert "DB tracking failed" in row["error_message"]
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_backfill_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        proc = _FakeProc(12346)
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(FiligreeDB, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert proc.killed is True
+            assert data["details"]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_immediate_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        original_update = FiligreeDB.update_scan_run_status
+
+        def fail_failed_status(
+            db: FiligreeDB,
+            scan_run_id: str,
+            status: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(db, scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=_ImmediateFailureProc(100)),
+                patch.object(FiligreeDB, "update_scan_run_status", autospec=True, side_effect=fail_failed_status),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert "Scanner process exited immediately with code 1" in data["error"]
+            assert data["details"]["status_update_error"] == "status update broken"
         finally:
             os.chdir(original)
 
