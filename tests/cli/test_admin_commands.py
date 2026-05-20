@@ -947,6 +947,54 @@ class TestInstallMode:
         assert config["mode"] == "server"
 
 
+class TestAdminProjectConfigValidation:
+    @staticmethod
+    def _write_invalid_clarion_config(project_root: Path) -> None:
+        config_path = project_root / ".filigree" / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "prefix": "test",
+                    "name": "test",
+                    "version": 1,
+                    "registry_backend": "clarion",
+                    "clarion": {},
+                }
+            )
+            + "\n"
+        )
+
+    def test_existing_init_reports_project_config_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        init_result = cli_runner.invoke(cli, ["init"])
+        assert init_result.exit_code == 0
+        self._write_invalid_clarion_config(tmp_path)
+
+        result = cli_runner.invoke(cli, ["init"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, ValueError)
+        assert "Invalid project config" in (result.output or "")
+        assert "clarion.base_url" in (result.output or "")
+
+    def test_install_mode_reports_project_config_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        init_result = cli_runner.invoke(cli, ["init"])
+        assert init_result.exit_code == 0
+        self._write_invalid_clarion_config(tmp_path)
+
+        result = cli_runner.invoke(cli, ["install", "--mode", "server"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, ValueError)
+        assert "Invalid project config" in (result.output or "")
+        assert "clarion.base_url" in (result.output or "")
+
+
 @pytest.mark.slow
 class TestInstallModeIntegration:
     def test_install_server_mode_registers_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:

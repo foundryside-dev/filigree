@@ -20,6 +20,7 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
+    ProjectConfig,
     ProjectNotInitialisedError,
     find_filigree_root,
     get_mode,
@@ -37,6 +38,14 @@ from filigree.install_support.version_marker import (
 )
 from filigree.summary import write_summary
 from filigree.types.api import SchemaVersionMismatchError
+
+
+def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
+    try:
+        return read_config(filigree_dir)
+    except ValueError as exc:
+        click.echo(f"Invalid project config: {exc}", err=True)
+        sys.exit(1)
 
 
 @click.command()
@@ -57,7 +66,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
         click.echo(f"{FILIGREE_DIR_NAME}/ already exists in {cwd}")
         previous_marker = read_install_version(filigree_dir)
         # Still ensure DB is initialized and migrated
-        config = read_config(filigree_dir)
+        config = _read_project_config_or_exit(filigree_dir)
         # filigree-fa6309d551: route DB open through the v2.0 anchor-aware
         # constructors so a custom .filigree.conf `db` path is honoured.
         # Without this, init silently migrates the legacy
@@ -247,7 +256,7 @@ def install(
 
     # Update mode in config if explicitly provided
     if mode is not None:
-        config = read_config(filigree_dir)
+        config = _read_project_config_or_exit(filigree_dir)
         config["mode"] = mode
         write_config(filigree_dir, config)
 
