@@ -1455,6 +1455,10 @@ class TestTemplateLoading:
         assert task is not None
         assert task.display_name == "Custom Task"
         assert task.initial_state == "todo"
+        core_pack = reg.get_pack("core")
+        assert core_pack is not None
+        assert core_pack.types["task"].display_name == "Custom Task"
+        assert core_pack.types["task"].initial_state == "todo"
 
     def test_load_skips_invalid_json(self, filigree_dir: Path) -> None:
         """Invalid JSON files in templates/ should be skipped, not crash."""
@@ -2290,6 +2294,68 @@ class TestLoadPackDataAtomicity:
         for type_name, tpl in reg._types.items():
             if tpl.pack == "testpack":
                 assert type_name in registered_pack.types, f"Registry has {type_name} from testpack but pack.types doesn't"
+
+    def test_invalid_pack_metadata_does_not_leak_types(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "badmeta"]}))
+        (packs_dir / "badmeta.json").write_text(
+            json.dumps(
+                {
+                    "pack": "badmeta",
+                    "requires_packs": 123,
+                    "types": {
+                        "leaked": {
+                            "type": "leaked",
+                            "display_name": "Leaked",
+                            "states": [
+                                {"name": "open", "category": "open"},
+                                {"name": "closed", "category": "done"},
+                            ],
+                            "initial_state": "open",
+                            "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                            "fields_schema": [],
+                        },
+                    },
+                }
+            )
+        )
+
+        reg = TemplateRegistry()
+        reg.load(filigree_dir)
+
+        assert reg.get_pack("badmeta") is None
+        assert reg.get_type("leaked") is None
+        assert "leaked" not in reg._category_cache
+
+    def test_pack_type_mapping_uses_parsed_type_name(self) -> None:
+        reg = TemplateRegistry()
+        pack_data: dict[str, Any] = {
+            "pack": "aliaspack",
+            "version": "1.0",
+            "types": {
+                "alias": {
+                    "type": "actual",
+                    "display_name": "Actual",
+                    "states": [
+                        {"name": "open", "category": "open"},
+                        {"name": "closed", "category": "done"},
+                    ],
+                    "initial_state": "open",
+                    "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                    "fields_schema": [],
+                },
+            },
+        }
+
+        reg._load_pack_data(pack_data)
+
+        pack = reg.get_pack("aliaspack")
+        assert pack is not None
+        assert list(pack.types) == ["actual"]
+        assert reg.get_type("actual") is pack.types["actual"]
+        assert reg.get_type("alias") is None
 
 
 class TestSpikeWorkflowDesign:

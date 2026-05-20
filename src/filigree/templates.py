@@ -711,6 +711,14 @@ class TemplateRegistry:
         self._transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.transitions}
         self._reverse_transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.reverse_transitions}
 
+        # Project-local template overrides call _register_type after the pack was
+        # loaded. Keep pack lookup surfaces coherent with the registry cache.
+        pack = self._packs.get(tpl.pack)
+        if pack is not None:
+            updated_types = dict(pack.types)
+            updated_types[tpl.type] = tpl
+            self._packs[tpl.pack] = _dc_replace(pack, types=MappingProxyType(updated_types))
+
     def _register_pack(self, pack: WorkflowPack) -> None:
         """Register a workflow pack."""
         logger.debug("Registering pack: %s (version=%s, %d types)", pack.pack, pack.version, len(pack.types))
@@ -1112,15 +1120,19 @@ class TemplateRegistry:
                 quality_warnings = self.check_type_template_quality(tpl)
                 for qw in quality_warnings:
                     logger.warning("Quality: %s/%s: %s", pack_name, type_name, qw)
-                types_dict[type_name] = tpl
+                if type_name != tpl.type:
+                    logger.warning(
+                        "Pack %s type key %s does not match template type %s; using parsed type name",
+                        pack_name,
+                        type_name,
+                        tpl.type,
+                    )
+                types_dict[tpl.type] = tpl
             except (ValueError, KeyError) as exc:
                 logger.warning("Skipping unparseable type %s in pack %s: %s", type_name, pack_name, exc)
 
-        # Phase 2: Register all staged types atomically
-        for tpl in types_dict.values():
-            self._register_type(tpl)
-
-        # Register the pack itself — wrap mutable containers for immutability
+        # Phase 2: Build the pack object before mutating registry caches. Invalid
+        # pack-level metadata must not leak staged types into the registry.
         raw_guide = pack_data.get("guide")
         if raw_guide is not None and not isinstance(raw_guide, dict):
             logger.warning("Pack %s has non-mapping guide (got %s), ignoring", pack_name, type(raw_guide).__name__)
@@ -1138,5 +1150,9 @@ class TemplateRegistry:
             ),
             guide=MappingProxyType(raw_guide) if raw_guide is not None else None,
         )
+
+        # Phase 3: Register all staged types and the pack atomically.
+        for tpl in types_dict.values():
+            self._register_type(tpl)
         self._register_pack(pack)
         logger.debug("Registered pack: %s (%d types)", pack_name, len(types_dict))
