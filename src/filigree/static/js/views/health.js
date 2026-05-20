@@ -6,6 +6,14 @@ import { fetchFiles, fetchFileStats, fetchHotspots, fetchScanRuns } from "../api
 import { SEVERITY_COLORS, state } from "../state.js";
 import { escHtml, escJsSingle, relativeTime } from "../ui.js";
 
+export function healthOverviewUnavailableReason({ hotspots, fileData, stats, scanRunData }) {
+  if (stats === null || stats === undefined) return "Code quality statistics are unavailable.";
+  if (fileData === null || fileData === undefined) return "Tracked file counts are unavailable.";
+  if (hotspots === null || hotspots === undefined) return "Hotspot data is unavailable.";
+  if (scanRunData === null || scanRunData === undefined) return "Scan run history is unavailable.";
+  return "";
+}
+
 /**
  * Render the full health overview into any container (for embedding in Files view).
  * @param {HTMLElement} container - Target container element
@@ -21,6 +29,20 @@ export async function renderHealthOverview(container, { onClickFile, onClickScan
       fetchFileStats(),
       fetchScanRuns(10),
     ]);
+
+    const unavailableReason = healthOverviewUnavailableReason({
+      hotspots,
+      fileData,
+      stats,
+      scanRunData,
+    });
+    if (unavailableReason) {
+      container.innerHTML =
+        '<div class="text-xs text-red-400">Failed to load code quality data: ' +
+        escHtml(unavailableReason) +
+        "</div>";
+      return;
+    }
 
     if (!hotspots && !fileData && !stats) {
       container.innerHTML =
