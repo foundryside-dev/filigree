@@ -206,6 +206,34 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_list_annotations_paginates_before_building_payloads_without_computed_filters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            for index in range(3):
+                path = tmp_path / f"ann_{index}.py"
+                path.write_text(f"x = {index}\n")
+                db.annotate_file(path.name, f"note {index}")
+
+            original = db._build_annotation_payload
+            calls = 0
+
+            def counted(row: sqlite3.Row, *, response_detail: str = "summary") -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return original(row, response_detail=response_detail)
+
+            monkeypatch.setattr(db, "_build_annotation_payload", counted)
+
+            result = db.list_annotations(limit=1)
+
+            assert len(result["items"]) == 1
+            assert result["has_more"] is True
+            assert calls <= 2
+        finally:
+            db.close()
+
     def test_annotate_file_rejects_line_end_beyond_eof(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:

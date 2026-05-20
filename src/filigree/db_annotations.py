@@ -837,8 +837,7 @@ class AnnotationsMixin(DBMixinProtocol):
             clauses.append("l.relationship = ?")
             params.append(relationship)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self.conn.execute(
-            f"""
+        query = f"""
             SELECT DISTINCT a.* FROM annotations a
             {join}
             {where}
@@ -846,14 +845,20 @@ class AnnotationsMixin(DBMixinProtocol):
                      CASE a.status WHEN 'active' THEN 0 ELSE 1 END,
                      a.created_at DESC,
                      a.id ASC
-            """,
-            params,
-        ).fetchall()
+            """
+        query_params = list(params)
+        if anchor_state is None:
+            query += " LIMIT ? OFFSET ?"
+            query_params.extend([limit + 1, offset])
+        rows = self.conn.execute(query, query_params).fetchall()
         payloads = [self._build_annotation_payload(row, response_detail=response_detail) for row in rows]
         if anchor_state is not None:
             payloads = [item for item in payloads if item["anchor_state"] == anchor_state]
-        page = payloads[offset : offset + limit]
-        has_more = offset + limit < len(payloads)
+            page = payloads[offset : offset + limit]
+            has_more = offset + limit < len(payloads)
+        else:
+            page = payloads[:limit]
+            has_more = len(payloads) > limit
         result: dict[str, Any] = {"items": page, "has_more": has_more}
         if has_more:
             result["next_offset"] = offset + len(page)
