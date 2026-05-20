@@ -38,7 +38,7 @@ from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import validate_scanner_command
+from filigree.scanners import validate_scanner_command, validate_scanner_name
 from filigree.types.api import ErrorCode
 
 _logger = logging.getLogger(__name__)
@@ -314,6 +314,9 @@ def scanner_enable_cmd(scanner: str, force: bool, as_json: bool) -> None:
 def scanner_disable_cmd(scanner: str, force: bool, as_json: bool) -> None:
     """Disable a project scanner by removing its TOML registration."""
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    if name_error := validate_scanner_name(scanner):
+        _emit_error(name_error, ErrorCode.VALIDATION, as_json=as_json, details={"scanner": scanner})
+        return
     path = _scanner_path(filigree_dir, scanner)
     if not path.exists():
         _emit_error(f"Scanner {scanner!r} is not enabled", ErrorCode.NOT_FOUND, as_json=as_json, details={"path": str(path)})

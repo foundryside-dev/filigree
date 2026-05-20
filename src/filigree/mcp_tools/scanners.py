@@ -25,7 +25,7 @@ from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_a
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import load_scanner, validate_scanner_command
+from filigree.scanners import load_scanner, validate_scanner_command, validate_scanner_name
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.files import ScanIngestResult
 from filigree.types.inputs import (
@@ -625,6 +625,8 @@ async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent
 
     args = _parse_args(arguments, DisableScannerArgs)
     scanner_name = args["scanner"]
+    if name_error := validate_scanner_name(scanner_name):
+        return _text(ErrorResponse(error=name_error, code=ErrorCode.VALIDATION, details={"scanner": scanner_name}))
     force = args.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="'force' must be a boolean", code=ErrorCode.VALIDATION))

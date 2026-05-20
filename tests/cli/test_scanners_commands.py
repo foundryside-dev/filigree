@@ -341,6 +341,22 @@ class TestScannerManagementCommand:
         finally:
             os.chdir(original)
 
+    def test_scanner_disable_rejects_traversal_name_without_deleting_config(self, initialized_project: Path) -> None:
+        config = initialized_project / ".filigree" / "config.toml"
+        config.write_text("[local]\nkeep = true\n")
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "disable", "../config", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert config.exists()
+        finally:
+            os.chdir(original)
+
     def test_scanner_disable_refuses_custom_scanner_without_force(self, initialized_project: Path) -> None:
         custom = initialized_project / ".filigree" / "scanners" / "codex.toml"
         custom.write_text(

@@ -116,6 +116,19 @@ class TestPreviewScanTool:
         assert data["details"]["conflict_kind"] == "custom"
         assert scanner_path.exists()
 
+    async def test_mcp_disable_rejects_traversal_name_without_deleting_config(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        (mcp_mod._filigree_dir / "scanners").mkdir(exist_ok=True)
+        config = mcp_mod._filigree_dir / "config.toml"
+        config.write_text("[local]\nkeep = true\n")
+
+        data = _parse(await call_tool("disable_scanner", {"scanner": "../config"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert config.exists()
+
     async def test_scanner_management_schema_is_exposed(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 

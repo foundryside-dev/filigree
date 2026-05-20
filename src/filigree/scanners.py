@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^[\w-]+$")
 
 
+def validate_scanner_name(name: object) -> str | None:
+    """Return a validation error when *name* is not safe for scanner file lookup."""
+    if not isinstance(name, str) or not _SAFE_NAME_RE.match(name):
+        return "Scanner name must contain only letters, numbers, underscores, and hyphens"
+    return None
+
+
 @dataclass(frozen=True)
 class ScannerConfig:
     """A scanner definition loaded from a TOML file."""
@@ -233,7 +240,7 @@ def _parse_toml(path: Path, *, errors: list[str] | None = None) -> ScannerConfig
     if name != path.stem:
         _fail(f"[scanner] name {name!r} must match filename stem {path.stem!r}")
         return None
-    if not _SAFE_NAME_RE.match(name):
+    if validate_scanner_name(name) is not None:
         _fail("[scanner] name contains unsafe characters")
         return None
 
@@ -269,7 +276,7 @@ def list_scanners(scanners_dir: Path, *, errors: list[str] | None = None) -> lis
 
 def load_scanner(scanners_dir: Path, name: str) -> ScannerConfig | None:
     """Load a single scanner by name. Returns None if not found or name is invalid."""
-    if not _SAFE_NAME_RE.match(name):
+    if validate_scanner_name(name) is not None:
         return None  # Reject path traversal attempts
     toml_path = scanners_dir / f"{name}.toml"
     if not toml_path.is_file():
