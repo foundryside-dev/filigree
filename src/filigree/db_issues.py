@@ -1381,6 +1381,9 @@ class IssuesMixin(DBMixinProtocol):
         if not isinstance(if_held, bool):
             msg = "if_held must be a boolean"
             raise ValueError(msg)
+        if not isinstance(revert_status, bool):
+            msg = "revert_status must be a boolean"
+            raise ValueError(msg)
         expected_holder: str | None = None
         if if_held:
             expected_holder = _normalize_assignee(actor if expected_assignee is None else expected_assignee)
@@ -1397,6 +1400,11 @@ class IssuesMixin(DBMixinProtocol):
             if if_held:
                 return self.get_issue(issue_id)
             msg = f"Cannot release {issue_id}: no assignee set"
+            raise ValueError(msg)
+        if self._resolve_status_category(row["type"], row["status"]) == "done":
+            if if_held:
+                return self.get_issue(issue_id)
+            msg = f"Cannot release {issue_id}: status '{row['status']}' is done-category; assignee is closure audit trail"
             raise ValueError(msg)
         if if_held and observed != expected_holder:
             msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"

@@ -754,6 +754,18 @@ class TestClaimIssue:
         assert released.status == "in_progress"
         assert released.assignee == ""
 
+    @pytest.mark.parametrize("revert_status", ["false", 0, None], ids=["string", "int", "none"])
+    def test_release_claim_rejects_non_bool_revert_status(self, db: FiligreeDB, revert_status: object) -> None:
+        issue = db.create_issue("Typed release", type="task")
+        db.start_work(issue.id, assignee="agent-alpha", actor="agent-alpha")
+
+        with pytest.raises(ValueError, match="revert_status must be a boolean"):
+            db.release_claim(issue.id, actor="agent-alpha", revert_status=revert_status)  # type: ignore[arg-type]
+
+        current = db.get_issue(issue.id)
+        assert current.status == "in_progress"
+        assert current.assignee == "agent-alpha"
+
     def test_release_claim_reverts_bug_fixing_to_confirmed(self, db: FiligreeDB) -> None:
         """For bug.fixing, the open predecessor is confirmed."""
         issue = db.create_issue("Bug", type="bug")
@@ -1081,6 +1093,33 @@ class TestReleaseClaim:
 
         assert released.status == "closed"
         assert released.assignee == ""
+
+    def test_release_if_held_done_category_preserves_audit_assignee(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Closed audit")
+        db.start_work(issue.id, assignee="closer", actor="closer")
+        db.close_issue(issue.id, actor="closer")
+
+        released = db.release_claim(issue.id, actor="closer", if_held=True)
+
+        assert released.status == "closed"
+        assert released.assignee == "closer"
+        events = db.conn.execute(
+            "SELECT event_type FROM events WHERE issue_id = ? AND event_type = 'released'",
+            (issue.id,),
+        ).fetchall()
+        assert events == []
+
+    def test_release_done_category_strict_rejects_audit_assignee_clear(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Closed audit strict")
+        db.start_work(issue.id, assignee="closer", actor="closer")
+        db.close_issue(issue.id, actor="closer")
+
+        with pytest.raises(ValueError, match="done-category"):
+            db.release_claim(issue.id, actor="closer")
+
+        current = db.get_issue(issue.id)
+        assert current.status == "closed"
+        assert current.assignee == "closer"
 
     def test_release_records_event(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Event check")
