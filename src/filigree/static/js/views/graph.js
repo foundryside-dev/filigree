@@ -154,6 +154,16 @@ function graphStyles() {
   ];
 }
 
+export function criticalPathEdgeIds(path) {
+  const edgeIds = new Set();
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const source = path[i]?.id;
+    const target = path[i + 1]?.id;
+    if (source && target) edgeIds.add(`e-${source}-${target}`);
+  }
+  return edgeIds;
+}
+
 function applyCriticalPathStyles() {
   if (!state.cy) return;
   if (state.criticalPathActive && state.criticalPathIds.size) {
@@ -161,10 +171,7 @@ function applyCriticalPathStyles() {
       if (!state.criticalPathIds.has(n.id())) n.style("opacity", 0.2);
     });
     state.cy.edges().forEach((e) => {
-      if (
-        state.criticalPathIds.has(e.source().id()) &&
-        state.criticalPathIds.has(e.target().id())
-      ) {
+      if (state.criticalPathEdgeIds.has(e.id())) {
         e.style({
           width: 3,
           "line-color": "#EF4444",
@@ -442,10 +449,13 @@ export async function toggleCriticalPath() {
   if (state.criticalPathActive) {
     btn.className = "px-2 py-0.5 rounded bg-red-600 text-white";
     const data = await fetchCriticalPath();
-    state.criticalPathIds = new Set(data?.path ? data.path.map((p) => p.id) : []);
+    const path = data?.path || [];
+    state.criticalPathIds = new Set(path.map((p) => p.id));
+    state.criticalPathEdgeIds = criticalPathEdgeIds(path);
   } else {
     btn.className = "px-2 py-0.5 rounded bg-overlay bg-overlay-hover";
     state.criticalPathIds.clear();
+    state.criticalPathEdgeIds.clear();
   }
   renderGraph();
 }

@@ -165,6 +165,7 @@ export const state = {
 
   // Health & critical path
   criticalPathIds: new Set(),
+  criticalPathEdgeIds: new Set(),
   criticalPathActive: false,
   impactScores: {},
   healthScore: null,
