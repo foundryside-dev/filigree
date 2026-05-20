@@ -589,6 +589,19 @@ class TestServerModeCrossProjectReadBlocking:
         assert body["code"] == "NOT_FOUND", body
         assert body["error"] == WrongProjectError.SAFE_MESSAGE
 
+    async def test_dashboard_server_mode_blocks_cross_project_plan_read(self, multi_client: AsyncClient) -> None:
+        """Plan reads are issue-backed and must use the same route boundary guard."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.get("/api/p/alpha/plan/bravo-deadbeef00")
+
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "bravo" not in body["error"]
+        assert "alpha" not in body["error"]
+
     async def test_server_mode_same_project_miss_indistinguishable(self, multi_client: AsyncClient) -> None:
         """Same-project miss and cross-project miss must return the same
         status code so a probe cannot distinguish the two. Bodies differ

@@ -625,6 +625,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/plan/{milestone_id}")
     async def api_plan(milestone_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Milestone plan tree."""
+        err = _check_read_prefix_in_server_mode(db, milestone_id)
+        if err is not None:
+            return err
         try:
             plan = db.get_plan(milestone_id)
         except KeyError:
