@@ -478,6 +478,18 @@ class TestDoctorContextMd:
         assert "Stale" in ctx_result.message
         assert "90" in ctx_result.message or "minutes" in ctx_result.message
 
+    def test_summary_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, with_summary=False)
+        summary_path = tmp_path / FILIGREE_DIR_NAME / SUMMARY_FILENAME
+        summary_path.mkdir()
+
+        results = run_doctor(tmp_path)
+
+        ctx_result = next(r for r in results if r.name == "context.md")
+        assert ctx_result.passed is False
+        assert "not a file" in ctx_result.message
+        assert "filigree doctor --fix" in ctx_result.fix_hint
+
 
 # ---------------------------------------------------------------------------
 # run_doctor — .gitignore check
@@ -708,6 +720,19 @@ class TestDoctorClaudeCodeHooks:
         assert hook_result.passed is False
         assert "Invalid .claude/settings.json" in hook_result.message
 
+    def test_settings_json_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").mkdir()
+
+        results = run_doctor(tmp_path)
+
+        hook_result = next(r for r in results if r.name == "Claude Code hooks")
+        assert hook_result.passed is False
+        assert "Invalid .claude/settings.json" in hook_result.message
+        assert "filigree install --hooks" in hook_result.fix_hint
+
     def test_settings_missing_hook(self, tmp_path: Path) -> None:
         _make_project(tmp_path)
         claude_dir = tmp_path / ".claude"
@@ -849,6 +874,17 @@ class TestDoctorInstructionFiles:
         assert claude_result.passed is True
         assert "instructions present" in claude_result.message.lower()
 
+    def test_claude_md_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / "CLAUDE.md").mkdir()
+
+        results = run_doctor(tmp_path)
+
+        claude_result = next(r for r in results if r.name == "CLAUDE.md")
+        assert claude_result.passed is False
+        assert "unreadable" in claude_result.message
+        assert "filigree install --claude-md" in claude_result.fix_hint
+
     def test_agents_md_with_marker(self, tmp_path: Path) -> None:
         _make_project(tmp_path)
         (tmp_path / "AGENTS.md").write_text(f"# Agents\n\n{FILIGREE_INSTRUCTIONS_MARKER}\n")
@@ -875,6 +911,18 @@ class TestDoctorInstructionFiles:
         results = run_doctor(tmp_path)
         agents_result = next((r for r in results if r.name == "AGENTS.md"), None)
         assert agents_result is None
+
+    def test_agents_md_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / "AGENTS.md").mkdir()
+
+        results = run_doctor(tmp_path)
+
+        agents_result = next((r for r in results if r.name == "AGENTS.md"), None)
+        assert agents_result is not None
+        assert agents_result.passed is False
+        assert "unreadable" in agents_result.message
+        assert "filigree install --agents-md" in agents_result.fix_hint
 
 
 # ---------------------------------------------------------------------------
@@ -1641,6 +1689,19 @@ class TestDoctorCodexMcp:
         config_path = tmp_path / ".codex" / "config.toml"
         self._write_codex_config(config_path, "this = [invalid toml\n")
         result = self._codex_result(self._run(tmp_path, config_path))
+        assert result.passed is False
+        assert "Invalid ~/.codex/config.toml" in result.message
+        assert "filigree install --codex" in result.fix_hint
+
+    def test_codex_config_directory_reports_failure(self, tmp_path: Path) -> None:
+        """Unreadable ~/.codex/config.toml paths should fail the check, not doctor."""
+        _make_project(tmp_path)
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir()
+        config_path.mkdir()
+
+        result = self._codex_result(self._run(tmp_path, config_path))
+
         assert result.passed is False
         assert "Invalid ~/.codex/config.toml" in result.message
         assert "filigree install --codex" in result.fix_hint

@@ -333,7 +333,7 @@ def _check_codex_mcp(filigree_dir: Path) -> CheckResult:
 
     try:
         parsed = tomllib.loads(codex_config.read_text())
-    except tomllib.TOMLDecodeError:
+    except (tomllib.TOMLDecodeError, OSError):
         return CheckResult(
             "Codex MCP", False, "Invalid ~/.codex/config.toml", fix_hint="Fix ~/.codex/config.toml or run: filigree install --codex"
         )
@@ -618,19 +618,40 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # 4. Check context.md freshness
     summary_path = filigree_dir / SUMMARY_FILENAME
     if summary_path.exists():
-        mtime = datetime.fromtimestamp(summary_path.stat().st_mtime, tz=UTC)
-        age_minutes = (datetime.now(UTC) - mtime).total_seconds() / 60
-        if age_minutes > 60:
+        if not summary_path.is_file():
             results.append(
                 CheckResult(
                     "context.md",
                     False,
-                    f"Stale ({int(age_minutes)} minutes old)",
+                    f"Found at {summary_path} but not a file",
                     fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
                 )
             )
         else:
-            results.append(CheckResult("context.md", True, f"Fresh ({int(age_minutes)}m old)"))
+            try:
+                mtime = datetime.fromtimestamp(summary_path.stat().st_mtime, tz=UTC)
+            except OSError as exc:
+                results.append(
+                    CheckResult(
+                        "context.md",
+                        False,
+                        f"Found at {summary_path} but unreadable: {exc}",
+                        fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                    )
+                )
+            else:
+                age_minutes = (datetime.now(UTC) - mtime).total_seconds() / 60
+                if age_minutes > 60:
+                    results.append(
+                        CheckResult(
+                            "context.md",
+                            False,
+                            f"Stale ({int(age_minutes)} minutes old)",
+                            fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                        )
+                    )
+                else:
+                    results.append(CheckResult("context.md", True, f"Fresh ({int(age_minutes)}m old)"))
     else:
         results.append(
             CheckResult(
@@ -792,7 +813,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                         fix_hint="Run: filigree install --hooks",
                     )
                 )
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError):
             results.append(
                 CheckResult(
                     "Claude Code hooks",
@@ -842,18 +863,29 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # 10. Check CLAUDE.md has instructions
     claude_md = (filigree_dir.parent) / "CLAUDE.md"
     if claude_md.exists():
-        content = claude_md.read_text()
-        if FILIGREE_INSTRUCTIONS_MARKER in content:
-            results.append(CheckResult("CLAUDE.md", True, "Filigree instructions present"))
-        else:
+        try:
+            content = claude_md.read_text()
+        except OSError as exc:
             results.append(
                 CheckResult(
                     "CLAUDE.md",
                     False,
-                    "No filigree instructions",
+                    f"Found at {claude_md} but unreadable: {exc}",
                     fix_hint="Run: filigree install --claude-md",
                 )
             )
+        else:
+            if FILIGREE_INSTRUCTIONS_MARKER in content:
+                results.append(CheckResult("CLAUDE.md", True, "Filigree instructions present"))
+            else:
+                results.append(
+                    CheckResult(
+                        "CLAUDE.md",
+                        False,
+                        "No filigree instructions",
+                        fix_hint="Run: filigree install --claude-md",
+                    )
+                )
     else:
         results.append(
             CheckResult(
@@ -867,18 +899,29 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # 11. Check AGENTS.md has instructions
     agents_md = (filigree_dir.parent) / "AGENTS.md"
     if agents_md.exists():
-        content = agents_md.read_text()
-        if FILIGREE_INSTRUCTIONS_MARKER in content:
-            results.append(CheckResult("AGENTS.md", True, "Filigree instructions present"))
-        else:
+        try:
+            content = agents_md.read_text()
+        except OSError as exc:
             results.append(
                 CheckResult(
                     "AGENTS.md",
                     False,
-                    "No filigree instructions",
+                    f"Found at {agents_md} but unreadable: {exc}",
                     fix_hint="Run: filigree install --agents-md",
                 )
             )
+        else:
+            if FILIGREE_INSTRUCTIONS_MARKER in content:
+                results.append(CheckResult("AGENTS.md", True, "Filigree instructions present"))
+            else:
+                results.append(
+                    CheckResult(
+                        "AGENTS.md",
+                        False,
+                        "No filigree instructions",
+                        fix_hint="Run: filigree install --agents-md",
+                    )
+                )
     # AGENTS.md is optional — don't warn if it doesn't exist
 
     # 12. Mode-specific checks
