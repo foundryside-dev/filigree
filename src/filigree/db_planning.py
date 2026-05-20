@@ -221,6 +221,8 @@ class PlanningMixin(DBMixinProtocol):
     def remove_dependency(self, issue_id: str, depends_on_id: str, *, actor: str = "") -> bool:
         self._check_id_prefix(issue_id)
         self._check_id_prefix(depends_on_id)
+        self.get_issue(issue_id)  # raises KeyError if not found
+        self.get_issue(depends_on_id)  # raises KeyError if not found
         try:
             # Read dep_type before deleting so undo can restore it
             row = self.conn.execute(

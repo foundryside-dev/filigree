@@ -303,6 +303,17 @@ class TestDependencyEdgeCases:
         b = db.create_issue("B")
         assert db.remove_dependency(a.id, b.id) is False
 
+    @pytest.mark.parametrize("missing_side", ["from", "to"])
+    def test_remove_dependency_missing_issue_raises_keyerror(self, db: FiligreeDB, missing_side: str) -> None:
+        """Missing issue IDs are not the same as a missing dependency edge."""
+        existing = db.create_issue("Existing")
+        missing_id = f"{db.prefix}-0000000000"
+        from_id = missing_id if missing_side == "from" else existing.id
+        to_id = existing.id if missing_side == "from" else missing_id
+
+        with pytest.raises(KeyError, match=missing_id):
+            db.remove_dependency(from_id, to_id)
+
     def test_remove_dependency_nonexistent_records_no_event(self, db: FiligreeDB) -> None:
         """Removing nonexistent dependency should not record an event."""
         a = db.create_issue("A")

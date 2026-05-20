@@ -48,6 +48,16 @@ class TestRemoveDependencyWrongProject:
         assert data.get("status") == "open"
         assert data.get("dependency_result") == "not_found"
 
+    async def test_missing_same_prefix_source_returns_not_found_error(self, mcp_db: FiligreeDB) -> None:
+        """Removing from a missing issue returns NOT_FOUND, not a not_found edge status."""
+        b = mcp_db.create_issue("B")
+        result = await call_tool(
+            "remove_dependency",
+            {"from_issue_id": "mcp-0000000000", "to_issue_id": b.id},
+        )
+        data = _parse(result)
+        assert data.get("code") == ErrorCode.NOT_FOUND, data
+
 
 # ---------------------------------------------------------------------------
 # filigree-36c7b6e18e: MCP claim_issue/claim_next blank assignee

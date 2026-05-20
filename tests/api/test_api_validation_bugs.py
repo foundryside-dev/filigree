@@ -218,6 +218,30 @@ class TestRemoveDependencyForeignPrefix:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
+    async def test_classic_remove_dependency_same_prefix_missing_source_returns_404(
+        self, bug_db: FiligreeDB, client: AsyncClient
+    ) -> None:
+        target = bug_db.create_issue("Target")
+        resp = await client.request(
+            "DELETE",
+            f"/api/issue/{bug_db.prefix}-0000000000/dependencies/{target.id}",
+        )
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+
+    async def test_loom_remove_dependency_same_prefix_missing_source_returns_404(
+        self, bug_db: FiligreeDB, client: AsyncClient
+    ) -> None:
+        target = bug_db.create_issue("Target")
+        resp = await client.request(
+            "DELETE",
+            f"/api/loom/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
+        )
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+
 
 # ---------------------------------------------------------------------------
 # filigree-48e937cd3e: close routes accept non-string reason

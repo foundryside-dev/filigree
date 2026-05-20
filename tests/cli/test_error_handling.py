@@ -110,6 +110,16 @@ class TestRemoveDepWrongProjectError:
         data = json.loads(result.output)
         assert "error" in data
 
+    def test_same_prefix_missing_source_json_is_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Target"])
+        issue_id = _extract_id(r.output)
+        result = runner.invoke(cli, ["remove-dep", "test-0000000000", issue_id, "--json"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        data = json.loads(result.output)
+        assert data["code"] == "NOT_FOUND", data
+
 
 class TestMetaWrongProjectError:
     """filigree-f8861115a9: add-comment / add-label / remove-label must surface

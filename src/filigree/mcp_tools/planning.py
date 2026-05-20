@@ -383,7 +383,9 @@ async def _handle_remove_dependency(arguments: dict[str, Any]) -> list[TextConte
             args["to_issue_id"],
             actor=actor,
         )
-    except (ValueError, KeyError) as e:
+    except KeyError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
+    except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     _refresh_summary()
     status = "removed" if removed else "not_found"

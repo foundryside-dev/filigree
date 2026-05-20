@@ -331,6 +331,12 @@ def remove_dep(ctx: click.Context, issue_id: str, depends_on_id: str, as_json: b
     with get_db() as db:
         try:
             removed = db.remove_dependency(issue_id, depends_on_id, actor=ctx.obj["actor"])
+        except KeyError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Not found: {e}", "code": ErrorCode.NOT_FOUND}))
+            else:
+                click.echo(f"Not found: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
