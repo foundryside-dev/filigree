@@ -981,8 +981,11 @@ async def _handle_get_issue_events(arguments: dict[str, Any]) -> list[TextConten
     from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetIssueEventsArgs)
-    tracker = _get_db()
     limit = args.get("limit", 50)
+    limit_err = _validate_int_range(limit, "limit", min_val=1)
+    if limit_err is not None:
+        return limit_err
+    tracker = _get_db()
     try:
         events = tracker.get_issue_events(args["issue_id"], limit=limit + 1)
     except KeyError:

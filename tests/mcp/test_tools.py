@@ -1569,6 +1569,15 @@ class TestGetChanges:
         assert data["items"][0]["event_id"]
         assert "id" not in data["items"][0]
 
+    @pytest.mark.parametrize("limit", ["5", 0, -1, True])
+    async def test_get_issue_events_invalid_limit_returns_validation(self, mcp_db: FiligreeDB, limit: object) -> None:
+        issue = mcp_db.create_issue("Issue events invalid limit")
+
+        result = await call_tool("get_issue_events", {"issue_id": issue.id, "limit": limit})
+
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
     async def test_get_changes_empty(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("get_changes", {"since": "2099-01-01T00:00:00+00:00"})
         data = _parse(result)
