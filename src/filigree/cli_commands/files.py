@@ -1111,6 +1111,7 @@ def update_finding_cmd(
     type=click.IntRange(0, 4),
     help="Override priority (default: inferred from severity)",
 )
+@click.option("--label", "labels", multiple=True, help="Label to add to the created issue (repeatable)")
 @click.option("--actor", default=None, help="Actor identity (defaults to global --actor)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1118,6 +1119,7 @@ def promote_finding_cmd(
     ctx: click.Context,
     finding_id: str,
     priority: int | None,
+    labels: tuple[str, ...],
     actor: str | None,
     as_json: bool,
 ) -> None:
@@ -1135,7 +1137,12 @@ def promote_finding_cmd(
         resolved_actor = cleaned
     with get_db() as db:
         try:
-            promoted = db.promote_finding_to_issue(finding_id, priority=priority, actor=resolved_actor)
+            promoted = db.promote_finding_to_issue(
+                finding_id,
+                priority=priority,
+                actor=resolved_actor,
+                labels=list(labels) or None,
+            )
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Finding not found: {finding_id}", "code": ErrorCode.NOT_FOUND}))

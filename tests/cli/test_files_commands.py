@@ -1725,6 +1725,44 @@ class TestPromoteFindingCommand:
         finally:
             os.chdir(original)
 
+    def test_promote_finding_with_labels(self, initialized_project_with_finding: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project_with_finding.path))
+        try:
+            finding_id = initialized_project_with_finding.finding_id
+            result = runner.invoke(
+                cli,
+                [
+                    "promote-finding",
+                    finding_id,
+                    "--label",
+                    "cluster:cli",
+                    "--label",
+                    "session:scan-1",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert set(data["labels"]) == {"from-finding", "cluster:cli", "session:scan-1"}
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_rejects_reserved_label(self, initialized_project_with_finding: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project_with_finding.path))
+        try:
+            finding_id = initialized_project_with_finding.finding_id
+            result = runner.invoke(cli, ["promote-finding", finding_id, "--label", "severity:high", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "system-managed auto-tag namespace" in data["error"]
+        finally:
+            os.chdir(original)
+
     def test_promote_finding_refreshes_context_md(
         self,
         initialized_project_with_finding: SeededProject,
