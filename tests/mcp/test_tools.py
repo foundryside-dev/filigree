@@ -3688,6 +3688,40 @@ class TestHttpMcpRequestContext:
         assert data["code"] == ErrorCode.SCHEMA_MISMATCH
         assert "upgrade" in data["error"].lower()
 
+    async def test_create_mcp_app_resolver_registry_version_mismatch_returns_structured_envelope(self) -> None:
+        from filigree.registry import EXPECTED_CLARION_API_VERSION, RegistryVersionMismatchError
+
+        def _resolver() -> FiligreeDB:
+            raise RegistryVersionMismatchError(
+                "Clarion advertised an incompatible registry API",
+                url="http://clarion.test/api/v1/_capabilities",
+                expected=EXPECTED_CLARION_API_VERSION,
+                advertised=EXPECTED_CLARION_API_VERSION + 1,
+            )
+
+        handler, _lifespan = create_mcp_app(db_resolver=_resolver)
+        messages: list[dict[str, Any]] = []
+
+        async def _receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await handler({"type": "http", "path": "/mcp"}, _receive, _send)  # type: ignore[arg-type]
+
+        start = next(m for m in messages if m["type"] == "http.response.start")
+        body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+        data = json.loads(body)
+        assert start["status"] == 503
+        assert data["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert data["details"] == {
+            "cause": "clarion_registry_version_mismatch",
+            "url": "http://clarion.test/api/v1/_capabilities",
+            "expected": EXPECTED_CLARION_API_VERSION,
+            "advertised": EXPECTED_CLARION_API_VERSION + 1,
+        }
+
     async def test_create_mcp_app_resolver_config_error_returns_structured_envelope(self) -> None:
         def _resolver() -> FiligreeDB:
             raise ValueError("bad project config")

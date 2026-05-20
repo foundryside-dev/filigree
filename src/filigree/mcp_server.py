@@ -49,8 +49,10 @@ from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backw
     _MAX_LIST_RESULTS,
     _text,
 )
+from filigree.registry import RegistryVersionMismatchError
+from filigree.registry_errors import registry_error_response
 from filigree.summary import generate_summary, write_summary
-from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchError
+from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchError, errorcode_to_http_status
 
 # ---------------------------------------------------------------------------
 # Module globals (state accessors depend on these)
@@ -68,6 +70,11 @@ _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_di
 # still works for introspection — but every call_tool short-circuits to a
 # structured ErrorResponse(code=SCHEMA_MISMATCH). Cleared on successful init.
 _schema_mismatch: SchemaVersionMismatchError | None = None
+
+# Set when Clarion advertises an incompatible registry API version at startup.
+# Mirrors schema-mismatch degraded mode: list_tools stays available, while
+# call_tool surfaces a structured CLARION_REGISTRY_VERSION_MISMATCH envelope.
+_registry_startup_error: RegistryVersionMismatchError | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing
 # file, permission denied, on-disk corruption). The server cannot run without
@@ -215,6 +222,22 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.SCHEMA_MISMATCH,
             "error": str(_schema_mismatch),
             "guidance": format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
+        }
+
+    if _registry_startup_error is not None:
+        response = registry_error_response(_registry_startup_error, action="opening project database")
+        return {
+            "status": "registry_version_mismatch",
+            "db_initialized": False,
+            "schema_compatible": True,
+            "installed_schema_version": installed,
+            "database_schema_version": None,
+            "code": response["code"],
+            "error": response["error"],
+            "details": response.get("details"),
+            "guidance": "Upgrade Filigree or Clarion so their registry API versions match.",
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -543,6 +566,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         )
 
+    if _registry_startup_error is not None and name != "get_mcp_status":
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text(registry_error_response(_registry_startup_error, action="opening project database"))
+
     # Runtime drift gate: a long-running MCP session can have its DB
     # forward-migrated under it (sibling MCP at a newer version, manual
     # migration, etc.). Initialization succeeded with version N, but
@@ -678,6 +706,14 @@ def create_mcp_app(
                 )
                 await resp(scope, receive, send)
                 return
+            except RegistryVersionMismatchError as exc:
+                response = registry_error_response(exc, action="opening project database")
+                resp = JSONResponse(
+                    response,
+                    status_code=errorcode_to_http_status(response["code"]),
+                )
+                await resp(scope, receive, send)
+                return
             except ValueError as exc:
                 resp = JSONResponse(
                     {
@@ -778,20 +814,28 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
     instead of connection drop" was one bug-class wide before this fix.
     ``_run`` consults the sentinel after calling us and exits cleanly.
     """
-    global db, _filigree_dir, _schema_mismatch, _db_open_error
+    global db, _filigree_dir, _schema_mismatch, _registry_startup_error, _db_open_error
 
     _filigree_dir = filigree_dir
     try:
         db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
         _schema_mismatch = None
+        _registry_startup_error = None
         _db_open_error = None
     except SchemaVersionMismatchError as exc:
         db = None
         _schema_mismatch = exc
+        _registry_startup_error = None
+        _db_open_error = None
+    except RegistryVersionMismatchError as exc:
+        db = None
+        _schema_mismatch = None
+        _registry_startup_error = exc
         _db_open_error = None
     except (OSError, sqlite3.Error, ValueError) as exc:
         db = None
         _schema_mismatch = None
+        _registry_startup_error = None
         _db_open_error = exc
 
 
@@ -859,6 +903,18 @@ def _log_startup_status(logger: logging.Logger) -> None:
                 "args_data": {
                     "installed": _schema_mismatch.installed,
                     "database": _schema_mismatch.database,
+                },
+            },
+        )
+    elif _registry_startup_error is not None:
+        logger.warning(
+            "mcp_server_registry_version_mismatch",
+            extra={
+                "tool": "server",
+                "args_data": {
+                    "expected": _registry_startup_error.expected,
+                    "advertised": _registry_startup_error.advertised,
+                    "url": _registry_startup_error.url,
                 },
             },
         )

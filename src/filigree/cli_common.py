@@ -23,6 +23,8 @@ from filigree.core import (
     find_filigree_anchor,
     find_filigree_root,
 )
+from filigree.registry import RegistryVersionMismatchError
+from filigree.registry_errors import registry_error_response
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 
@@ -116,6 +118,15 @@ def _emit_startup_failure(exc: Exception, code: ErrorCode, *, human_prefix: str 
         click.echo(f"{human_prefix}{exc}" if human_prefix else str(exc), err=True)
 
 
+def _emit_registry_startup_failure(exc: RegistryVersionMismatchError) -> None:
+    """Render registry protocol failures from DB startup with public envelopes."""
+    response = registry_error_response(exc, action="opening project database")
+    if _wants_json():
+        click.echo(json_mod.dumps(response))
+    else:
+        click.echo(response["error"], err=True)
+
+
 def get_db() -> FiligreeDB:
     """Discover the project anchor and return an initialized FiligreeDB.
 
@@ -145,6 +156,9 @@ def get_db() -> FiligreeDB:
         return FiligreeDB.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
     except SchemaVersionMismatchError as exc:
         _emit_startup_failure(exc, ErrorCode.SCHEMA_MISMATCH, human_prefix="Error opening project database: ")
+        sys.exit(1)
+    except RegistryVersionMismatchError as exc:
+        _emit_registry_startup_failure(exc)
         sys.exit(1)
     except (OSError, sqlite3.Error) as exc:
         _emit_startup_failure(exc, ErrorCode.IO, human_prefix="Error opening project database: ")

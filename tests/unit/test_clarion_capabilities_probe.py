@@ -23,6 +23,8 @@ from filigree.registry import (
     probe_clarion_capabilities,
     validate_clarion_capabilities,
 )
+from filigree.registry_errors import registry_error_response
+from filigree.types.api import ErrorCode
 from tests._fakes.clarion_http import clarion_stub
 
 
@@ -51,6 +53,25 @@ def test_validate_raises_on_api_version_mismatch() -> None:
 
     assert exc.value.advertised == EXPECTED_CLARION_API_VERSION + 1
     assert exc.value.expected == EXPECTED_CLARION_API_VERSION
+
+
+def test_registry_error_response_maps_api_version_mismatch() -> None:
+    exc = RegistryVersionMismatchError(
+        "Clarion advertised an incompatible registry API",
+        url="http://clarion.test/api/v1/_capabilities",
+        expected=EXPECTED_CLARION_API_VERSION,
+        advertised=EXPECTED_CLARION_API_VERSION + 1,
+    )
+
+    response = registry_error_response(exc, action="resolving file identity")
+
+    assert response["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+    assert response["details"] == {
+        "cause": "clarion_registry_version_mismatch",
+        "url": "http://clarion.test/api/v1/_capabilities",
+        "expected": EXPECTED_CLARION_API_VERSION,
+        "advertised": EXPECTED_CLARION_API_VERSION + 1,
+    }
 
 
 def test_validate_raises_when_clarion_declines_registry_backend_role() -> None:

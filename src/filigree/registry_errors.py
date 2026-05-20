@@ -4,14 +4,32 @@ from __future__ import annotations
 
 from typing import Any
 
-from filigree.registry import RegistryBriefingBlockedError, RegistryFileNotFoundError, RegistryResolutionError, RegistryUnavailableError
+from filigree.registry import (
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    RegistryUnavailableError,
+    RegistryVersionMismatchError,
+)
 from filigree.types.api import ErrorCode, ErrorResponse
 
-RegistryPublicError = RegistryResolutionError | RegistryUnavailableError
+RegistryPublicError = RegistryResolutionError | RegistryUnavailableError | RegistryVersionMismatchError
 
 
 def registry_error_response(exc: RegistryPublicError, *, action: str) -> ErrorResponse:
     """Translate registry exceptions into the shared CLI/MCP/API error envelope."""
+    if isinstance(exc, RegistryVersionMismatchError):
+        return ErrorResponse(
+            error=f"Clarion registry API version mismatch while {action}: {exc}",
+            code=ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH,
+            details={
+                "cause": "clarion_registry_version_mismatch",
+                "url": exc.url,
+                "expected": exc.expected,
+                "advertised": exc.advertised,
+            },
+        )
+
     if isinstance(exc, RegistryUnavailableError):
         details: dict[str, Any] = {
             "cause": "registry_unavailable",
