@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_DAYS = 14
 STALE_THRESHOLD_HOURS = 48
+MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 _LIST_OBSERVATIONS_SORT_COLUMNS = frozenset({"priority", "created_at", "expires_at"})
 _LIST_OBSERVATIONS_DIRECTIONS = frozenset({"asc", "desc"})
@@ -263,6 +264,8 @@ class ObservationsMixin(DBMixinProtocol):
                 raise ValueError(f"line must be an integer or null, got {type(line).__name__}")
             if line < 0:
                 raise ValueError(f"line must be >= 0, got {line}")
+            if line > MAX_SQLITE_INTEGER:
+                raise ValueError(f"line must be <= {MAX_SQLITE_INTEGER}, got {line}")
 
         file_id: str | None = None
         # Track whether THIS call created a new file_record so we can compensate
@@ -478,6 +481,18 @@ class ObservationsMixin(DBMixinProtocol):
         if direction not in _LIST_OBSERVATIONS_DIRECTIONS:
             msg = f"direction must be one of {sorted(_LIST_OBSERVATIONS_DIRECTIONS)}, got {direction!r}"
             raise ValueError(msg)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            msg = f"limit must be an integer, got {type(limit).__name__}"
+            raise ValueError(msg)
+        if not (1 <= limit <= MAX_SQLITE_INTEGER):
+            msg = f"limit must be between 1 and {MAX_SQLITE_INTEGER}, got {limit}"
+            raise ValueError(msg)
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            msg = f"offset must be an integer, got {type(offset).__name__}"
+            raise ValueError(msg)
+        if not (0 <= offset <= MAX_SQLITE_INTEGER):
+            msg = f"offset must be between 0 and {MAX_SQLITE_INTEGER}, got {offset}"
+            raise ValueError(msg)
         for field_name, value in (
             ("file_path", file_path),
             ("file_id", file_id),
@@ -498,6 +513,9 @@ class ObservationsMixin(DBMixinProtocol):
             raise ValueError(msg)
         if priority_max is not None and not (0 <= priority_max <= 4):
             msg = f"priority_max must be between 0 and 4, got {priority_max}"
+            raise ValueError(msg)
+        if priority_min is not None and priority_max is not None and priority_min > priority_max:
+            msg = f"priority_min must be <= priority_max, got {priority_min} > {priority_max}"
             raise ValueError(msg)
         if older_than_hours is not None and older_than_hours < 0:
             msg = f"older_than_hours must be >= 0, got {older_than_hours}"

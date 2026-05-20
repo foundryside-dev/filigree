@@ -263,6 +263,10 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="line must be an integer"):
             db.create_observation("bad line", line=True)  # type: ignore[arg-type]
 
+    def test_create_huge_line_raises_before_sqlite_binding(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="line must be <="):
+            db.create_observation("line overflow", line=9_223_372_036_854_775_808)
+
     def test_create_whitespace_only_summary_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="summary"):
             db.create_observation("   ")
@@ -358,6 +362,11 @@ class TestListObservations:
             db.create_observation(f"Obs {i}")
         assert len(db.list_observations(limit=2)) == 2
 
+    @pytest.mark.parametrize("limit", [0, -1, True], ids=["zero", "negative", "bool"])
+    def test_list_invalid_limit_raises(self, db: FiligreeDB, limit: object) -> None:
+        with pytest.raises(ValueError, match="limit"):
+            db.list_observations(limit=limit)  # type: ignore[arg-type]
+
     def test_list_with_offset(self, db: FiligreeDB) -> None:
         for i in range(5):
             db.create_observation(f"Obs {i}", priority=i % 5)
@@ -378,6 +387,11 @@ class TestListObservations:
     def test_list_offset_beyond_results(self, db: FiligreeDB) -> None:
         db.create_observation("Only one")
         assert db.list_observations(offset=10) == []
+
+    @pytest.mark.parametrize("offset", [-1, True], ids=["negative", "bool"])
+    def test_list_invalid_offset_raises(self, db: FiligreeDB, offset: object) -> None:
+        with pytest.raises(ValueError, match="offset"):
+            db.list_observations(offset=offset)  # type: ignore[arg-type]
 
     def test_list_filter_by_file_path(self, db: FiligreeDB) -> None:
         db.create_observation("api bug", file_path="src/api/routes.py")
@@ -437,6 +451,10 @@ class TestListObservations:
         result = db.list_observations(priority_min=1, priority_max=3)
         assert len(result) == 1
         assert result[0]["summary"] == "p2"
+
+    def test_list_inverted_priority_range_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="priority_min"):
+            db.list_observations(priority_min=3, priority_max=1)
 
     def test_list_filter_older_than_hours(self, db: FiligreeDB) -> None:
         old = db.create_observation("ancient")
