@@ -906,6 +906,11 @@ class TestBatchScanDbTrackingFailure:
                 )
             assert data["code"] == ErrorCode.IO
             proc.kill.assert_called_once()
+            row = mcp_db.conn.execute("SELECT status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
+            assert mcp_db.check_scan_cooldown("test-scanner", "backfill_fail.py") is None
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -1082,6 +1087,32 @@ class TestTriggerScanCooldownReservation:
             # The cooldown query should no longer find a blocking run — failed
             # rows are excluded from the cooldown window.
             assert mcp_db.check_scan_cooldown("test-scanner", "spawn_fail_target.py") is None
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_trigger_scan_backfill_failure_marks_reservation_failed(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["single_backfill_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=None))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "single_backfill_fail.py"},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            proc.kill.assert_called_once()
+            row = mcp_db.conn.execute("SELECT status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
+            assert mcp_db.check_scan_cooldown("test-scanner", "single_backfill_fail.py") is None
         finally:
             _cleanup_files(mcp_db, files)
 

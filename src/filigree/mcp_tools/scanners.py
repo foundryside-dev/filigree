@@ -896,18 +896,25 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     except (sqlite3.Error, KeyError, ValueError) as exc:
         with contextlib.suppress(OSError):
             proc.kill()
+        status_update_error = _mark_scan_run_failed(
+            tracker,
+            scan_run_id,
+            error_message=f"Scanner process terminated after DB tracking failed: {exc}",
+            context="single DB tracking failure",
+        )
         _logger.error(
             "Failed to finalize scan run %s (pid %d killed): %s",
             scan_run_id,
             proc.pid,
             exc,
         )
-        return _text(
-            ErrorResponse(
-                error=f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
-                code=ErrorCode.IO,
-            )
+        err_resp = ErrorResponse(
+            error=f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
+            code=ErrorCode.IO,
         )
+        if status_update_error:
+            err_resp["details"] = {"status_update_error": status_update_error}
+        return _text(err_resp)
 
     await asyncio.sleep(0.2)
     exit_code = proc.poll()
@@ -1174,13 +1181,22 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         except (sqlite3.Error, KeyError, ValueError) as exc:
             with contextlib.suppress(OSError):
                 proc.kill()
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                entry["scan_run_id"],
+                error_message=f"Scanner process terminated after DB tracking failed: {exc}",
+                context="batch DB tracking failure",
+            )
             _logger.error(
                 "Failed to finalize scan run %s (pid %d killed): %s",
                 entry["scan_run_id"],
                 proc.pid,
                 exc,
             )
-            spawn_errors.append({"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"})
+            error_item = {"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"}
+            if status_update_error:
+                error_item["status_update_error"] = status_update_error
+            spawn_errors.append(error_item)
             continue
         entry["log_rel"] = log_rel
         entry["pid"] = proc.pid
