@@ -524,6 +524,23 @@ class FilesMixin(DBMixinProtocol):
             raise ValueError(msg)
 
         try:
+            finding_ids = [
+                row["id"]
+                for row in self.conn.execute(
+                    "SELECT id FROM scan_findings WHERE file_id = ?",
+                    (file_id,),
+                ).fetchall()
+            ]
+            annotation_links = self.conn.execute(
+                "DELETE FROM annotation_links WHERE target_type = 'file' AND target_id = ?",
+                (file_id,),
+            ).rowcount
+            if finding_ids:
+                placeholders = ", ".join("?" for _ in finding_ids)
+                annotation_links += self.conn.execute(
+                    f"DELETE FROM annotation_links WHERE target_type = 'finding' AND target_id IN ({placeholders})",
+                    finding_ids,
+                ).rowcount
             observations = self.conn.execute(
                 "UPDATE observations SET file_id = NULL WHERE file_id = ?",
                 (file_id,),
@@ -546,6 +563,7 @@ class FilesMixin(DBMixinProtocol):
             "deleted_findings": deleted_findings,
             "deleted_associations": deleted_associations,
             "deleted_file_events": file_events,
+            "deleted_annotation_links": annotation_links,
             "unlinked_observations": observations,
             "actor": actor,
         }

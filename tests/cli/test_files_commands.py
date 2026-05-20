@@ -14,7 +14,8 @@ File shapes:
 - add-file-association: {"status": "created"}
 - register-file: FileRecordDict — {id, path, language, file_type, content_hash, registry_backend,
         first_seen, updated_at, metadata, data_warnings}
-- delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events, unlinked_observations, actor}
+- delete-file-record: {status, file_id, deleted_findings, deleted_associations, deleted_file_events,
+        deleted_annotation_links, unlinked_observations, actor}
 
 Finding shapes:
 - list-findings items: PublicScanFinding

@@ -392,6 +392,45 @@ class TestDeleteFileRecord:
         with pytest.raises(KeyError):
             db.get_finding(scan["new_finding_ids"][0])
 
+    def test_delete_removes_annotation_file_target_links(self, tmp_path: Path) -> None:
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
+        db.initialize()
+        db.project_root = tmp_path
+        try:
+            file_record = db.register_file("src/linked_target.py")
+            scan = db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": "src/linked_target.py", "rule_id": "R1", "message": "Open"}],
+            )
+            finding_id = scan["new_finding_ids"][0]
+            anchor = tmp_path / "src" / "annotation_anchor.py"
+            anchor.parent.mkdir()
+            anchor.write_text("anchor\n")
+            db.annotate_file(
+                "src/annotation_anchor.py",
+                "This annotation points at a file record.",
+                links=[{"target_type": "file", "target_id": file_record.id, "relationship": "relevant_to"}],
+            )
+            db.annotate_file(
+                "src/annotation_anchor.py",
+                "This annotation points at a finding record.",
+                links=[{"target_type": "finding", "target_id": finding_id, "relationship": "evidence_for"}],
+            )
+
+            result = db.delete_file_record(file_record.id, force=True)
+
+            assert result["deleted_annotation_links"] == 2
+            assert (
+                db.conn.execute(
+                    "SELECT COUNT(*) FROM annotation_links WHERE "
+                    "(target_type = 'file' AND target_id = ?) OR (target_type = 'finding' AND target_id = ?)",
+                    (file_record.id, finding_id),
+                ).fetchone()[0]
+                == 0
+            )
+        finally:
+            db.close()
+
 
 class TestListFiles:
     """Tests for listing file records."""

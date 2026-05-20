@@ -96,6 +96,7 @@ class DeleteFileRecordResult(TypedDict):
     deleted_findings: int
     deleted_associations: int
     deleted_file_events: int
+    deleted_annotation_links: int
     unlinked_observations: int
     actor: str
 
