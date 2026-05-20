@@ -89,10 +89,30 @@ def _emit_registry_error(exc: RegistryResolutionError | RegistryUnavailableError
     _emit_error(response["error"], response["code"], as_json=as_json, details=response.get("details"))
 
 
-def _mark_reserved_scan_failed(tracker: Any, scan_run_id: str, error_message: str) -> None:
+def _mark_reserved_scan_failed(
+    tracker: Any,
+    scan_run_id: str,
+    error_message: str,
+    *,
+    context: str,
+    exit_code: int | None = None,
+) -> str | None:
     """Best-effort terminalization for a reserved run after post-spawn tracking fails."""
-    with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-        tracker.update_scan_run_status(scan_run_id, "failed", error_message=error_message)
+    kwargs: dict[str, Any] = {"error_message": error_message}
+    if exit_code is not None:
+        kwargs["exit_code"] = exit_code
+    try:
+        tracker.update_scan_run_status(scan_run_id, "failed", **kwargs)
+    except (sqlite3.Error, KeyError, ValueError) as exc:
+        _logger.error(
+            "Failed to mark scan run %s failed during %s: %s",
+            scan_run_id,
+            context,
+            exc,
+            exc_info=True,
+        )
+        return str(exc)
+    return None
 
 
 def _resolve_scanner_api_url_or_die(
@@ -457,6 +477,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 tracker,
                 scan_run_id,
                 f"Scanner process terminated after DB tracking failed: {exc}",
+                context="single DB tracking failure",
             )
             _emit_error(
                 f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
@@ -665,13 +686,16 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 )
             except ScannerSpawnError as exc:
                 reason = str(exc)
-                spawn_errors.append({"file_path": cp, "reason": reason})
-                with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                    tracker.update_scan_run_status(
-                        child_run_id,
-                        "failed",
-                        error_message=f"Scanner process failed to spawn: {reason}",
-                    )
+                error_item = {"file_path": cp, "reason": reason}
+                status_update_error = _mark_reserved_scan_failed(
+                    tracker,
+                    child_run_id,
+                    f"Scanner process failed to spawn: {reason}",
+                    context="batch spawn failure",
+                )
+                if status_update_error:
+                    error_item["status_update_error"] = status_update_error
+                spawn_errors.append(error_item)
                 continue
             entry["spawn_result"] = spawn_result
             spawned.append(entry)
@@ -697,12 +721,16 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             except (sqlite3.Error, KeyError, ValueError) as exc:
                 with contextlib.suppress(OSError):
                     proc.kill()
-                _mark_reserved_scan_failed(
+                status_update_error = _mark_reserved_scan_failed(
                     tracker,
                     entry["scan_run_id"],
                     f"Scanner process terminated after DB tracking failed: {exc}",
+                    context="batch DB tracking failure",
                 )
-                spawn_errors.append({"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"})
+                error_item = {"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"}
+                if status_update_error:
+                    error_item["status_update_error"] = status_update_error
+                spawn_errors.append(error_item)
                 continue
             entry["log_rel"] = log_rel
             entry["pid"] = proc.pid
@@ -719,17 +747,26 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
 
         time.sleep(0.2)
         immediate_failures = 0
+        status_update_errors: list[dict[str, str]] = []
         for entry in finalized:
             proc = entry["spawn_result"]["proc"]
             ec = proc.poll()
             if ec is not None and ec != 0:
                 immediate_failures += 1
-                with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                    tracker.update_scan_run_status(
-                        entry["scan_run_id"],
-                        "failed",
-                        exit_code=ec,
-                        error_message="Scanner exited immediately",
+                status_update_error = _mark_reserved_scan_failed(
+                    tracker,
+                    entry["scan_run_id"],
+                    "Scanner exited immediately",
+                    context="batch immediate exit",
+                    exit_code=ec,
+                )
+                if status_update_error:
+                    status_update_errors.append(
+                        {
+                            "scan_run_id": entry["scan_run_id"],
+                            "file_path": entry["canonical_path"],
+                            "error": status_update_error,
+                        }
                     )
 
         scan_run_ids = [entry["scan_run_id"] for entry in finalized]
@@ -749,7 +786,12 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 f"All {len(finalized)} scanner processes exited immediately.",
                 ErrorCode.IO,
                 as_json=as_json,
-                details={"batch_id": batch_id, "scan_run_ids": scan_run_ids, "per_file": per_file},
+                details={
+                    "batch_id": batch_id,
+                    "scan_run_ids": scan_run_ids,
+                    "per_file": per_file,
+                    **({"status_update_errors": status_update_errors} if status_update_errors else {}),
+                },
             )
             return
 
@@ -773,6 +815,8 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             result["skipped"] = skipped
         if immediate_failures:
             result["immediate_failures"] = immediate_failures
+        if status_update_errors:
+            result["status_update_errors"] = status_update_errors
         log_warnings = [entry["spawn_result"]["log_warning"] for entry in finalized if entry["spawn_result"].get("log_warning")]
         if log_warnings:
             result["warnings"] = log_warnings

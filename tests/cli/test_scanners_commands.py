@@ -70,6 +70,13 @@ class _FakeProc:
         self.killed = True
 
 
+class _ImmediateFailureProc(_FakeProc):
+    """Popen stand-in for a child that exits during the immediate poll."""
+
+    def poll(self) -> int:
+        return 1
+
+
 @pytest.fixture
 def project_with_scanner(initialized_project: Path) -> SeededProject:
     """A project with a test-scanner TOML and a target.py file."""
@@ -1322,6 +1329,68 @@ class TestTriggerScanBatchCommand:
             assert result.exit_code == 1
             data = json.loads(result.output)
             assert data["code"] == "IO"
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_spawn_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("mock fail")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["spawn_errors"][0]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_immediate_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        original_update = FiligreeDB.update_scan_run_status
+
+        def fail_failed_status(
+            db: FiligreeDB,
+            scan_run_id: str,
+            status: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(db, scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=_ImmediateFailureProc(100)),
+                patch.object(FiligreeDB, "update_scan_run_status", autospec=True, side_effect=fail_failed_status),
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["status_update_errors"][0]["error"] == "status update broken"
         finally:
             os.chdir(original)
 
