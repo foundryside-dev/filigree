@@ -1856,6 +1856,73 @@ class TestImportJsonl:
         assert file_event["file_id"] == dst_file.id
         fresh.close()
 
+    def test_import_merge_remaps_scan_run_file_ids_by_path(self, tmp_path: Path) -> None:
+        source = FiligreeDB(tmp_path / "source-scan-run.db", prefix="src")
+        source.initialize()
+        self._seed_file_domain(source, file_id="src-f1", finding_id="src-sf1")
+        source.conn.execute(
+            "INSERT INTO scan_runs "
+            "(id, scanner_name, scan_source, status, file_paths, file_ids, started_at, updated_at, findings_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run-src-remap",
+                "ruff",
+                "ci",
+                "completed",
+                '["src/example.py"]',
+                '["src-f1"]',
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+                1,
+            ),
+        )
+        source.conn.commit()
+        out = tmp_path / "scan-run-remap.jsonl"
+        source.export_jsonl(out)
+        source.close()
+
+        fresh = FiligreeDB(tmp_path / "dest-scan-run.db", prefix="dst")
+        fresh.initialize()
+        dst_file = fresh.register_file("src/example.py", language="python")
+        fresh.import_jsonl(out, merge=True, allow_foreign_ids=True)
+
+        row = fresh.conn.execute("SELECT file_ids FROM scan_runs WHERE id = ?", ("run-src-remap",)).fetchone()
+        assert json.loads(row["file_ids"]) == [dst_file.id]
+        fresh.close()
+
+    def test_import_merge_remaps_finding_annotation_link_by_dedup_key(self, tmp_path: Path) -> None:
+        source = FiligreeDB(tmp_path / "source-finding-link.db", prefix="src")
+        source.initialize()
+        self._seed_file_domain(source, file_id="src-f1", finding_id="src-sf1")
+        now = "2026-01-01T00:00:00+00:00"
+        source.conn.execute(
+            "INSERT INTO annotations (id, file_id, file_path, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("src-ann-finding", "src-f1", "src/example.py", "linked to finding", now, now),
+        )
+        source.conn.execute(
+            "INSERT INTO annotation_links "
+            "(id, annotation_id, target_type, target_id, relationship, actor, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("src-annlink-finding", "src-ann-finding", "finding", "src-sf1", "evidence_for", "import", now),
+        )
+        source.conn.commit()
+        out = tmp_path / "finding-link-remap.jsonl"
+        source.export_jsonl(out)
+        source.close()
+
+        fresh = FiligreeDB(tmp_path / "dest-finding-link.db", prefix="dst")
+        fresh.initialize()
+        self._seed_file_domain(fresh, file_id="dst-f1", finding_id="dst-sf1")
+        fresh.import_jsonl(out, merge=True, allow_foreign_ids=True)
+
+        link = fresh.conn.execute(
+            "SELECT target_id FROM annotation_links WHERE id = ?",
+            ("src-annlink-finding",),
+        ).fetchone()
+        assert link["target_id"] == "dst-sf1"
+        assert fresh.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE id = ?", ("src-sf1",)).fetchone()[0] == 0
+        fresh.close()
+
     def test_import_skips_unknown_types_and_reports_them(self, db: FiligreeDB, tmp_path: Path) -> None:
         jsonl = tmp_path / "unknown.jsonl"
         jsonl.write_text('{"_type": "alien", "data": "hello"}\n')
@@ -1989,11 +2056,98 @@ class TestImportJsonl:
         child = db.get_issue("test-child002")
         assert child.parent_id == parent.id
 
+    def test_import_rejects_non_integer_issue_priority_before_write(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """import_jsonl must not persist issue rows the Issue model cannot hydrate."""
+        bad_id = "test-importbadprio"
+        jsonl = tmp_path / "bad_issue_priority.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": bad_id,
+                    "title": "Bad priority",
+                    "priority": 2.5,
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="Priority must be an integer"):
+            db.import_jsonl(jsonl)
+
+        leaked = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", (bad_id,)).fetchone()[0]
+        assert leaked == 0
+
+    def test_import_rejects_invalid_issue_status_before_write(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """import_jsonl must validate issue status against the issue type template."""
+        bad_id = "test-importbadstatus"
+        jsonl = tmp_path / "bad_issue_status.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": bad_id,
+                    "title": "Bad status",
+                    "status": "teleported",
+                    "type": "task",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="Invalid status"):
+            db.import_jsonl(jsonl)
+
+        leaked = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", (bad_id,)).fetchone()[0]
+        assert leaked == 0
+
     def test_import_skips_blank_lines(self, db: FiligreeDB, tmp_path: Path) -> None:
         jsonl = tmp_path / "blanks.jsonl"
         jsonl.write_text('\n\n{"_type": "issue", "id": "test-aaa111", "title": "Blank test"}\n\n')
         result = db.import_jsonl(jsonl)
         assert result["count"] == 1
+
+    def test_import_rejects_self_dependency_and_rolls_back_issues(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """Dependency import must preserve the normal self-edge guard and rollback prior inserts."""
+        issue_id = "test-importselfdep"
+        jsonl = tmp_path / "self_dependency.jsonl"
+        lines = [
+            {"_type": "issue", "id": issue_id, "title": "Self dependency"},
+            {"_type": "dependency", "issue_id": issue_id, "depends_on_id": issue_id},
+        ]
+        jsonl.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+        with pytest.raises(ValueError, match="self-dependency"):
+            db.import_jsonl(jsonl)
+
+        leaked_issues = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", (issue_id,)).fetchone()[0]
+        leaked_deps = db.conn.execute("SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", (issue_id,)).fetchone()[0]
+        assert leaked_issues == 0
+        assert leaked_deps == 0
+
+    def test_import_rejects_dependency_cycle_and_rolls_back_import(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """Dependency import must not bypass graph cycle detection."""
+        first_id = "test-importcyclea"
+        second_id = "test-importcycleb"
+        jsonl = tmp_path / "cycle_dependency.jsonl"
+        lines = [
+            {"_type": "issue", "id": first_id, "title": "First"},
+            {"_type": "issue", "id": second_id, "title": "Second"},
+            {"_type": "dependency", "issue_id": first_id, "depends_on_id": second_id},
+            {"_type": "dependency", "issue_id": second_id, "depends_on_id": first_id},
+        ]
+        jsonl.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+        with pytest.raises(ValueError, match="would create a cycle"):
+            db.import_jsonl(jsonl)
+
+        leaked_issues = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id IN (?, ?)", (first_id, second_id)).fetchone()[0]
+        leaked_deps = db.conn.execute(
+            "SELECT COUNT(*) FROM dependencies WHERE issue_id IN (?, ?)",
+            (first_id, second_id),
+        ).fetchone()[0]
+        assert leaked_issues == 0
+        assert leaked_deps == 0
 
     def test_import_rejects_invalid_scan_finding_severity(self, db: FiligreeDB, tmp_path: Path) -> None:
         """import_jsonl must reject scan_findings with invalid severity values."""

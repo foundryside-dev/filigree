@@ -477,3 +477,41 @@ class TestAnnotationCrud:
             assert db.conn.execute("SELECT COUNT(*) FROM annotation_links WHERE id = 'test-annlink-dangling'").fetchone()[0] == 0
         finally:
             db.close()
+
+    def test_jsonl_import_rejects_missing_closeout_ack_issue_targets(self, tmp_path: Path) -> None:
+        imported = tmp_path / "dangling-closeout-ack.jsonl"
+        now = "2026-01-01T00:00:00+00:00"
+        records = [
+            {
+                "_type": "annotation",
+                "id": "test-ann-ack-dangling",
+                "file_path": "src.py",
+                "note": "imported annotation",
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "_type": "annotation_closeout_acknowledgement",
+                "annotation_id": "test-ann-ack-dangling",
+                "target_id": "test-missingissue",
+                "carried_to_target_id": "test-othermissing",
+                "actor": "import",
+                "reason": "carry it",
+                "acknowledged_at": now,
+            },
+        ]
+        imported.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+        db = _project_db(tmp_path / "closeout-import-reject")
+        try:
+            with pytest.raises(ValueError, match=r"closeout.*missing issue target"):
+                db.import_jsonl(imported, merge=True)
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE id = 'test-ann-ack-dangling'").fetchone()[0] == 0
+            assert (
+                db.conn.execute(
+                    "SELECT COUNT(*) FROM annotation_closeout_acknowledgements WHERE annotation_id = 'test-ann-ack-dangling'"
+                ).fetchone()[0]
+                == 0
+            )
+        finally:
+            db.close()
