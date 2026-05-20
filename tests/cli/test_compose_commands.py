@@ -12,6 +12,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.types.api import AmbiguousTransitionError
 from tests.cli.conftest import _extract_id
 
 
@@ -168,6 +169,27 @@ class TestStartWorkCli:
         assert data["code"] == "INVALID_TRANSITION"
         assert {t["to"] for t in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
         assert data["hint"] == "Use get_valid_transitions to see allowed state changes"
+
+    def test_ambiguous_transition_includes_candidate_details(self, monkeypatch) -> None:
+        class FakeDB:
+            def __enter__(self) -> FakeDB:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                pass
+
+            def start_work(self, *_args: object, **_kwargs: object) -> object:
+                raise AmbiguousTransitionError("custom", ["review", "revise"], current_status="open")
+
+        monkeypatch.setattr("filigree.cli_commands.issues.get_db", lambda: FakeDB())
+        runner = CliRunner()
+
+        result = runner.invoke(cli, ["start-work", "test-1234567890", "--assignee", "erin", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert data["details"] == {"candidates": ["review", "revise"], "current_status": "open", "type": "custom"}
 
     def test_actor_defaults_to_assignee(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """When --actor is omitted, the audit-trail actor should be the assignee.

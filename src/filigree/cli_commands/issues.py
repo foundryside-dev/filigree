@@ -56,6 +56,15 @@ def _log_transition_enrichment_failure(issue_id: str, exc: Exception) -> None:
 
 def _transition_error_payload(db: Any, issue_id: str, exc: BaseException) -> dict[str, Any]:
     payload: dict[str, Any] = {"error": str(exc), "code": ErrorCode.INVALID_TRANSITION}
+    if isinstance(exc, AmbiguousTransitionError):
+        details: dict[str, Any] = {
+            "type": exc.type_name,
+            "candidates": exc.candidates,
+        }
+        if exc.current_status is not None:
+            details["current_status"] = exc.current_status
+        payload["details"] = details
+        return payload
     if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
         payload["valid_transitions"] = exc.valid_transitions
         payload["hint"] = "Use get_valid_transitions to see allowed state changes"
@@ -1310,21 +1319,7 @@ def start_work(
             sys.exit(1)
         except (AmbiguousTransitionError, InvalidTransitionError) as e:
             if as_json:
-                transition_payload: dict[str, Any] = {"error": str(e), "code": ErrorCode.INVALID_TRANSITION}
-                if isinstance(e, InvalidTransitionError):
-                    if e.valid_transitions is not None:
-                        transition_payload["valid_transitions"] = e.valid_transitions
-                        transition_payload["hint"] = "Use get_valid_transitions to see allowed state changes"
-                    else:
-                        try:
-                            transitions = db.get_valid_transitions(issue_id)
-                            transition_payload["valid_transitions"] = [
-                                {"to": t.to, "category": t.category, "ready": t.ready} for t in transitions
-                            ]
-                            transition_payload["hint"] = "Use get_valid_transitions to see allowed state changes"
-                        except Exception as enrich_exc:
-                            _log_transition_enrichment_failure(issue_id, enrich_exc)
-                click.echo(json_mod.dumps(transition_payload))
+                click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
