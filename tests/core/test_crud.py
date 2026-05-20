@@ -23,6 +23,16 @@ class TestCreateIssueValidation:
         with pytest.raises(ValueError, match="Title cannot be empty"):
             db.create_issue(title)
 
+    @pytest.mark.parametrize("title", [123, ["title"]], ids=["int", "list"])
+    def test_non_string_title_raises_type_error_without_writing(self, db: FiligreeDB, title: object) -> None:
+        before_count = db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+
+        with pytest.raises(TypeError, match="title must be a string"):
+            db.create_issue(title)  # type: ignore[arg-type]
+
+        after_count = db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        assert after_count == before_count
+
     @pytest.mark.parametrize("priority", [-1, 5, 100], ids=["neg1", "five", "hundred"])
     def test_bad_priority_raises(self, db: FiligreeDB, priority: int) -> None:
         with pytest.raises(ValueError, match="Priority must be"):

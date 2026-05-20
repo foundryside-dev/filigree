@@ -494,6 +494,9 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         _skip_begin: bool = False,
     ) -> Issue:
+        if not isinstance(title, str):
+            msg = "title must be a string"
+            raise TypeError(msg)
         if not title or not title.strip():
             msg = "Title cannot be empty"
             raise ValueError(msg)
