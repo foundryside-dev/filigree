@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
-from filigree.db_base import DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
+from filigree.db_base import DBMixinProtocol, _escape_like_chars, _now_iso, _safe_json_loads
 from filigree.models import FileRecord, ScanFinding
 from filigree.registry import (
     BatchQuery,
@@ -128,6 +128,36 @@ def _is_project_relative_scan_path(path: str) -> bool:
     if len(path) >= 3 and path[1:3] == ":/":
         return False
     return path != ".." and not path.startswith("../")
+
+
+def _normalize_project_relative_scan_path(path: object, *, field_name: str) -> str:
+    if not isinstance(path, str):
+        raise ValueError(f"{field_name} must be a string, got {type(path).__name__}")
+    normalized = _normalize_scan_path(path)
+    if not normalized:
+        raise ValueError(f"{field_name} cannot be empty after normalization")
+    if not _is_project_relative_scan_path(normalized):
+        raise ValueError(f"{field_name} must be project-relative")
+    return normalized
+
+
+def _normalize_registry_canonical_path(path: object, *, requested_path: str) -> str:
+    return _normalize_project_relative_scan_path(
+        path,
+        field_name=f"Registry canonical_path for {requested_path!r}",
+    )
+
+
+def _normalize_file_path_prefix(path_prefix: str) -> str:
+    raw_prefix = path_prefix.replace("\\", "/")
+    normalized = _normalize_scan_path(raw_prefix)
+    if not normalized:
+        return ""
+    if not _is_project_relative_scan_path(normalized):
+        raise ValueError("path_prefix must be project-relative")
+    if raw_prefix.endswith("/") and not normalized.endswith("/"):
+        normalized += "/"
+    return normalized
 
 
 def _infer_language_from_path(path: str) -> str:
@@ -255,13 +285,7 @@ class FilesMixin(DBMixinProtocol):
         :meth:`_update_existing_file_record` directly so there is exactly one
         update code path (mirroring ``_upsert_file_record``'s pattern).
         """
-        if not isinstance(path, str):
-            raise ValueError(f"File path must be a string, got {type(path).__name__}")
-        path = _normalize_scan_path(path)
-        if not path:
-            raise ValueError("File path cannot be empty after normalization")
-        if not _is_project_relative_scan_path(path):
-            raise ValueError("File path must be project-relative")
+        path = _normalize_project_relative_scan_path(path, field_name="File path")
         now = _now_iso()
         existing = self.conn.execute("SELECT * FROM file_records WHERE path = ?", (path,)).fetchone()
         inferred_language = _infer_language_from_path(path)
@@ -285,7 +309,7 @@ class FilesMixin(DBMixinProtocol):
             actor=actor,
         )
         file_id = resolved["file_id"]
-        stored_path = resolved["canonical_path"]
+        stored_path = _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
         stored_language = resolved["language"] or stored_language
         content_hash = resolved["content_hash"]
         registry_backend = resolved["registry_backend"]
@@ -537,7 +561,7 @@ class FilesMixin(DBMixinProtocol):
             params.append(language)
         if path_prefix is not None:
             clauses.append("path LIKE ? ESCAPE '\\'")
-            params.append(_escape_like(path_prefix))
+            params.append(f"{_escape_like_chars(_normalize_file_path_prefix(path_prefix))}%")
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         if sort not in self._VALID_FILE_SORTS:
@@ -583,9 +607,8 @@ class FilesMixin(DBMixinProtocol):
             clauses.append("fr.language = ?")
             params.append(language)
         if path_prefix is not None:
-            escaped = _escape_like_chars(path_prefix)
             clauses.append("fr.path LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
+            params.append(f"{_escape_like_chars(_normalize_file_path_prefix(path_prefix))}%")
         if min_findings is not None and min_findings > 0:
             clauses.append(f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {self._OPEN_FINDINGS_FILTER_SF}) >= ?")
             params.append(min_findings)
@@ -713,10 +736,10 @@ class FilesMixin(DBMixinProtocol):
                 ln_val = f.get(ln_field)
                 if ln_val is not None and (isinstance(ln_val, bool) or not isinstance(ln_val, int)):
                     raise ValueError(f"findings[{i}] {ln_field} must be an integer or null, got {type(ln_val).__name__}")
-                # Reject negatives — `-1` is the dedup sentinel for missing line in
-                # the unique index `coalesce(line_start, -1)` (db_schema.py:159-160).
-                if isinstance(ln_val, int) and not isinstance(ln_val, bool) and ln_val < 0:
-                    raise ValueError(f"findings[{i}] {ln_field} must be >= 0, got {ln_val}")
+                # Scanner line numbers are 1-based; NULL remains the only
+                # representation for "line unknown".
+                if isinstance(ln_val, int) and not isinstance(ln_val, bool) and ln_val < 1:
+                    raise ValueError(f"findings[{i}] {ln_field} must be >= 1, got {ln_val}")
             line_start = f.get("line_start")
             line_end = f.get("line_end")
             if isinstance(line_start, int) and isinstance(line_end, int) and line_end < line_start:
@@ -834,6 +857,7 @@ class FilesMixin(DBMixinProtocol):
             current_language = existing_file["language"] or ""
             next_language = language or (inferred_language if not current_language else "")
             if resolved is not None:
+                _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
                 if resolved["file_id"] != file_id:
                     msg = (
                         f"Existing scan file {path!r} resolves to registry id {resolved['file_id']!r}, "
@@ -870,7 +894,7 @@ class FilesMixin(DBMixinProtocol):
             stored_language = language or inferred_language
             resolved = resolved_file or self.registry.resolve_file(path, language=stored_language, actor=actor)
             file_id = resolved["file_id"]
-            stored_path = resolved["canonical_path"]
+            stored_path = _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
             stored_language = resolved["language"] or stored_language
             content_hash = resolved["content_hash"]
             registry_backend = resolved["registry_backend"]
@@ -1443,10 +1467,10 @@ class FilesMixin(DBMixinProtocol):
             # finding reaches a terminal lifecycle state (dismissed, fixed,
             # promoted to issue) so the agent triage queue doesn't accumulate
             # zombie scratchpad notes for findings that have already been
-            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) status='open' or
-            # 'acknowledged' are not terminal — leave the observation alone.
-            terminal_statuses = {"false_positive", "fixed", "unseen_in_latest"}
-            should_cascade = (status is not None and status in terminal_statuses) or normalized_issue_id is not None
+            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) Non-terminal
+            # statuses such as 'open', 'acknowledged', and 'unseen_in_latest'
+            # leave the observation alive for continued triage.
+            should_cascade = (status is not None and status in TERMINAL_FINDING_STATUSES) or normalized_issue_id is not None
             if should_cascade:
                 self._cascade_dismiss_observations_for_finding(
                     finding_id,

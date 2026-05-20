@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
-from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES
+from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES, _normalize_project_relative_scan_path
 from filigree.db_issues import _check_expected_assignee
 from filigree.db_observations import _expires_iso
 from filigree.types.planning import CommentRecord, StatsResult
@@ -610,7 +610,10 @@ class MetaMixin(DBMixinProtocol):
         file_id_map: dict[str, str],
     ) -> int:
         src_id = record["id"]
-        path = record["path"]
+        path = _normalize_project_relative_scan_path(
+            record["path"],
+            field_name=f"file_record {src_id!r} path",
+        )
         registry_backend = record.get("registry_backend", "local") or "local"
         if not isinstance(registry_backend, str) or registry_backend not in _VALID_FILE_REGISTRY_BACKENDS:
             msg = f"Invalid registry_backend {registry_backend!r} for imported file_record {src_id!r}"
@@ -619,6 +622,27 @@ class MetaMixin(DBMixinProtocol):
         if not isinstance(content_hash, str):
             msg = f"Invalid content_hash for imported file_record {src_id!r}: expected string"
             raise ValueError(msg)
+        existing_by_id = self.conn.execute("SELECT id, path FROM file_records WHERE id = ?", (src_id,)).fetchone()
+        existing_by_path = self.conn.execute("SELECT id, path FROM file_records WHERE path = ?", (path,)).fetchone()
+
+        if existing_by_id is not None and existing_by_id["path"] != path:
+            msg = f"Import conflict for file id {src_id}: existing path {existing_by_id['path']!r} != imported path {path!r}"
+            raise ValueError(msg)
+
+        if existing_by_path is not None:
+            if merge:
+                file_id_map[src_id] = existing_by_path["id"]
+                return 0
+            msg = f"Import conflict for file {path!r}"
+            raise sqlite3.IntegrityError(msg)
+
+        if existing_by_id is not None:
+            if merge:
+                file_id_map[src_id] = existing_by_id["id"]
+                return 0
+            msg = f"Import conflict for file id {src_id!r}"
+            raise sqlite3.IntegrityError(msg)
+
         cursor = self.conn.execute(
             f"INSERT {conflict} INTO file_records "
             "(id, path, language, file_type, content_hash, registry_backend, first_seen, updated_at, metadata) "
@@ -638,13 +662,6 @@ class MetaMixin(DBMixinProtocol):
         if cursor.rowcount > 0:
             file_id_map[src_id] = src_id
             return cursor.rowcount
-
-        existing_by_id = self.conn.execute("SELECT id, path FROM file_records WHERE id = ?", (src_id,)).fetchone()
-        existing_by_path = self.conn.execute("SELECT id, path FROM file_records WHERE path = ?", (path,)).fetchone()
-
-        if existing_by_id is not None and existing_by_id["path"] != path:
-            msg = f"Import conflict for file id {src_id}: existing path {existing_by_id['path']!r} != imported path {path!r}"
-            raise ValueError(msg)
 
         if not merge:
             msg = f"Import conflict for file {path!r}"

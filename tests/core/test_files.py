@@ -101,6 +101,26 @@ class TestRegisterFile:
         with pytest.raises(ValueError, match="project-relative"):
             db.register_file("/src/main.py", language="python")
 
+    def test_register_file_rejects_escaping_registry_canonical_path(self, tmp_path: Path) -> None:
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry=FixedRegistry(
+                file_id="core:file:escape",
+                canonical_path="../outside.py",
+                registry_backend="clarion",
+            ),
+        )
+        try:
+            db.initialize()
+
+            with pytest.raises(ValueError, match="project-relative"):
+                db.register_file("src/input.py", language="python")
+
+            assert db.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 0
+        finally:
+            db.close()
+
     def test_register_file_rejects_non_string_path(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="File path must be a string"):
             db.register_file(123)  # type: ignore[arg-type]
@@ -408,9 +428,10 @@ class TestListFiles:
     def test_list_with_path_prefix(self, db: FiligreeDB) -> None:
         db.register_file("src/core/a.py")
         db.register_file("src/core/b.py")
+        db.register_file("vendor/src/core/c.py")
         db.register_file("tests/test_a.py")
         files = db.list_files(path_prefix="src/core/")
-        assert len(files) == 2
+        assert {item.path for item in files} == {"src/core/a.py", "src/core/b.py"}
 
     def test_list_with_path_prefix_escapes_like_wildcards(self, db: FiligreeDB) -> None:
         """path_prefix containing SQL LIKE wildcards (% and _) must match literally."""
@@ -420,12 +441,12 @@ class TestListFiles:
         db.register_file("src/fileABCtest.py")  # % wildcard would match this
 
         # Underscore must be literal — only file_test.py should match
-        files = db.list_files(path_prefix="file_test")
+        files = db.list_files(path_prefix="src/file_test")
         assert len(files) == 1
         assert files[0].path == "src/file_test.py"
 
         # Percent must be literal — only file%test.py should match
-        files = db.list_files(path_prefix="file%test")
+        files = db.list_files(path_prefix="src/file%test")
         assert len(files) == 1
         assert files[0].path == "src/file%test.py"
 
@@ -779,6 +800,30 @@ class TestProcessScanResults:
         finding = db.conn.execute("SELECT severity FROM scan_findings").fetchone()
         assert finding["severity"] == "info"
 
+    def test_ingest_rejects_escaping_registry_canonical_path(self, tmp_path: Path) -> None:
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry=FixedRegistry(
+                file_id="core:file:escape",
+                canonical_path="/etc/passwd",
+                registry_backend="clarion",
+            ),
+        )
+        try:
+            db.initialize()
+
+            with pytest.raises(ValueError, match="project-relative"):
+                db.process_scan_results(
+                    scan_source="ruff",
+                    findings=[{"path": "src/input.py", "rule_id": "E1", "severity": "low", "message": "m"}],
+                )
+
+            assert db.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 0
+        finally:
+            db.close()
+
     def test_ingest_empty_findings(self, db: FiligreeDB) -> None:
         result = db.process_scan_results(scan_source="ruff", findings=[])
         assert result["files_created"] == 0
@@ -832,6 +877,24 @@ class TestProcessScanResults:
         assert updated["status"] == "fixed"
         summary = db.get_file_findings_summary(file_record.id)
         assert summary["open_findings"] == 0
+
+    def test_update_finding_unseen_in_latest_preserves_linked_observation(self, db: FiligreeDB) -> None:
+        db.process_scan_results(
+            scan_source="ruff",
+            create_observations=True,
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+        file_record = db.get_file_by_path("a.py")
+        assert file_record is not None
+        finding = db.get_findings(file_record.id)[0]
+        assert len(db.list_observations(file_id=file_record.id)) == 1
+
+        updated = db.update_finding(finding.id, file_id=file_record.id, status="unseen_in_latest")
+
+        assert updated["status"] == "unseen_in_latest"
+        assert len(db.list_observations(file_id=file_record.id)) == 1
+        summary = db.get_file_findings_summary(file_record.id)
+        assert summary["open_findings"] == 1
 
     def test_update_finding_links_issue_and_creates_association(self, db: FiligreeDB) -> None:
         db.process_scan_results(
@@ -1027,7 +1090,7 @@ class TestProcessScanResults:
 
     def test_negative_line_start_rejected(self, db: FiligreeDB) -> None:
         """filigree-8383bb4462: negative line_start collides with -1 dedup sentinel."""
-        with pytest.raises(ValueError, match="line_start must be >= 0"):
+        with pytest.raises(ValueError, match="line_start must be >= 1"):
             db.process_scan_results(
                 scan_source="ruff",
                 findings=[
@@ -1035,13 +1098,33 @@ class TestProcessScanResults:
                 ],
             )
 
+    def test_zero_line_start_rejected(self, db: FiligreeDB) -> None:
+        """Scan finding line numbers are 1-based across public contracts."""
+        with pytest.raises(ValueError, match="line_start must be >= 1"):
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m", "line_start": 0},
+                ],
+            )
+
     def test_negative_line_end_rejected(self, db: FiligreeDB) -> None:
         """filigree-8383bb4462: negative line_end likewise rejected for symmetry."""
-        with pytest.raises(ValueError, match="line_end must be >= 0"):
+        with pytest.raises(ValueError, match="line_end must be >= 1"):
             db.process_scan_results(
                 scan_source="ruff",
                 findings=[
                     {"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m", "line_end": -5},
+                ],
+            )
+
+    def test_zero_line_end_rejected(self, db: FiligreeDB) -> None:
+        """Scan finding line ranges must not store a zero end line."""
+        with pytest.raises(ValueError, match="line_end must be >= 1"):
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m", "line_end": 0},
                 ],
             )
 
@@ -2970,13 +3053,22 @@ class TestPaginationMetadata:
         db.register_file("src/file%test.py")
         db.register_file("src/fileABCtest.py")
 
-        result = db.list_files_paginated(path_prefix="file_test")
+        result = db.list_files_paginated(path_prefix="src/file_test")
         assert result["total"] == 1
         assert result["results"][0]["path"] == "src/file_test.py"
 
-        result = db.list_files_paginated(path_prefix="file%test")
+        result = db.list_files_paginated(path_prefix="src/file%test")
         assert result["total"] == 1
         assert result["results"][0]["path"] == "src/file%test.py"
+
+    def test_list_files_paginated_path_prefix_matches_only_prefix(self, db: FiligreeDB) -> None:
+        db.register_file("src/a.py")
+        db.register_file("vendor/src/b.py")
+
+        result = db.list_files_paginated(path_prefix="src/")
+
+        assert result["total"] == 1
+        assert result["results"][0]["path"] == "src/a.py"
 
     def test_list_files_paginated_invalid_sort_raises(self, db: FiligreeDB) -> None:
         """Invalid sort parameter must raise ValueError, not silently fall back."""

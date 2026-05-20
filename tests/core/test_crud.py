@@ -1326,6 +1326,50 @@ class TestImportJsonl:
         with pytest.raises(ValueError, match="Invalid registry_backend"):
             db.import_jsonl(jsonl)
 
+    @pytest.mark.parametrize("path", ["/etc/passwd", "../outside.py", "src/../../outside.py"])
+    def test_import_rejects_non_project_relative_file_path(self, db: FiligreeDB, tmp_path: Path, path: str) -> None:
+        jsonl = tmp_path / "bad-file-path.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "file_record",
+                    "id": "test-file-bad-path",
+                    "path": path,
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(ValueError, match="project-relative"):
+            db.import_jsonl(jsonl)
+
+        assert db.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 0
+
+    def test_import_normalizes_file_path_before_merge(self, db: FiligreeDB, tmp_path: Path) -> None:
+        existing = db.register_file("src/bar.py")
+        jsonl = tmp_path / "normalized-file-path.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "file_record",
+                    "id": "test-file-imported-bar",
+                    "path": "src/foo/../bar.py",
+                    "language": "python",
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        )
+
+        result = db.import_jsonl(jsonl, merge=True)
+
+        assert result["count"] == 0
+        rows = db.conn.execute("SELECT id, path FROM file_records").fetchall()
+        assert [dict(row) for row in rows] == [{"id": existing.id, "path": "src/bar.py"}]
+
     def test_import_legacy_file_record_defaults_registry_metadata(self, db: FiligreeDB, tmp_path: Path) -> None:
         jsonl = tmp_path / "legacy-file-record.jsonl"
         jsonl.write_text(
@@ -1555,9 +1599,9 @@ class TestImportJsonl:
         with patch("filigree.db_meta._now_iso", side_effect=_advancing_clock):
             db.import_jsonl(jsonl, merge=True)
 
-        # file_record merge uses _now_iso for first_seen and updated_at (2 calls),
-        # file_event merge should use exactly 1 call (the fix)
-        assert total_calls == 3, f"Expected 3 _now_iso calls (2 for file_record + 1 for file_event), got {total_calls}"
+        # Existing file_record merge maps by normalized path before insert; the
+        # file_event merge should use exactly one timestamp call.
+        assert total_calls == 1, f"Expected 1 _now_iso call for file_event merge, got {total_calls}"
 
     def test_import_merge_file_domain_count_accurate(self, db: FiligreeDB, tmp_path: Path) -> None:
         self._seed_file_domain(db)
