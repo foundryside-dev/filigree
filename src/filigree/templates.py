@@ -603,6 +603,13 @@ class TemplateRegistry:
                 errors.append(f"reverse_transition to_state '{t.to_state}' is not in states list")
 
         field_names = {f.name for f in tpl.fields_schema}
+        if len(field_names) != len(tpl.fields_schema):
+            seen_fields: set[str] = set()
+            for field in tpl.fields_schema:
+                if field.name in seen_fields:
+                    errors.append(f"duplicate field name '{field.name}'")
+                seen_fields.add(field.name)
+
         for t in tpl.transitions:
             for rf in t.requires_fields:
                 if rf not in field_names:

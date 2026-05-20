@@ -473,6 +473,24 @@ class TestTemplateRegistry:
         errors = TemplateRegistry.validate_type_template(tpl)
         assert any("ghost_field" in e for e in errors)
 
+    def test_validate_type_template_duplicate_field_names(self) -> None:
+        tpl = TypeTemplate(
+            type="bad",
+            display_name="Bad",
+            description="Bad",
+            pack="test",
+            states=(StateDefinition("open", "open"), StateDefinition("closed", "done")),
+            initial_state="open",
+            transitions=(TransitionDefinition("open", "closed", "soft", requires_fields=("details",)),),
+            fields_schema=(
+                FieldSchema("details", "text"),
+                FieldSchema("details", "text"),
+            ),
+        )
+
+        errors = TemplateRegistry.validate_type_template(tpl)
+        assert any("duplicate field name 'details'" in e for e in errors)
+
 
 class TestStateCategoryValidation:
     """Bug fix: filigree-fe2078 — invalid categories silently accepted."""
