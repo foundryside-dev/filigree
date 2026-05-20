@@ -1015,6 +1015,51 @@ class TestReleaseCli:
         data = json.loads(result.output)
         assert "error" in data
 
+    def test_release_my_claims_json_exits_nonzero_on_failures(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release failure"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        def fail_release_claim(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("simulated release failure")
+
+        monkeypatch.setattr("filigree.db_issues.IssuesMixin.release_claim", fail_release_claim)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["succeeded"] == []
+        assert data["failed"][0]["id"] == issue_id
+        assert "simulated release failure" in data["failed"][0]["error"]
+
+    def test_release_my_claims_text_exits_nonzero_on_failures(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Text bulk release failure"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        def fail_release_claim(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("simulated release failure")
+
+        monkeypatch.setattr("filigree.db_issues.IssuesMixin.release_claim", fail_release_claim)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims"])
+
+        assert result.exit_code == 1
+        assert "failure(s)" in result.output
+        assert issue_id in result.output
+        assert "simulated release failure" in result.output
+
 
 class TestListLabelQuery:
     def test_list_label_prefix(self, cli_in_project: tuple[CliRunner, Path]) -> None:

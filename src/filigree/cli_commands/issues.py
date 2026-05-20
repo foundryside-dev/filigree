@@ -1043,6 +1043,8 @@ def release_my_claims_cmd(
             if dry_run:
                 payload["dry_run"] = True
             click.echo(json_mod.dumps(payload, indent=2, default=str))
+            if failures:
+                sys.exit(1)
             return
         verb = "would release" if dry_run else "released"
         click.echo(f"{verb} {len(released)} claim(s) for actor {actor!r}")
@@ -1054,6 +1056,8 @@ def release_my_claims_cmd(
                 click.echo(f"  {fail['id']}: {fail['error']}", err=True)
         if not dry_run:
             refresh_summary(db)
+        if failures:
+            sys.exit(1)
 
 
 @click.command("heartbeat-work")
