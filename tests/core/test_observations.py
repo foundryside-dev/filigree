@@ -1096,6 +1096,41 @@ class TestPromoteObservation:
         linked = db.conn.execute("SELECT obs_id FROM observation_links WHERE issue_id = ? ORDER BY id", (issue.id,)).fetchall()
         assert [row["obs_id"] for row in linked] == [obs1["id"], obs2["id"]]
 
+    def test_promote_many_cleanup_failure_prevents_duplicate_issue(
+        self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        obs1 = db.create_observation("First retry signal", detail="one", priority=3)
+        obs2 = db.create_observation("Second retry signal", detail="two", priority=1)
+        real_link = db.link_observation_to_issue
+
+        def fail_link_cleanup(*args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        issues_before = db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        monkeypatch.setattr(db, "link_observation_to_issue", fail_link_cleanup)
+        result1 = db.promote_observations_to_issue(
+            [obs1["id"], obs2["id"]],
+            title="Merged retry issue",
+            actor="triager",
+        )
+        first_issue = result1["issue"]
+        assert "warnings" in result1
+        assert db.observation_count() == 2
+        assert db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == issues_before + 1
+
+        monkeypatch.setattr(db, "link_observation_to_issue", real_link)
+        result2 = db.promote_observations_to_issue(
+            [obs1["id"], obs2["id"]],
+            title="Merged retry issue",
+            actor="triager",
+        )
+
+        assert result2["issue"].id == first_issue.id
+        assert db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == issues_before + 1
+        assert db.observation_count() == 0
+        assert "warnings" in result2
+        assert any("already promoted" in warning for warning in result2["warnings"])
+
     @pytest.mark.parametrize("field", ["title", "extra_description", "actor"])
     def test_promote_many_rejects_non_string_text_fields(self, db: FiligreeDB, field: str) -> None:
         obs = db.create_observation("bad promote input")

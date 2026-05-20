@@ -14,6 +14,7 @@ Includes:
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -861,39 +862,92 @@ class ObservationsMixin(DBMixinProtocol):
         actor = _require_string(actor, "actor")
         labels = _require_string_list(labels, "labels")
         unique_ids = list(dict.fromkeys(obs_ids))
+        source_ids_json = json.dumps(unique_ids, separators=(",", ":"))
 
         now = _now_iso()
-        placeholders = ",".join("?" for _ in unique_ids)
-        rows = self.conn.execute(f"SELECT * FROM observations WHERE id IN ({placeholders})", unique_ids).fetchall()
-        by_id = {row["id"]: dict(row) for row in rows}
-        missing = [obs_id for obs_id in unique_ids if obs_id not in by_id]
-        if missing:
-            raise ValueError(f"Observation not found: {missing[0]}")
-        observations = [by_id[obs_id] for obs_id in unique_ids]
-        expired = [obs["id"] for obs in observations if obs["expires_at"] <= now]
-        if expired:
-            raise ValueError(f"Observation {expired[0]} has expired and cannot be promoted")
-
-        issue_title = title or observations[0]["summary"]
-        issue_priority = priority if priority is not None else min(int(obs["priority"]) for obs in observations)
-        desc_parts: list[str] = []
-        if extra_description:
-            desc_parts.append(extra_description)
-        desc_parts.append("Promoted observations:\n" + "\n".join(_observation_evidence_block(obs) for obs in observations))
-        description = "\n\n".join(desc_parts)
-
-        carry_labels = ["from-observation", *list(dict.fromkeys(labels or []))]
-        issue = self.create_issue(
-            issue_title,
-            type=issue_type,
-            priority=issue_priority,
-            description=description,
-            actor=actor or observations[0]["actor"],
-            fields={"source_observation_ids": unique_ids},
-            labels=carry_labels,
-        )
-
         warnings: list[str] = []
+        _begin_immediate(self.conn, "promote_observations_to_issue")
+        try:
+            existing_issue_row = self.conn.execute(
+                "SELECT id FROM issues "
+                "WHERE json_valid(fields) "
+                "AND json_extract(fields, '$.source_observation_ids') = json(?)",
+                (source_ids_json,),
+            ).fetchone()
+            if existing_issue_row is not None:
+                self.conn.commit()
+                existing_issue = self.get_issue(existing_issue_row["id"])
+                msg = f"Observations {unique_ids} were already promoted to issue {existing_issue.id} (returning existing)"
+                logger.info(msg)
+                warnings.append(msg)
+
+                cleanup_placeholders = ",".join("?" for _ in unique_ids)
+                cleanup_rows = self.conn.execute(
+                    f"SELECT * FROM observations WHERE id IN ({cleanup_placeholders})",
+                    unique_ids,
+                ).fetchall()
+                cleanup_by_id = {row["id"]: dict(row) for row in cleanup_rows}
+                for obs_id in unique_ids:
+                    obs = cleanup_by_id.get(obs_id)
+                    if obs is None:
+                        continue
+                    try:
+                        self.link_observation_to_issue(
+                            obs_id,
+                            existing_issue.id,
+                            disposition="evidence",
+                            reason="promoted into merged issue",
+                            actor=actor or obs["actor"],
+                        )
+                    except (sqlite3.Error, ValueError) as exc:
+                        cleanup_msg = (
+                            f"Failed to clean up linked observation {obs_id} after finding existing issue "
+                            f"{existing_issue.id}: {exc}"
+                        )
+                        logger.warning(cleanup_msg, exc_info=True)
+                        warnings.append(cleanup_msg)
+
+                idem_result = cast(PromoteObservationResult, {"issue": existing_issue, "warnings": warnings})
+                return idem_result
+
+            placeholders = ",".join("?" for _ in unique_ids)
+            rows = self.conn.execute(f"SELECT * FROM observations WHERE id IN ({placeholders})", unique_ids).fetchall()
+            by_id = {row["id"]: dict(row) for row in rows}
+            missing = [obs_id for obs_id in unique_ids if obs_id not in by_id]
+            if missing:
+                self.conn.rollback()
+                raise ValueError(f"Observation not found: {missing[0]}")
+            observations = [by_id[obs_id] for obs_id in unique_ids]
+            expired = [obs["id"] for obs in observations if obs["expires_at"] <= now]
+            if expired:
+                self.conn.rollback()
+                raise ValueError(f"Observation {expired[0]} has expired and cannot be promoted")
+
+            issue_title = title or observations[0]["summary"]
+            issue_priority = priority if priority is not None else min(int(obs["priority"]) for obs in observations)
+            desc_parts: list[str] = []
+            if extra_description:
+                desc_parts.append(extra_description)
+            desc_parts.append("Promoted observations:\n" + "\n".join(_observation_evidence_block(obs) for obs in observations))
+            description = "\n\n".join(desc_parts)
+
+            carry_labels = ["from-observation", *list(dict.fromkeys(labels or []))]
+            issue = self.create_issue(
+                issue_title,
+                type=issue_type,
+                priority=issue_priority,
+                description=description,
+                actor=actor or observations[0]["actor"],
+                fields={"source_observation_ids": unique_ids},
+                labels=carry_labels,
+                _skip_begin=True,
+            )
+            self.conn.commit()
+        except Exception:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+
         for obs in observations:
             try:
                 self.link_observation_to_issue(
