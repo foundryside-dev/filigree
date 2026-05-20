@@ -79,7 +79,7 @@ def _validate_filigree_mcp_entry(entry: object) -> dict[str, object]:
     (``install_support/integrations.py``):
 
     * stdio: a dict with ``type == "stdio"`` (or no ``type``), a non-empty
-      string ``command``, and ``args`` as a list (when present).
+      string ``command``, and ``args`` as a list of strings (when present).
     * streamable-http: a dict with ``type == "streamable-http"`` and a
       non-empty string ``url``.
 
@@ -97,6 +97,8 @@ def _validate_filigree_mcp_entry(entry: object) -> dict[str, object]:
         args = entry.get("args", [])
         if not isinstance(args, list):
             raise ValueError("mcpServers.filigree.args must be a list")
+        if not all(isinstance(arg, str) for arg in args):
+            raise ValueError("mcpServers.filigree.args entries must be strings")
     elif transport == "streamable-http":
         url = entry.get("url")
         if not isinstance(url, str) or not url:

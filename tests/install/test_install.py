@@ -522,6 +522,7 @@ class TestRunDoctor:
             {"type": "stdio"},
             {"type": "stdio", "command": ""},
             {"type": "stdio", "command": "filigree-mcp", "args": "not-a-list"},
+            {"type": "stdio", "command": "filigree-mcp", "args": [123]},
             {"type": "streamable-http"},
             {"type": "streamable-http", "url": ""},
             {"type": "unknown-transport", "command": "filigree-mcp"},
