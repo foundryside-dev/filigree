@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -777,6 +778,24 @@ class TestObservationDbErrorEnvelope:
         assert data["code"] == "IO"
         assert "database is locked" in data["error"]
 
+    def test_batch_dismiss_full_prefetch_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_observations_by_ids", _raise)
+        result = runner.invoke(
+            cli,
+            ["batch-dismiss-observations", "obs-anything", "--detail", "full", "--json"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_promote_observation_sqlite_error_returns_io_envelope(
         self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -787,6 +806,63 @@ class TestObservationDbErrorEnvelope:
 
         monkeypatch.setattr("filigree.core.FiligreeDB.promote_observation", _raise)
         result = runner.invoke(cli, ["promote-observation", "obs-anything", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
+    def test_promote_observation_refresh_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _promote(*_a: object, **_kw: object) -> dict[str, object]:
+            return {"issue": SimpleNamespace(id="test-issue")}
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.promote_observation", _promote)
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["promote-observation", "obs-anything", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
+    def test_batch_promote_refresh_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _promote(*_a: object, **_kw: object) -> tuple[list[dict[str, object]], list[object]]:
+            return ([{"issue": SimpleNamespace(id="test-issue")}], [])
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.batch_promote_observations", _promote)
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["batch-promote-observations", "obs-anything", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
+    def test_promote_observations_to_issue_refresh_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _promote(*_a: object, **_kw: object) -> dict[str, object]:
+            return {"issue": SimpleNamespace(id="test-issue")}
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.promote_observations_to_issue", _promote)
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["promote-observations-to-issue", "obs-one", "obs-two", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["code"] == "IO"

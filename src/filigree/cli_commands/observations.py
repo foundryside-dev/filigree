@@ -17,6 +17,10 @@ from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.registry_errors import registry_error_response
 from filigree.types.api import BatchFailure, ErrorCode
 
+_MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
+_MAX_SQLITE_OVERFETCH_LIMIT = _MAX_SQLITE_OFFSET - 1
+_MAX_OBSERVATION_OLDER_THAN_HOURS = 8760
+
 
 def _slim_issue(issue: Issue) -> dict[str, Any]:
     return {
@@ -63,14 +67,17 @@ def _validate_line(line: int | None, *, as_json: bool) -> None:
         _emit_validation_error(f"Line must be >= 0, got {line}", as_json=as_json)
 
 
+def _validate_int_range(value: int | None, name: str, *, min_val: int, max_val: int, as_json: bool) -> None:
+    if value is not None and not min_val <= value <= max_val:
+        _emit_validation_error(f"{name} must be between {min_val} and {max_val}, got {value}", as_json=as_json)
+
+
 def _validate_limit(limit: int, *, as_json: bool) -> None:
-    if limit < 1:
-        _emit_validation_error(f"Limit must be >= 1, got {limit}", as_json=as_json)
+    _validate_int_range(limit, "Limit", min_val=1, max_val=_MAX_SQLITE_OVERFETCH_LIMIT, as_json=as_json)
 
 
 def _validate_offset(offset: int, *, as_json: bool) -> None:
-    if offset < 0:
-        _emit_validation_error(f"Offset must be >= 0, got {offset}", as_json=as_json)
+    _validate_int_range(offset, "Offset", min_val=0, max_val=_MAX_SQLITE_OFFSET, as_json=as_json)
 
 
 @click.command("observe")
@@ -182,6 +189,15 @@ def list_observations_cmd(
     """List pending observations with optional filtering."""
     _validate_limit(limit, as_json=as_json)
     _validate_offset(offset, as_json=as_json)
+    _validate_int_range(priority_min, "priority_min", min_val=0, max_val=4, as_json=as_json)
+    _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4, as_json=as_json)
+    _validate_int_range(
+        older_than_hours,
+        "older_than_hours",
+        min_val=0,
+        max_val=_MAX_OBSERVATION_OLDER_THAN_HOURS,
+        as_json=as_json,
+    )
     with get_db() as db:
         effective_limit = limit if not no_limit else 10_000_000
         try:
@@ -314,6 +330,7 @@ def promote_observation_cmd(
                 extra_description=description,
                 actor=ctx.obj["actor"],
             )
+            issue = db.get_issue(result["issue"].id)
         except ValueError as e:
             msg = str(e)
             err_code = ErrorCode.NOT_FOUND if "not found" in msg.lower() else ErrorCode.VALIDATION
@@ -328,7 +345,6 @@ def promote_observation_cmd(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
-        issue = db.get_issue(result["issue"].id)
         resp: dict[str, Any] = dict(issue_to_public(issue))
         if result.get("warnings"):
             resp["warnings"] = result["warnings"]
@@ -368,9 +384,9 @@ def batch_dismiss_observations_cmd(
         # Snapshot pre-dismissal records for full mode — rows are deleted by
         # batch_dismiss_observations so the fetch must happen first.
         full_records: list[dict[str, Any]] = []
-        if response_detail == "full":
-            full_records = [observation_to_mcp(rec) for rec in db.get_observations_by_ids(raw_ids)]
         try:
+            if response_detail == "full":
+                full_records = [observation_to_mcp(rec) for rec in db.get_observations_by_ids(raw_ids)]
             result = db.batch_dismiss_observations(
                 raw_ids,
                 actor=ctx.obj["actor"],
@@ -452,6 +468,7 @@ def batch_promote_observations_cmd(
                 priority=priority,
                 actor=ctx.obj["actor"],
             )
+            issues = [db.get_issue(result["issue"].id) for result in promoted]
         except sqlite3.Error as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
@@ -459,7 +476,6 @@ def batch_promote_observations_cmd(
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        issues = [db.get_issue(result["issue"].id) for result in promoted]
         failed_ids = {f_item["id"] for f_item in failed}
         succeeded_obs_ids = [oid for oid in dict.fromkeys(observation_ids) if oid not in failed_ids]
         if as_json:
@@ -645,6 +661,7 @@ def promote_observations_to_issue_cmd(
                 extra_description=description,
                 actor=ctx.obj["actor"],
             )
+            issue = db.get_issue(result["issue"].id)
         except (TypeError, ValueError) as e:
             msg = str(e)
             err_code = ErrorCode.NOT_FOUND if "not found" in msg.lower() else ErrorCode.VALIDATION
@@ -660,7 +677,6 @@ def promote_observations_to_issue_cmd(
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        issue = db.get_issue(result["issue"].id)
         resp: dict[str, Any] = dict(issue_to_public(issue))
         if result.get("warnings"):
             resp["warnings"] = result["warnings"]

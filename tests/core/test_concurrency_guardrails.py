@@ -140,7 +140,7 @@ def test_busy_timeout_retry_behavior(db: FiligreeDB, monkeypatch: pytest.MonkeyP
         if operation == "create_issue" and attempts["count"] < 2:
             attempts["count"] += 1
             exc = sqlite3.OperationalError("database is locked")
-            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY  # type: ignore[attr-defined]
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
             raise exc
         attempts["count"] += 1
         real_begin(conn, operation)
@@ -177,7 +177,7 @@ def test_meta_writes_use_busy_retry_and_begin_immediate(
         if op == operation and attempts["count"] < 2:
             attempts["count"] += 1
             exc = sqlite3.OperationalError("database is locked")
-            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY  # type: ignore[attr-defined]
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
             raise exc
         if op == operation:
             attempts["count"] += 1

@@ -1,5 +1,12 @@
 1. This project uses UV like millions of other projects. Use uv run rather than trying literally nothing and then saying its broken.
 
+2. Use focused subagents when they materially improve confidence or throughput.
+   For release reviews, broad audits, multi-surface debugging, and independent
+   implementation slices, split the work by boundary and dispatch subagents
+   without asking for another permission round. Keep each subagent prompt
+   self-contained, give it a narrow scope, avoid overlapping write sets, and
+   integrate its findings against the live tree before reporting or closing work.
+
 <!-- filigree:instructions:v2.1.0:d454f2c2 -->
 ## Filigree Issue Tracker
 

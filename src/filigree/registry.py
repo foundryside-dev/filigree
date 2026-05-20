@@ -35,12 +35,16 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
+from dataclasses import field as dataclass_field
 from typing import Any, Protocol, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
+
+import httpx
 
 from filigree.types.core import EntityId, FileId, RegistryBackend, make_content_hash, make_entity_id, make_file_id
 
@@ -54,6 +58,8 @@ DEFAULT_CLARION_TOKEN_ENV = "CLARION_LOOM_TOKEN"  # noqa: S105
 
 DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "clarion")
 REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "clarion")
+CLARION_RESOLVE_FILE_MAX_ATTEMPTS = 3
+CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS = 0.05
 
 # Clarion's `_capabilities` response declares an `api_version: u8`. Filigree
 # rejects startup under `clarion` mode if Clarion advertises a version this
@@ -284,12 +290,17 @@ def _build_clarion_request(
     Pass ``data`` to issue a POST (Content-Type defaults to application/json
     since every Clarion POST in this codebase is JSON).
     """
+    headers = _clarion_headers(auth_token=auth_token, has_body=data is not None)
+    return Request(url, data=data, headers=headers, method=method)  # noqa: S310 — scheme validated by normalize_clarion_base_url
+
+
+def _clarion_headers(*, auth_token: str | None, has_body: bool = False) -> dict[str, str]:
     headers: dict[str, str] = {}
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
-    if data is not None:
-        headers.setdefault("Content-Type", "application/json")
-    return Request(url, data=data, headers=headers, method=method)  # noqa: S310 — scheme validated by normalize_clarion_base_url
+    if has_body:
+        headers["Content-Type"] = "application/json"
+    return headers
 
 
 def clarion_files_batch_url(base_url: str) -> str:
@@ -398,6 +409,10 @@ def _is_briefing_blocked_body(exc: HTTPError) -> bool:
         return False
     if not raw:
         return False
+    return _is_briefing_blocked_payload(raw)
+
+
+def _is_briefing_blocked_payload(raw: str | bytes | bytearray) -> bool:
     try:
         text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
         payload = json.loads(text)
@@ -480,6 +495,7 @@ class ClarionRegistry:
     _: KW_ONLY
     timeout_seconds: float = 5
     auth_token: str | None = None
+    _http_client: httpx.Client = dataclass_field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_clarion_base_url(self.base_url))
@@ -490,6 +506,7 @@ class ClarionRegistry:
         if self.auth_token is not None and not isinstance(self.auth_token, str):
             msg = f"clarion.auth_token must be a string or None, got {type(self.auth_token).__name__}"
             raise ValueError(msg)
+        object.__setattr__(self, "_http_client", httpx.Client(trust_env=False, follow_redirects=True))
 
     def resolve_file(
         self,
@@ -499,29 +516,36 @@ class ClarionRegistry:
         actor: str = "",
     ) -> ResolvedFile:
         url = clarion_file_read_url(self.base_url, path, language=language)
-        request = _build_clarion_request(url, auth_token=self.auth_token)
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            reason = exc.reason or exc.msg
-            if exc.code == 401:
-                msg = f"Clarion registry rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="auth") from exc
-            if exc.code == 403 and _is_briefing_blocked_body(exc):
-                msg = f"Clarion registry refuses briefing-blocked file at {url}: HTTP 403 {reason}"
-                raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
-            if exc.code == 404:
-                msg = f"Clarion registry could not resolve file at {url}: HTTP 404 {reason}"
-                raise RegistryFileNotFoundError(msg, status_code=exc.code, url=url) from exc
-            if 400 <= exc.code < 500:
-                msg = f"Clarion registry rejected file resolution at {url}: HTTP {exc.code} {reason}"
-                raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
-            msg = f"Clarion registry unavailable at {url}: HTTP {exc.code} {reason}"
-            raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error") from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            msg = f"Clarion registry unavailable at {url}: {exc}"
-            raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="network") from exc
+        deadline = time.monotonic() + self.timeout_seconds
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Clarion registry unavailable at {url}: retry budget exhausted"
+                raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="timeout")
+            try:
+                response = self._http_client.get(
+                    url,
+                    headers=_clarion_headers(auth_token=self.auth_token),
+                    timeout=remaining,
+                )
+                raw = response.text
+                if response.status_code >= 400:
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                        self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
+                        self._sleep_before_retry(deadline)
+                        attempt += 1
+                        continue
+                    self._raise_file_http_error(response, url=url, path=path)
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if self._should_retry_read(attempt, deadline):
+                    self._log_retry(url=url, attempt=attempt, cause_kind="network")
+                    self._sleep_before_retry(deadline)
+                    attempt += 1
+                    continue
+                msg = f"Clarion registry unavailable at {url}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="network") from exc
 
         try:
             payload = json.loads(raw)
@@ -549,6 +573,47 @@ class ClarionRegistry:
             canonical_path=payload["canonical_path"],
             language=payload["language"],
             registry_backend="clarion",
+        )
+
+    def _raise_file_http_error(self, response: httpx.Response, *, url: str, path: str) -> None:
+        reason = response.reason_phrase
+        if response.status_code == 401:
+            msg = f"Clarion registry rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+            raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="auth")
+        if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
+            msg = f"Clarion registry refuses briefing-blocked file at {url}: HTTP 403 {reason}"
+            raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+        if response.status_code == 404:
+            msg = f"Clarion registry could not resolve file at {url}: HTTP 404 {reason}"
+            raise RegistryFileNotFoundError(msg, status_code=response.status_code, url=url)
+        if 400 <= response.status_code < 500:
+            msg = f"Clarion registry rejected file resolution at {url}: HTTP {response.status_code} {reason}"
+            raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
+        msg = f"Clarion registry unavailable at {url}: HTTP {response.status_code} {reason}"
+        raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error")
+
+    def _should_retry_read(self, attempt: int, deadline: float) -> bool:
+        return (
+            attempt < CLARION_RESOLVE_FILE_MAX_ATTEMPTS
+            and deadline - time.monotonic() > CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS
+        )
+
+    def _sleep_before_retry(self, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS, remaining))
+
+    def _log_retry(self, *, url: str, attempt: int, cause_kind: str) -> None:
+        logger.warning(
+            "Retrying Clarion registry request after transient failure",
+            extra={
+                "url": url,
+                "attempt": attempt,
+                "next_attempt": attempt + 1,
+                "max_attempts": CLARION_RESOLVE_FILE_MAX_ATTEMPTS,
+                "cause_kind": cause_kind,
+            },
         )
 
     def resolve_files_batch(
@@ -582,25 +647,29 @@ class ClarionRegistry:
 
     def _resolve_files_batch_chunk(self, chunk: list[BatchQuery]) -> BatchResolution:
         url = clarion_files_batch_url(self.base_url)
-        body = json.dumps({"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}).encode("utf-8")
-        request = _build_clarion_request(url, auth_token=self.auth_token, data=body, method="POST")
+        body = {"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            reason = exc.reason or exc.msg
-            if exc.code == 401:
-                msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
-            if exc.code == 403 and _is_briefing_blocked_body(exc):
-                msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
-                raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
-            if 400 <= exc.code < 500:
-                msg = f"Clarion batch resolve rejected request at {url}: HTTP {exc.code} {reason}"
-                raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
-            msg = f"Clarion batch resolve failed at {url}: HTTP {exc.code} {reason}"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
-        except (URLError, TimeoutError, OSError) as exc:
+            response = self._http_client.post(
+                url,
+                json=body,
+                headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                timeout=self.timeout_seconds,
+            )
+            raw = response.text
+            if response.status_code >= 400:
+                reason = response.reason_phrase
+                if response.status_code == 401:
+                    msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
+                    msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
+                    raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+                if 400 <= response.status_code < 500:
+                    msg = f"Clarion batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
+                    raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
+                msg = f"Clarion batch resolve failed at {url}: HTTP {response.status_code} {reason}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
             msg = f"Clarion batch resolve unreachable at {url}: {exc}"
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
 
@@ -683,3 +752,6 @@ class ClarionRegistry:
 
     def is_displaced(self) -> bool:
         return True
+
+    def close(self) -> None:
+        self._http_client.close()

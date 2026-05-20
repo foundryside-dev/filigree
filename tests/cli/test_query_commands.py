@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
@@ -248,6 +250,39 @@ class TestJsonOutput:
         item = next(i for i in data["items"] if i["issue_id"] == child_id)
         assert item["parent_issue_id"] == parent_id
         assert item["parent_title"] == "Parent epic"
+
+    def test_ready_json_sqlite_error_returns_io(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_ready", _raise)
+        result = runner.invoke(cli, ["ready", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
+    def test_ready_include_context_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+        parent = runner.invoke(cli, ["create", "Parent epic", "--type", "epic"])
+        parent_id = _extract_id(parent.output)
+        runner.invoke(cli, ["create", "Child task", "--parent", parent_id])
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["ready", "--json", "--include-context"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
 
     def test_stats_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

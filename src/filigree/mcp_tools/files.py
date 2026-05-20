@@ -12,6 +12,7 @@ from mcp.types import TextContent, Tool
 from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
+    _MAX_SQLITE_OFFSET,
     _list_response,
     _parse_args,
     _text,
@@ -343,8 +344,8 @@ async def _handle_list_files(arguments: dict[str, Any]) -> list[TextContent]:
 
     for err in (
         _validate_int_range(limit, "limit", min_val=1, max_val=10000),
-        _validate_int_range(offset, "offset", min_val=0),
-        _validate_int_range(min_findings, "min_findings", min_val=0),
+        _validate_int_range(offset, "offset", min_val=0, max_val=_MAX_SQLITE_OFFSET),
+        _validate_int_range(min_findings, "min_findings", min_val=0, max_val=_MAX_SQLITE_OFFSET),
         _validate_str(language, "language"),
         _validate_str(path_prefix, "path_prefix"),
         _validate_str(scan_source, "scan_source"),
@@ -358,17 +359,22 @@ async def _handle_list_files(arguments: dict[str, Any]) -> list[TextContent]:
     if direction is not None and (not isinstance(direction, str) or direction.upper() not in {"ASC", "DESC"}):
         return _text(ErrorResponse(error="direction must be 'asc' or 'desc'", code=ErrorCode.VALIDATION))
 
-    files_result = tracker.list_files_paginated(
-        limit=limit,
-        offset=offset,
-        language=language,
-        path_prefix=path_prefix,
-        min_findings=min_findings,
-        has_severity=has_severity,
-        scan_source=scan_source,
-        sort=sort,
-        direction=direction,
-    )
+    try:
+        files_result = tracker.list_files_paginated(
+            limit=limit,
+            offset=offset,
+            language=language,
+            path_prefix=path_prefix,
+            min_findings=min_findings,
+            has_severity=has_severity,
+            scan_source=scan_source,
+            sort=sort,
+            direction=direction,
+        )
+    except ValueError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        return _text(ErrorResponse(error=f"Database error: {exc}", code=ErrorCode.IO))
     items = [file_record_to_mcp(item) for item in files_result["results"]]
     has_more = bool(files_result["has_more"])
     next_offset = offset + len(items) if has_more else None
@@ -454,6 +460,8 @@ async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextConte
         )
     except KeyError:
         return _text(ErrorResponse(error=f"File not found: {file_id}", code=ErrorCode.NOT_FOUND))
+    except sqlite3.Error as exc:
+        return _text(ErrorResponse(error=f"Database error: {exc}", code=ErrorCode.IO))
     items = [timeline_entry_to_mcp(item) for item in timeline_result["results"]]
     has_more = timeline_result["has_more"]
     next_offset = (offset + len(items)) if has_more else None
@@ -499,16 +507,22 @@ async def _handle_add_file_association(arguments: dict[str, Any]) -> list[TextCo
         tracker.get_file(file_id)
     except KeyError:
         return _text(ErrorResponse(error=f"File not found: {file_id}", code=ErrorCode.NOT_FOUND))
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
 
     try:
         tracker.get_issue(issue_id)
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
 
     try:
         tracker.add_file_association(file_id, issue_id, assoc_type, actor=actor)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     return _text({"status": "created"})
 
 
@@ -762,6 +776,8 @@ async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
 
     reason = args.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return _text(ErrorResponse(error="reason must be a string", code=ErrorCode.VALIDATION))
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
@@ -770,6 +786,8 @@ async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent
     # subset that makes sense for "dismiss" — promotion to 'open' would
     # contradict the verb.
     status_arg = args.get("status", "false_positive")
+    if not isinstance(status_arg, str):
+        return _text(ErrorResponse(error="status must be a string", code=ErrorCode.VALIDATION))
     valid_dismiss_statuses: dict[str, FindingStatus] = {
         "false_positive": "false_positive",
         "fixed": "fixed",

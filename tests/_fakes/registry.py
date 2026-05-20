@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from filigree.registry import ResolvedFile
+from filigree.registry import BatchQuery, BatchResolution, ResolvedFile, resolve_files_batch_via_loop
 from filigree.types.core import EntityId, FileId, RegistryBackend, make_entity_id, make_file_id
 
 
@@ -38,6 +38,9 @@ class FixedRegistry:
             "registry_backend": self.registry_backend,
         }
 
+    def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+        return resolve_files_batch_via_loop(self, queries, actor=actor)
+
     def is_displaced(self) -> bool:
         return self.displaced
 
@@ -54,6 +57,9 @@ class PathRegistry:
             "language": language,
             "registry_backend": "local",
         }
+
+    def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+        return resolve_files_batch_via_loop(self, queries, actor=actor)
 
     def is_displaced(self) -> bool:
         return False

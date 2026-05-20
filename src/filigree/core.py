@@ -635,6 +635,14 @@ class _ClarionLocalFallbackRegistry:
     def is_displaced(self) -> bool:
         return self._primary.is_displaced()
 
+    def close(self) -> None:
+        close_primary = getattr(self._primary, "close", None)
+        if callable(close_primary):
+            close_primary()
+        close_fallback = getattr(self._fallback, "close", None)
+        if callable(close_fallback):
+            close_fallback()
+
 
 def _apply_allow_local_fallback_override(
     clarion_config: ClarionConfig | None,
@@ -1379,23 +1387,34 @@ class FiligreeDB(
         indicates a bug rather than normal operation.  When no transaction
         is active, a final commit is issued (a no-op in practice).
         """
-        if self._conn is not None:
-            try:
-                if self._conn.in_transaction:
-                    logger.warning("close: rolling back in-flight transaction")
-                    self._conn.rollback()
-                else:
-                    self._conn.commit()
-            finally:
+        try:
+            self._close_registry()
+        finally:
+            if self._conn is not None:
+                try:
+                    if self._conn.in_transaction:
+                        logger.warning("close: rolling back in-flight transaction")
+                        self._conn.rollback()
+                    else:
+                        self._conn.commit()
+                finally:
+                    try:
+                        self._conn.close()
+                    finally:
+                        self._conn = None
+
+    def _close_no_commit(self) -> None:
+        """Close the connection without committing (used after rollback)."""
+        try:
+            self._close_registry()
+        finally:
+            if self._conn is not None:
                 try:
                     self._conn.close()
                 finally:
                     self._conn = None
 
-    def _close_no_commit(self) -> None:
-        """Close the connection without committing (used after rollback)."""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            finally:
-                self._conn = None
+    def _close_registry(self) -> None:
+        close_registry = getattr(self.registry, "close", None)
+        if callable(close_registry):
+            close_registry()

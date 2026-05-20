@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
-from filigree.registry import RegistryBriefingBlockedError, RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
+from filigree.registry import (
+    BatchQuery,
+    BatchResolution,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryUnavailableError,
+    ResolvedFile,
+    resolve_files_batch_via_loop,
+)
 from filigree.types.api import ErrorCode
 from filigree.types.core import make_entity_id
 from tests._fakes.registry import FixedRegistry
@@ -112,6 +120,9 @@ class TestReportFindingTool:
             def is_displaced(self) -> bool:
                 return False
 
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                return resolve_files_batch_via_loop(self, queries, actor=actor)
+
         mcp_db.registry = UnavailableRegistry()
 
         data = _parse(
@@ -146,6 +157,9 @@ class TestReportFindingTool:
             def is_displaced(self) -> bool:
                 return False
 
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                return resolve_files_batch_via_loop(self, queries, actor=actor)
+
         mcp_db.registry = MissingFileRegistry()
 
         data = _parse(
@@ -174,6 +188,9 @@ class TestReportFindingTool:
 
             def is_displaced(self) -> bool:
                 return False
+
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                return resolve_files_batch_via_loop(self, queries, actor=actor)
 
         mcp_db.registry = BriefingBlockedRegistry()
 
@@ -209,6 +226,9 @@ class TestReportFindingTool:
 
             def is_displaced(self) -> bool:
                 return False
+
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                return resolve_files_batch_via_loop(self, queries, actor=actor)
 
         registry = CountingCanonicalRegistry()
         mcp_db.registry = registry
@@ -403,6 +423,36 @@ class TestPromoteFindingTool:
         data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "priority": 0}))
         assert data["priority"] == 0
 
+    async def test_promote_rejects_invalid_priority(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "priority": 5}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "priority must be <= 4"
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
+    async def test_promote_rejects_invalid_labels_shape(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["ok", 42]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "labels must be a list of strings"
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
+    async def test_promote_returns_validation_error_for_reserved_label(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["severity:high"]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "system-managed auto-tag namespace" in data["error"]
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
+    async def test_promote_carries_labels_to_created_issue(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["cluster:mcp"]}))
+
+        assert set(data["labels"]) == {"from-finding", "cluster:mcp"}
+
     async def test_promote_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("promote_finding", {"finding_id": "nonexistent"}))
         assert data["code"] == ErrorCode.NOT_FOUND
@@ -427,3 +477,15 @@ class TestDismissFindingTool:
     async def test_dismiss_empty_id_rejected(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("dismiss_finding", {"finding_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_dismiss_non_string_status_rejected(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("dismiss_finding", {"finding_id": ids["type"], "status": ["fixed"]}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "status" in data["error"].lower()
+
+    async def test_dismiss_non_string_reason_rejected(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("dismiss_finding", {"finding_id": ids["type"], "reason": ["not", "a", "string"]}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "reason" in data["error"].lower()

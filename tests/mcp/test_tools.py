@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import json
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, SUMMARY_FILENAME, FiligreeDB, write_config
+from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.mcp_server import (  # type: ignore[attr-defined]
     _MAX_LIST_RESULTS,
     _safe_path,
@@ -529,6 +531,34 @@ class TestReadyAndBlocked:
             }
         ]
 
+    async def test_get_blocked_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise() -> object:
+            raise sqlite3.OperationalError("blocked read failed")
+
+        monkeypatch.setattr(mcp_db, "get_blocked", _raise)
+
+        data = _parse(await call_tool("get_blocked", {}))
+
+        assert data["code"] == ErrorCode.IO
+        assert "blocked read failed" in data["error"]
+
+    async def test_get_blocked_include_blockers_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = mcp_db.create_issue("Blocked")
+        b = mcp_db.create_issue("Blocker")
+        mcp_db.add_dependency(a.id, b.id)
+
+        def _raise(issue_id: str) -> object:
+            raise sqlite3.OperationalError(f"blocker hydrate failed for {issue_id}")
+
+        monkeypatch.setattr(mcp_db, "get_issue", _raise)
+
+        data = _parse(await call_tool("get_blocked", {"include_blockers": True}))
+
+        assert data["code"] == ErrorCode.IO
+        assert "blocker hydrate failed" in data["error"]
+
 
 class TestPlan:
     async def test_get_plan(self, mcp_db: FiligreeDB) -> None:
@@ -745,6 +775,17 @@ class TestLabels:
 
 
 class TestCreatePlan:
+    async def test_create_plan_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*args: Any, **kwargs: Any) -> object:
+            raise sqlite3.OperationalError("plan write failed")
+
+        monkeypatch.setattr(mcp_db, "create_plan", _raise)
+
+        data = _parse(await call_tool("create_plan", {"milestone": {"title": "M"}, "phases": [{"title": "P"}]}))
+
+        assert data["code"] == ErrorCode.IO
+        assert "plan write failed" in data["error"]
+
     async def test_create_plan_basic(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
             "create_plan",
@@ -871,6 +912,18 @@ class TestCreatePlan:
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
         assert "escapes project directory" in data["error"]
+
+    async def test_create_plan_from_file_missing_file_path_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("create_plan_from_file", {}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "file_path is required"
+
+    async def test_create_plan_from_file_non_string_file_path_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("create_plan_from_file", {"file_path": ["plan.json"]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "file_path must be a string"
 
     async def test_label_subtree_labels_root_and_descendants(self, mcp_db: FiligreeDB) -> None:
         created = await call_tool(
@@ -1038,6 +1091,50 @@ class TestCreatePlan:
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
         assert "milestone" in data["error"]
+
+    async def test_label_plan_tree_missing_milestone_id_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("label_plan_tree", {"label": "release:v1"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "milestone_id is required"
+
+    async def test_label_plan_tree_non_string_fields_rejected(self, mcp_db: FiligreeDB) -> None:
+        milestone = mcp_db.create_issue("Milestone", type="milestone")
+
+        bad_milestone = _parse(await call_tool("label_plan_tree", {"milestone_id": ["bad"], "label": "release:v1"}))
+        bad_label = _parse(await call_tool("label_plan_tree", {"milestone_id": milestone.id, "label": ["bad"]}))
+
+        assert bad_milestone["code"] == ErrorCode.VALIDATION
+        assert bad_milestone["error"] == "milestone_id must be a string"
+        assert bad_label["code"] == ErrorCode.VALIDATION
+        assert bad_label["error"] == "label must be a string"
+
+    async def test_label_plan_tree_full_refresh_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        milestone = mcp_db.create_issue("Milestone", type="milestone")
+        original_get_issue = mcp_db.get_issue
+
+        def _label_subtree(*args: Any, **kwargs: Any) -> tuple[list[dict[str, str]], list[object]]:
+            return ([{"id": "filigree-refresh-target"}], [])
+
+        def _get_issue(issue_id: str) -> object:
+            if issue_id == milestone.id:
+                return original_get_issue(issue_id)
+            raise sqlite3.OperationalError(f"label refresh failed for {issue_id}")
+
+        monkeypatch.setattr(mcp_db, "label_subtree", _label_subtree)
+        monkeypatch.setattr(mcp_db, "get_issue", _get_issue)
+
+        data = _parse(
+            await call_tool(
+                "label_plan_tree",
+                {"milestone_id": milestone.id, "label": "release:v1", "response_detail": "full"},
+            )
+        )
+
+        assert data["code"] == ErrorCode.IO
+        assert "label refresh failed" in data["error"]
 
 
 class TestBatchClose:
@@ -1686,7 +1783,7 @@ class TestResource:
         monkeypatch.setattr(mcp_mod, "_schema_mismatch", None)
         monkeypatch.setattr(mcp_mod, "db", mcp_db)
         # Spoof a forward-drifted DB version (current+1).
-        installed = mcp_mod.CURRENT_SCHEMA_VERSION
+        installed = CURRENT_SCHEMA_VERSION
         monkeypatch.setattr(mcp_db, "get_schema_version", lambda: installed + 1)
 
         # Diagnostic stays available — it must not be gated even under drift.
@@ -1704,7 +1801,7 @@ class TestResource:
         """
         import filigree.mcp_server as mcp_mod
 
-        installed = mcp_mod.CURRENT_SCHEMA_VERSION
+        installed = CURRENT_SCHEMA_VERSION
         monkeypatch.setattr(mcp_mod, "_schema_mismatch", None)
         monkeypatch.setattr(mcp_mod, "db", None)
         monkeypatch.setattr(mcp_db, "get_schema_version", lambda: installed + 1)
@@ -2624,8 +2721,9 @@ class TestFileTools:
         assert "src/example.py" in data["error"]
         records = [record for record in caplog.records if record.message == "file_registry_displaced_registration_rejected"]
         assert records
-        assert records[0].tool == "mcp"
-        assert records[0].file_path == "src/example.py"
+        record_data = records[0].__dict__
+        assert record_data["tool"] == "mcp"
+        assert record_data["file_path"] == "src/example.py"
         assert clarion_mcp_db.registry.is_displaced() is True
 
     async def test_register_file_displacement_uses_registry_protocol(self, mcp_db: FiligreeDB) -> None:
@@ -2741,6 +2839,29 @@ class TestFileTools:
     async def test_list_files_invalid_sort_rejected(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_files", {"sort": "bad_sort"}))
         assert result["code"] == ErrorCode.VALIDATION
+
+    async def test_list_files_huge_offset_rejected_before_sqlite(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_files", {"offset": 9_223_372_036_854_775_808}))
+
+        assert result["code"] == ErrorCode.VALIDATION
+        assert "offset must be <=" in result["error"]
+
+    async def test_list_files_huge_min_findings_rejected_before_sqlite(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_files", {"min_findings": 9_223_372_036_854_775_808}))
+
+        assert result["code"] == ErrorCode.VALIDATION
+        assert "min_findings must be <=" in result["error"]
+
+    async def test_list_files_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*args: Any, **kwargs: Any) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(mcp_db, "list_files_paginated", _raise)
+
+        result = _parse(await call_tool("list_files", {}))
+
+        assert result["code"] == ErrorCode.IO
+        assert "Database error" in result["error"]
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -2912,6 +3033,21 @@ class TestFileTools:
             )
         )
         assert result["code"] == ErrorCode.VALIDATION
+
+    async def test_get_file_timeline_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        file_data = _parse(await call_tool("register_file", {"path": "src/timeline_io_error.py"}))
+
+        def _raise_sqlite_error(self: FiligreeDB, *args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("timeline storage failed")
+
+        monkeypatch.setattr(FiligreeDB, "get_file_timeline", _raise_sqlite_error)
+
+        result = _parse(await call_tool("get_file_timeline", {"file_id": file_data["file_id"]}))
+
+        assert result["code"] == ErrorCode.IO
+        assert "timeline storage failed" in result["error"]
 
 
 @pytest.mark.slow
@@ -3622,6 +3758,70 @@ class TestAddFileAssociationIssueNotFound:
             )
         )
         assert result["code"] == ErrorCode.VALIDATION
+
+    async def test_get_file_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_file", _raise)
+        result = _parse(
+            await call_tool(
+                "add_file_association",
+                {
+                    "file_id": "file-anything",
+                    "issue_id": "issue-anything",
+                    "assoc_type": "task_for",
+                },
+            )
+        )
+
+        assert result["code"] == ErrorCode.IO
+        assert "database is locked" in result["error"]
+
+    async def test_get_issue_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        file_data = _parse(await call_tool("register_file", {"path": "src/io-assoc.py"}))
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = _parse(
+            await call_tool(
+                "add_file_association",
+                {
+                    "file_id": file_data["file_id"],
+                    "issue_id": "issue-anything",
+                    "assoc_type": "task_for",
+                },
+            )
+        )
+
+        assert result["code"] == ErrorCode.IO
+        assert "database is locked" in result["error"]
+
+    async def test_add_file_association_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue = mcp_db.create_issue("Real issue")
+        file_data = _parse(await call_tool("register_file", {"path": "src/io-assoc-write.py"}))
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.add_file_association", _raise)
+        result = _parse(
+            await call_tool(
+                "add_file_association",
+                {
+                    "file_id": file_data["file_id"],
+                    "issue_id": issue.id,
+                    "assoc_type": "task_for",
+                },
+            )
+        )
+
+        assert result["code"] == ErrorCode.IO
+        assert "database is locked" in result["error"]
 
 
 # ---------------------------------------------------------------------------

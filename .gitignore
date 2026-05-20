@@ -19,6 +19,8 @@ node_modules/
 .mcp.json
 .codex/
 .agents/
+.clarion/
+clarion.yaml
 .filigree.old/
 
 # Filigree issue tracker

@@ -476,6 +476,25 @@ class TestCommentsCli:
         assert data["comment"]["text"] == "My comment"
         assert isinstance(data["comment"]["created_at"], str)
 
+    def test_add_comment_json_get_comment_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sqlite3
+
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Commentable"])
+        issue_id = _extract_id(r.output)
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_comment", _raise)
+        result = runner.invoke(cli, ["add-comment", issue_id, "My comment", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_add_comment_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Claim-aware comment"])

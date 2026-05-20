@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as json_mod
+import sqlite3
 import sys
 from typing import Any
 
@@ -50,6 +51,12 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee:
             else:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         try:
             comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"], expected_assignee=expected_assignee)
         except ValueError as e:
@@ -58,8 +65,18 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee:
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         if as_json:
-            comment = db.get_comment(comment_id)
+            try:
+                comment = db.get_comment(comment_id)
+            except sqlite3.Error as e:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+                sys.exit(1)
             click.echo(
                 json_mod.dumps(
                     {
@@ -530,6 +547,10 @@ def batch_add_label(
                 actor=ctx.obj["actor"],
                 expected_assignee=expected_assignee,
             )
+            if response_detail == "full":
+                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in labeled]
+            else:
+                succeeded_payload = [row["id"] for row in labeled]
         except WrongProjectError as e:
             # 2.1.0 §0.4.
             if as_json:
@@ -537,12 +558,14 @@ def batch_add_label(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
-            if response_detail == "full":
-                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in labeled]
-            else:
-                succeeded_payload = [row["id"] for row in labeled]
             click.echo(
                 json_mod.dumps(
                     {
@@ -597,6 +620,10 @@ def batch_remove_label(
                 actor=ctx.obj["actor"],
                 expected_assignee=expected_assignee,
             )
+            if response_detail == "full":
+                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in removed]
+            else:
+                succeeded_payload = [row["id"] for row in removed]
         except WrongProjectError as e:
             # 2.1.0 §0.4.
             if as_json:
@@ -604,12 +631,14 @@ def batch_remove_label(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
-            if response_detail == "full":
-                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in removed]
-            else:
-                succeeded_payload = [row["id"] for row in removed]
             click.echo(
                 json_mod.dumps(
                     {
@@ -664,6 +693,10 @@ def batch_add_comment(
                 author=ctx.obj["actor"],
                 expected_assignee=expected_assignee,
             )
+            if response_detail == "full":
+                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(str(row["id"])))) for row in commented]
+            else:
+                succeeded_payload = [str(row["id"]) for row in commented]
         except WrongProjectError as e:
             # 2.1.0 §0.4.
             if as_json:
@@ -671,12 +704,14 @@ def batch_add_comment(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
-            if response_detail == "full":
-                succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(str(row["id"])))) for row in commented]
-            else:
-                succeeded_payload = [str(row["id"]) for row in commented]
             click.echo(
                 json_mod.dumps(
                     {

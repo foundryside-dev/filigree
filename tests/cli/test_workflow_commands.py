@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
@@ -792,6 +794,22 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "NOT_FOUND"
         assert "demo-nope" in data["error"]
 
+    def test_plan_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_plan", _raise)
+        result = runner.invoke(cli, ["plan", "demo-milestone", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_create_plan_invalid_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["create-plan", "--json"], input="not json")
@@ -839,6 +857,41 @@ class TestPlanningCliJsonErrorEnvelope:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION"
         assert "timestamp" in data["error"].lower() or "iso" in data["error"].lower()
+
+    def test_changes_limit_zero_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["changes", "--since", "2020-01-01T00:00:00", "--limit", "0", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "limit" in data["error"].lower()
+
+    def test_changes_after_event_id_negative_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(
+            cli,
+            ["changes", "--since", "2020-01-01T00:00:00", "--after-event-id", "-1", "--json"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "after-event-id" in data["error"].lower()
+
+    def test_changes_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_events_since", _raise)
+        result = runner.invoke(cli, ["changes", "--since", "2020-01-01T00:00:00", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
 
 
 class TestBatchCli:

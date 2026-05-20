@@ -20,7 +20,7 @@ from filigree.db_base import _in_immediate_tx, _retry_busy
 def _sqlite_operational_error(message: str, code: int | None = None) -> sqlite3.OperationalError:
     exc = sqlite3.OperationalError(message)
     if code is not None:
-        exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+        exc.sqlite_errorcode = code
     return exc
 
 
@@ -118,18 +118,21 @@ def test_immediate_transaction_decorator_skip_begin_is_passthrough(db: FiligreeD
         db.conn.rollback()
 
 
-def _make_busy_fn(busy_for: int):
-    """Return a callable that raises SQLITE_BUSY for the first N calls, then succeeds."""
-    calls = {"n": 0}
+class _BusyFn:
+    def __init__(self, busy_for: int) -> None:
+        self.busy_for = busy_for
+        self.calls = {"n": 0}
 
-    def fn(self: object) -> int:
-        calls["n"] += 1
-        if calls["n"] <= busy_for:
+    def __call__(self, self_arg: object) -> int:
+        self.calls["n"] += 1
+        if self.calls["n"] <= self.busy_for:
             raise _sqlite_operational_error("database is locked", sqlite3.SQLITE_BUSY)
-        return calls["n"]
+        return self.calls["n"]
 
-    fn.calls = calls  # type: ignore[attr-defined]
-    return fn
+
+def _make_busy_fn(busy_for: int) -> _BusyFn:
+    """Return a callable that raises SQLITE_BUSY for the first N calls, then succeeds."""
+    return _BusyFn(busy_for)
 
 
 def test_busy_retry_decorator_transparently_recovers() -> None:
@@ -166,7 +169,7 @@ def test_busy_retry_decorator_re_raises_after_exhaustion() -> None:
     wrapped = _retry_busy(attempts=3, base=0.01, sleep=slept.append)(fn)
     with pytest.raises(sqlite3.OperationalError, match="database is locked"):
         wrapped(object())
-    assert fn.calls["n"] == 3  # type: ignore[attr-defined]
+    assert fn.calls["n"] == 3
     assert slept == [0.01, 0.02]  # no sleep after final failure
 
 

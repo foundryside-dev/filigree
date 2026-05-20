@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
-from filigree.registry import RegistryUnavailableError, ResolvedFile
+from filigree.registry import BatchQuery, BatchResolution, RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
@@ -20,6 +23,13 @@ class TestObserveTool:
                     "Clarion registry unavailable for test",
                     url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
                     path=path,
+                    cause_kind="network",
+                )
+
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files",
                     cause_kind="network",
                 )
 
@@ -86,6 +96,12 @@ class TestObserveTool:
         )
         data = _parse(result)
         assert data["source_issue_id"] == "mcp-abc123"
+
+    async def test_observe_huge_line_rejected_before_sqlite(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("observe", {"summary": "line overflow", "line": 9_223_372_036_854_775_808}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "line must be <=" in data["error"]
 
 
 class TestListObservationsTool:
@@ -223,6 +239,26 @@ class TestBatchDismissTool:
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
+    async def test_batch_dismiss_full_prefetch_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        obs = mcp_db.create_observation("Prefetch failure")
+
+        def _raise_sqlite_error(self: FiligreeDB, *args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("observation prefetch failed")
+
+        monkeypatch.setattr(FiligreeDB, "get_observations_by_ids", _raise_sqlite_error)
+
+        result = _parse(
+            await call_tool(
+                "batch_dismiss_observations",
+                {"observation_ids": [obs["id"]], "response_detail": "full"},
+            )
+        )
+
+        assert result["code"] == ErrorCode.IO
+        assert "observation prefetch failed" in result["error"]
+
 
 class TestBatchPromoteTool:
     async def test_batch_promote_promotes_multiple_observations(self, mcp_db: FiligreeDB) -> None:
@@ -264,6 +300,23 @@ class TestBatchPromoteTool:
         assert len(data["failed"]) == 1
         assert data["failed"][0]["id"] == "obs-missing"
         assert data["failed"][0]["code"] == ErrorCode.NOT_FOUND
+
+    async def test_batch_promote_refresh_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _promote(self: FiligreeDB, *args: object, **kwargs: object) -> tuple[list[dict[str, object]], list[object]]:
+            return ([{"issue": SimpleNamespace(id="filigree-refresh-target")}], [])
+
+        def _raise_sqlite_error(self: FiligreeDB, issue_id: str) -> object:
+            raise sqlite3.OperationalError(f"issue refresh failed for {issue_id}")
+
+        monkeypatch.setattr(FiligreeDB, "batch_promote_observations", _promote)
+        monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
+
+        data = _parse(await call_tool("batch_promote_observations", {"observation_ids": ["obs-1"]}))
+
+        assert data["code"] == ErrorCode.IO
+        assert "issue refresh failed" in data["error"]
 
     async def test_batch_promote_rejects_bare_string_ids(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("batch_promote_observations", {"observation_ids": "obs-123"})
@@ -316,6 +369,50 @@ class TestObservationTriageTools:
         assert data["failed"][0]["id"] == "obs-missing"
         assert data["failed"][0]["code"] == ErrorCode.NOT_FOUND
 
+    async def test_batch_link_missing_issue_id_rejected(self, mcp_db: FiligreeDB) -> None:
+        obs = mcp_db.create_observation("Attach me")
+
+        data = _parse(await call_tool("batch_link_observations", {"observation_ids": [obs["id"]]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "issue_id is required"
+
+    async def test_batch_link_non_string_issue_id_rejected(self, mcp_db: FiligreeDB) -> None:
+        obs = mcp_db.create_observation("Attach me")
+
+        data = _parse(await call_tool("batch_link_observations", {"observation_ids": [obs["id"]], "issue_id": ["bad"]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "issue_id must be a string"
+
+    async def test_batch_link_non_string_disposition_rejected(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Existing issue")
+        obs = mcp_db.create_observation("Attach me")
+
+        data = _parse(
+            await call_tool(
+                "batch_link_observations",
+                {"observation_ids": [obs["id"]], "issue_id": issue.id, "disposition": ["evidence"]},
+            )
+        )
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "disposition must be a string"
+
+    async def test_batch_link_non_string_reason_rejected(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Existing issue")
+        obs = mcp_db.create_observation("Attach me")
+
+        data = _parse(
+            await call_tool(
+                "batch_link_observations",
+                {"observation_ids": [obs["id"]], "issue_id": issue.id, "reason": ["bad"]},
+            )
+        )
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "reason must be a string"
+
     async def test_promote_observations_to_issue(self, mcp_db: FiligreeDB) -> None:
         obs1 = mcp_db.create_observation("First signal")
         obs2 = mcp_db.create_observation("Second signal", priority=1)
@@ -334,6 +431,25 @@ class TestObservationTriageTools:
         assert data["title"] == "Merged issue"
         assert data["priority"] == 1
         assert data["fields"]["source_observation_ids"] == [obs1["id"], obs2["id"]]
+
+    async def test_promote_observations_to_issue_refresh_sqlite_error_returns_io(
+        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue = mcp_db.create_issue("Promoted shell")
+
+        def _promote(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            return {"issue": SimpleNamespace(id=issue.id)}
+
+        def _raise_sqlite_error(self: FiligreeDB, *args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("issue refresh failed")
+
+        monkeypatch.setattr(FiligreeDB, "promote_observations_to_issue", _promote)
+        monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
+
+        result = _parse(await call_tool("promote_observations_to_issue", {"observation_ids": ["obs-1"]}))
+
+        assert result["code"] == ErrorCode.IO
+        assert "issue refresh failed" in result["error"]
 
 
 class TestSummaryRefreshOnObservationMutations:
@@ -449,6 +565,42 @@ class TestPromoteObservationTool:
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
         assert "nonexistent_type" in data["error"]
+
+    async def test_promote_missing_observation_id_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("promote_observation", {}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "observation_id is required"
+
+    async def test_promote_non_string_observation_id_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("promote_observation", {"observation_id": ["obs-1"]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "observation_id must be a string"
+
+    @pytest.mark.parametrize("field", ["type", "title", "description"])
+    async def test_promote_rejects_non_string_optional_fields(self, mcp_db: FiligreeDB, field: str) -> None:
+        obs = mcp_db.create_observation("test obs for field validation")
+
+        data = _parse(await call_tool("promote_observation", {"observation_id": obs["id"], field: ["bad"]}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == f"{field} must be a string"
+
+    async def test_promote_refresh_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _promote(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            return {"issue": SimpleNamespace(id="filigree-refresh-target")}
+
+        def _raise_sqlite_error(self: FiligreeDB, issue_id: str) -> object:
+            raise sqlite3.OperationalError(f"issue refresh failed for {issue_id}")
+
+        monkeypatch.setattr(FiligreeDB, "promote_observation", _promote)
+        monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
+
+        data = _parse(await call_tool("promote_observation", {"observation_id": "obs-1"}))
+
+        assert data["code"] == ErrorCode.IO
+        assert "issue refresh failed" in data["error"]
 
     async def test_promote_surfaces_warnings(self, mcp_db: FiligreeDB) -> None:
         """MCP handler surfaces warnings from promote_observation on enrichment failure."""

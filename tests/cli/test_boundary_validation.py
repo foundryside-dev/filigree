@@ -313,6 +313,23 @@ class TestObservationCLIEnvelopeEmission:
         result = runner.invoke(cli, ["list-observations", "--offset", "-1", "--json"])
         self._assert_validation_envelope(result)
 
+    def test_list_observations_limit_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-observations", "--limit", "9223372036854775807", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_observations_offset_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-observations", "--offset", "9223372036854775808", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_observations_older_than_hours_huge_json_envelope(
+        self, cli_in_project: tuple[CliRunner, Path]
+    ) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list-observations", "--older-than-hours", "999999999999999999999", "--json"])
+        self._assert_validation_envelope(result)
+
     def test_promote_observation_priority_high_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["promote-observation", "obs-nope", "--priority", "99", "--json"])

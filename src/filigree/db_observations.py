@@ -474,20 +474,20 @@ class ObservationsMixin(DBMixinProtocol):
         if direction not in _LIST_OBSERVATIONS_DIRECTIONS:
             msg = f"direction must be one of {sorted(_LIST_OBSERVATIONS_DIRECTIONS)}, got {direction!r}"
             raise ValueError(msg)
-        for field_name, value in (
+        for field_name, string_value in (
             ("file_path", file_path),
             ("file_id", file_id),
             ("actor", actor),
             ("source_issue_id", source_issue_id),
         ):
-            _require_string(value, field_name)
-        for field_name, value in (
+            _require_string(string_value, field_name)
+        for field_name, int_value in (
             ("priority_min", priority_min),
             ("priority_max", priority_max),
             ("older_than_hours", older_than_hours),
         ):
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
-                msg = f"{field_name} must be an integer, got {type(value).__name__}"
+            if int_value is not None and (isinstance(int_value, bool) or not isinstance(int_value, int)):
+                msg = f"{field_name} must be an integer, got {type(int_value).__name__}"
                 raise ValueError(msg)
         if priority_min is not None and not (0 <= priority_min <= 4):
             msg = f"priority_min must be between 0 and 4, got {priority_min}"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,22 @@ class TestCliMetaBatchDetail:
         assert set(item.keys()) >= _FULL_ONLY_KEYS
         assert "x" in item["labels"]
 
+    def test_batch_add_label_full_get_issue_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+        issue_id = _create_issue(runner)
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["batch-add-label", "x", issue_id, "--detail", "full", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_batch_remove_label_slim_default_emits_id_strings(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         issue_id = _create_issue(runner)
@@ -116,6 +133,23 @@ class TestCliMetaBatchDetail:
         assert set(item.keys()) >= _FULL_ONLY_KEYS
         assert "x" not in item["labels"]
 
+    def test_batch_remove_label_full_get_issue_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+        issue_id = _create_issue(runner)
+        runner.invoke(cli, ["add-label", "x", issue_id])
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["batch-remove-label", "x", issue_id, "--detail", "full", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_batch_add_comment_slim_default_emits_id_strings(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         issue_id = _create_issue(runner)
@@ -133,6 +167,22 @@ class TestCliMetaBatchDetail:
         item = data["succeeded"][0]
         assert isinstance(item, dict)
         assert set(item.keys()) >= _FULL_ONLY_KEYS
+
+    def test_batch_add_comment_full_get_issue_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+        issue_id = _create_issue(runner)
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_issue", _raise)
+        result = runner.invoke(cli, ["batch-add-comment", "hi", issue_id, "--detail", "full", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
 
 
 # ---------------------------------------------------------------------------

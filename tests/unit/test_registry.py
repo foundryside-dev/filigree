@@ -145,6 +145,27 @@ def test_filigree_db_warns_when_clarion_token_env_unset(
             db.close()
 
 
+def test_filigree_db_exceptional_context_exit_closes_registry(tmp_path: Path) -> None:
+    class CloseableRegistry(LocalRegistry):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    registry = CloseableRegistry(lambda: "test-f-0000000001")
+    db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry)
+
+    def raise_after_opening_connection() -> None:
+        with db:
+            db.initialize()
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        raise_after_opening_connection()
+
+    assert registry.closed
+
+
 def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown clarion setting"):
         FiligreeDB(
@@ -229,6 +250,225 @@ def test_clarion_registry_resolves_file_via_http() -> None:
         thread.join(timeout=1)
 
 
+def test_clarion_registry_reuses_http_connection_for_contiguous_resolves() -> None:
+    connections: list[tuple[str, int]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            assert parsed.path == "/api/v1/files"
+            connections.append(self.client_address)
+            query = parse_qs(parsed.query)
+            path = query["path"][0]
+            language = query["language"][0]
+            body = json.dumps(
+                {
+                    "entity_id": f"core:file:abc123@{path}",
+                    "content_hash": f"sha256:{path}",
+                    "canonical_path": path,
+                    "language": language,
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        registry.resolve_file("src/one.py", language="python")
+        registry.resolve_file("src/two.py", language="python")
+
+        assert len(connections) == 2
+        assert len(set(connections)) == 1
+    finally:
+        close = getattr(registry, "close", None)
+        if callable(close):
+            close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_follows_redirects_for_single_file_resolution() -> None:
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            requests.append(parsed.path)
+            if parsed.path == "/api/v1/files":
+                self.send_response(307)
+                self.send_header("Location", f"/redirected{self.path}")
+                self.end_headers()
+                return
+            if parsed.path == "/redirected/api/v1/files":
+                query = parse_qs(parsed.query)
+                path = query.get("path", [""])[0]
+                language = query.get("language", [""])[0]
+                body = json.dumps(
+                    {
+                        "entity_id": f"core:file:redirected@{path}",
+                        "content_hash": f"sha256:{path}",
+                        "canonical_path": path,
+                        "language": language,
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        resolved = registry.resolve_file("src/main.py", language="python")
+
+        assert resolved["file_id"] == "core:file:redirected@src/main.py"
+        assert requests == ["/api/v1/files", "/redirected/api/v1/files"]
+    finally:
+        close = getattr(registry, "close", None)
+        if callable(close):
+            close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_follows_redirects_for_batch_resolution() -> None:
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            requests.append(parsed.path)
+            if parsed.path == "/api/v1/files/batch":
+                self.send_response(307)
+                self.send_header("Location", "/redirected/api/v1/files/batch")
+                self.end_headers()
+                return
+            if parsed.path == "/redirected/api/v1/files/batch":
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                resolved = [
+                    {
+                        "requested_path": query["path"],
+                        "entity_id": f"core:file:redirected@{query['path']}",
+                        "content_hash": f"sha256:{query['path']}",
+                        "canonical_path": query["path"],
+                        "language": query.get("language", ""),
+                    }
+                    for query in payload["queries"]
+                ]
+                body = json.dumps({"resolved": resolved, "not_found": [], "briefing_blocked": [], "errors": []}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        batch = registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
+
+        assert batch["resolved"]["src/main.py"]["file_id"] == "core:file:redirected@src/main.py"
+        assert requests == ["/api/v1/files/batch", "/redirected/api/v1/files/batch"]
+    finally:
+        close = getattr(registry, "close", None)
+        if callable(close):
+            close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            requests.append(parse_qs(parsed.query))
+            if len(requests) == 1:
+                self.send_error(503, "warming up")
+                return
+            body = json.dumps(
+                {
+                    "entity_id": "core:file:abc123@src/main.py",
+                    "content_hash": "sha256:abc123",
+                    "canonical_path": "src/main.py",
+                    "language": "python",
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        caplog.set_level(logging.WARNING, logger="filigree.registry")
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        resolved = registry.resolve_file("src/main.py", language="python")
+
+        assert requests == [
+            {"path": ["src/main.py"], "language": ["python"]},
+            {"path": ["src/main.py"], "language": ["python"]},
+        ]
+        assert resolved["file_id"] == "core:file:abc123@src/main.py"
+        retry_records = [
+            record
+            for record in caplog.records
+            if record.message == "Retrying Clarion registry request after transient failure"
+        ]
+        assert len(retry_records) == 1
+        retry_extra = vars(retry_records[0])
+        assert retry_extra["attempt"] == 1
+        assert retry_extra["next_attempt"] == 2
+        assert retry_extra["cause_kind"] == "http_error"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 @pytest.mark.parametrize("base_url", ["ftp://clarion.test", "http://", "localhost:9111", "http:///api"])
 def test_clarion_registry_rejects_invalid_base_url(base_url: str) -> None:
     with pytest.raises(ValueError, match="base_url"):
@@ -279,8 +519,12 @@ def test_clarion_registry_wraps_unreachable_backend() -> None:
 
 
 def test_clarion_registry_distinguishes_unknown_file_from_unavailable() -> None:
+    requests = 0
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            nonlocal requests
+            requests += 1
             self.send_error(404, "not indexed")
 
         def log_message(self, format: str, *args: object) -> None:
@@ -297,6 +541,7 @@ def test_clarion_registry_distinguishes_unknown_file_from_unavailable() -> None:
 
         assert exc_info.value.status_code == 404
         assert "/api/v1/files" in exc_info.value.url
+        assert requests == 1
     finally:
         server.shutdown()
         server.server_close()
