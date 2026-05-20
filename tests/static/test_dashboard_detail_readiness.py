@@ -60,3 +60,30 @@ def test_detail_readiness_badge_uses_dependency_details_before_issue_cache_loads
     assert "Ready" not in result["unknownUntilListLoads"]
     assert "Ready" in result["resolvedFromDetail"]
     assert "Blocked" not in result["resolvedFromDetail"]
+
+
+def test_detail_transition_buttons_ignore_stale_async_results() -> None:
+    script = textwrap.dedent(
+        """
+        import { shouldRenderDetailTransitions } from "./src/filigree/static/js/views/detail.js";
+
+        const currentContainer = { dataset: { issueId: "issue-a" } };
+        const replacedContainer = { dataset: { issueId: "issue-b" } };
+        const payload = {
+          current: shouldRenderDetailTransitions("issue-a", "issue-a", currentContainer),
+          wrongSelection: shouldRenderDetailTransitions("issue-a", "issue-b", currentContainer),
+          replacedContainer: shouldRenderDetailTransitions("issue-a", "issue-a", replacedContainer),
+          missingContainer: shouldRenderDetailTransitions("issue-a", "issue-a", null),
+        };
+        console.log(JSON.stringify(payload));
+        """
+    )
+
+    result = _run_node(script)
+
+    assert result == {
+        "current": True,
+        "wrongSelection": False,
+        "replacedContainer": False,
+        "missingContainer": False,
+    }

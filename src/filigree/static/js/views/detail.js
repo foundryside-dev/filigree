@@ -40,6 +40,12 @@ export function detailReadinessBadgeHtml(issue, issueMap = state.issueMap) {
       : "";
 }
 
+export function shouldRenderDetailTransitions(issueId, selectedIssueId, container) {
+  return Boolean(
+    container && selectedIssueId === issueId && container.dataset?.issueId === issueId,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // openDetail — fetch full issue detail and render panel
 // ---------------------------------------------------------------------------
@@ -87,6 +93,7 @@ export async function openDetail(issueId) {
   }
 
   const safeId = escJsSingle(d.id);
+  const htmlId = escHtml(d.id);
   const statusCat = d.status_category || "open";
   const statusColor = CATEGORY_COLORS[statusCat] || "#64748B";
   const prioColor = PRIORITY_COLORS[d.priority] || "#6B7280";
@@ -243,7 +250,7 @@ export async function openDetail(issueId) {
     // Actions section
     '<div class="mt-4 pt-3" style="border-top:1px solid var(--border-default)">' +
     '<div class="text-xs font-medium mb-2" style="color:var(--text-secondary)">Actions</div>' +
-    '<div id="transitionBtns" class="flex flex-wrap gap-1 mb-2"></div>' +
+    `<div id="transitionBtns" data-issue-id="${htmlId}" class="flex flex-wrap gap-1 mb-2"></div>` +
     '<div class="flex gap-2 mb-2">' +
     '<label for="prioSelect" class="text-xs" style="color:var(--text-secondary)">Priority</label> ' +
     `<select id="prioSelect" onchange="updateIssue('${safeId}', {priority: parseInt(this.value)})" class="text-xs rounded px-2 py-1" style="background:var(--surface-overlay);color:var(--text-primary);border:1px solid var(--border-strong)">` +
@@ -281,7 +288,12 @@ export async function openDetail(issueId) {
   loadTransitions(issueId)
     .then((transitions) => {
       const container = document.getElementById("transitionBtns");
-      if (!container || !transitions || !transitions.length) return;
+      if (
+        !shouldRenderDetailTransitions(issueId, state.selectedIssue, container) ||
+        !transitions ||
+        !transitions.length
+      )
+        return;
       container.innerHTML = transitions
         .map((t) => {
           const btnStyle = t.ready
@@ -301,7 +313,7 @@ export async function openDetail(issueId) {
     })
     .catch((err) => {
       const container = document.getElementById("transitionBtns");
-      if (container) {
+      if (shouldRenderDetailTransitions(issueId, state.selectedIssue, container)) {
         console.error("[detail] Failed to load transitions:", err);
         container.innerHTML =
           '<span class="text-xs" style="color:var(--text-muted)">Could not load transitions</span>';
