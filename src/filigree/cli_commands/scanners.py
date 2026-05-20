@@ -1138,30 +1138,33 @@ def report_finding_cmd(
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
         reported_file_id = finding_record.get(INGESTED_FILE_ID_KEY)
+        reported_line_start = finding_record.get("line_start")
+        lookup_line_start = (
+            reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
+        )
         ingested_finding = _reported_finding_record(
             tracker,
             result,
             file_id=reported_file_id if isinstance(reported_file_id, str) else None,
             rule_id=rule_id,
-            line_start=line_start,
+            line_start=lookup_line_start,
             message=message,
             severity=severity,
         )
         if ingested_finding is None:
             _emit_error("Reported finding was not found after ingestion", ErrorCode.IO, as_json=as_json)
             return
-        if create_paired_observation and result["new_finding_ids"]:
+        if create_paired_observation:
             observation_ids = _report_finding_observation_ids(
                 tracker,
                 file_id=ingested_finding["file_id"],
-                finding_id=result["new_finding_ids"][0],
+                finding_id=ingested_finding["id"],
             )
 
     response: dict[str, Any] = {
         "status": "created" if result["findings_created"] else "updated",
     }
-    if result["new_finding_ids"]:
-        response["finding_id"] = result["new_finding_ids"][0]
+    response["finding_id"] = ingested_finding["id"]
     if observation_ids:
         response["observation_id"] = observation_ids[0]
     if response_detail == "full":

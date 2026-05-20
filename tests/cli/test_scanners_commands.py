@@ -948,6 +948,69 @@ class TestReportFindingCommand:
         finally:
             os.chdir(original)
 
+    def test_report_finding_duplicate_update_returns_existing_ids(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            first = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full", "--create-observation"],
+                input=_REPORT_FINDING_JSON,
+            )
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+
+            payload = json.loads(_REPORT_FINDING_JSON)
+            payload["message"] = "Updated report"
+            second = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full", "--create-observation"],
+                input=json.dumps(payload),
+            )
+            assert second.exit_code == 0, second.output
+            second_data = json.loads(second.output)
+
+            assert second_data["status"] == "updated"
+            assert second_data["finding_id"] == first_data["finding_id"]
+            assert second_data["observation_id"] == first_data["observation_id"]
+            assert second_data["observation_ids"] == [first_data["observation_id"]]
+            assert second_data["findings_updated"] == 1
+            assert second_data["observations_created"] == 0
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_update_after_line_start_normalization(self, initialized_project: Path) -> None:
+        (initialized_project / "src").mkdir()
+        (initialized_project / "src/foo.py").write_text("x = 1\n")
+        payload = json.dumps(
+            {
+                "path": "src/foo.py",
+                "rule_id": "line-too-high",
+                "message": "Line attribution should be cleared",
+                "severity": "high",
+                "line_start": 389,
+                "line_end": 391,
+            }
+        )
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            first = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=payload)
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+            assert first_data["status"] == "created"
+            assert any("line_start 389" in warning for warning in first_data["warnings"])
+
+            second = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=payload)
+            assert second.exit_code == 0, second.output
+            second_data = json.loads(second.output)
+            assert second_data["status"] == "updated"
+            assert second_data["findings_updated"] == 1
+        finally:
+            os.chdir(original)
+
     def test_report_finding_stdin_and_file_same_result(self, initialized_project: Path) -> None:
         """stdin and --file paths should both succeed and produce the required key set."""
         runner = CliRunner()

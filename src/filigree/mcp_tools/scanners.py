@@ -719,18 +719,24 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     except RegistryUnavailableError as exc:
         _logger.error("report_finding registry unavailable: %s", exc)
         return _registry_error_text(exc, action="reporting finding")
-    except (ValueError, sqlite3.Error) as exc:
-        _logger.error("report_finding failed: %s", exc)
+    except ValueError as exc:
+        _logger.warning("report_finding validation failed: %s", exc)
+        return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        _logger.error("report_finding storage failure: %s", exc)
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))
 
-    line_start = args.get("line_start")
     reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
+    reported_line_start = finding.get("line_start")
+    lookup_line_start = (
+        reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
+    )
     finding_record = _reported_finding_record(
         tracker,
         result,
         file_id=reported_file_id if isinstance(reported_file_id, str) else None,
         rule_id=rule_id,
-        line_start=line_start,
+        line_start=lookup_line_start,
         message=message,
         severity=severity,
     )

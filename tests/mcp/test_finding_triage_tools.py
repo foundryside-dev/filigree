@@ -291,6 +291,49 @@ class TestReportFindingTool:
         assert data["observation_id"] == observations[0]["id"]
         assert data["observation_ids"] == [observations[0]["id"]]
 
+    async def test_report_finding_line_end_before_line_start_returns_validation(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/report_target.py",
+                    "rule_id": "invalid-range",
+                    "message": "Line range is backwards",
+                    "severity": "medium",
+                    "line_start": 10,
+                    "line_end": 2,
+                },
+            )
+        )
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "line_end" in data["error"]
+
+    async def test_report_finding_update_after_line_start_normalization(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        project_root = mcp_mod._filigree_dir.parent
+        (project_root / "src").mkdir()
+        (project_root / "src/report_target.py").write_text("x = 1\n")
+        payload = {
+            "file_path": "src/report_target.py",
+            "rule_id": "line-too-high",
+            "message": "Line attribution should be cleared",
+            "severity": "high",
+            "line_start": 389,
+            "line_end": 391,
+            "response_detail": "full",
+        }
+
+        first = _parse(await call_tool("report_finding", payload))
+        assert first["finding_result"] == "created"
+        assert any("line_start 389" in warning for warning in first["warnings"])
+
+        second = _parse(await call_tool("report_finding", payload))
+        assert second["finding_result"] == "updated"
+        assert second["findings_updated"] == 1
+
     async def test_report_finding_update_fallback_is_scoped_to_reported_file(self, mcp_db: FiligreeDB) -> None:
         finding_shape = {
             "rule_id": "same-risk",
