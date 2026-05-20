@@ -262,6 +262,18 @@ class TestDoctorConfigJson:
         assert config_result.passed is False
         assert "object" in config_result.message.lower()
 
+    def test_config_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path, with_config=False)
+        config_path = tmp_path / FILIGREE_DIR_NAME / CONFIG_FILENAME
+        config_path.mkdir()
+
+        results = run_doctor(tmp_path)
+
+        config_result = next(r for r in results if r.name == "config.json")
+        assert config_result.passed is False
+        assert "unreadable" in config_result.message.lower()
+        assert "config.json" in config_result.fix_hint
+
 
 # ---------------------------------------------------------------------------
 # run_doctor — filigree.db check

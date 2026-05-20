@@ -498,6 +498,15 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     fix_hint="Fix or regenerate .filigree/config.json",
                 )
             )
+        except OSError as exc:
+            results.append(
+                CheckResult(
+                    "config.json",
+                    False,
+                    f"Found at {config_path} but unreadable: {exc}",
+                    fix_hint="Fix or regenerate .filigree/config.json",
+                )
+            )
     else:
         results.append(
             CheckResult(
