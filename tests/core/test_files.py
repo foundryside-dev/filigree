@@ -824,6 +824,28 @@ class TestProcessScanResults:
         finally:
             db.close()
 
+    @pytest.mark.parametrize("scan_source", ["", "   ", 123])
+    def test_process_scan_results_rejects_invalid_scan_source(self, db: FiligreeDB, scan_source: Any) -> None:
+        with pytest.raises(ValueError, match="scan_source must be a non-empty string"):
+            db.process_scan_results(
+                scan_source=scan_source,
+                findings=[{"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m"}],
+            )
+
+        assert db.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 0
+
+    def test_process_scan_results_rejects_non_string_scan_run_id(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="scan_run_id must be a string"):
+            db.process_scan_results(
+                scan_source="ruff",
+                scan_run_id=cast(Any, 123),
+                findings=[{"path": "a.py", "rule_id": "E1", "severity": "low", "message": "m"}],
+            )
+
+        assert db.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 0
+
     def test_ingest_empty_findings(self, db: FiligreeDB) -> None:
         result = db.process_scan_results(scan_source="ruff", findings=[])
         assert result["files_created"] == 0

@@ -1200,6 +1200,10 @@ class FilesMixin(DBMixinProtocol):
 
         Returns summary stats including ``new_finding_ids``.
         """
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            raise ValueError("scan_source must be a non-empty string")
+        if not isinstance(scan_run_id, str):
+            raise ValueError(f"scan_run_id must be a string, got {type(scan_run_id).__name__}")
         if mark_unseen and not findings:
             raise ValueError(
                 "mark_unseen=True requires at least one finding; an empty batch cannot identify which (file, scan_source) pairs to sweep"
