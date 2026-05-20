@@ -606,6 +606,28 @@ class TestTriggerScanBatchTool:
         )
         assert data["code"] == ErrorCode.VALIDATION
 
+    @pytest.mark.parametrize(
+        ("arguments", "expected_error"),
+        [
+            ({"scanner": ["bad"], "file_paths": ["batch_bad.py"]}, "scanner must be a string"),
+            ({"scanner": "test-scanner", "file_paths": [123]}, "file_paths entries must be strings"),
+            ({"scanner": "test-scanner", "file_paths": ["batch_bad.py"], "prompt": ["bad"]}, "prompt must be a string"),
+            ({"scanner": "test-scanner", "file_paths": ["batch_bad.py"], "api_url": ["bad"]}, "api_url must be a string"),
+        ],
+    )
+    async def test_batch_scan_rejects_malformed_argument_types(
+        self,
+        mcp_db: FiligreeDB,
+        arguments: dict[str, object],
+        expected_error: str,
+    ) -> None:
+        _write_scanner_toml(mcp_db)
+
+        data = _parse(await call_tool("trigger_scan_batch", arguments))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == expected_error
+
     async def test_batch_scan_scanner_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
