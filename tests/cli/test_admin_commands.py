@@ -1479,6 +1479,26 @@ class TestInstallStepFailureExitCode:
         assert "Next: filigree create" in (result.output or "")
 
 
+class TestInstallStepExceptionReporting:
+    def test_install_reports_step_exception_as_failure(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _project = cli_in_project
+
+        def _raise_oserror(*_args: object, **_kwargs: object) -> tuple[bool, str]:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("filigree.install.inject_instructions", _raise_oserror)
+
+        result = runner.invoke(cli, ["install", "--claude-md"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, OSError)
+        assert "CLAUDE.md: disk full" in (result.output or "")
+        assert "Some install steps failed" in (result.output or "")
+        assert "Next: filigree create" not in (result.output or "")
+
+
 class TestMetricsDaysValidation:
     """filigree-d9cf9d34b1: metrics --days must reject non-positive values
     with a clean click error, not a Python traceback from analytics.

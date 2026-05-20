@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -185,6 +186,15 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     click.echo("\nNext: filigree install")
 
 
+def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> tuple[str, bool, str]:
+    try:
+        ok, msg = installer()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("Install step %s failed", name, exc_info=True)
+        return name, False, str(exc) or exc.__class__.__name__
+    return name, ok, msg
+
+
 @click.command()
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
@@ -248,6 +258,8 @@ def install(
         except ValueError as exc:
             click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
             mode = "ethereal"
+    if mode is None:
+        mode = "ethereal"
 
     project_root = filigree_dir.parent
     install_all = not any([claude_code, codex, claude_md, agents_md, gitignore, hooks_only, skills_only, codex_skills_only])
@@ -262,37 +274,51 @@ def install(
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server config port; defaulting to 8377", exc_info=True)
 
-    if install_all or claude_code:
-        ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
-        results.append(("Claude Code MCP", ok, msg))
-
-    if install_all or codex:
-        ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
-        results.append(("Codex MCP", ok, msg))
-
-    if install_all or claude_md:
-        ok, msg = inject_instructions(project_root / "CLAUDE.md")
-        results.append(("CLAUDE.md", ok, msg))
-
-    if install_all or agents_md:
-        ok, msg = inject_instructions(project_root / "AGENTS.md")
-        results.append(("AGENTS.md", ok, msg))
-
-    if install_all or gitignore:
-        ok, msg = ensure_gitignore(project_root)
-        results.append((".gitignore", ok, msg))
-
-    if install_all or hooks_only:
-        ok, msg = install_claude_code_hooks(project_root)
-        results.append(("Claude Code hooks", ok, msg))
-
-    if install_all or skills_only:
-        ok, msg = install_skills(project_root)
-        results.append(("Claude Code skills", ok, msg))
-
-    if install_all or codex_skills_only:
-        ok, msg = install_codex_skills(project_root)
-        results.append(("Codex skills", ok, msg))
+    install_steps: list[tuple[bool, str, Callable[[], tuple[bool, str]]]] = [
+        (
+            install_all or claude_code,
+            "Claude Code MCP",
+            lambda: install_claude_code_mcp(project_root, mode=mode, server_port=server_port),
+        ),
+        (
+            install_all or codex,
+            "Codex MCP",
+            lambda: install_codex_mcp(project_root, mode=mode, server_port=server_port),
+        ),
+        (
+            install_all or claude_md,
+            "CLAUDE.md",
+            lambda: inject_instructions(project_root / "CLAUDE.md"),
+        ),
+        (
+            install_all or agents_md,
+            "AGENTS.md",
+            lambda: inject_instructions(project_root / "AGENTS.md"),
+        ),
+        (
+            install_all or gitignore,
+            ".gitignore",
+            lambda: ensure_gitignore(project_root),
+        ),
+        (
+            install_all or hooks_only,
+            "Claude Code hooks",
+            lambda: install_claude_code_hooks(project_root),
+        ),
+        (
+            install_all or skills_only,
+            "Claude Code skills",
+            lambda: install_skills(project_root),
+        ),
+        (
+            install_all or codex_skills_only,
+            "Codex skills",
+            lambda: install_codex_skills(project_root),
+        ),
+    ]
+    for selected, name, installer in install_steps:
+        if selected:
+            results.append(_run_install_step(name, installer))
 
     # Server mode: register project in server.json
     if mode == "server":
