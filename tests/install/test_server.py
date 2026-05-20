@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import portalocker
 import pytest
 
+from filigree.core import CONF_FILENAME, FILIGREE_DIR_NAME, write_conf
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 from filigree.server import (
     ServerConfig,
@@ -189,6 +190,38 @@ class TestVersionEnforcement:
 
         with pytest.raises(ValueError, match="schema version"):
             register_project(filigree_dir)
+
+    def test_register_rejects_incompatible_relocated_schema(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Registration must validate the DB path declared by adjacent .filigree.conf."""
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        project_root = tmp_path / "future-relocated"
+        filigree_dir = project_root / FILIGREE_DIR_NAME
+        db_dir = project_root / "storage"
+        filigree_dir.mkdir(parents=True)
+        db_dir.mkdir()
+        (filigree_dir / "config.json").write_text(json.dumps({"prefix": "future", "version": 1}))
+        write_conf(
+            project_root / CONF_FILENAME,
+            {
+                "version": 1,
+                "project_name": "future",
+                "prefix": "future",
+                "db": "storage/track.db",
+            },
+        )
+        conn = sqlite3.connect(db_dir / "track.db")
+        conn.executescript(SCHEMA_SQL)
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(ValueError, match="schema version"):
+            register_project(filigree_dir)
+
+        assert read_server_config().projects == {}
 
     def test_register_project_tolerates_transient_lock(self, tmp_path: Path) -> None:
         """A transiently locked DB should not prevent project registration."""

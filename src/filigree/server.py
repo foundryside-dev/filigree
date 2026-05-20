@@ -20,7 +20,7 @@ from typing import TypedDict
 
 import portalocker
 
-from filigree.core import DB_FILENAME, read_config, write_atomic
+from filigree.core import CONF_FILENAME, DB_FILENAME, read_conf, read_config, write_atomic
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.ephemeral import is_pid_alive, read_pid_file, verify_pid_ownership, write_pid_file
 
@@ -54,6 +54,14 @@ class ServerConfig:
             raise ValueError(f"port must be between 1 and 65535, got {self.port}")
 
 
+def _project_db_path(filigree_dir: Path) -> Path:
+    conf_path = filigree_dir.parent / CONF_FILENAME
+    if conf_path.is_file():
+        conf = read_conf(conf_path)
+        return (conf_path.parent / conf["db"]).resolve()
+    return filigree_dir / DB_FILENAME
+
+
 def _read_project_schema_version(filigree_dir: Path) -> int:
     """Return the SQLite schema version for a project, or 0 if no DB exists.
 
@@ -62,7 +70,7 @@ def _read_project_schema_version(filigree_dir: Path) -> int:
     Raises sqlite3.DatabaseError or OSError for genuine corruption or
     permission errors.
     """
-    db_path = filigree_dir / DB_FILENAME
+    db_path = _project_db_path(filigree_dir)
     if not db_path.exists():
         return 0
 
