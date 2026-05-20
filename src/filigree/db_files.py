@@ -269,6 +269,7 @@ class FilesMixin(DBMixinProtocol):
         file_type: str = "",
         metadata: dict[str, Any] | None = None,
         actor: str = "",
+        _commit: bool = True,
     ) -> FileRecord:
         """Register a file or update it if already registered (upsert by path).
 
@@ -300,6 +301,7 @@ class FilesMixin(DBMixinProtocol):
                 metadata=metadata,
                 actor=actor,
                 now=now,
+                _commit=_commit,
             )
 
         stored_language = language or inferred_language
@@ -327,6 +329,7 @@ class FilesMixin(DBMixinProtocol):
                 metadata=metadata,
                 actor=actor,
                 now=now,
+                _commit=_commit,
             )
         try:
             self.conn.execute(
@@ -349,7 +352,8 @@ class FilesMixin(DBMixinProtocol):
             )
             if self._is_local_registry_fallback_row(registry_backend):
                 self._record_registry_fallback_event(file_id, actor=actor, now=now)
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
         except sqlite3.IntegrityError:
             self.conn.rollback()
             storage_existing = self.conn.execute(
@@ -366,6 +370,7 @@ class FilesMixin(DBMixinProtocol):
                     metadata=metadata,
                     actor=actor,
                     now=now,
+                    _commit=_commit,
                 )
             raise
         except Exception:
@@ -384,6 +389,7 @@ class FilesMixin(DBMixinProtocol):
         metadata: dict[str, Any] | None,
         actor: str,
         now: str,
+        _commit: bool = True,
     ) -> FileRecord:
         """Update an already-stored ``file_records`` row from a register call.
 
@@ -463,7 +469,8 @@ class FilesMixin(DBMixinProtocol):
                     "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
                     (existing["id"], field, old_val, new_val, actor, now),
                 )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise

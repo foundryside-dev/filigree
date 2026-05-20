@@ -674,7 +674,7 @@ class AnnotationsMixin(DBMixinProtocol):
             line_start=line_start,
             line_end=line_end,
         )
-        file_record = self.register_file(normalized)
+        file_record = self.register_file(normalized, _commit=False)
         try:
             self.conn.execute(
                 "INSERT INTO annotations "

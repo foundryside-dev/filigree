@@ -257,6 +257,30 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_failed_annotation_event_rolls_back_file_registration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "event.py").write_text("one\n")
+            original_event = db._record_annotation_event
+
+            def fail_created_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "created":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_created_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.annotate_file("event.py", "this fails after file registration", line_start=1)
+
+            assert db.conn.execute("SELECT COUNT(*) FROM file_records WHERE path = 'event.py'").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotation_provenance").fetchone()[0] == 0
+        finally:
+            db.close()
+
     def test_carry_forward_acknowledges_old_critical_warning(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:
