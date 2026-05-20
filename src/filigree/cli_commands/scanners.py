@@ -7,7 +7,6 @@ Mirrors the MCP scanner-domain tools:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json as json_mod
 import logging
@@ -16,6 +15,7 @@ import shlex
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -463,7 +463,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
             return
 
         # Quick poll: did the process exit immediately?
-        asyncio.run(asyncio.sleep(0.2))
+        time.sleep(0.2)
         exit_code = proc.poll()
         if exit_code is not None and exit_code != 0:
             tracker.update_scan_run_status(
@@ -714,7 +714,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             )
             return
 
-        asyncio.run(asyncio.sleep(0.2))
+        time.sleep(0.2)
         immediate_failures = 0
         for entry in finalized:
             proc = entry["spawn_result"]["proc"]

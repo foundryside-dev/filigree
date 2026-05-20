@@ -542,9 +542,7 @@ class TestReadyAndBlocked:
         assert data["code"] == ErrorCode.IO
         assert "blocked read failed" in data["error"]
 
-    async def test_get_blocked_include_blockers_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_get_blocked_include_blockers_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         a = mcp_db.create_issue("Blocked")
         b = mcp_db.create_issue("Blocker")
         mcp_db.add_dependency(a.id, b.id)
@@ -1109,9 +1107,7 @@ class TestCreatePlan:
         assert bad_label["code"] == ErrorCode.VALIDATION
         assert bad_label["error"] == "label must be a string"
 
-    async def test_label_plan_tree_full_refresh_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_label_plan_tree_full_refresh_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         milestone = mcp_db.create_issue("Milestone", type="milestone")
         original_get_issue = mcp_db.get_issue
 
@@ -3034,9 +3030,7 @@ class TestFileTools:
         )
         assert result["code"] == ErrorCode.VALIDATION
 
-    async def test_get_file_timeline_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_get_file_timeline_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         file_data = _parse(await call_tool("register_file", {"path": "src/timeline_io_error.py"}))
 
         def _raise_sqlite_error(self: FiligreeDB, *args: object, **kwargs: object) -> object:
@@ -3799,9 +3793,7 @@ class TestAddFileAssociationIssueNotFound:
         assert result["code"] == ErrorCode.IO
         assert "database is locked" in result["error"]
 
-    async def test_add_file_association_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_add_file_association_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         issue = mcp_db.create_issue("Real issue")
         file_data = _parse(await call_tool("register_file", {"path": "src/io-assoc-write.py"}))
 

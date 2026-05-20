@@ -285,13 +285,9 @@ class TestConfigValidation:
         assert "/good" in config.projects
         assert "/bad" not in config.projects
 
-    def test_project_values_with_non_string_prefix_dropped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_project_values_with_non_string_prefix_dropped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = self._setup(tmp_path, monkeypatch)
-        (config_dir / "server.json").write_text(
-            '{"projects": {"/good": {"prefix": "a"}, "/bad": {"prefix": ["not", "hashable"]}}}'
-        )
+        (config_dir / "server.json").write_text('{"projects": {"/good": {"prefix": "a"}, "/bad": {"prefix": ["not", "hashable"]}}}')
         config = read_server_config()
         assert config.projects == {"/good": {"prefix": "a"}}
 
@@ -631,9 +627,7 @@ class TestDaemonLifecycle:
         release_daemon_pid_if_owned(123)
         assert not pid_file.exists()
 
-    def test_release_daemon_pid_if_owned_leaves_pid_on_rename_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_release_daemon_pid_if_owned_leaves_pid_on_rename_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = tmp_path / ".config" / "filigree"
         config_dir.mkdir(parents=True)
         pid_file = config_dir / "server.pid"

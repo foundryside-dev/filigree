@@ -3,7 +3,14 @@
 // Extracted from dashboard.html into an ES module.
 // ---------------------------------------------------------------------------
 
-import { fetchTypes, patchFileFinding, postBatchClose, postBatchUpdate, postCreateIssue, postReload } from "./api.js";
+import {
+  fetchTypes,
+  patchFileFinding,
+  postBatchClose,
+  postBatchUpdate,
+  postCreateIssue,
+  postReload,
+} from "./api.js";
 import { CATEGORY_COLORS, state, THEME_COLORS, TOUR_STEPS } from "./state.js";
 
 // ---------------------------------------------------------------------------
@@ -477,7 +484,10 @@ export async function submitCreateForm() {
       issue_id: created.id,
     });
     if (!findingResult.ok) {
-      showToast(`Created ${created.id}, but failed to close finding: ${findingResult.error || "Unknown error"}`, "warning");
+      showToast(
+        `Created ${created.id}, but failed to close finding: ${findingResult.error || "Unknown error"}`,
+        "warning",
+      );
     }
   }
   if (modalEl) modalEl.remove();

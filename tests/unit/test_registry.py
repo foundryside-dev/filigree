@@ -454,9 +454,7 @@ def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.Lo
         ]
         assert resolved["file_id"] == "core:file:abc123@src/main.py"
         retry_records = [
-            record
-            for record in caplog.records
-            if record.message == "Retrying Clarion registry request after transient failure"
+            record for record in caplog.records if record.message == "Retrying Clarion registry request after transient failure"
         ]
         assert len(retry_records) == 1
         retry_extra = vars(retry_records[0])

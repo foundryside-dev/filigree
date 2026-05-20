@@ -127,9 +127,13 @@ async def unavailable_clarion_client(unavailable_clarion_dashboard_db: FiligreeD
 
 
 @pytest.fixture
-def release_dashboard_db(tmp_path: Path) -> FiligreeDB:
+def release_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
     """FiligreeDB initialized with the release workflow pack enabled."""
-    return make_db(tmp_path, packs=["core", "planning", "release"], check_same_thread=False)
+    db = make_db(tmp_path, packs=["core", "planning", "release"], check_same_thread=False)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -138,9 +142,11 @@ async def release_client(release_dashboard_db: FiligreeDB) -> AsyncIterator[Asyn
     dash_module._db = release_dashboard_db
     app = create_app()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    dash_module._db = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        dash_module._db = None
 
 
 def make_release_hierarchy(db: FiligreeDB, *, include_done: bool = False) -> tuple[Issue, Issue, Issue]:

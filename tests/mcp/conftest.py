@@ -65,6 +65,9 @@ def mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Filigre
     try:
         yield d
     finally:
+        import filigree.mcp_server as mcp_mod
+
+        mcp_mod._tool_locks.pop(d, None)
         d.close()
 
 
@@ -81,6 +84,9 @@ def clarion_mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator
     try:
         yield d
     finally:
+        import filigree.mcp_server as mcp_mod
+
+        mcp_mod._tool_locks.pop(d, None)
         d.close()
 
 

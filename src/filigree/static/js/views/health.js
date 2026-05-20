@@ -49,8 +49,7 @@ export async function renderHealthOverview(container, { onClickFile, onClickScan
       "</div>";
   } catch (err) {
     console.warn("[health] Failed to load health data:", err);
-    container.innerHTML =
-      '<div class="text-xs text-red-400">Failed to load health data.</div>';
+    container.innerHTML = '<div class="text-xs text-red-400">Failed to load health data.</div>';
   }
 }
 
@@ -72,11 +71,7 @@ function renderHotspotsWidget(hotspots, onClickFile) {
       const f = h.file || {};
       const b = h.findings_breakdown || {};
       const total =
-        (b.critical || 0) +
-        (b.high || 0) +
-        (b.medium || 0) +
-        (b.low || 0) +
-        (b.info || 0);
+        (b.critical || 0) + (b.high || 0) + (b.medium || 0) + (b.low || 0) + (b.info || 0);
       if (total === 0) return "";
 
       // Stacked bar segments
@@ -113,8 +108,7 @@ function renderHotspotsWidget(hotspots, onClickFile) {
 // --- Widget 2: Findings by Severity (CSS donut) ---
 
 function renderDonutWidget(agg) {
-  const total =
-    agg.critical + agg.high + agg.medium + agg.low + agg.info;
+  const total = agg.critical + agg.high + agg.medium + agg.low + agg.info;
   if (total === 0) {
     return (
       '<div class="rounded p-4" style="background:var(--surface-raised);border:1px solid var(--border-default)">' +
@@ -129,9 +123,7 @@ function renderDonutWidget(agg) {
   for (const sev of ["critical", "high", "medium", "low", "info"]) {
     if (agg[sev]) {
       const pct = (agg[sev] / total) * 100;
-      segments.push(
-        `${SEVERITY_COLORS[sev].hex} ${cumPct}% ${cumPct + pct}%`,
-      );
+      segments.push(`${SEVERITY_COLORS[sev].hex} ${cumPct}% ${cumPct + pct}%`);
       cumPct += pct;
     }
   }
@@ -206,7 +198,7 @@ function renderRecentScansWidget(scanRuns, onClickScan) {
       '<div class="mb-2">No scan runs recorded yet.</div>' +
       '<div class="mb-1">Ingest scan results via the API:</div>' +
       '<code class="block rounded px-2 py-1 text-xs mb-2" style="background:var(--surface-base);color:var(--text-secondary)">POST /api/v1/scan-results</code>' +
-      '<div>Example scanners available in <code>scripts/</code></div>' +
+      "<div>Example scanners available in <code>scripts/</code></div>" +
       "</div></div>"
     );
   }
@@ -221,7 +213,7 @@ function renderRecentScansWidget(scanRuns, onClickScan) {
       const findings = run.total_findings || 0;
 
       return (
-        `<div class="flex items-center gap-2 mb-2 rounded px-2 py-1.5 cursor-pointer bg-overlay-hover"${onClickScan ? ` onclick="${onClickScan(run.scan_source || '')}"` : ''} role="button" tabindex="0">` +
+        `<div class="flex items-center gap-2 mb-2 rounded px-2 py-1.5 cursor-pointer bg-overlay-hover"${onClickScan ? ` onclick="${onClickScan(run.scan_source || "")}"` : ""} role="button" tabindex="0">` +
         `<span class="text-xs font-medium rounded px-1.5 py-0.5 shrink-0" style="${_sourceBadge(run.scan_source)}">${source}</span>` +
         `<span class="text-xs truncate flex-1" style="color:var(--text-primary)" title="${runId}">${runId}</span>` +
         `<span class="text-xs shrink-0" style="color:var(--text-muted)">${escHtml(String(files))} files</span>` +
@@ -234,4 +226,3 @@ function renderRecentScansWidget(scanRuns, onClickScan) {
 
   return wrapper + header + rows + "</div>";
 }
-

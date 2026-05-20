@@ -239,9 +239,7 @@ class TestBatchDismissTool:
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
-    async def test_batch_dismiss_full_prefetch_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_batch_dismiss_full_prefetch_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         obs = mcp_db.create_observation("Prefetch failure")
 
         def _raise_sqlite_error(self: FiligreeDB, *args: object, **kwargs: object) -> object:
@@ -301,9 +299,7 @@ class TestBatchPromoteTool:
         assert data["failed"][0]["id"] == "obs-missing"
         assert data["failed"][0]["code"] == ErrorCode.NOT_FOUND
 
-    async def test_batch_promote_refresh_sqlite_error_returns_io(
-        self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_batch_promote_refresh_sqlite_error_returns_io(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         def _promote(self: FiligreeDB, *args: object, **kwargs: object) -> tuple[list[dict[str, object]], list[object]]:
             return ([{"issue": SimpleNamespace(id="filigree-refresh-target")}], [])
 

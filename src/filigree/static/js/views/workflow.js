@@ -64,7 +64,8 @@ export async function loadWorkflow() {
   } catch (err) {
     console.warn("[workflow] Failed to render workflow graph:", err);
     const cy = document.getElementById("workflowCy");
-    if (cy) cy.innerHTML = '<div class="p-4 text-xs text-red-400">Failed to load workflow diagram.</div>';
+    if (cy)
+      cy.innerHTML = '<div class="p-4 text-xs text-red-400">Failed to load workflow diagram.</div>';
   }
 }
 
@@ -264,8 +265,7 @@ export async function loadWorkflowInModal() {
     }
     renderWorkflowGraph(tpl, stateCounts, container);
   } catch (_e) {
-    container.innerHTML =
-      '<div class="p-4 text-xs text-red-400">Failed to load workflow.</div>';
+    container.innerHTML = '<div class="p-4 text-xs text-red-400">Failed to load workflow.</div>';
   }
 }
 

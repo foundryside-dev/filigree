@@ -20,8 +20,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --group dev
-      - run: uv run ruff check src/ tests/
-      - run: uv run ruff format --check src/ tests/
+      - run: uv run ruff check src/ tests/ scripts/
+      - run: uv run ruff format --check src/ tests/ scripts/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -32,6 +32,18 @@ jobs:
           enable-cache: true
       - run: uv sync --group dev
       - run: uv run mypy src/filigree/
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
 
   test:
     runs-on: ubuntu-latest
@@ -45,10 +57,13 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev
-      - run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=85
+      - run: uv run pytest --cov --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=85
+      - run: uv run python scripts/check_coverage_floors.py coverage.json
       - name: Upload coverage
         if: matrix.python-version == '3.13'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-report
-          path: .coverage
+          path: |
+            .coverage
+            coverage.json

@@ -324,12 +324,15 @@ def probe_clarion_capabilities(base_url: str, *, timeout_seconds: float, auth_to
         with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
-        reason = exc.reason or exc.msg
-        if exc.code == 401:
-            msg = f"Clarion capability probe rejected at {url}: HTTP 401 {reason} (check token_env)"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
-        msg = f"Clarion capability probe failed at {url}: HTTP {exc.code} {reason}"
-        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+        try:
+            reason = exc.reason or exc.msg
+            if exc.code == 401:
+                msg = f"Clarion capability probe rejected at {url}: HTTP 401 {reason} (check token_env)"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
+            msg = f"Clarion capability probe failed at {url}: HTTP {exc.code} {reason}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+        finally:
+            exc.close()
     except (URLError, TimeoutError, OSError) as exc:
         msg = f"Clarion capability probe unreachable at {url}: {exc}"
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
@@ -593,10 +596,7 @@ class ClarionRegistry:
         raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error")
 
     def _should_retry_read(self, attempt: int, deadline: float) -> bool:
-        return (
-            attempt < CLARION_RESOLVE_FILE_MAX_ATTEMPTS
-            and deadline - time.monotonic() > CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS
-        )
+        return attempt < CLARION_RESOLVE_FILE_MAX_ATTEMPTS and deadline - time.monotonic() > CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS
 
     def _sleep_before_retry(self, deadline: float) -> None:
         remaining = deadline - time.monotonic()

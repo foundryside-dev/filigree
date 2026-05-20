@@ -2354,12 +2354,16 @@ class TestCloseCommitsPending:
         db.initialize()
 
         # Replace _conn with a mock whose close() raises
-        mock_conn = MagicMock(wraps=db._conn)
+        original_conn = db._conn
+        mock_conn = MagicMock(wraps=original_conn)
         mock_conn.close.side_effect = sqlite3.ProgrammingError("simulated close failure")
         db._conn = mock_conn
 
-        with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
-            db.close()
+        try:
+            with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
+                db.close()
+        finally:
+            original_conn.close()
 
         # _conn must be cleared despite the exception
         assert db._conn is None
@@ -2370,12 +2374,16 @@ class TestCloseCommitsPending:
         db = FiligreeDB(db_path, prefix="test")
         db.initialize()
 
-        mock_conn = MagicMock(wraps=db._conn)
+        original_conn = db._conn
+        mock_conn = MagicMock(wraps=original_conn)
         mock_conn.close.side_effect = sqlite3.ProgrammingError("simulated close failure")
         db._conn = mock_conn
 
-        with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
-            db.__exit__(None, None, None)
+        try:
+            with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
+                db.__exit__(None, None, None)
+        finally:
+            original_conn.close()
 
         assert db._conn is None
 
@@ -2498,12 +2506,16 @@ class TestReconnect:
         db = FiligreeDB(tmp_path / "reconnect-err.db", prefix="test")
         db.initialize()
 
-        mock_conn = MagicMock(wraps=db._conn)
+        original_conn = db._conn
+        mock_conn = MagicMock(wraps=original_conn)
         mock_conn.close.side_effect = sqlite3.ProgrammingError("simulated close failure")
         db._conn = mock_conn
 
-        with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
-            db.reconnect(check_same_thread=False)
+        try:
+            with pytest.raises(sqlite3.ProgrammingError, match="simulated close failure"):
+                db.reconnect(check_same_thread=False)
+        finally:
+            original_conn.close()
 
         assert db._conn is None
         assert db._check_same_thread is False

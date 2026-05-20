@@ -1200,6 +1200,10 @@ class FiligreeDB(
         else:
             self.close()
 
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
+
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:

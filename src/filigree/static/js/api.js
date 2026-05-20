@@ -298,7 +298,10 @@ export function patchIssue(issueId, body) {
 }
 
 export function postCloseIssue(issueId, reason) {
-  return writeRequest(`/issue/${issueId}/close`, { body: { reason: reason || "" }, errorLabel: "Close failed" });
+  return writeRequest(`/issue/${issueId}/close`, {
+    body: { reason: reason || "" },
+    errorLabel: "Close failed",
+  });
 }
 
 export function postReopenIssue(issueId) {
@@ -306,7 +309,10 @@ export function postReopenIssue(issueId) {
 }
 
 export function postClaimIssue(issueId, assignee) {
-  return writeRequest(`/issue/${issueId}/claim`, { body: { assignee }, errorLabel: "Claim failed" });
+  return writeRequest(`/issue/${issueId}/claim`, {
+    body: { assignee },
+    errorLabel: "Claim failed",
+  });
 }
 
 export function postReleaseIssue(issueId) {
@@ -314,15 +320,24 @@ export function postReleaseIssue(issueId) {
 }
 
 export function postAddDependency(issueId, dependsOnId) {
-  return writeRequest(`/issue/${issueId}/dependencies`, { body: { depends_on: dependsOnId }, errorLabel: "Add failed" });
+  return writeRequest(`/issue/${issueId}/dependencies`, {
+    body: { depends_on: dependsOnId },
+    errorLabel: "Add failed",
+  });
 }
 
 export function deleteIssueDep(issueId, depId) {
-  return writeRequest(`/issue/${issueId}/dependencies/${depId}`, { method: "DELETE", errorLabel: "Remove failed" });
+  return writeRequest(`/issue/${issueId}/dependencies/${depId}`, {
+    method: "DELETE",
+    errorLabel: "Remove failed",
+  });
 }
 
 export function postComment(issueId, text) {
-  return writeRequest(`/issue/${issueId}/comments`, { body: { text }, errorLabel: "Comment failed" });
+  return writeRequest(`/issue/${issueId}/comments`, {
+    body: { text },
+    errorLabel: "Comment failed",
+  });
 }
 
 export function postCreateIssue(body) {
@@ -330,7 +345,10 @@ export function postCreateIssue(body) {
 }
 
 export function postBatchUpdate(issueIds, fields) {
-  return writeRequest("/batch/update", { body: { issue_ids: issueIds, ...fields }, errorLabel: "Batch update failed" });
+  return writeRequest("/batch/update", {
+    body: { issue_ids: issueIds, ...fields },
+    errorLabel: "Batch update failed",
+  });
 }
 
 export function postBatchClose(issueIds, reason, actor) {
@@ -453,7 +471,10 @@ export async function fetchScanRuns(limit) {
 }
 
 export function postFileAssociation(fileId, body) {
-  return writeRequest(`/files/${encodeURIComponent(fileId)}/associations`, { body, errorLabel: "Association failed" });
+  return writeRequest(`/files/${encodeURIComponent(fileId)}/associations`, {
+    body,
+    errorLabel: "Association failed",
+  });
 }
 
 export function patchFileFinding(fileId, findingId, body) {

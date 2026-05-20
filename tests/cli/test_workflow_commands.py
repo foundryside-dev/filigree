@@ -794,9 +794,7 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "NOT_FOUND"
         assert "demo-nope" in data["error"]
 
-    def test_plan_sqlite_error_returns_io_envelope(
-        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_plan_sqlite_error_returns_io_envelope(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
         runner, _ = cli_in_project
 
         def _raise(*_args: object, **_kwargs: object) -> None:

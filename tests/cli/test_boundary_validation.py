@@ -323,9 +323,7 @@ class TestObservationCLIEnvelopeEmission:
         result = runner.invoke(cli, ["list-observations", "--offset", "9223372036854775808", "--json"])
         self._assert_validation_envelope(result)
 
-    def test_list_observations_older_than_hours_huge_json_envelope(
-        self, cli_in_project: tuple[CliRunner, Path]
-    ) -> None:
+    def test_list_observations_older_than_hours_huge_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["list-observations", "--older-than-hours", "999999999999999999999", "--json"])
         self._assert_validation_envelope(result)

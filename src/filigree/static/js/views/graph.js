@@ -255,8 +255,12 @@ export function renderGraph() {
 
   if (scopeNodes.length === 0 && state.graphSidebarSelections.size === 0) {
     // Blank state — no selections
-    if (state.cy) { state.cy.destroy(); state.cy = null; }
-    container.innerHTML = '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">Select items from the sidebar to explore their dependency graph.</div>';
+    if (state.cy) {
+      state.cy.destroy();
+      state.cy = null;
+    }
+    container.innerHTML =
+      '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">Select items from the sidebar to explore their dependency graph.</div>';
     setGraphNotice("");
     updateGraphPerfState();
     return;
@@ -286,7 +290,8 @@ export function renderGraph() {
   let cyNodes = filteredNodes.map((n) => {
     const title = n.title || n.id;
     const isGhost = ghostIds.has(n.id);
-    const matchesSearch = !search || title.toLowerCase().includes(search) || n.id.toLowerCase().includes(search);
+    const matchesSearch =
+      !search || title.toLowerCase().includes(search) || n.id.toLowerCase().includes(search);
     return {
       data: {
         id: n.id,
@@ -298,7 +303,7 @@ export function renderGraph() {
         isReady: !!n.is_ready,
         childCount: (n.children || []).length,
         isGhost: isGhost,
-        opacity: isGhost ? 0.45 : (matchesSearch ? 1 : 0.2),
+        opacity: isGhost ? 0.45 : matchesSearch ? 1 : 0.2,
       },
     };
   });
