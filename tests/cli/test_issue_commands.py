@@ -1060,6 +1060,50 @@ class TestReleaseCli:
         assert issue_id in result.output
         assert "simulated release failure" in result.output
 
+    def test_release_my_claims_json_refreshes_context_after_release(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release refresh"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+        calls: list[object] = []
+
+        def spy_refresh(db: object) -> None:
+            calls.append(db)
+
+        monkeypatch.setattr("filigree.cli_commands.issues.refresh_summary", spy_refresh)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert calls, "release-my-claims --json must refresh context.md after real releases"
+
+    def test_release_my_claims_json_dry_run_does_not_refresh_context(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release dry-run"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+        calls: list[object] = []
+
+        def spy_refresh(db: object) -> None:
+            calls.append(db)
+
+        monkeypatch.setattr("filigree.cli_commands.issues.refresh_summary", spy_refresh)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--dry-run", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["dry_run"] is True
+        assert calls == []
+
 
 class TestListLabelQuery:
     def test_list_label_prefix(self, cli_in_project: tuple[CliRunner, Path]) -> None:

@@ -1043,6 +1043,8 @@ def release_my_claims_cmd(
             if dry_run:
                 payload["dry_run"] = True
             click.echo(json_mod.dumps(payload, indent=2, default=str))
+            if not dry_run:
+                refresh_summary(db)
             if failures:
                 sys.exit(1)
             return
