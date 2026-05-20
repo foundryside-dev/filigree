@@ -33,6 +33,10 @@ let _selectedFinding = null;
 // --- Sort direction state ---
 let _filesSortDir = "DESC";
 
+export function shouldRecreateFilesOverview(overview, projectKey) {
+  return Boolean(overview && overview.dataset?.projectKey !== projectKey);
+}
+
 // --- Severity helpers ---
 
 function severityBadge(severity, count) {
@@ -66,14 +70,19 @@ export async function loadFiles() {
   if (!container) return;
 
   // --- Code Quality Overview (collapsible) ---
+  const projectKey = state.currentProjectKey || "__default__";
   let overview = document.getElementById("filesOverview");
+  if (shouldRecreateFilesOverview(overview, projectKey)) {
+    overview.remove();
+    overview = null;
+  }
   if (!overview) {
-    const projectKey = state.currentProjectKey || "__default__";
     const storageKey = `filigree_files_overview_collapsed.${projectKey}`;
     const collapsed = localStorage.getItem(storageKey) === "1";
 
     overview = document.createElement("details");
     overview.id = "filesOverview";
+    overview.dataset.projectKey = projectKey;
     overview.className = "mb-4 rounded";
     overview.style.cssText =
       "background:var(--surface-raised);border:1px solid var(--border-default)";
