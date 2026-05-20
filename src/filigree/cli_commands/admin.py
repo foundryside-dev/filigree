@@ -710,6 +710,12 @@ def import_data(input_file: str, merge: bool, allow_foreign_ids: bool) -> None:
 @click.pass_context
 def archive(ctx: click.Context, days: int, label: str | None, as_json: bool) -> None:
     """Archive old closed issues to reduce active issue count."""
+    if days < 7 and not (label and label.strip()):
+        click.echo(
+            f"Error: --days {days} requires a non-empty --label scope to avoid archiving recent issues project-wide.",
+            err=True,
+        )
+        sys.exit(1)
     with get_db() as db:
         try:
             archived = db.archive_closed(days_old=days, actor=ctx.obj["actor"], label=label)

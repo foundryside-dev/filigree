@@ -204,6 +204,12 @@ class TestJsonRetrofit:
         assert json.loads(scratch_show.output)["status"] == "archived"
         assert json.loads(unrelated_show.output)["status"] == "closed"
 
+    def test_archive_tight_window_requires_label_scope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["archive", "--days", "0"])
+        assert result.exit_code == 1
+        assert "--days 0 requires a non-empty --label" in result.output
+
     def test_archive_rejects_negative_days(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["archive", "--days", "-1"])
