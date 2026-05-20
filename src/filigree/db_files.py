@@ -820,12 +820,27 @@ class FilesMixin(DBMixinProtocol):
         """Create or update a file record, returning its id."""
         inferred_language = _infer_language_from_path(path) if infer_language else ""
 
-        def update_existing_file(existing_file: sqlite3.Row) -> str:
+        def update_existing_file(existing_file: sqlite3.Row, resolved: ResolvedFile | None = None) -> str:
             file_id: str = existing_file["id"]
             update_parts = ["updated_at = ?", "updated_by = ?"]
             update_params: list[Any] = [now, actor]
             current_language = existing_file["language"] or ""
             next_language = language or (inferred_language if not current_language else "")
+            if resolved is not None:
+                if resolved["file_id"] != file_id:
+                    msg = (
+                        f"Existing scan file {path!r} resolves to registry id {resolved['file_id']!r}, "
+                        f"but stored file id is {file_id!r}; run migrate-registry before ingesting scan results"
+                    )
+                    raise ValueError(msg)
+                for field, next_value in (
+                    ("content_hash", resolved["content_hash"]),
+                    ("registry_backend", resolved["registry_backend"]),
+                ):
+                    current_value = existing_file[field] or ""
+                    if next_value != current_value:
+                        update_parts.append(f"{field} = ?")
+                        update_params.append(next_value)
             if next_language:
                 update_parts.append("language = ?")
                 update_params.append(next_language)
@@ -837,9 +852,12 @@ class FilesMixin(DBMixinProtocol):
             stats["files_updated"] += 1
             return file_id
 
-        existing_file = self.conn.execute("SELECT id, language FROM file_records WHERE path = ?", (path,)).fetchone()
+        existing_file = self.conn.execute(
+            "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path = ?",
+            (path,),
+        ).fetchone()
         if existing_file is not None:
-            file_id = update_existing_file(existing_file)
+            file_id = update_existing_file(existing_file, resolved_file)
         else:
             stored_language = language or inferred_language
             resolved = resolved_file or self.registry.resolve_file(path, language=stored_language, actor=actor)
@@ -849,11 +867,11 @@ class FilesMixin(DBMixinProtocol):
             content_hash = resolved["content_hash"]
             registry_backend = resolved["registry_backend"]
             storage_existing = self.conn.execute(
-                "SELECT id, language FROM file_records WHERE path = ? OR id = ?",
+                "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path = ? OR id = ?",
                 (stored_path, file_id),
             ).fetchone()
             if storage_existing is not None:
-                file_id = update_existing_file(storage_existing)
+                file_id = update_existing_file(storage_existing, resolved)
             else:
                 try:
                     self.conn.execute(
@@ -864,12 +882,12 @@ class FilesMixin(DBMixinProtocol):
                     )
                 except sqlite3.IntegrityError:
                     storage_existing = self.conn.execute(
-                        "SELECT id, language FROM file_records WHERE path IN (?, ?) OR id = ?",
+                        "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path IN (?, ?) OR id = ?",
                         (path, stored_path, file_id),
                     ).fetchone()
                     if storage_existing is None:
                         raise
-                    file_id = update_existing_file(storage_existing)
+                    file_id = update_existing_file(storage_existing, resolved)
                 else:
                     if self._is_local_registry_fallback_row(registry_backend):
                         self._record_registry_fallback_event(file_id, actor=actor, now=now)
@@ -889,12 +907,13 @@ class FilesMixin(DBMixinProtocol):
         # Deduplicate unfamiliar paths and capture the language to send.
         seen_paths: set[str] = set()
         queries: list[BatchQuery] = []
+        refresh_existing = self.registry.is_displaced()
         for f in findings:
             path = f["path"]
             if path in seen_paths:
                 continue
             existing_file = self.conn.execute("SELECT 1 FROM file_records WHERE path = ?", (path,)).fetchone()
-            if existing_file is not None:
+            if existing_file is not None and not refresh_existing:
                 seen_paths.add(path)
                 continue
             inferred_language = _infer_language_from_path(path) if "language" not in f else ""

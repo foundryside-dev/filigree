@@ -11,7 +11,7 @@ import pytest
 
 from filigree.core import FiligreeDB, ScanFinding, _normalize_scan_path
 from filigree.db_files import _safe_json_loads  # type: ignore[attr-defined]
-from filigree.registry import ResolvedFile
+from filigree.registry import BatchQuery, BatchResolution, ResolvedFile, resolve_files_batch_via_loop
 from filigree.types.core import make_entity_id, make_file_id
 from tests._fakes.registry import FixedRegistry
 
@@ -497,6 +497,66 @@ class TestProcessScanResults:
             assert file_record.registry_backend == "clarion"
             finding = db.get_finding(result["new_finding_ids"][0])
             assert finding["file_id"] == "core:file:abc123@src/main.py"
+        finally:
+            db.close()
+
+    def test_ingest_refreshes_existing_displaced_registry_metadata(self, tmp_path: Path) -> None:
+        class RefreshingRegistry:
+            calls = 0
+
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                self.calls += 1
+                return {
+                    "file_id": make_entity_id("core:file:stable@src/refresh.py"),
+                    "content_hash": f"sha256:scan-{self.calls}",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                }
+
+            def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+                return resolve_files_batch_via_loop(self, queries, actor=actor)
+
+            def is_displaced(self) -> bool:
+                return True
+
+        registry = RefreshingRegistry()
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="clarion")
+        try:
+            db.initialize()
+            first = db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {
+                        "path": "src/refresh.py",
+                        "language": "python",
+                        "rule_id": "E501",
+                        "severity": "low",
+                        "message": "first",
+                    },
+                ],
+            )
+
+            second = db.process_scan_results(
+                scan_source="ruff",
+                findings=[
+                    {
+                        "path": "src/refresh.py",
+                        "language": "python",
+                        "rule_id": "E502",
+                        "severity": "low",
+                        "message": "second",
+                    },
+                ],
+            )
+
+            file_record = db.get_file_by_path("src/refresh.py")
+            assert file_record is not None
+            assert first["files_created"] == 1
+            assert second["files_updated"] == 1
+            assert registry.calls == 2
+            assert file_record.content_hash == "sha256:scan-2"
+            assert file_record.registry_backend == "clarion"
         finally:
             db.close()
 
