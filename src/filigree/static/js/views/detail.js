@@ -24,6 +24,22 @@ import { escHtml, escJsSingle, issueIdChip, setLoading, showToast, trapFocus } f
 
 export const callbacks = { fetchData: null, render: null };
 
+export function detailReadinessBadgeHtml(issue, issueMap = state.issueMap) {
+  const statusCat = issue.status_category || "open";
+  const blockedBy = issue.blocked_by || [];
+  const depDetails = issue.dep_details || {};
+  const openBlockers = blockedBy.filter((bid) => {
+    const blocker = depDetails[bid] || issueMap[bid];
+    return !blocker || (blocker.status_category || "open") !== "done";
+  });
+
+  return statusCat === "open" && openBlockers.length === 0
+    ? '<span class="text-xs bg-emerald-900/50 text-emerald-400 px-2 py-0.5 rounded">Ready</span>'
+    : openBlockers.length > 0
+      ? `<span class="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded">Blocked by ${openBlockers.length}</span>`
+      : "";
+}
+
 // ---------------------------------------------------------------------------
 // openDetail — fetch full issue detail and render panel
 // ---------------------------------------------------------------------------
@@ -152,16 +168,7 @@ export async function openDetail(issueId) {
     })
     .join("");
 
-  const openBlockers = (d.blocked_by || []).filter((bid) => {
-    const b = state.issueMap[bid];
-    return b && (b.status_category || "open") !== "done";
-  });
-  const readyBadge =
-    statusCat === "open" && openBlockers.length === 0
-      ? '<span class="text-xs bg-emerald-900/50 text-emerald-400 px-2 py-0.5 rounded">Ready</span>'
-      : openBlockers.length > 0
-        ? `<span class="text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded">Blocked by ${openBlockers.length}</span>`
-        : "";
+  const readyBadge = detailReadinessBadgeHtml(d);
 
   header.innerHTML =
     `<span class="text-xs">${issueIdChip(d.id)}</span>` +
