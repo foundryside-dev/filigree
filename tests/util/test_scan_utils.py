@@ -362,6 +362,71 @@ class TestRunScannerPipeline:
         assert "Failed:         1" in captured.out
         assert "FAIL target.py: scanner exploded" in captured.err
 
+    async def test_blank_api_url_returns_cli_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--api-url", "   "])
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        assert "--api-url must be a non-empty URL" in capsys.readouterr().err
+
+    async def test_missing_generated_report_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            return None
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL target.py: scanner did not generate report" in captured.err
+
+    async def test_unreadable_generated_report_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"\xff")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL reading report for target.py" in captured.err
+
 
 class TestAnalyseFiles:
     async def test_cache_warmup_runs_first_file_before_parallel_batch(self, tmp_path: Path) -> None:

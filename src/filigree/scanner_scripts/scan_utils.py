@@ -556,21 +556,34 @@ async def _analyse_files(
     from collections import Counter
 
     failed: list[tuple[Path, Exception]] = []
-    report_paths: list[Path] = []
+    report_paths: list[tuple[Path, Path]] = []
+    bad_report_paths: set[Path] = set()
     done = 0
     total = len(files)
     api_successes = 0
     api_failures = 0
 
+    def record_report_failure(fpath: Path, out: Path, detail: str) -> None:
+        failed.append((fpath, RuntimeError(detail)))
+        bad_report_paths.add(out)
+        print(f"  FAIL {_display_path(fpath, repo_root)}: {detail}", file=sys.stderr)
+
+    def read_report_text(fpath: Path, out: Path) -> str | None:
+        try:
+            return out.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as read_exc:
+            if out not in bad_report_paths:
+                failed.append((fpath, read_exc))
+                bad_report_paths.add(out)
+            print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
+            return None
+
     def ingest_report(fpath: Path, out: Path) -> None:
         nonlocal api_successes, api_failures
-        if no_ingest or not out.exists():
+        if no_ingest or not out.is_file():
             return
-        try:
-            text = out.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as read_exc:
-            failed.append((fpath, read_exc))
-            print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
+        text = read_report_text(fpath, out)
+        if text is None:
             return
         rel_path = str(_display_path(fpath, repo_root))
         findings = parse_findings(text, file_path=rel_path)
@@ -603,7 +616,10 @@ async def _analyse_files(
 
             if skip_existing and out.exists():
                 done += 1
-                report_paths.append(out)
+                if not out.is_file():
+                    record_report_failure(fpath, out, "existing report path is not a file")
+                    continue
+                report_paths.append((fpath, out))
                 print(f"  [skip] {_display_path(fpath, repo_root)}", file=sys.stderr)
                 ingest_report(fpath, out)
                 continue
@@ -627,7 +643,13 @@ async def _analyse_files(
                 failed.append((fpath, result))
                 print(f"  FAIL {_display_path(fpath, repo_root)}: {result}", file=sys.stderr)
             else:
-                report_paths.append(out)
+                if not out.exists():
+                    record_report_failure(fpath, out, "scanner did not generate report")
+                    continue
+                if not out.is_file():
+                    record_report_failure(fpath, out, "generated report path is not a file")
+                    continue
+                report_paths.append((fpath, out))
                 print(f"  [{done}/{total}] {_display_path(fpath, repo_root)}", file=sys.stderr)
                 ingest_report(fpath, out)
 
@@ -664,10 +686,15 @@ async def _analyse_files(
             api_failures += 1
 
     stats: Counter[str] = Counter()
-    for md in report_paths:
-        if not md.exists():
+    for fpath, md in report_paths:
+        if md in bad_report_paths:
             continue
-        text = md.read_text(encoding="utf-8")
+        if not md.exists():
+            record_report_failure(fpath, md, "scanner did not generate report")
+            continue
+        text = read_report_text(fpath, md)
+        if text is None:
+            continue
         if "No concrete bug found" in text:
             stats["clean"] += 1
         else:
@@ -792,7 +819,13 @@ async def run_scanner_pipeline(
     context = load_context(repo_root)
     scan_run_id = args.scan_run_id or f"{scan_source}-{datetime.now(UTC).isoformat()}"
     try:
-        api_url = args.api_url.strip().rstrip("/") if args.api_url is not None else _default_api_url_for_repo(repo_root)
+        if args.api_url is not None:
+            api_url = args.api_url.strip().rstrip("/")
+            if not api_url:
+                print("Error: --api-url must be a non-empty URL", file=sys.stderr)
+                return 1
+        else:
+            api_url = _default_api_url_for_repo(repo_root)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
