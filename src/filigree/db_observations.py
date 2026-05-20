@@ -246,6 +246,7 @@ class ObservationsMixin(DBMixinProtocol):
         avoid committing partial work.
         """
         summary = _require_string(summary, "summary")
+        file_path = _require_string(file_path, "file_path")
         for field_name, value in (
             ("detail", detail),
             ("source_issue_id", source_issue_id),
@@ -273,7 +274,6 @@ class ObservationsMixin(DBMixinProtocol):
         # file_record is orphaned (register_file commits independently).
         created_file_id: str | None = None
         if file_path:
-            file_path = _require_string(file_path, "file_path")
             file_path = _normalize_scan_path(file_path)
             if not _is_project_relative_scan_path(file_path):
                 raise ValueError("file_path must be project-relative")

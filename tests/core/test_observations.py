@@ -285,6 +285,11 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="file_path must be a string"):
             db.create_observation("bad path", file_path=123)  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("file_path", [0, False, None], ids=["zero", "false", "none"])
+    def test_create_observation_rejects_falsey_non_string_file_path(self, db: FiligreeDB, file_path: object) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.create_observation("bad falsey path", file_path=file_path)  # type: ignore[arg-type]
+
     @pytest.mark.parametrize("auto_commit", [True, False])
     def test_create_observation_rejects_non_project_relative_file_path(self, db: FiligreeDB, auto_commit: bool) -> None:
         with pytest.raises(ValueError, match="project-relative"):
