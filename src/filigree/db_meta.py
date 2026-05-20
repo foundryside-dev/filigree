@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
 from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES, _normalize_project_relative_scan_path
-from filigree.db_issues import _check_expected_assignee
+from filigree.db_issues import _check_expected_assignee, _validate_fields_payload, _validate_priority_value
 from filigree.db_observations import _expires_iso
 from filigree.types.planning import CommentRecord, StatsResult
 
@@ -421,13 +421,66 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Bulk import (for migration) -----------------------------------------
 
+    def _validate_bulk_issue_data(self, issue_data: dict[str, Any]) -> None:
+        issue_id = issue_data["id"]
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            msg = "Issue id cannot be empty"
+            raise ValueError(msg)
+        self._check_id_prefix(issue_id)
+
+        title = issue_data["title"]
+        if not isinstance(title, str) or not title.strip():
+            msg = "Title cannot be empty"
+            raise ValueError(msg)
+
+        priority = issue_data.get("priority", 2)
+        _validate_priority_value(priority)
+
+        issue_type = issue_data.get("type", "task")
+        if not isinstance(issue_type, str) or self.templates.get_type(issue_type) is None:
+            valid_types = [t.type for t in self.templates.list_types()]
+            msg = f"Unknown type '{issue_type}'. Valid types: {', '.join(valid_types)}"
+            raise ValueError(msg)
+
+        status = issue_data.get("status", self.templates.get_initial_state(issue_type))
+        if not isinstance(status, str) or not status.strip():
+            msg = "Invalid status"
+            raise ValueError(msg)
+        self._validate_status(status, issue_type)
+
+        parent_id = issue_data.get("parent_id")
+        if parent_id is not None and not isinstance(parent_id, str):
+            msg = "parent_id must be a string"
+            raise TypeError(msg)
+        if parent_id:
+            self._check_id_prefix(parent_id)
+        self._validate_parent_id(parent_id)
+
+        assignee = issue_data.get("assignee", "")
+        if not isinstance(assignee, str):
+            msg = "assignee must be a string"
+            raise TypeError(msg)
+
+        fields = issue_data.get("fields")
+        _validate_fields_payload(fields)
+        field_values = {} if fields is None else fields
+        if field_values:
+            pattern_errors = self._validate_field_values(issue_type, field_values)
+            if pattern_errors:
+                msg = "Field validation failed: " + "; ".join(pattern_errors)
+                raise ValueError(msg)
+            self._check_field_uniqueness(issue_type, field_values, exclude_id=issue_id)
+
     def bulk_insert_issue(self, issue_data: dict[str, Any], *, validate: bool = True) -> bool:
         """Insert a pre-formed issue dict directly. For migration use only.
 
         Returns True if the row was inserted, False if skipped (duplicate).
         """
+        fields = issue_data.get("fields", {})
         if validate:
-            self._validate_parent_id(issue_data.get("parent_id"))
+            self._validate_bulk_issue_data(issue_data)
+            if fields is None:
+                fields = {}
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO issues "
             "(id, title, status, priority, type, parent_id, assignee, "
@@ -446,7 +499,7 @@ class MetaMixin(DBMixinProtocol):
                 issue_data.get("closed_at"),
                 issue_data.get("description", ""),
                 issue_data.get("notes", ""),
-                json.dumps(issue_data.get("fields", {})),
+                json.dumps(fields),
             ),
         )
         inserted = cursor.rowcount > 0
@@ -454,8 +507,19 @@ class MetaMixin(DBMixinProtocol):
             logger.debug("bulk_insert_issue: skipped duplicate id=%s", issue_data.get("id"))
         return inserted
 
-    def bulk_insert_dependency(self, issue_id: str, depends_on_id: str, dep_type: str = "blocks") -> bool:
+    def bulk_insert_dependency(self, issue_id: str, depends_on_id: str, dep_type: str = "blocks", *, validate: bool = True) -> bool:
         """Insert a dependency. Returns True if inserted, False if skipped (duplicate)."""
+        if validate:
+            self._check_id_prefix(issue_id)
+            self._check_id_prefix(depends_on_id)
+            self.get_issue(issue_id)
+            self.get_issue(depends_on_id)
+            if issue_id == depends_on_id:
+                msg = f"Cannot add self-dependency: {issue_id}"
+                raise ValueError(msg)
+            if self._would_create_cycle(issue_id, depends_on_id):
+                msg = f"Dependency {issue_id} -> {depends_on_id} would create a cycle"
+                raise ValueError(msg)
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
             (issue_id, depends_on_id, dep_type, _now_iso()),
@@ -787,11 +851,10 @@ class MetaMixin(DBMixinProtocol):
         def check(issue_id: Any) -> None:
             if not isinstance(issue_id, str) or not issue_id:
                 return
-            if "-" not in issue_id:
-                return
-            if issue_id.startswith(self.prefix + "-"):
-                return
-            foreign.add(issue_id)
+            try:
+                self._check_id_prefix(issue_id)
+            except WrongProjectError:
+                foreign.add(issue_id)
 
         for rec in issues:
             check(rec.get("id"))

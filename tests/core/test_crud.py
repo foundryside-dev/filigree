@@ -1661,6 +1661,34 @@ class TestImportJsonl:
         assert foreign_rows == 0
         fresh.close()
 
+    def test_import_rejects_foreign_prefix_that_extends_local_prefix(self, tmp_path: Path) -> None:
+        from filigree.core import WrongProjectError
+
+        fresh = FiligreeDB(tmp_path / "dest-prefix-extension.db", prefix="a")
+        fresh.initialize()
+
+        jsonl = tmp_path / "prefix-extension.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": "a-b-1234567890",
+                    "title": "foreign prefix extension",
+                    "status": "open",
+                    "type": "task",
+                    "fields": "{}",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(WrongProjectError, match=r"a-b-1234567890"):
+            fresh.import_jsonl(jsonl, merge=True)
+
+        leaked = fresh.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", ("a-b-1234567890",)).fetchone()[0]
+        assert leaked == 0
+        fresh.close()
+
     def test_import_cross_prefix_rejects_observation_source_issue_id(self, tmp_path: Path) -> None:
         """filigree-b5c304cc75: foreign-prefix preflight must catch
         observation.source_issue_id, not just issue/event/etc IDs. Otherwise
@@ -2063,6 +2091,42 @@ class TestImportJsonl:
         assert result2 is False
         db.bulk_commit()
 
+    def test_bulk_insert_issue_rejects_blank_title_when_validate_true(self, db: FiligreeDB) -> None:
+        """bulk_insert_issue(validate=True) must enforce create_issue title invariants."""
+        bad_id = "test-bulk-blank-title"
+
+        with pytest.raises(ValueError, match="Title cannot be empty"):
+            db.bulk_insert_issue(
+                {
+                    "id": bad_id,
+                    "title": "   ",
+                    "status": "open",
+                    "priority": 2,
+                    "type": "task",
+                }
+            )
+
+        leaked = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", (bad_id,)).fetchone()[0]
+        assert leaked == 0
+
+    def test_bulk_insert_issue_rejects_non_integer_priority_before_write(self, db: FiligreeDB) -> None:
+        """bulk_insert_issue(validate=True) must not durably store priorities the Issue model rejects."""
+        bad_id = "test-bulk-bad-priority"
+
+        with pytest.raises(ValueError, match="Priority must be an integer"):
+            db.bulk_insert_issue(
+                {
+                    "id": bad_id,
+                    "title": "Bad priority",
+                    "status": "open",
+                    "priority": 2.5,
+                    "type": "task",
+                }
+            )
+
+        leaked = db.conn.execute("SELECT COUNT(*) FROM issues WHERE id = ?", (bad_id,)).fetchone()[0]
+        assert leaked == 0
+
     def test_bulk_insert_dependency_returns_inserted_flag(self, db: FiligreeDB) -> None:
         """bulk_insert_dependency must return True when inserted, False when skipped."""
         db.create_issue("A", fields=None)
@@ -2077,6 +2141,32 @@ class TestImportJsonl:
         result2 = db.bulk_insert_dependency(a_id, b_id)
         assert result2 is False
         db.bulk_commit()
+
+    def test_bulk_insert_dependency_rejects_self_dependency(self, db: FiligreeDB) -> None:
+        """bulk_insert_dependency must preserve the normal dependency self-edge guard."""
+        issue = db.create_issue("Self dependency")
+
+        with pytest.raises(ValueError, match="self-dependency"):
+            db.bulk_insert_dependency(issue.id, issue.id)
+
+        leaked = db.conn.execute("SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", (issue.id,)).fetchone()[0]
+        assert leaked == 0
+
+    def test_bulk_insert_dependency_rejects_dependency_cycle(self, db: FiligreeDB) -> None:
+        """bulk_insert_dependency must not bypass cycle detection."""
+        first = db.create_issue("First")
+        second = db.create_issue("Second")
+        assert db.bulk_insert_dependency(first.id, second.id) is True
+        db.bulk_commit()
+
+        with pytest.raises(ValueError, match="would create a cycle"):
+            db.bulk_insert_dependency(second.id, first.id)
+
+        cycle_edges = db.conn.execute(
+            "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
+            (second.id, first.id),
+        ).fetchone()[0]
+        assert cycle_edges == 0
 
     def test_bulk_insert_event_returns_inserted_flag(self, db: FiligreeDB) -> None:
         """bulk_insert_event must return True when inserted, False when skipped."""
