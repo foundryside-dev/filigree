@@ -559,8 +559,9 @@ class PlanningMixin(DBMixinProtocol):
             except json.JSONDecodeError:
                 continue
             sequence = fields.get("sequence") if isinstance(fields, dict) else None
-            if isinstance(sequence, int) and sequence > max_sequence:
-                max_sequence = sequence
+            sort_kind, normalized = _sequence_sort_key(sequence)
+            if sort_kind == 0 and isinstance(normalized, int) and normalized > max_sequence:
+                max_sequence = normalized
         return max_sequence + 1
 
     def add_plan_step(

@@ -106,6 +106,32 @@ class TestCreatePlan:
         assert [phase["phase"]["title"] for phase in plan["phases"]] == ["Phase 1", "Phase 2", "Phase 3"]
         assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2"]
 
+    def test_add_plan_step_counts_numeric_string_sequences(self, db: FiligreeDB) -> None:
+        ms = db.create_issue("Milestone", type="milestone")
+        phase = db.create_issue("Phase", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        db.create_issue("Step 1", type="step", parent_id=phase.id, fields={"sequence": "1"})
+        db.create_issue("Step 2", type="step", parent_id=phase.id, fields={"sequence": "2"})
+
+        added = db.add_plan_step(phase.id, "Step 3")
+
+        assert added.fields["sequence"] == 3
+        plan = db.get_plan(ms.id)
+        assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2", "Step 3"]
+
+    def test_move_plan_step_counts_numeric_string_sequences(self, db: FiligreeDB) -> None:
+        ms = db.create_issue("Milestone", type="milestone")
+        source = db.create_issue("Source", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        target = db.create_issue("Target", type="phase", parent_id=ms.id, fields={"sequence": 2})
+        moving = db.create_issue("Move me", type="step", parent_id=source.id, fields={"sequence": 1})
+        db.create_issue("Target step 1", type="step", parent_id=target.id, fields={"sequence": "1"})
+        db.create_issue("Target step 2", type="step", parent_id=target.id, fields={"sequence": "2"})
+
+        moved = db.move_plan_step(moving.id, target.id)
+
+        assert moved.fields["sequence"] == 3
+        plan = db.get_plan(ms.id)
+        assert [step["title"] for step in plan["phases"][1]["steps"]] == ["Target step 1", "Target step 2", "Move me"]
+
     def test_plan_uses_template_initial_states(self, db: FiligreeDB) -> None:
         plan = db.create_plan(
             {"title": "Initial states"},
