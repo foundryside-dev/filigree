@@ -181,6 +181,22 @@ class TestListIssuesBoundaries:
         results = db.list_issues(offset=9999)
         assert results == []
 
+    def test_list_issues_chunks_hydration_above_sqlite_variable_limit(self, db: FiligreeDB) -> None:
+        expected_ids = [db.create_issue(f"Bulk list {i}", labels=["bulk-page"]).id for i in range(101)]
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+
+        results = db.list_issues(label="bulk-page", sort_by="created_at", direction="asc", limit=101)
+
+        assert [issue.id for issue in results] == expected_ids
+
+    def test_build_issues_batch_chunks_above_sqlite_variable_limit(self, db: FiligreeDB) -> None:
+        expected_ids = [db.create_issue(f"Bulk hydrate {i}").id for i in range(101)]
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+
+        issues = db._build_issues_batch(expected_ids)
+
+        assert [issue.id for issue in issues] == expected_ids
+
 
 class TestSanitizeFtsQuery:
     """Unit tests for _sanitize_fts_query — primary defense against FTS5 injection."""

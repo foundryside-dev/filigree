@@ -607,30 +607,39 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         return issues[0]
 
+    def _chunk_issue_ids_for_sqlite(self, issue_ids: list[str], *, extra_params: int = 0) -> list[list[str]]:
+        variable_limit = self.conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        chunk_size = max(1, variable_limit - extra_params)
+        return [issue_ids[start : start + chunk_size] for start in range(0, len(issue_ids), chunk_size)]
+
     def _build_issues_batch(self, issue_ids: list[str]) -> list[Issue]:
         """Build multiple Issues efficiently with batched queries (eliminates N+1)."""
         if not issue_ids:
             return []
 
-        placeholders = ",".join("?" * len(issue_ids))
-
         # 1. Fetch all issue rows
         rows_by_id: dict[str, sqlite3.Row] = {}
-        for r in self.conn.execute(f"SELECT * FROM issues WHERE id IN ({placeholders})", issue_ids).fetchall():
-            rows_by_id[r["id"]] = r
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT * FROM issues WHERE id IN ({placeholders})", chunk).fetchall():
+                rows_by_id[r["id"]] = r
 
         # 2. Batch fetch labels
         labels_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(f"SELECT issue_id, label FROM labels WHERE issue_id IN ({placeholders})", issue_ids).fetchall():
-            labels_by_id[r["issue_id"]].append(r["label"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT issue_id, label FROM labels WHERE issue_id IN ({placeholders})", chunk).fetchall():
+                labels_by_id[r["issue_id"]].append(r["label"])
 
         # 3. Batch fetch "blocks" — issues blocked BY these IDs (where depends_on_id = this issue)
         blocks_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(
-            f"SELECT depends_on_id, issue_id FROM dependencies WHERE depends_on_id IN ({placeholders})",
-            issue_ids,
-        ).fetchall():
-            blocks_by_id[r["depends_on_id"]].append(r["issue_id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT depends_on_id, issue_id FROM dependencies WHERE depends_on_id IN ({placeholders})",
+                chunk,
+            ).fetchall():
+                blocks_by_id[r["depends_on_id"]].append(r["issue_id"])
 
         # 4. Batch fetch "blocked_by" — only open (non-done, non-archived) blockers.
         # Archived blockers must not appear here (filigree-42045dd065): archive_closed
@@ -645,29 +654,35 @@ class IssuesMixin(DBMixinProtocol):
             include_archived=True,
         )
         blocked_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(
-            f"SELECT d.issue_id, d.depends_on_id FROM dependencies d "
-            f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-            f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql})",
-            [*issue_ids, *blocker_done_params],
-        ).fetchall():
-            blocked_by_id[r["issue_id"]].append(r["depends_on_id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT d.issue_id, d.depends_on_id FROM dependencies d "
+                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql})",
+                [*chunk, *blocker_done_params],
+            ).fetchall():
+                blocked_by_id[r["issue_id"]].append(r["depends_on_id"])
 
         # 5. Batch fetch children
         children_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", issue_ids).fetchall():
-            children_by_id[r["parent_id"]].append(r["id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", chunk).fetchall():
+                children_by_id[r["parent_id"]].append(r["id"])
 
         # 6. Batch compute open blocker counts — same blocker semantics as step 4.
         open_blockers_by_id: dict[str, int] = dict.fromkeys(issue_ids, 0)
-        for r in self.conn.execute(
-            f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
-            f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-            f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
-            f"GROUP BY d.issue_id",
-            [*issue_ids, *blocker_done_params],
-        ).fetchall():
-            open_blockers_by_id[r["issue_id"]] = r["cnt"]
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
+                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
+                f"GROUP BY d.issue_id",
+                [*chunk, *blocker_done_params],
+            ).fetchall():
+                open_blockers_by_id[r["issue_id"]] = r["cnt"]
 
         # Build Issue objects preserving input order
         result: list[Issue] = []
