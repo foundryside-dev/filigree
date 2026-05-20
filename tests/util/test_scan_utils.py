@@ -315,6 +315,53 @@ class TestRunScannerPipeline:
         assert "Defects found:  1" in out
         assert "P1: 1" in out
 
+    async def test_unreadable_optional_context_file_does_not_abort_scan(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        (tmp_path / "CLAUDE.md").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+        executor_ran = False
+
+        async def fake_executor(**kwargs: object) -> None:
+            nonlocal executor_ran
+            executor_ran = True
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 0
+        assert executor_ran is True
+        assert "Skipping unreadable context file CLAUDE.md" in capsys.readouterr().err
+
+    async def test_executor_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise RuntimeError("scanner exploded")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL target.py: scanner exploded" in captured.err
+
 
 class TestAnalyseFiles:
     async def test_cache_warmup_runs_first_file_before_parallel_batch(self, tmp_path: Path) -> None:

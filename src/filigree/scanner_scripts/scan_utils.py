@@ -202,8 +202,14 @@ def load_context(repo_root: Path) -> str:
     parts: list[str] = []
     for name in ("CLAUDE.md", "ARCHITECTURE.md"):
         path = repo_root / name
-        if path.exists():
-            parts.append(f"--- {name} ---\n{path.read_text(encoding='utf-8')}")
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"Warning: Skipping unreadable context file {name}: {exc}", file=sys.stderr)
+            continue
+        parts.append(f"--- {name} ---\n{text}")
     return "\n\n".join(parts)
 
 
@@ -836,6 +842,9 @@ async def run_scanner_pipeline(
     print("=" * 50)
 
     if not args.no_ingest and stats.get("api_files_posted", 0) == 0 and stats.get("api_files_failed", 0) > 0:
+        return 1
+
+    if stats.get("failed", 0) > 0:
         return 1
 
     return 0
