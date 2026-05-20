@@ -289,6 +289,70 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_promote_annotation_rolls_back_issue_target_when_audit_event_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "src.py").write_text("x = 1\n")
+            annotation = db.annotate_file("src.py", "This should become issue work.", line_start=1)
+            before_issue_ids = {row["id"] for row in db.conn.execute("SELECT id FROM issues").fetchall()}
+            original_event = db._record_annotation_event
+
+            def fail_promote_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "promoted":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_promote_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.promote_annotation(annotation["annotation_id"], target_type="issue", title="Promoted target")
+
+            after_issue_ids = {row["id"] for row in db.conn.execute("SELECT id FROM issues").fetchall()}
+            promoted_links = db.conn.execute(
+                "SELECT COUNT(*) FROM annotation_links WHERE annotation_id = ? AND relationship = 'promoted_to'",
+                (annotation["annotation_id"],),
+            ).fetchone()[0]
+            assert after_issue_ids == before_issue_ids
+            assert promoted_links == 0
+        finally:
+            db.close()
+
+    def test_promote_annotation_rolls_back_observation_target_when_audit_event_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "src.py").write_text("x = 1\n")
+            annotation = db.annotate_file("src.py", "This should become observation work.", line_start=1)
+            before_observation_ids = {row["id"] for row in db.conn.execute("SELECT id FROM observations").fetchall()}
+            original_event = db._record_annotation_event
+
+            def fail_promote_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "promoted":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_promote_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.promote_annotation(annotation["annotation_id"], target_type="observation", title="Promoted target")
+
+            after_observation_ids = {row["id"] for row in db.conn.execute("SELECT id FROM observations").fetchall()}
+            promoted_links = db.conn.execute(
+                "SELECT COUNT(*) FROM annotation_links WHERE annotation_id = ? AND relationship = 'promoted_to'",
+                (annotation["annotation_id"],),
+            ).fetchone()[0]
+            assert after_observation_ids == before_observation_ids
+            assert promoted_links == 0
+        finally:
+            db.close()
+
     def test_provenance_flags_redaction_generated_binary_and_file_delete(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)

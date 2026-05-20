@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast, get_args
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _begin_immediate, _now_iso
 from filigree.db_files import _normalize_scan_path
 from filigree.types.api import ErrorCode
 from filigree.types.core import (
@@ -1018,25 +1018,28 @@ class AnnotationsMixin(DBMixinProtocol):
             msg = "target_type must be 'issue' or 'observation'"
             raise ValueError(msg)
         default_title = (title or annotation["note"].splitlines()[0]).strip()[:120] or "Promoted annotation"
-        if target_type == "issue":
-            issue = self.create_issue(
-                default_title,
-                description=annotation["note"],
-                notes=reason,
-                labels=["from-annotation"],
-                actor=actor,
-            )
-            target_id = issue.id
-        else:
-            obs = self.create_observation(
-                default_title,
-                detail=annotation["note"],
-                file_path=annotation["file_path"],
-                line=annotation["line_start"],
-                actor=actor,
-            )
-            target_id = obs["id"]
+        _begin_immediate(self.conn, "promote_annotation")
         try:
+            if target_type == "issue":
+                issue = self.create_issue(
+                    default_title,
+                    description=annotation["note"],
+                    notes=reason,
+                    labels=["from-annotation"],
+                    actor=actor,
+                    _skip_begin=True,
+                )
+                target_id = issue.id
+            else:
+                obs = self.create_observation(
+                    default_title,
+                    detail=annotation["note"],
+                    file_path=annotation["file_path"],
+                    line=annotation["line_start"],
+                    actor=actor,
+                    auto_commit=False,
+                )
+                target_id = obs["id"]
             link = self._insert_annotation_link(
                 annotation_id,
                 target_type=target_type,
@@ -1060,7 +1063,8 @@ class AnnotationsMixin(DBMixinProtocol):
             )
             self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if self.conn.in_transaction:
+                self.conn.rollback()
             raise
         return {
             "annotation": self.get_annotation(annotation_id),
