@@ -1755,6 +1755,22 @@ class TestTemplateEnforcementValidation:
 
 
 class TestTemplateMalformedShape:
+    def _base_template(self, **overrides: Any) -> dict[str, Any]:
+        raw: dict[str, Any] = {
+            "type": "badshape",
+            "display_name": "Bad",
+            "description": "Bad shape",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+            "fields_schema": [],
+        }
+        raw.update(overrides)
+        return raw
+
     def test_states_none_raises_value_error(self) -> None:
         """Template with states=None should raise ValueError, not TypeError."""
         raw: dict[str, Any] = {
@@ -1809,6 +1825,70 @@ class TestTemplateMalformedShape:
             "fields_schema": [],
         }
         with pytest.raises(ValueError, match="must be a dict with 'name' and 'category'"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_non_string_type_raises_value_error(self) -> None:
+        raw = self._base_template(type=123)
+
+        with pytest.raises(ValueError, match="'type' must be a string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_non_string_state_name_raises_value_error(self) -> None:
+        raw = self._base_template(states=[{"name": None, "category": "open"}])
+
+        with pytest.raises(ValueError, match=r"state at index 0.*name.*string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_transition_missing_required_key_raises_value_error(self) -> None:
+        raw = self._base_template(transitions=[{"to": "closed", "enforcement": "soft"}])
+
+        with pytest.raises(ValueError, match=r"transition at index 0.*from"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_missing_required_key_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"type": "text"}])
+
+        with pytest.raises(ValueError, match=r"field at index 0.*name"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_transition_requires_fields_string_raises_value_error(self) -> None:
+        raw = self._base_template(
+            transitions=[
+                {"from": "open", "to": "closed", "enforcement": "soft", "requires_fields": "fix_verification"},
+            ],
+        )
+
+        with pytest.raises(ValueError, match=r"requires_fields.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_options_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "severity", "type": "enum", "options": "major"}])
+
+        with pytest.raises(ValueError, match=r"options.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_required_at_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "severity", "type": "text", "required_at": "closed"}])
+
+        with pytest.raises(ValueError, match=r"required_at.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_pattern_non_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "code", "type": "text", "pattern": 123}])
+
+        with pytest.raises(ValueError, match=r"pattern.*string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_suggested_children_string_raises_value_error(self) -> None:
+        raw = self._base_template(suggested_children="task")
+
+        with pytest.raises(ValueError, match=r"suggested_children.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_suggested_labels_string_raises_value_error(self) -> None:
+        raw = self._base_template(suggested_labels="bug")
+
+        with pytest.raises(ValueError, match=r"suggested_labels.*list of strings"):
             TemplateRegistry.parse_type_template(raw)
 
     def test_malformed_template_in_pack_loading_does_not_crash(self, tmp_path: object) -> None:

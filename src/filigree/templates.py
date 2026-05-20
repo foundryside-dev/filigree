@@ -320,13 +320,52 @@ class TemplateRegistry:
 
         Raises:
             ValueError: If required fields are missing, invalid, or exceed size limits.
-            KeyError: If required keys are missing from the dict.
         """
+        if not isinstance(raw, dict):
+            msg = f"Type template root must be an object, got {type(raw).__name__}"
+            raise ValueError(msg)
+
+        def required_string(mapping: dict[str, Any], key: str, context: str) -> str:
+            if key not in mapping:
+                msg = f"{context}: missing required key '{key}'"
+                raise ValueError(msg)
+            value = mapping[key]
+            if not isinstance(value, str):
+                msg = f"{context}: '{key}' must be a string, got {type(value).__name__}"
+                raise ValueError(msg)
+            return value
+
+        def optional_string(mapping: dict[str, Any], key: str, default: str, context: str) -> str:
+            if key not in mapping:
+                return default
+            value = mapping[key]
+            if not isinstance(value, str):
+                msg = f"{context}: '{key}' must be a string, got {type(value).__name__}"
+                raise ValueError(msg)
+            return value
+
+        def optional_string_tuple(mapping: dict[str, Any], key: str, context: str) -> tuple[str, ...]:
+            if key not in mapping:
+                return ()
+            value = mapping[key]
+            if not isinstance(value, list):
+                msg = f"{context}: '{key}' must be a list of strings, got {type(value).__name__}"
+                raise ValueError(msg)
+            for i, item in enumerate(value):
+                if not isinstance(item, str):
+                    msg = f"{context}: '{key}' item at index {i} must be a string, got {type(item).__name__}"
+                    raise ValueError(msg)
+            return tuple(value)
+
         # Validate type name format
-        type_name = raw["type"]
+        type_name = required_string(raw, "type", "Type template")
         if not _NAME_PATTERN.match(type_name):
             msg = f"Invalid type name '{type_name}': must match ^[a-z][a-z0-9_]{{0,63}}$"
             raise ValueError(msg)
+        display_name = required_string(raw, "display_name", f"Type '{type_name}'")
+        description = optional_string(raw, "description", "", f"Type '{type_name}'")
+        pack = optional_string(raw, "pack", "custom", f"Type '{type_name}'")
+        initial_state = required_string(raw, "initial_state", f"Type '{type_name}'")
 
         # Defensive shape checks (must come before size limits to avoid TypeError on None)
         raw_states = raw.get("states")
@@ -336,10 +375,16 @@ class TemplateRegistry:
         if not raw_states:
             msg = f"Type '{type_name}': must have at least one state"
             raise ValueError(msg)
-        for i, s in enumerate(raw_states):
-            if not isinstance(s, dict) or "name" not in s or "category" not in s:
+        state_specs: list[tuple[str, str]] = []
+        for i, state in enumerate(raw_states):
+            if not isinstance(state, dict):
                 msg = f"Type '{type_name}': state at index {i} must be a dict with 'name' and 'category'"
                 raise ValueError(msg)
+            if "name" not in state or "category" not in state:
+                msg = f"Type '{type_name}': state at index {i} must be a dict with 'name' and 'category'"
+                raise ValueError(msg)
+            context = f"Type '{type_name}': state at index {i}"
+            state_specs.append((required_string(state, "name", context), required_string(state, "category", context)))
 
         # Defensive shape checks for transitions and fields_schema
         raw_transitions = raw.get("transitions", [])
@@ -348,10 +393,20 @@ class TemplateRegistry:
             raise ValueError(msg)
         if raw_transitions is None:
             raw_transitions = []
-        for i, t in enumerate(raw_transitions):
-            if not isinstance(t, dict):
-                msg = f"Type '{type_name}': transition at index {i} must be a dict, got {type(t).__name__}"
+        transition_specs: list[tuple[str, str, str, tuple[str, ...]]] = []
+        for i, transition in enumerate(raw_transitions):
+            if not isinstance(transition, dict):
+                msg = f"Type '{type_name}': transition at index {i} must be a dict, got {type(transition).__name__}"
                 raise ValueError(msg)
+            context = f"Type '{type_name}': transition at index {i}"
+            transition_specs.append(
+                (
+                    required_string(transition, "from", context),
+                    required_string(transition, "to", context),
+                    required_string(transition, "enforcement", context),
+                    optional_string_tuple(transition, "requires_fields", context),
+                )
+            )
 
         raw_reverse_transitions = raw.get("reverse_transitions", [])
         if raw_reverse_transitions is not None and not isinstance(raw_reverse_transitions, list):
@@ -359,10 +414,20 @@ class TemplateRegistry:
             raise ValueError(msg)
         if raw_reverse_transitions is None:
             raw_reverse_transitions = []
-        for i, t in enumerate(raw_reverse_transitions):
-            if not isinstance(t, dict):
-                msg = f"Type '{type_name}': reverse_transition at index {i} must be a dict, got {type(t).__name__}"
+        reverse_transition_specs: list[tuple[str, str, str, tuple[str, ...]]] = []
+        for i, transition in enumerate(raw_reverse_transitions):
+            if not isinstance(transition, dict):
+                msg = f"Type '{type_name}': reverse_transition at index {i} must be a dict, got {type(transition).__name__}"
                 raise ValueError(msg)
+            context = f"Type '{type_name}': reverse_transition at index {i}"
+            reverse_transition_specs.append(
+                (
+                    required_string(transition, "from", context),
+                    required_string(transition, "to", context),
+                    required_string(transition, "enforcement", context),
+                    optional_string_tuple(transition, "requires_fields", context),
+                )
+            )
 
         raw_fields = raw.get("fields_schema", [])
         if raw_fields is not None and not isinstance(raw_fields, list):
@@ -370,20 +435,37 @@ class TemplateRegistry:
             raise ValueError(msg)
         if raw_fields is None:
             raw_fields = []
-        for i, f in enumerate(raw_fields):
-            if not isinstance(f, dict):
-                msg = f"Type '{type_name}': field at index {i} must be a dict, got {type(f).__name__}"
+        field_specs: list[tuple[str, str, str, tuple[str, ...], Any, tuple[str, ...], str | None, Any]] = []
+        for i, field in enumerate(raw_fields):
+            if not isinstance(field, dict):
+                msg = f"Type '{type_name}': field at index {i} must be a dict, got {type(field).__name__}"
                 raise ValueError(msg)
+            context = f"Type '{type_name}': field at index {i}"
+            pattern = field.get("pattern")
+            if pattern is not None and not isinstance(pattern, str):
+                msg = f"{context}: 'pattern' must be a string, got {type(pattern).__name__}"
+                raise ValueError(msg)
+            field_specs.append(
+                (
+                    required_string(field, "name", context),
+                    required_string(field, "type", context),
+                    optional_string(field, "description", "", context),
+                    optional_string_tuple(field, "options", context),
+                    field.get("default"),
+                    optional_string_tuple(field, "required_at", context),
+                    pattern,
+                    field.get("unique", False),
+                )
+            )
 
         # Enforcement validation (filigree-9b9e45: only "hard"/"soft" are valid)
         valid_enforcement = {"hard", "soft"}
-        for t in [*raw_transitions, *raw_reverse_transitions]:
-            enforcement_val = t.get("enforcement")
+        for from_state, to_state, enforcement_val, _requires_fields in [*transition_specs, *reverse_transition_specs]:
             if enforcement_val not in valid_enforcement:
                 allowed = ", ".join(sorted(valid_enforcement))
                 msg = (
                     f"Type '{type_name}': transition "
-                    f"{t.get('from')}->{t.get('to')} "
+                    f"{from_state}->{to_state} "
                     f"has invalid enforcement '{enforcement_val}' "
                     f"(must be one of: {allowed})"
                 )
@@ -404,7 +486,7 @@ class TemplateRegistry:
         logger.debug("Parsing template for type: %s", type_name)
 
         # StateDefinition.__post_init__ validates each state name format + category
-        states = tuple(StateDefinition(name=s["name"], category=s["category"]) for s in raw_states)
+        states = tuple(StateDefinition(name=name, category=category) for name, category in state_specs)
 
         # Detect duplicate state names (filigree-eff214)
         seen_names: set[str] = set()
@@ -416,21 +498,21 @@ class TemplateRegistry:
 
         transitions = tuple(
             TransitionDefinition(
-                from_state=t["from"],
-                to_state=t["to"],
-                enforcement=t["enforcement"],
-                requires_fields=tuple(t.get("requires_fields", [])),
+                from_state=from_state,
+                to_state=to_state,
+                enforcement=enforcement,
+                requires_fields=requires_fields,
             )
-            for t in raw_transitions
+            for from_state, to_state, enforcement, requires_fields in transition_specs
         )
         reverse_transitions = tuple(
             TransitionDefinition(
-                from_state=t["from"],
-                to_state=t["to"],
-                enforcement=t["enforcement"],
-                requires_fields=tuple(t.get("requires_fields", [])),
+                from_state=from_state,
+                to_state=to_state,
+                enforcement=enforcement,
+                requires_fields=requires_fields,
             )
-            for t in raw_reverse_transitions
+            for from_state, to_state, enforcement, requires_fields in reverse_transition_specs
         )
 
         # Detect duplicate (from_state, to_state) pairs (filigree-ab91b3, filigree-3e3f12)
@@ -450,29 +532,29 @@ class TemplateRegistry:
             seen_reverse_transitions.add(key)
         fields_schema = tuple(
             FieldSchema(
-                name=f["name"],
-                type=f["type"],
-                description=f.get("description", ""),
-                options=tuple(f.get("options", [])),
-                default=f.get("default"),
-                required_at=tuple(f.get("required_at", [])),
-                pattern=f.get("pattern"),
-                unique=f.get("unique", False),
+                name=name,
+                type=field_type,
+                description=field_description,
+                options=options,
+                default=default,
+                required_at=required_at,
+                pattern=pattern,
+                unique=unique,
             )
-            for f in raw_fields
+            for name, field_type, field_description, options, default, required_at, pattern, unique in field_specs
         )
         return TypeTemplate(
             type=type_name,
-            display_name=raw["display_name"],
-            description=raw.get("description", ""),
-            pack=raw.get("pack", "custom"),
+            display_name=display_name,
+            description=description,
+            pack=pack,
             states=states,
-            initial_state=raw["initial_state"],
+            initial_state=initial_state,
             transitions=transitions,
             fields_schema=fields_schema,
             reverse_transitions=reverse_transitions,
-            suggested_children=tuple(raw.get("suggested_children", [])),
-            suggested_labels=tuple(raw.get("suggested_labels", [])),
+            suggested_children=optional_string_tuple(raw, "suggested_children", f"Type '{type_name}'"),
+            suggested_labels=optional_string_tuple(raw, "suggested_labels", f"Type '{type_name}'"),
         )
 
     @staticmethod
