@@ -125,6 +125,14 @@ class TestRegisterFile:
         with pytest.raises(ValueError, match="File path must be a string"):
             db.register_file(123)  # type: ignore[arg-type]
 
+    def test_register_file_rejects_non_object_metadata(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="metadata must be a JSON object"):
+            db.register_file("src/meta.py", metadata=cast(Any, ["bad"]))
+
+        db.register_file("src/meta.py", metadata={"owner": "team-a"})
+        with pytest.raises(ValueError, match="metadata must be a JSON object"):
+            db.register_file("src/meta.py", metadata=cast(Any, ["bad"]))
+
     def test_register_file_records_actor_on_record_and_metadata_event(self, db: FiligreeDB) -> None:
         created = db.register_file("src/owned.py", language="python", actor="scanner-a")
 

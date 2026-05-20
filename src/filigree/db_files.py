@@ -160,6 +160,15 @@ def _normalize_file_path_prefix(path_prefix: str) -> str:
     return normalized
 
 
+def _validate_file_metadata(metadata: object | None) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        msg = "metadata must be a JSON object"
+        raise ValueError(msg)
+    return metadata
+
+
 def _infer_language_from_path(path: str) -> str:
     """Infer a conservative language name from a path extension."""
     _root, ext = os.path.splitext(path.casefold())
@@ -287,6 +296,7 @@ class FilesMixin(DBMixinProtocol):
         update code path (mirroring ``_upsert_file_record``'s pattern).
         """
         path = _normalize_project_relative_scan_path(path, field_name="File path")
+        metadata = _validate_file_metadata(metadata)
         now = _now_iso()
         existing = self.conn.execute("SELECT * FROM file_records WHERE path = ?", (path,)).fetchone()
         inferred_language = _infer_language_from_path(path)
