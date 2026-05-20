@@ -416,6 +416,60 @@ class TestAnalyseFiles:
         assert post_calls[1]["complete_scan_run"] is True
         assert "[1/1] target.py" in capsys.readouterr().err
 
+    async def test_skip_existing_report_ingests_findings_before_completion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        report = output_dir / "target.py.md"
+        report.parent.mkdir(parents=True)
+        report.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+        post_calls: list[dict[str, Any]] = []
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("skip-existing must not execute scanner")
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            post_calls.append(kwargs)
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=True,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["P1"] == 1
+        assert stats["api_files_posted"] == 1
+        assert stats["api_files_failed"] == 0
+        assert len(post_calls) == 2
+        assert post_calls[0]["complete_scan_run"] is False
+        assert post_calls[0]["create_observations"] is True
+        assert post_calls[0]["findings"][0]["path"] == "target.py"
+        assert post_calls[1]["findings"] == []
+        assert post_calls[1]["complete_scan_run"] is True
+        assert "[skip] target.py" in capsys.readouterr().err
+
     async def test_records_api_failures_for_finding_and_completion_posts(
         self,
         tmp_path: Path,

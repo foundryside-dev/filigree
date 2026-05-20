@@ -556,8 +556,39 @@ async def _analyse_files(
     api_successes = 0
     api_failures = 0
 
+    def ingest_report(fpath: Path, out: Path) -> None:
+        nonlocal api_successes, api_failures
+        if no_ingest or not out.exists():
+            return
+        try:
+            text = out.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as read_exc:
+            failed.append((fpath, read_exc))
+            print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
+            return
+        rel_path = str(_display_path(fpath, repo_root))
+        findings = parse_findings(text, file_path=rel_path)
+        if not findings:
+            return
+
+        # Ingest findings but defer scan run completion to the final POST after
+        # all files are processed.
+        ok, err_detail = post_to_api(
+            api_url=api_url,
+            scan_source=scan_source,
+            scan_run_id=scan_run_id,
+            findings=findings,
+            create_observations=True,
+            complete_scan_run=False,
+        )
+        if ok:
+            api_successes += 1
+        else:
+            api_failures += 1
+            print(f"  API error for {rel_path}: {err_detail}", file=sys.stderr)
+
     async def run_batch(batch: list[Path]) -> None:
-        nonlocal done, api_successes, api_failures
+        nonlocal done
         tasks: list[tuple[Path, Path, asyncio.Task[None]]] = []
 
         for fpath in batch:
@@ -568,6 +599,7 @@ async def _analyse_files(
                 done += 1
                 report_paths.append(out)
                 print(f"  [skip] {_display_path(fpath, repo_root)}", file=sys.stderr)
+                ingest_report(fpath, out)
                 continue
 
             prompt = prompt_template.format(file_path=fpath, context=context)
@@ -591,32 +623,7 @@ async def _analyse_files(
             else:
                 report_paths.append(out)
                 print(f"  [{done}/{total}] {_display_path(fpath, repo_root)}", file=sys.stderr)
-
-                if not no_ingest and out.exists():
-                    try:
-                        text = out.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError) as read_exc:
-                        failed.append((fpath, read_exc))
-                        print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
-                        continue
-                    rel_path = str(_display_path(fpath, repo_root))
-                    findings = parse_findings(text, file_path=rel_path)
-                    if findings:
-                        # Ingest findings but defer scan run completion to the
-                        # final POST after all files are processed (Bug #4 fix).
-                        ok, err_detail = post_to_api(
-                            api_url=api_url,
-                            scan_source=scan_source,
-                            scan_run_id=scan_run_id,
-                            findings=findings,
-                            create_observations=True,
-                            complete_scan_run=False,
-                        )
-                        if ok:
-                            api_successes += 1
-                        else:
-                            api_failures += 1
-                            print(f"  API error for {rel_path}: {err_detail}", file=sys.stderr)
+                ingest_report(fpath, out)
 
     remaining_files = files
     if cache_warmup and batch_size > 1 and total > 1:
