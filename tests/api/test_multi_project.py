@@ -216,6 +216,24 @@ class TestProjectStore:
         after_keys = {p["key"] for p in project_store.list_projects()}
         assert after_keys == before_keys
 
+    def test_reload_malformed_project_entry_retains_state(self, project_store: ProjectStore, tmp_path: Path) -> None:
+        import json
+
+        config_dir = tmp_path / ".config" / "filigree"
+        before_keys = {p["key"] for p in project_store.list_projects()}
+        existing = json.loads((config_dir / "server.json").read_text())
+        alpha_path = next(path for path, meta in existing["projects"].items() if meta["prefix"] == "alpha")
+        existing["projects"][alpha_path] = "oops"
+        (config_dir / "server.json").write_text(json.dumps(existing))
+
+        diff = project_store.reload()
+
+        assert diff["added"] == []
+        assert diff["removed"] == []
+        assert diff["error"]
+        after_keys = {p["key"] for p in project_store.list_projects()}
+        assert after_keys == before_keys
+
     def test_get_db_logs_and_reraises_open_failure(
         self,
         project_store: ProjectStore,

@@ -558,6 +558,28 @@ class TestProjectStoreLoadCorruption:
         with pytest.raises(ValueError, match="'projects' must be an object"):
             store.load()
 
+    def test_load_raises_when_project_entry_is_not_object(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed project entry must fail load() instead of disappearing."""
+        config_dir = self._setup_server_config(tmp_path, monkeypatch)
+        project_path = str(tmp_path / "proj" / ".filigree")
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {project_path: "oops"}}))
+
+        store = ProjectStore()
+        with pytest.raises(ValueError, match="project entry"):
+            store.load()
+
+    def test_load_raises_when_project_prefix_is_not_string(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed prefix must fail load() instead of dropping the project."""
+        config_dir = self._setup_server_config(tmp_path, monkeypatch)
+        project_path = str(tmp_path / "proj" / ".filigree")
+        (config_dir / "server.json").write_text(
+            json.dumps({"port": 8377, "projects": {project_path: {"prefix": ["bad"]}}})
+        )
+
+        store = ProjectStore()
+        with pytest.raises(ValueError, match="project prefix"):
+            store.load()
+
     def test_load_with_no_server_json_produces_empty_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """When server.json is absent, load() produces an empty project map."""
         self._setup_server_config(tmp_path, monkeypatch)

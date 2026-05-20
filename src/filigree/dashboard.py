@@ -212,6 +212,16 @@ class ProjectStore:
             projects_node = parsed.get("projects", {})
             if not isinstance(projects_node, dict):
                 raise ValueError(f"Corrupt server config {SERVER_CONFIG_FILE}: 'projects' must be an object")
+            for project_path, meta in projects_node.items():
+                if not isinstance(meta, dict):
+                    raise ValueError(
+                        f"Corrupt server config {SERVER_CONFIG_FILE}: project entry for {project_path!r} must be an object"
+                    )
+                prefix = meta.get("prefix")
+                if not isinstance(prefix, str):
+                    raise ValueError(
+                        f"Corrupt server config {SERVER_CONFIG_FILE}: project prefix for {project_path!r} must be a string"
+                    )
 
         config = read_server_config()
         projects: dict[str, dict[str, str]] = {}
