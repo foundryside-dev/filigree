@@ -1439,6 +1439,9 @@ class FilesMixin(DBMixinProtocol):
         params: list[Any] = []
 
         if status is not None:
+            if not isinstance(status, str):
+                msg = "status must be a string"
+                raise ValueError(msg)
             if status not in VALID_FINDING_STATUSES:
                 valid = ", ".join(sorted(VALID_FINDING_STATUSES))
                 msg = f'Invalid finding status "{status}". Must be one of: {valid}'

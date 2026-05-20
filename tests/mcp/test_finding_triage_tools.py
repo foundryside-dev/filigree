@@ -412,6 +412,12 @@ class TestUpdateFindingTool:
         data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"], "status": "banana"}))
         assert data["code"] == ErrorCode.VALIDATION
 
+    async def test_update_non_string_status_rejected(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"], "status": ["fixed"]}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "status must be a string" in data["error"]
+
 
 class TestBatchUpdateFindingsTool:
     async def test_batch_update(self, mcp_db: FiligreeDB) -> None:

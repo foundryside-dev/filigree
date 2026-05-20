@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from filigree.core import FiligreeDB
@@ -107,6 +109,11 @@ class TestUpdateFinding:
         ids = _seed_findings(db)
         with pytest.raises(ValueError, match="Invalid finding status"):
             db.update_finding(ids["obo"], status="bogus")
+
+    def test_non_string_status_raises_value_error(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(ValueError, match="status must be a string"):
+            db.update_finding(ids["obo"], status=cast(Any, ["fixed"]))
 
     def test_not_found_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(KeyError):
