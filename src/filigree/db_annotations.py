@@ -115,6 +115,20 @@ class AnnotationsMixin(DBMixinProtocol):
             raise ValueError(msg)
         return normalized, resolved
 
+    def _resolve_stored_annotation_file_path(self, file_path: Any) -> Path | None:
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+        normalized = _normalize_scan_path(file_path.strip())
+        if not normalized or Path(normalized).is_absolute():
+            return None
+        root = self._project_root_for_annotations()
+        resolved = (root / normalized).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved
+
     @staticmethod
     def _validate_annotation_line_range(line_start: int | None, line_end: int | None) -> tuple[int | None, int | None]:
         if line_start is None and line_end is not None:
@@ -355,8 +369,6 @@ class AnnotationsMixin(DBMixinProtocol):
         provenance: sqlite3.Row | None,
     ) -> dict[str, Any]:
         file_path = annotation["file_path"]
-        root = self._project_root_for_annotations()
-        absolute_path = (root / file_path).resolve()
         commit_ref = provenance["commit_ref"] if provenance is not None else ""
         base = {
             "anchor_state": "file_missing",
@@ -366,6 +378,9 @@ class AnnotationsMixin(DBMixinProtocol):
             "current_line_end": None,
             "commit_available": self._annotation_commit_available(commit_ref),
         }
+        absolute_path = self._resolve_stored_annotation_file_path(file_path)
+        if absolute_path is None:
+            return base
         if not absolute_path.exists() or not absolute_path.is_file():
             return base
         data = absolute_path.read_bytes()

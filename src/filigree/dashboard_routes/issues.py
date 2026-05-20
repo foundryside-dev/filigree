@@ -513,6 +513,7 @@ def create_classic_router() -> APIRouter:
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
+            annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,
                 reason=reason,
@@ -530,7 +531,10 @@ def create_classic_router() -> APIRouter:
         except ValueError as e:
             code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        return JSONResponse(issue.to_dict())
+        result = issue.to_dict()
+        if annotation_warnings:
+            result["annotation_warnings"] = annotation_warnings
+        return JSONResponse(result)
 
     @router.post("/issue/{issue_id}/reopen")
     async def api_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
@@ -1328,6 +1332,7 @@ def create_loom_router() -> APIRouter:
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
+            annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,
                 reason=reason,
@@ -1348,6 +1353,8 @@ def create_loom_router() -> APIRouter:
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         result: dict[str, Any] = dict(issue_to_loom(issue))
+        if annotation_warnings:
+            result["annotation_warnings"] = annotation_warnings
         if newly_unblocked:
             result["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
         return JSONResponse(result)

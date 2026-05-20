@@ -669,6 +669,33 @@ class MetaMixin(DBMixinProtocol):
             msg = f"Import references unknown file_id {source_file_id!r}"
             raise ValueError(msg) from exc
 
+    def _validate_imported_annotation_link_target(
+        self,
+        *,
+        index: int,
+        target_type: str,
+        target_id: str,
+    ) -> None:
+        if target_type == "issue":
+            table = "issues"
+            description = "issue target"
+        elif target_type == "file":
+            table = "file_records"
+            description = "file target"
+        elif target_type == "finding":
+            table = "scan_findings"
+            description = "finding target"
+        elif target_type == "observation":
+            table = "observations"
+            description = "observation target"
+        else:
+            msg = f"annotation_link record #{index} has invalid target_type {target_type!r}"
+            raise ValueError(msg)
+        row = self.conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (target_id,)).fetchone()
+        if row is None:
+            msg = f"annotation_link record #{index} has missing {description}: {target_id}"
+            raise ValueError(msg)
+
     # Table export definitions: (record_type_tag, SQL query)
     _EXPORT_TABLES: ClassVar[list[tuple[str, str]]] = [
         ("issue", "SELECT * FROM issues ORDER BY created_at"),
@@ -1371,6 +1398,11 @@ class MetaMixin(DBMixinProtocol):
                 target_id = record["target_id"]
                 if record.get("target_type") == "file":
                     target_id = self._remap_file_id(target_id, file_id_map)
+                self._validate_imported_annotation_link_target(
+                    index=_import_index,
+                    target_type=record["target_type"],
+                    target_id=target_id,
+                )
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO annotation_links "
                     "(id, annotation_id, target_type, target_id, relationship, actor, created_at) "

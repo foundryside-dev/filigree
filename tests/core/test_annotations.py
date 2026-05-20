@@ -139,6 +139,30 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_stored_annotation_path_escape_is_treated_as_missing(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("outside anchor\n")
+        db = _project_db(project)
+        try:
+            now = "2026-01-01T00:00:00+00:00"
+            db.conn.execute(
+                "INSERT INTO annotations "
+                "(id, file_path, line_start, line_end, anchor_snippet, note, intent, critical, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'breadcrumb', 0, 'active', ?, ?)",
+                ("test-ann-escape", "../outside.py", 1, 1, "outside anchor\n", "imported bad path", now, now),
+            )
+            db.conn.commit()
+
+            annotation = db.get_annotation("test-ann-escape")
+
+            assert annotation["anchor_state"] == "file_missing"
+            assert annotation["current_line_start"] is None
+            assert annotation["current_line_end"] is None
+        finally:
+            db.close()
+
     def test_anchor_drift_counts_final_line_without_trailing_newline(self, tmp_path: Path) -> None:
         """A two-line snippet without a final newline still spans two lines after drift."""
         db = _project_db(tmp_path)
@@ -420,3 +444,36 @@ class TestAnnotationCrud:
                 reject.import_jsonl(bad, merge=True)
         finally:
             reject.close()
+
+    def test_jsonl_import_rejects_missing_annotation_link_targets(self, tmp_path: Path) -> None:
+        imported = tmp_path / "dangling-annotation-link.jsonl"
+        now = "2026-01-01T00:00:00+00:00"
+        records = [
+            {
+                "_type": "annotation",
+                "id": "test-ann-dangling",
+                "file_path": "src.py",
+                "note": "imported annotation",
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "_type": "annotation_link",
+                "id": "test-annlink-dangling",
+                "annotation_id": "test-ann-dangling",
+                "target_type": "issue",
+                "target_id": "test-missingissue",
+                "relationship": "must_consider",
+                "created_at": now,
+            },
+        ]
+        imported.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+        db = _project_db(tmp_path / "import-reject")
+        try:
+            with pytest.raises(ValueError, match=r"annotation_link.*missing issue target"):
+                db.import_jsonl(imported, merge=True)
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE id = 'test-ann-dangling'").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotation_links WHERE id = 'test-annlink-dangling'").fetchone()[0] == 0
+        finally:
+            db.close()

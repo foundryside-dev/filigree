@@ -549,6 +549,42 @@ class TestCloseReopenAPI:
         data = resp.json()
         assert data["status_category"] == "done"
 
+    async def test_classic_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        source = dashboard_db.db.db_path.parent / "api-close-classic.py"
+        source.write_text("x = 1\n")
+        issue = dashboard_db.db.create_issue("Classic annotated close")
+        annotation = dashboard_db.db.annotate_file(
+            source.name,
+            "Must be considered before close.",
+            critical=True,
+            links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+        )
+
+        resp = await client.post(f"/api/issue/{issue.id}/close", json={"reason": "completed"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["annotation_warnings"][0]["annotation_id"] == annotation["annotation_id"]
+        assert data["annotation_warnings"][0]["relationship"] == "must_consider"
+
+    async def test_loom_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        source = dashboard_db.db.db_path.parent / "api-close-loom.py"
+        source.write_text("x = 1\n")
+        issue = dashboard_db.db.create_issue("Loom annotated close")
+        annotation = dashboard_db.db.annotate_file(
+            source.name,
+            "Must be considered before close.",
+            critical=True,
+            links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+        )
+
+        resp = await client.post(f"/api/loom/issues/{issue.id}/close", json={"reason": "completed"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["annotation_warnings"][0]["annotation_id"] == annotation["annotation_id"]
+        assert data["annotation_warnings"][0]["relationship"] == "must_consider"
+
     async def test_close_already_closed(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         # C is already closed
