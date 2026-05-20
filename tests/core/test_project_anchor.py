@@ -967,6 +967,51 @@ class TestFactoriesCloseConnOnInitFailure:
         assert len(created) == 1, "expected a single FiligreeDB instance to be constructed"
         assert created[0]._conn is None, "from_conf must close the SQLite connection when initialize() raises"
 
+    def test_from_filigree_dir_preserves_initialize_error_when_cleanup_close_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+
+        def fail_initialize(self: FiligreeDB) -> None:
+            raise ValueError("initialize root cause")
+
+        def fail_close(self: FiligreeDB) -> None:
+            raise sqlite3.ProgrammingError("cleanup close failed")
+
+        monkeypatch.setattr(FiligreeDB, "initialize", fail_initialize)
+        monkeypatch.setattr(FiligreeDB, "close", fail_close)
+
+        with pytest.raises(ValueError, match="initialize root cause"):
+            FiligreeDB.from_filigree_dir(filigree_dir)
+
+    def test_from_conf_preserves_initialize_error_when_cleanup_close_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        conf = tmp_path / CONF_FILENAME
+        write_conf(
+            conf,
+            {"version": 1, "project_name": "p", "prefix": "p", "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"},
+        )
+
+        def fail_initialize(self: FiligreeDB) -> None:
+            raise ValueError("initialize root cause")
+
+        def fail_close(self: FiligreeDB) -> None:
+            raise sqlite3.ProgrammingError("cleanup close failed")
+
+        monkeypatch.setattr(FiligreeDB, "initialize", fail_initialize)
+        monkeypatch.setattr(FiligreeDB, "close", fail_close)
+
+        with pytest.raises(ValueError, match="initialize root cause"):
+            FiligreeDB.from_conf(conf)
+
 
 class TestFromFiligreeDirLegacyPrefixFallback:
     """Regression: legacy installs with no (or malformed) config.json must

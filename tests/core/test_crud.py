@@ -2445,14 +2445,14 @@ class TestCompaction:
 
 
 class TestCloseCommitsPending:
-    """close() must commit pending transactions so writes are not lost."""
+    """close() preserves committed writes and rolls back raw in-flight transactions."""
 
     def test_close_commits_pending_writes(self, tmp_path: Path) -> None:
         db = FiligreeDB(tmp_path / "commit-on-close.db", prefix="test")
         db.initialize()
         issue = db.create_issue(title="will survive close", type="task")
 
-        # No explicit commit — close() should handle it.
+        # create_issue commits internally; close() should preserve that write.
         db.close()
 
         # Reopen and verify the issue persists.
@@ -2475,6 +2475,39 @@ class TestCloseCommitsPending:
         assert found is not None
         assert found.title == "ctx write"
         db2.close()
+
+    def test_context_manager_success_rolls_back_raw_in_flight_transaction(self, tmp_path: Path) -> None:
+        """Raw writes without an explicit commit are treated as incomplete work on close."""
+        db_path = tmp_path / "ctx-raw-success.db"
+        issue_id = "test-rawsuccess"
+
+        with FiligreeDB(db_path, prefix="test") as db:
+            db.initialize()
+            db.conn.execute(
+                "INSERT INTO issues (id, title, status, priority, type, assignee,"
+                " created_at, updated_at, description, notes, fields)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    issue_id,
+                    "raw success",
+                    "open",
+                    2,
+                    "task",
+                    "",
+                    "2026-01-01T00:00:00",
+                    "2026-01-01T00:00:00",
+                    "",
+                    "",
+                    "{}",
+                ),
+            )
+
+        check = FiligreeDB(db_path, prefix="test")
+        try:
+            row = check.conn.execute("SELECT id FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            assert row is None
+        finally:
+            check.close()
 
     def test_close_clears_conn_even_when_sqlite_close_raises(self, tmp_path: Path) -> None:
         """_conn must be None after close() even if Connection.close() raises."""

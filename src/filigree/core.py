@@ -1121,7 +1121,10 @@ class FiligreeDB(
             # returning, the caller never receives ``db`` and so cannot close
             # the connection — close it here to avoid leaking the handle and
             # its WAL/SHM sidecar files.
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                logger.error("Failed to close database after from_filigree_dir initialize() failure", exc_info=True)
             raise
         return db
 
@@ -1163,7 +1166,10 @@ class FiligreeDB(
             if enabled_packs_from_project_config:
                 db._enabled_packs_override = None
         except BaseException:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                logger.error("Failed to close database after from_conf initialize() failure", exc_info=True)
             raise
         return db
 
