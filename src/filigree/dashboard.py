@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 from filigree import __version__
 from filigree.core import (
     CONF_FILENAME,
+    CONFIG_FILENAME,
     FILIGREE_DIR_NAME,
     FiligreeDB,
     ProjectNotInitialisedError,
@@ -133,6 +134,22 @@ def _open_db_for_filigree_dir(
         check_same_thread=check_same_thread,
         allow_local_fallback_override=allow_local_fallback_override,
     )
+
+
+def _read_project_display_name(filigree_dir: Path, prefix: str) -> str:
+    """Read only the optional display name, without validating the project."""
+    config_path = filigree_dir / CONFIG_FILENAME
+    if not config_path.exists():
+        return prefix
+    try:
+        raw = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        logger.warning("Failed to read %s for dashboard display name; using prefix", config_path, exc_info=True)
+        return prefix
+    if not isinstance(raw, dict):
+        return prefix
+    name = raw.get("name")
+    return name if isinstance(name, str) and name else prefix
 
 
 class ProjectStore:
@@ -234,8 +251,7 @@ class ProjectStore:
             if prefix in projects:
                 existing = projects[prefix]["path"]
                 raise ValueError(f"Prefix collision: {prefix!r} claimed by both {existing} and {filigree_path_str}")
-            proj_config = read_config(filigree_path)
-            display_name = proj_config.get("name") or prefix
+            display_name = _read_project_display_name(filigree_path, prefix)
             projects[prefix] = {"name": display_name, "path": filigree_path_str}
         return projects
 

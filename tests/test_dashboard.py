@@ -516,6 +516,53 @@ class TestGetDbErrorPaths:
             store.close_all()
             dash_module._project_store = None
 
+    async def test_server_mode_isolates_bad_project_config_from_good_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One malformed registered project must not prevent serving the rest."""
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        good_dir = _create_filigree_dir(tmp_path, "good-project", "good")
+
+        bad_root = tmp_path / "bad-project"
+        bad_dir = bad_root / FILIGREE_DIR_NAME
+        bad_dir.mkdir(parents=True)
+        write_config(
+            bad_dir,
+            {
+                "prefix": "bad",
+                "version": 1,
+                "registry_backend": "clarion",
+                "clarion": {"base_url": "file:///not-http"},
+            },
+        )
+        bad_db = FiligreeDB(bad_dir / DB_FILENAME, prefix="bad", check_same_thread=False)
+        bad_db.initialize()
+        bad_db.close()
+        _write_server_json(config_dir, {str(good_dir): {"prefix": "good"}, str(bad_dir): {"prefix": "bad"}})
+
+        store = ProjectStore()
+        store.load()
+        dash_module._project_store = store
+        try:
+            app = create_app(server_mode=True)
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                good_resp = await client.get("/api/p/good/stats")
+                bad_resp = await client.get("/api/p/bad/issues")
+
+            assert good_resp.status_code == 200
+            assert bad_resp.status_code == 400
+            bad_body = bad_resp.json()
+            assert bad_body["code"] == "VALIDATION"
+            assert "clarion.base_url" in bad_body["error"]
+        finally:
+            store.close_all()
+            dash_module._project_store = None
+
 
 # ---------------------------------------------------------------------------
 # ProjectStore.load() — corrupt / malformed configs
