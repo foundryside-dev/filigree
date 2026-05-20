@@ -336,6 +336,35 @@ class TestCreatePlan:
             )
         assert len(db.list_issues()) == issues_before
 
+    @pytest.mark.parametrize(
+        ("milestone", "phases", "match"),
+        [
+            ({"title": 123}, [], "title.*string"),
+            ({"title": "MS", "fields": ["not", "a", "dict"]}, [], "fields must be a dict"),
+            ({"title": "MS", "description": ["not", "text"]}, [], "description.*string"),
+            ({"title": "MS"}, [None], "Phase 1 must be an object"),
+            ({"title": "MS"}, [{"title": "P", "fields": ["bad"]}], "fields must be a dict"),
+            ({"title": "MS"}, [{"title": "P", "description": {"bad": True}}], "description.*string"),
+            ({"title": "MS"}, [{"title": "P", "steps": "bad"}], "steps.*list"),
+            ({"title": "MS"}, [{"title": "P", "steps": [None]}], "Step 1 must be an object"),
+            ({"title": "MS"}, [{"title": "P", "steps": [{"title": "S", "fields": ["bad"]}]}], "fields must be a dict"),
+            ({"title": "MS"}, [{"title": "P", "steps": [{"title": "S", "description": []}]}], "description.*string"),
+        ],
+    )
+    def test_plan_rejects_malformed_nested_shapes_without_orphans(
+        self,
+        db: FiligreeDB,
+        milestone: object,
+        phases: object,
+        match: str,
+    ) -> None:
+        issues_before = len(db.list_issues())
+
+        with pytest.raises((TypeError, ValueError), match=match):
+            db.create_plan(milestone, phases)  # type: ignore[arg-type]
+
+        assert len(db.list_issues()) == issues_before
+
 
 class TestCreatePlanRollback:
     """Bug fix: filigree-4135c6 — create_plan no rollback."""

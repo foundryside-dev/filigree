@@ -146,6 +146,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "title": {"type": "string"},
                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                             "description": {"type": "string", "default": ""},
+                            "fields": {"type": "object", "description": "Custom fields for the milestone issue"},
                             "labels": {
                                 "type": "array",
                                 "items": {"type": "string"},
@@ -162,6 +163,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                 "title": {"type": "string"},
                                 "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                 "description": {"type": "string", "default": ""},
+                                "fields": {"type": "object", "description": "Custom fields for this phase issue"},
                                 "labels": {
                                     "type": "array",
                                     "items": {"type": "string"},
@@ -175,6 +177,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                             "title": {"type": "string"},
                                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                             "description": {"type": "string", "default": ""},
+                                            "fields": {"type": "object", "description": "Custom fields for this step issue"},
                                             "labels": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -600,7 +603,7 @@ async def _create_plan_from_payload(arguments: dict[str, Any]) -> list[TextConte
         )
         _refresh_summary()
         return _text(plan_tree_to_mcp(plan))
-    except (KeyError, IndexError, ValueError) as e:
+    except (KeyError, IndexError, TypeError, ValueError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except sqlite3.Error as e:
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))

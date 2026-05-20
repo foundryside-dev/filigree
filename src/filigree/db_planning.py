@@ -65,6 +65,45 @@ def _validate_priority(value: Any, label: str) -> None:
         raise ValueError(msg)
 
 
+def _validate_plan_object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        msg = f"{label} must be an object"
+        raise ValueError(msg)
+    return value
+
+
+def _validate_plan_title(data: dict[str, Any], label: str) -> None:
+    title = data.get("title", "")
+    if not isinstance(title, str):
+        msg = f"{label} 'title' must be a string"
+        raise ValueError(msg)
+    if not title.strip():
+        msg = f"{label} 'title' is required and cannot be empty"
+        raise ValueError(msg)
+
+
+def _validate_plan_optional_string(data: dict[str, Any], key: str, label: str) -> None:
+    if key in data and not isinstance(data[key], str):
+        msg = f"{label} '{key}' must be a string"
+        raise ValueError(msg)
+
+
+def _normalize_plan_fields(fields: Any, label: str) -> dict[str, Any]:
+    if fields is None:
+        return {}
+    if not isinstance(fields, dict):
+        msg = f"{label} fields must be a dict"
+        raise TypeError(msg)
+    for key in fields:
+        if not isinstance(key, str):
+            msg = f"{label} field keys must be strings"
+            raise TypeError(msg)
+        if not key.strip():
+            msg = f"{label} field key cannot be empty"
+            raise ValueError(msg)
+    return fields
+
+
 def _normalize_dep_ref(dep_ref: Any) -> str:
     """Validate a step ``dep_ref`` and return its canonical string form.
 
@@ -741,22 +780,34 @@ class PlanningMixin(DBMixinProtocol):
         Returns the full plan tree (same format as get_plan).
         """
         # Validate inputs — specific error messages for each level
-        if not milestone.get("title", "").strip():
-            msg = "Milestone 'title' is required and cannot be empty"
+        milestone = _validate_plan_object(milestone, "Milestone")  # type: ignore[assignment]
+        if not isinstance(phases, list):
+            msg = "'phases' must be a list of phase objects"
             raise ValueError(msg)
+        _validate_plan_title(milestone, "Milestone")
+        _validate_plan_optional_string(milestone, "description", "Milestone")
+        _normalize_plan_fields(milestone.get("fields"), "Milestone")
         _validate_priority(milestone.get("priority", 2), "Milestone")
         for phase_idx, phase_data in enumerate(phases):
-            if not phase_data.get("title", "").strip():
-                msg = f"Phase {phase_idx + 1} 'title' is required and cannot be empty"
+            phase_label = f"Phase {phase_idx + 1}"
+            phase_data = _validate_plan_object(phase_data, phase_label)  # type: ignore[assignment]
+            _validate_plan_title(phase_data, phase_label)
+            _validate_plan_optional_string(phase_data, "description", phase_label)
+            _normalize_plan_fields(phase_data.get("fields"), phase_label)
+            _validate_priority(phase_data.get("priority", 2), phase_label)
+            steps = phase_data.get("steps", [])
+            if not isinstance(steps, list):
+                msg = f"{phase_label} 'steps' must be a list"
                 raise ValueError(msg)
-            _validate_priority(phase_data.get("priority", 2), f"Phase {phase_idx + 1}")
-            for step_idx, step_data in enumerate(phase_data.get("steps", [])):
-                if not step_data.get("title", "").strip():
-                    msg = f"Phase {phase_idx + 1}, Step {step_idx + 1} 'title' is required and cannot be empty"
-                    raise ValueError(msg)
+            for step_idx, step_data in enumerate(steps):
+                step_label = f"{phase_label}, Step {step_idx + 1}"
+                step_data = _validate_plan_object(step_data, step_label)  # type: ignore[assignment]
+                _validate_plan_title(step_data, step_label)
+                _validate_plan_optional_string(step_data, "description", step_label)
+                _normalize_plan_fields(step_data.get("fields"), step_label)
                 _validate_priority(
                     step_data.get("priority", 2),
-                    f"Phase {phase_idx + 1}, Step {step_idx + 1}",
+                    step_label,
                 )
         milestone_labels = self._normalize_label_inputs(milestone.get("labels"), "milestone.labels")
         phase_labels: list[list[str]] = []
@@ -785,7 +836,7 @@ class PlanningMixin(DBMixinProtocol):
         try:
             # Create milestone
             ms_id = self._generate_unique_id("issues")
-            ms_fields = milestone.get("fields") or {}
+            ms_fields = _normalize_plan_fields(milestone.get("fields"), "Milestone")
             self.conn.execute(
                 "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "
                 "created_at, updated_at, description, notes, fields) "
@@ -811,7 +862,7 @@ class PlanningMixin(DBMixinProtocol):
             for phase_idx, phase_data in enumerate(phases):
                 # Create phase
                 phase_id = self._generate_unique_id("issues")
-                phase_fields: dict[str, Any] = dict(phase_data.get("fields") or {})  # type: ignore[call-overload]
+                phase_fields = dict(_normalize_plan_fields(phase_data.get("fields"), f"Phase {phase_idx + 1}"))
                 phase_fields["sequence"] = phase_idx + 1
                 self.conn.execute(
                     "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "
@@ -837,7 +888,9 @@ class PlanningMixin(DBMixinProtocol):
                 steps = phase_data.get("steps") or []
                 for step_idx, step_data in enumerate(steps):
                     step_id = self._generate_unique_id("issues")
-                    step_fields: dict[str, Any] = dict(step_data.get("fields") or {})  # type: ignore[call-overload]
+                    step_fields = dict(
+                        _normalize_plan_fields(step_data.get("fields"), f"Phase {phase_idx + 1}, Step {step_idx + 1}")
+                    )
                     step_fields["sequence"] = step_idx + 1
                     self.conn.execute(
                         "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "

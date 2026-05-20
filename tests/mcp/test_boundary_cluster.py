@@ -325,3 +325,19 @@ class TestCreatePlanDeps:
         )
         data = _parse(result)
         assert "milestone" in data, data
+
+
+class TestCreatePlanMalformedOptionalFields:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"milestone": {"title": "MS", "fields": ["not", "a", "dict"]}, "phases": []},
+            {"milestone": {"title": "MS", "description": []}, "phases": []},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "fields": ["bad"]}]},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "steps": [{"title": "S", "description": []}]}]},
+        ],
+    )
+    async def test_malformed_optional_fields_return_validation(self, mcp_db: FiligreeDB, payload: dict[str, object]) -> None:
+        result = await call_tool("create_plan", payload)
+        data = _parse(result)
+        assert data.get("code") == ErrorCode.VALIDATION, data

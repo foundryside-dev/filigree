@@ -860,6 +860,25 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "VALIDATION"
         assert "phase 1" in data["error"].lower()
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"milestone": {"title": "MS", "fields": ["not", "a", "dict"]}, "phases": []},
+            {"milestone": {"title": "MS", "description": []}, "phases": []},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "fields": ["bad"]}]},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "steps": [{"title": "S", "description": []}]}]},
+        ],
+    )
+    def test_create_plan_malformed_optional_fields_json_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], payload: dict[str, object]
+    ) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["create-plan", "--json"], input=json.dumps(payload))
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "Traceback" not in result.output
+
     def test_changes_invalid_timestamp_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["changes", "--since", "not-a-timestamp", "--json"])

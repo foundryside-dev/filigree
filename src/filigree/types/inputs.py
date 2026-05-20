@@ -469,6 +469,7 @@ class StepInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
     deps: NotRequired[list[int | str]]
 
@@ -477,6 +478,7 @@ class PhaseInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
     steps: NotRequired[list[StepInput]]
 
@@ -485,6 +487,7 @@ class MilestoneInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
 
 
