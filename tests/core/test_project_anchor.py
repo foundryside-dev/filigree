@@ -863,6 +863,39 @@ class TestFromConf:
         finally:
             db.close()
 
+    def test_from_conf_custom_db_path_loads_project_local_templates(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        templates_dir = filigree_dir / "templates"
+        templates_dir.mkdir(parents=True)
+        (tmp_path / "state").mkdir()
+        write_config(filigree_dir, {"prefix": "p", "version": 1, "enabled_packs": ["custom_only"]})
+        (templates_dir / "custom_item.json").write_text(
+            json.dumps(
+                {
+                    "type": "custom_item",
+                    "display_name": "Custom Item",
+                    "states": [
+                        {"name": "open", "category": "open"},
+                        {"name": "closed", "category": "done"},
+                    ],
+                    "initial_state": "open",
+                    "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                    "fields_schema": [],
+                }
+            )
+        )
+        conf = tmp_path / CONF_FILENAME
+        write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": "state/filigree.db"})
+
+        db = FiligreeDB.from_conf(conf)
+        try:
+            assert db.db_path == tmp_path / "state" / "filigree.db"
+            assert db.get_template("custom_item") is not None
+            created = db.create_issue("Custom", type="custom_item")
+            assert created.status == "open"
+        finally:
+            db.close()
+
 
 class TestFactoriesCloseConnOnInitFailure:
     """Regression: ``from_filigree_dir`` / ``from_conf`` must close the
