@@ -21,6 +21,10 @@ def _run_node(script: str) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
+def _read(rel: str) -> str:
+    return (REPO_ROOT / rel).read_text()
+
+
 def test_critical_path_edge_ids_exclude_shortcut_edges() -> None:
     script = textwrap.dedent(
         """
@@ -67,3 +71,36 @@ def test_empty_graph_reset_destroys_stale_cytoscape_instance() -> None:
         "blankState": True,
         "oldGraphGone": True,
     }
+
+
+def test_critical_path_state_replaces_stale_ids_and_edges() -> None:
+    script = textwrap.dedent(
+        """
+        const { setCriticalPathStateFromPath } = await import("./src/filigree/static/js/views/graph.js");
+
+        const graphState = {
+          criticalPathIds: new Set(["old-a", "old-b"]),
+          criticalPathEdgeIds: new Set(["e-old-a-old-b"]),
+        };
+        setCriticalPathStateFromPath([{ id: "new-a" }, { id: "new-b" }, { id: "new-c" }], graphState);
+
+        console.log(JSON.stringify({
+          nodeIds: [...graphState.criticalPathIds].sort(),
+          edgeIds: [...graphState.criticalPathEdgeIds].sort(),
+        }));
+        """
+    )
+
+    result = _run_node(script)
+
+    assert result == {
+        "nodeIds": ["new-a", "new-b", "new-c"],
+        "edgeIds": ["e-new-a-new-b", "e-new-b-new-c"],
+    }
+
+
+def test_app_refreshes_or_clears_critical_path_state_when_data_context_changes() -> None:
+    text = _read("src/filigree/static/js/app.js")
+
+    assert "setCriticalPathStateFromPath([]);" in text
+    assert "if (state.criticalPathActive) await refreshCriticalPathState();" in text

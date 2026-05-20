@@ -87,6 +87,8 @@ import {
   callbacks as graphCallbacks,
   graphFit,
   renderGraph,
+  refreshCriticalPathState,
+  setCriticalPathStateFromPath,
   showHealthBreakdown,
   toggleCriticalPath,
 } from "./views/graph.js";
@@ -172,6 +174,7 @@ async function fetchData() {
     trackChanges(state.allIssues);
     computeImpactScores();
     computeHealthScore();
+    if (state.criticalPathActive) await refreshCriticalPathState();
     updateStaleBadge();
     renderSparkline();
     updateStats();
@@ -257,6 +260,7 @@ function setProject(key, opts) {
   state.graphQuery = {};
   state.graphQueryKey = "";
   state.graphFallbackNotice = "";
+  setCriticalPathStateFromPath([]);
   loadProjectFilterSettings();
   const sel = document.getElementById("projectSwitcher");
   if (sel) sel.value = key;

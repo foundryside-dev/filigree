@@ -164,6 +164,16 @@ export function criticalPathEdgeIds(path) {
   return edgeIds;
 }
 
+export function setCriticalPathStateFromPath(path, graphState = state) {
+  graphState.criticalPathIds = new Set(path.map((p) => p.id));
+  graphState.criticalPathEdgeIds = criticalPathEdgeIds(path);
+}
+
+export async function refreshCriticalPathState() {
+  const data = await fetchCriticalPath();
+  setCriticalPathStateFromPath(data?.path || []);
+}
+
 export function clearGraphForNoIssues(container, graphState = state) {
   if (graphState.cy) {
     graphState.cy.destroy();
@@ -463,14 +473,10 @@ export async function toggleCriticalPath() {
   const btn = document.getElementById("btnCritPath");
   if (state.criticalPathActive) {
     btn.className = "px-2 py-0.5 rounded bg-red-600 text-white";
-    const data = await fetchCriticalPath();
-    const path = data?.path || [];
-    state.criticalPathIds = new Set(path.map((p) => p.id));
-    state.criticalPathEdgeIds = criticalPathEdgeIds(path);
+    await refreshCriticalPathState();
   } else {
     btn.className = "px-2 py-0.5 rounded bg-overlay bg-overlay-hover";
-    state.criticalPathIds.clear();
-    state.criticalPathEdgeIds.clear();
+    setCriticalPathStateFromPath([]);
   }
   renderGraph();
 }
