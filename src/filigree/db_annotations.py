@@ -282,8 +282,15 @@ class AnnotationsMixin(DBMixinProtocol):
                 git_state = "clean"
 
             if not is_binary and tracked_ok:
+                diff_parts: list[str] = []
                 diff_ok, diff_out = self._run_git(["diff", "--", file_path], cwd=root)
                 if diff_ok and diff_out:
+                    diff_parts.append(diff_out)
+                cached_diff_ok, cached_diff_out = self._run_git(["diff", "--cached", "--", file_path], cwd=root)
+                if cached_diff_ok and cached_diff_out:
+                    diff_parts.append(cached_diff_out)
+                if diff_parts:
+                    diff_out = "\n".join(diff_parts)
                     dirty_diff_hash = hashlib.sha256(diff_out.encode("utf-8")).hexdigest()
                     file_diff, redacted = _redact_secrets(diff_out)
                     if redacted:

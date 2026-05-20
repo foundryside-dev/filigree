@@ -407,6 +407,30 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_provenance_captures_staged_tracked_file_diff(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True)
+        tracked = tmp_path / "tracked.py"
+        tracked.write_text("x = 1\n")
+        subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+        tracked.write_text("x = 1\ny = 2\n")
+        subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+
+        db = _project_db(tmp_path)
+        try:
+            annotation = db.annotate_file("tracked.py", "Staged change", line_start=2)
+            provenance = annotation["provenance"]
+
+            assert provenance["git_state"] == "dirty"
+            assert provenance["worktree_dirty"] is True
+            assert "dirty_worktree" in provenance["provenance_flags"]
+            assert provenance["dirty_diff_hash"]
+            assert "+y = 2" in provenance["file_diff"]
+        finally:
+            db.close()
+
     def test_jsonl_round_trip_includes_annotations_and_rejects_foreign_issue_links(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:
