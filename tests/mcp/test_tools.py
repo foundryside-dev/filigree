@@ -1904,6 +1904,12 @@ class TestMetrics:
         data = _parse(result)
         assert data["period_days"] == 7
 
+    @pytest.mark.parametrize("days", ["7", 0, -1, True])
+    async def test_get_metrics_invalid_days_returns_validation(self, mcp_db: FiligreeDB, days: object) -> None:
+        result = await call_tool("get_metrics", {"days": days})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
 
 class TestCriticalPathMCP:
     async def test_get_critical_path(self, mcp_db: FiligreeDB) -> None:

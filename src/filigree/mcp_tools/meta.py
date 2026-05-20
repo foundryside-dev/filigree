@@ -859,6 +859,9 @@ async def _handle_get_metrics(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetMetricsArgs)
+    days_err = _validate_int_range(args.get("days", 30), "days", min_val=1)
+    if days_err is not None:
+        return days_err
     tracker = _get_db()
     return _text(get_flow_metrics(tracker, days=args.get("days", 30)))
 
