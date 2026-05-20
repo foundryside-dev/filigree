@@ -68,7 +68,14 @@ def _spawn_scan(
         raise ScannerSpawnError(cmd_err, code=ErrorCode.NOT_FOUND)
 
     scan_log_dir = filigree_dir / "scans"
-    scan_log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        scan_log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ScannerSpawnError(
+            f"Failed to create scan log directory {scan_log_dir}: {e}",
+            code=ErrorCode.IO,
+            details={"scanner": cfg.name, "scan_log_dir": str(scan_log_dir)},
+        ) from e
     log_name = f"{scan_run_id}{log_suffix}.log"
     scan_log_path = scan_log_dir / log_name
     log_warning: str | None = None
