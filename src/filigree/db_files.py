@@ -814,11 +814,18 @@ class FilesMixin(DBMixinProtocol):
         infer_language: bool,
         now: str,
         stats: ScanIngestResult,
+        counted_file_ids: set[str],
         actor: str,
         resolved_file: ResolvedFile | None = None,
     ) -> str:
         """Create or update a file record, returning its id."""
         inferred_language = _infer_language_from_path(path) if infer_language else ""
+
+        def should_count_file(file_id: str) -> bool:
+            if file_id in counted_file_ids:
+                return False
+            counted_file_ids.add(file_id)
+            return True
 
         def update_existing_file(existing_file: sqlite3.Row, resolved: ResolvedFile | None = None) -> str:
             file_id: str = existing_file["id"]
@@ -849,7 +856,8 @@ class FilesMixin(DBMixinProtocol):
                 f"UPDATE file_records SET {', '.join(update_parts)} WHERE id = ?",
                 update_params,
             )
-            stats["files_updated"] += 1
+            if should_count_file(file_id):
+                stats["files_updated"] += 1
             return file_id
 
         existing_file = self.conn.execute(
@@ -891,7 +899,8 @@ class FilesMixin(DBMixinProtocol):
                 else:
                     if self._is_local_registry_fallback_row(registry_backend):
                         self._record_registry_fallback_event(file_id, actor=actor, now=now)
-                    stats["files_created"] += 1
+                    if should_count_file(file_id):
+                        stats["files_created"] += 1
         return file_id
 
     def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
@@ -1197,6 +1206,7 @@ class FilesMixin(DBMixinProtocol):
         )
 
         seen_finding_ids: dict[str, list[str]] = {}
+        counted_file_ids: set[str] = set()
         file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor)
 
         try:
@@ -1207,6 +1217,7 @@ class FilesMixin(DBMixinProtocol):
                     infer_language="language" not in f,
                     now=now,
                     stats=stats,
+                    counted_file_ids=counted_file_ids,
                     actor=actor,
                     resolved_file=file_resolutions.get(f["path"]),
                 )

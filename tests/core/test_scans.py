@@ -861,6 +861,20 @@ class TestScanIngestClusterRegressions:
         assert run["status"] == "completed"
         assert run["findings_count"] == 2, f"expected 2 total findings, got {run['findings_count']}"
 
+    def test_multiple_findings_for_new_file_count_file_created_once(self, db: FiligreeDB) -> None:
+        """File-level scan ingest stats count unique files, not findings."""
+        result = db.process_scan_results(
+            scan_source="codex",
+            findings=[
+                {"path": "a.py", "rule_id": "R1", "severity": "medium", "message": "m1"},
+                {"path": "a.py", "rule_id": "R2", "severity": "high", "message": "m2"},
+            ],
+        )
+
+        assert result["files_created"] == 1
+        assert result["files_updated"] == 0
+        assert result["findings_created"] == 2
+
     def test_cooldown_check_tolerates_malformed_file_paths(self, db: FiligreeDB) -> None:
         """One corrupt scan_runs.file_paths row must not block cooldown checks for other files (23c676fd5a)."""
         db.create_scan_run(
