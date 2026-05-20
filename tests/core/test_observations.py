@@ -1049,6 +1049,36 @@ class TestPromoteObservation:
         result3 = db.promote_observation(obs["id"])
         assert result3["issue"].id == first_issue.id
 
+    def test_promote_idempotent_retry_records_missing_audit_trail(self, db: FiligreeDB) -> None:
+        """If first cleanup and audit both fail, retry must preserve the dismissal audit trail."""
+        obs = db.create_observation("audit retry after cleanup failure")
+        real_conn = db._conn
+
+        def _fail_cleanup_and_audit(real: Any, sql: str, params: Any = ()) -> Any:
+            if "DELETE FROM observations WHERE id" in sql and "expires_at" not in sql:
+                raise sqlite3.OperationalError("delete failed")
+            if "INSERT INTO dismissed_observations" in sql:
+                raise sqlite3.OperationalError("audit failed")
+            return real.execute(sql, params)
+
+        db._conn = _InterceptingConn(real_conn, _fail_cleanup_and_audit)  # type: ignore[assignment]
+        try:
+            first = db.promote_observation(obs["id"])
+        finally:
+            db._conn = real_conn
+
+        assert "warnings" in first
+        assert db.observation_count() == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM dismissed_observations WHERE obs_id = ?", (obs["id"],)).fetchone()[0] == 0
+
+        retry = db.promote_observation(obs["id"])
+
+        assert retry["issue"].id == first["issue"].id
+        assert db.observation_count() == 0
+        audit = db.conn.execute("SELECT reason FROM dismissed_observations WHERE obs_id = ?", (obs["id"],)).fetchone()
+        assert audit is not None
+        assert audit["reason"] == "promoted"
+
     def test_promote_warns_when_observation_already_swept(self, db: FiligreeDB) -> None:
         """If a concurrent sweep deletes the observation between SELECT and DELETE,
         promote succeeds but returns a warning about the race."""

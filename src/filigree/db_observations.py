@@ -1061,10 +1061,24 @@ class ObservationsMixin(DBMixinProtocol):
                 (obs_id,),
             ).fetchone()
             if existing_issue_row is not None:
-                # Best-effort cleanup of lingering observation from prior failed promote.
+                # Best-effort cleanup of lingering observation from prior failed promote,
+                # including a missing promotion audit row when the prior cleanup
+                # and audit both failed after the issue had already committed.
                 # Lives inside the BEGIN IMMEDIATE so a single commit covers both reads
                 # and the cleanup write atomically.
-                self.conn.execute("DELETE FROM observations WHERE id = ?", (obs_id,))
+                lingering_obs = self.conn.execute("SELECT summary, actor FROM observations WHERE id = ?", (obs_id,)).fetchone()
+                if lingering_obs is not None:
+                    self.conn.execute("DELETE FROM observations WHERE id = ?", (obs_id,))
+                    audit_exists = self.conn.execute(
+                        "SELECT 1 FROM dismissed_observations WHERE obs_id = ? AND reason = 'promoted' LIMIT 1",
+                        (obs_id,),
+                    ).fetchone()
+                    if audit_exists is None:
+                        self.conn.execute(
+                            "INSERT INTO dismissed_observations (obs_id, summary, actor, reason, dismissed_at) "
+                            "VALUES (?, ?, ?, 'promoted', ?)",
+                            (obs_id, lingering_obs["summary"], actor or lingering_obs["actor"], _now_iso()),
+                        )
                 self.conn.commit()
                 existing_issue = self.get_issue(existing_issue_row["id"])
                 msg = f"Observation {obs_id} was already promoted to issue {existing_issue.id} (returning existing)"
