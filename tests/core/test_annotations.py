@@ -156,6 +156,32 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_list_annotations_filters_by_relationship_without_target(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "must.py").write_text("x = 1\n")
+            (tmp_path / "relevant.py").write_text("x = 2\n")
+            (tmp_path / "plain.py").write_text("x = 3\n")
+            issue = db.create_issue("Linked")
+            must_consider = db.annotate_file(
+                "must.py",
+                "Must consider this.",
+                links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+            )
+            db.annotate_file(
+                "relevant.py",
+                "Relevant but not required.",
+                links=[{"target_type": "issue", "target_id": issue.id, "relationship": "relevant_to"}],
+            )
+            db.annotate_file("plain.py", "No relationship link.")
+
+            result = db.list_annotations(relationship="must_consider")
+
+            assert [item["annotation_id"] for item in result["items"]] == [must_consider["annotation_id"]]
+            assert result["has_more"] is False
+        finally:
+            db.close()
+
     def test_annotate_file_rejects_line_end_beyond_eof(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:

@@ -810,9 +810,10 @@ class AnnotationsMixin(DBMixinProtocol):
             params.append(target_type)
             clauses.append("l.target_id = ?")
             params.append(target_id)
-            if relationship is not None:
-                clauses.append("l.relationship = ?")
-                params.append(relationship)
+        if relationship is not None:
+            join = "JOIN annotation_links l ON l.annotation_id = a.id"
+            clauses.append("l.relationship = ?")
+            params.append(relationship)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.conn.execute(
             f"""
