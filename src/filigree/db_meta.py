@@ -957,6 +957,15 @@ class MetaMixin(DBMixinProtocol):
                         if not exists:
                             msg = f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} references non-existent issue"
                             raise ValueError(msg)
+                    if parent_id == issue_id:
+                        msg = f"import_jsonl: issue {issue_id!r} cannot be its own parent"
+                        raise ValueError(msg)
+                    if self._would_create_parent_cycle(issue_id, parent_id):
+                        msg = (
+                            f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} "
+                            "would create a circular parent chain"
+                        )
+                        raise ValueError(msg)
                     self.conn.execute("UPDATE issues SET parent_id = ? WHERE id = ?", (parent_id, issue_id))
 
             _import_stage = "file_record"

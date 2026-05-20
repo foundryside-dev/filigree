@@ -1777,6 +1777,56 @@ class TestImportJsonl:
         with pytest.raises(ValueError, match="parent_id"):
             db.import_jsonl(jsonl)
 
+    def test_import_rejects_self_parented_issue(self, db: FiligreeDB, tmp_path: Path) -> None:
+        jsonl = tmp_path / "self_parent.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": "test-selfparent",
+                    "title": "Self-parented import",
+                    "parent_id": "test-selfparent",
+                }
+            ),
+        ]
+        jsonl.write_text("\n".join(lines) + "\n")
+
+        with pytest.raises(ValueError, match="own parent"):
+            db.import_jsonl(jsonl)
+
+    def test_import_rejects_circular_parent_chain(self, db: FiligreeDB, tmp_path: Path) -> None:
+        jsonl = tmp_path / "circular_parent.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": "test-grandparent",
+                    "title": "Grandparent",
+                    "parent_id": "test-child",
+                }
+            ),
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": "test-parent",
+                    "title": "Parent",
+                    "parent_id": "test-grandparent",
+                }
+            ),
+            json.dumps(
+                {
+                    "_type": "issue",
+                    "id": "test-child",
+                    "title": "Child",
+                    "parent_id": "test-parent",
+                }
+            ),
+        ]
+        jsonl.write_text("\n".join(lines) + "\n")
+
+        with pytest.raises(ValueError, match="circular parent chain"):
+            db.import_jsonl(jsonl)
+
     def test_import_valid_parent_id_succeeds(self, db: FiligreeDB, tmp_path: Path) -> None:
         """Parent references to issues in the same import should work."""
         jsonl = tmp_path / "valid_parent.jsonl"
