@@ -382,10 +382,18 @@ function formatChildSummary(summary) {
   return parts.join(", ");
 }
 
+export function releaseTargetDateStart(isoDate) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
+    const [year, month, day] = isoDate.split("-").map((part) => Number.parseInt(part, 10));
+    return new Date(year, month - 1, day);
+  }
+  return new Date(isoDate);
+}
+
 function formatTargetDate(isoDate) {
   if (!isoDate) return "";
-  const target = new Date(isoDate);
-  if (isNaN(target.getTime())) return escHtml(isoDate);
+  const target = releaseTargetDateStart(isoDate);
+  if (Number.isNaN(target.getTime())) return escHtml(isoDate);
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const targetStart = new Date(target.getFullYear(), target.getMonth(), target.getDate());
