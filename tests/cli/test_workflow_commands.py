@@ -531,6 +531,18 @@ class TestPlanCli:
         assert result.exit_code == 1
         assert "Not found" in result.output
 
+    def test_plan_non_milestone_root_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        with get_db() as db:
+            phase = db.create_issue("Wrong root", type="phase")
+
+        result = runner.invoke(cli, ["plan", phase.id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "not a milestone" in data["error"]
+
     def test_plan_display(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         plan_json = json.dumps(

@@ -599,6 +599,13 @@ class TestPlan:
         data = _parse(result)
         assert data["code"] == ErrorCode.NOT_FOUND
 
+    async def test_get_plan_rejects_non_milestone_root(self, mcp_db: FiligreeDB) -> None:
+        phase = mcp_db.create_issue("Wrong root", type="phase")
+        result = await call_tool("get_plan", {"milestone_id": phase.id})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "not a milestone" in data["error"]
+
 
 class TestComments:
     async def test_add_comment(self, mcp_db: FiligreeDB) -> None:

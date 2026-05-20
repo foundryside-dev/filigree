@@ -1066,6 +1066,16 @@ class TestPlanAPI:
         assert resp.status_code == 404
         assert "error" in resp.json()
 
+    async def test_plan_non_milestone_root_returns_not_found(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        phase = dashboard_db.db.create_issue("Wrong root", type="phase")
+
+        resp = await client.get(f"/api/plan/{phase.id}")
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND"
+        assert "not a milestone" in body["error"]
+
     async def test_plan_returns_tree(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         # Create a mini milestone -> phase -> step hierarchy
         milestone = dashboard_db.db.create_issue("Test Milestone", type="milestone")

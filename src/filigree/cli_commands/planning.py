@@ -13,6 +13,7 @@ from typing import Any, NoReturn, get_args
 import click
 
 from filigree.cli_common import get_db, refresh_summary
+from filigree.db_planning import NotAMilestoneError
 from filigree.issue_payloads import issue_to_ready
 from filigree.mcp_tools.payloads import plan_tree_to_mcp, slim_plan_tree_to_mcp
 from filigree.types.api import ErrorCode
@@ -233,6 +234,8 @@ def _plan_impl(milestone_id: str, as_json: bool, detail: str = "slim") -> None:
             p = db.get_plan(milestone_id)
         except KeyError:
             _emit_error(f"Not found: {milestone_id}", ErrorCode.NOT_FOUND, as_json)
+        except NotAMilestoneError as e:
+            _emit_error(str(e), ErrorCode.VALIDATION, as_json)
         except sqlite3.Error as e:
             _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
 

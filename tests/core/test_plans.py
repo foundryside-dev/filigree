@@ -35,6 +35,13 @@ class TestGetPlan:
         with pytest.raises(KeyError):
             db.get_plan("nonexistent-abc123")
 
+    def test_plan_rejects_non_milestone_root(self, db: FiligreeDB) -> None:
+        phase = db.create_issue("Phase without milestone root", type="phase")
+        db.create_issue("Step incorrectly treated as phase", type="step", parent_id=phase.id)
+
+        with pytest.raises(ValueError, match="not a milestone"):
+            db.get_plan(phase.id)
+
 
 class TestCreatePlan:
     def test_basic_plan(self, db: FiligreeDB) -> None:

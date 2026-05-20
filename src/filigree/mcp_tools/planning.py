@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from mcp.types import TextContent, Tool
 
+from filigree.db_planning import NotAMilestoneError
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _list_response,
@@ -470,6 +471,8 @@ async def _handle_get_plan(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(payload)
     except KeyError:
         return _text(ErrorResponse(error=f"Milestone not found: {args['milestone_id']}", code=ErrorCode.NOT_FOUND))
+    except NotAMilestoneError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
 
 
 def _validate_plan_deps(deps: Any, name: str) -> list[TextContent] | None:

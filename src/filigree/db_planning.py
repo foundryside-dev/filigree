@@ -117,6 +117,10 @@ class NotAReleaseError(ValueError):
     """
 
 
+class NotAMilestoneError(ValueError):
+    """Raised by ``get_plan`` when the issue exists but is not a milestone."""
+
+
 def _truncated_issue_sentinel(issue_id: str) -> IssueDict:
     """Minimal IssueDict placeholder for tree nodes truncated at the depth limit."""
     return IssueDict(
@@ -514,6 +518,8 @@ class PlanningMixin(DBMixinProtocol):
     def get_plan(self, milestone_id: str) -> PlanTree:
         """Get milestone->phase->step tree with progress stats."""
         milestone = self.get_issue(milestone_id)
+        if milestone.type != "milestone":
+            raise NotAMilestoneError(f"Issue {milestone_id} is not a milestone")
 
         phases = self._list_all_children(milestone_id)
         phases.sort(key=lambda p: _sequence_sort_key(p.fields.get("sequence", 999)))

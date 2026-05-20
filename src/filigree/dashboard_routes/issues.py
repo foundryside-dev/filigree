@@ -21,6 +21,7 @@ from filigree.dashboard_routes.common import (
     _validate_actor,
     _validate_priority_field,
 )
+from filigree.db_planning import NotAMilestoneError
 from filigree.models import Issue
 from filigree.types.api import (
     ClaimConflictError,
@@ -642,6 +643,8 @@ def create_classic_router() -> APIRouter:
             plan = db.get_plan(milestone_id)
         except KeyError:
             return _error_response(f"Issue not found: {milestone_id}", ErrorCode.NOT_FOUND, 404)
+        except NotAMilestoneError as e:
+            return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
         return JSONResponse(plan)
 
     @router.post("/batch/update")
