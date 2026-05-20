@@ -680,6 +680,7 @@ class MetaMixin(DBMixinProtocol):
         ("comment", "SELECT * FROM comments ORDER BY created_at"),
         ("event", "SELECT * FROM events ORDER BY created_at"),
         ("file_association", "SELECT * FROM file_associations ORDER BY created_at, file_id, issue_id"),
+        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, clarion_entity_id"),
         ("file_event", "SELECT * FROM file_events ORDER BY created_at, file_id"),
         ("observation", "SELECT * FROM observations ORDER BY created_at"),
         ("dismissed_observation", "SELECT * FROM dismissed_observations ORDER BY dismissed_at"),
@@ -719,6 +720,7 @@ class MetaMixin(DBMixinProtocol):
         comments: list[dict[str, Any]],
         events: list[dict[str, Any]],
         file_associations: list[dict[str, Any]],
+        entity_associations: list[dict[str, Any]],
         scan_findings: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         observation_links: list[dict[str, Any]],
@@ -760,6 +762,8 @@ class MetaMixin(DBMixinProtocol):
         for rec in events:
             check(rec.get("issue_id"))
         for rec in file_associations:
+            check(rec.get("issue_id"))
+        for rec in entity_associations:
             check(rec.get("issue_id"))
         for rec in scan_findings:
             check(rec.get("issue_id"))
@@ -832,6 +836,7 @@ class MetaMixin(DBMixinProtocol):
         comments: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
         file_associations: list[dict[str, Any]] = []
+        entity_associations: list[dict[str, Any]] = []
         file_events: list[dict[str, Any]] = []
         observations: list[dict[str, Any]] = []
         dismissed_observations: list[dict[str, Any]] = []
@@ -852,6 +857,7 @@ class MetaMixin(DBMixinProtocol):
             "comment": comments,
             "event": events,
             "file_association": file_associations,
+            "entity_association": entity_associations,
             "file_event": file_events,
             "observation": observations,
             "dismissed_observation": dismissed_observations,
@@ -891,6 +897,7 @@ class MetaMixin(DBMixinProtocol):
                 comments=comments,
                 events=events,
                 file_associations=file_associations,
+                entity_associations=entity_associations,
                 scan_findings=scan_findings,
                 observations=observations,
                 observation_links=observation_links,
@@ -1132,6 +1139,22 @@ class MetaMixin(DBMixinProtocol):
                         record["issue_id"],
                         record.get("assoc_type", "bug_in"),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
+                    ),
+                )
+                count += cursor.rowcount
+
+            _import_stage = "entity_association"
+            for _import_index, record in enumerate(entity_associations):
+                cursor = self.conn.execute(
+                    f"INSERT {conflict} INTO entity_associations "
+                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        record["issue_id"],
+                        record["clarion_entity_id"],
+                        record["content_hash_at_attach"],
+                        _normalize_iso_to_utc(record.get("attached_at")) or _now_iso(),
+                        record.get("attached_by", ""),
                     ),
                 )
                 count += cursor.rowcount

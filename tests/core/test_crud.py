@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, WrongProjectError
 from filigree.types.api import ClaimConflictError, InvalidTransitionError
 from tests.conftest import PopulatedDB
 
@@ -1192,6 +1192,59 @@ class TestImportJsonl:
         assert fresh.conn.execute("SELECT COUNT(*) FROM file_associations").fetchone()[0] == 1
         assert fresh.conn.execute("SELECT COUNT(*) FROM file_events").fetchone()[0] == 1
         fresh.close()
+
+    def test_import_roundtrip_preserves_entity_associations(self, db: FiligreeDB, tmp_path: Path) -> None:
+        issue = db.create_issue("Entity-bound issue")
+        attached = db.add_entity_association(
+            issue.id,
+            "py:func:parser.tokenize",
+            content_hash="hash-a",
+            actor="alice",
+        )
+
+        out = tmp_path / "entity-associations.jsonl"
+        export_count = db.export_jsonl(out)
+
+        records = [json.loads(line) for line in out.read_text().splitlines() if line]
+        entity_records = [record for record in records if record.get("_type") == "entity_association"]
+        assert entity_records == [
+            {
+                "_type": "entity_association",
+                "issue_id": issue.id,
+                "clarion_entity_id": "py:func:parser.tokenize",
+                "content_hash_at_attach": "hash-a",
+                "attached_at": attached["attached_at"],
+                "attached_by": "alice",
+            }
+        ]
+
+        fresh = FiligreeDB(tmp_path / "fresh-entity-associations.db", prefix="test")
+        fresh.initialize()
+        result = fresh.import_jsonl(out)
+
+        rows = fresh.list_entity_associations(issue.id)
+        assert result["count"] == export_count
+        assert rows == [attached]
+        fresh.close()
+
+    def test_import_rejects_foreign_entity_association_issue_ids(self, db: FiligreeDB, tmp_path: Path) -> None:
+        jsonl = tmp_path / "foreign-entity-association.jsonl"
+        jsonl.write_text(
+            json.dumps(
+                {
+                    "_type": "entity_association",
+                    "issue_id": "other-1234567890",
+                    "clarion_entity_id": "py:func:parser.tokenize",
+                    "content_hash_at_attach": "hash-a",
+                    "attached_at": "2026-01-01T00:00:00+00:00",
+                    "attached_by": "alice",
+                }
+            )
+            + "\n"
+        )
+
+        with pytest.raises(WrongProjectError):
+            db.import_jsonl(jsonl, merge=True)
 
     def test_import_preserves_file_registry_metadata(self, tmp_path: Path) -> None:
         jsonl = tmp_path / "clarion-file.jsonl"
