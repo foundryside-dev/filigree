@@ -569,9 +569,14 @@ class ClarionRegistry:
         except ValueError as exc:
             msg = f"Clarion registry response from {url} has invalid content_hash: {exc}"
             raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="invalid_response") from exc
+        try:
+            file_id = make_entity_id(payload["entity_id"])
+        except ValueError as exc:
+            msg = f"Clarion registry response from {url} has invalid entity_id: {exc}"
+            raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="invalid_response") from exc
 
         return ResolvedFile(
-            file_id=make_entity_id(payload["entity_id"]),
+            file_id=file_id,
             content_hash=content_hash,
             canonical_path=payload["canonical_path"],
             language=payload["language"],
@@ -709,8 +714,13 @@ class ClarionRegistry:
             except ValueError as exc:
                 msg = f"Clarion batch resolve at {url} has invalid content_hash for {item['requested_path']!r}: {exc}"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
+            try:
+                file_id = make_entity_id(item["entity_id"])
+            except ValueError as exc:
+                msg = f"Clarion batch resolve at {url} has invalid entity_id for {item['requested_path']!r}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
             resolved[item["requested_path"]] = ResolvedFile(
-                file_id=make_entity_id(item["entity_id"]),
+                file_id=file_id,
                 content_hash=content_hash,
                 canonical_path=item["canonical_path"],
                 language=item["language"],

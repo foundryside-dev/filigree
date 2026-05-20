@@ -882,6 +882,87 @@ def test_clarion_registry_rejects_blank_content_hash() -> None:
         thread.join(timeout=1)
 
 
+def test_clarion_registry_wraps_invalid_entity_id_as_invalid_response() -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(
+                {
+                    "entity_id": " ",
+                    "content_hash": "sha256:abc123",
+                    "canonical_path": "src/main.py",
+                    "language": "python",
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match="entity_id") as exc_info:
+            registry.resolve_file("src/main.py", language="python")
+
+        assert exc_info.value.path == "src/main.py"
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_wraps_batch_invalid_entity_id_as_invalid_response() -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps(
+                {
+                    "resolved": [
+                        {
+                            "requested_path": "src/main.py",
+                            "entity_id": " ",
+                            "content_hash": "sha256:abc123",
+                            "canonical_path": "src/main.py",
+                            "language": "python",
+                        }
+                    ],
+                    "not_found": [],
+                    "briefing_blocked": [],
+                    "errors": [],
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match="entity_id") as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_filigree_db_composes_clarion_registry_when_configured(tmp_path: Path) -> None:
     from tests._fakes.clarion_http import clarion_stub
 
