@@ -515,10 +515,19 @@ class TestListObservations:
         with pytest.raises(ValueError, match=field):
             db.list_observations(**{field: 123})  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize("field", ["sort_by", "direction"])
+    def test_list_rejects_unhashable_sort_options(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: ["created_at"]})  # type: ignore[arg-type]
+
     @pytest.mark.parametrize("field", ["priority_min", "priority_max", "older_than_hours"])
     def test_list_rejects_bool_numeric_filters(self, db: FiligreeDB, field: str) -> None:
         with pytest.raises(ValueError, match=field):
             db.list_observations(**{field: True})  # type: ignore[arg-type]
+
+    def test_list_rejects_older_than_hours_overflow(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="older_than_hours"):
+            db.list_observations(older_than_hours=10**100)
 
     def test_list_sweeps_expired(self, db: FiligreeDB) -> None:
         """Expired observations are auto-removed on list and logged to audit trail."""
@@ -1149,6 +1158,23 @@ class TestPromoteObservation:
 
         with pytest.raises(ValueError, match=field):
             db.link_observation_to_issue(obs["id"], issue.id, **{field: 123})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["obs_id", "issue_id", "disposition"])
+    def test_link_observation_rejects_non_string_identifiers(self, db: FiligreeDB, field: str) -> None:
+        issue = db.create_issue("Existing tracked work")
+        obs = db.create_observation("Attach me")
+        obs_id: object = obs["id"]
+        issue_id: object = issue.id
+        kwargs: dict[str, object] = {}
+        if field == "obs_id":
+            obs_id = ["obs-id"]
+        elif field == "issue_id":
+            issue_id = ["issue-id"]
+        else:
+            kwargs["disposition"] = ["evidence"]
+
+        with pytest.raises(ValueError, match=field):
+            db.link_observation_to_issue(obs_id, issue_id, **kwargs)  # type: ignore[arg-type]
 
     def test_batch_link_observations_reports_per_item_failures(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Existing tracked work")

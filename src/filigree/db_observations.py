@@ -475,6 +475,8 @@ class ObservationsMixin(DBMixinProtocol):
         Sort fields and direction are whitelisted before interpolation so the
         SQL can't be poisoned by caller input.
         """
+        sort_by = _require_string(sort_by, "sort_by")
+        direction = _require_string(direction, "direction")
         if sort_by not in _LIST_OBSERVATIONS_SORT_COLUMNS:
             msg = f"sort_by must be one of {sorted(_LIST_OBSERVATIONS_SORT_COLUMNS)}, got {sort_by!r}"
             raise ValueError(msg)
@@ -546,7 +548,11 @@ class ObservationsMixin(DBMixinProtocol):
             clauses.append("priority <= ?")
             params.append(priority_max)
         if older_than_hours is not None:
-            cutoff = (datetime.now(UTC) - timedelta(hours=older_than_hours)).isoformat()
+            try:
+                cutoff = (datetime.now(UTC) - timedelta(hours=older_than_hours)).isoformat()
+            except OverflowError as exc:
+                msg = f"older_than_hours is too large, got {older_than_hours}"
+                raise ValueError(msg) from exc
             clauses.append("created_at <= ?")
             params.append(cutoff)
         if not swept_ok:
@@ -753,6 +759,9 @@ class ObservationsMixin(DBMixinProtocol):
         in ``observation_links`` and the dismissal audit trail records the
         structured disposition.
         """
+        obs_id = _require_string(obs_id, "obs_id")
+        issue_id = _require_string(issue_id, "issue_id")
+        disposition = _require_string(disposition, "disposition")
         _require_string(actor, "actor")
         _require_string(reason, "reason")
         if disposition not in VALID_OBSERVATION_LINK_DISPOSITIONS:
