@@ -164,6 +164,17 @@ export function criticalPathEdgeIds(path) {
   return edgeIds;
 }
 
+export function clearGraphForNoIssues(container, graphState = state) {
+  if (graphState.cy) {
+    graphState.cy.destroy();
+    graphState.cy = null;
+  }
+  if (container) {
+    container.innerHTML =
+      '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">No issues to display for this project.</div>';
+  }
+}
+
 function applyCriticalPathStyles() {
   if (!state.cy) return;
   if (state.criticalPathActive && state.criticalPathIds.size) {
@@ -253,9 +264,13 @@ function bindGraphEvents() {
 
 export function renderGraph() {
   const renderStarted = performance.now();
-  if (!state.allIssues.length) return;
-
   const container = document.getElementById("cy");
+  if (!state.allIssues.length) {
+    clearGraphForNoIssues(container);
+    setGraphNotice("");
+    updateGraphPerfState();
+    return;
+  }
 
   // --- Scoped subtree rendering ---
   const { nodes: scopeNodes, edges: scopeEdges, ghostIds } = resolveGraphScope();

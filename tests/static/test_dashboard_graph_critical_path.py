@@ -38,3 +38,32 @@ def test_critical_path_edge_ids_exclude_shortcut_edges() -> None:
         "edgeIds": ["e-x1-x2", "e-x2-x3", "e-x3-x4"],
         "hasShortcut": False,
     }
+
+
+def test_empty_graph_reset_destroys_stale_cytoscape_instance() -> None:
+    script = textwrap.dedent(
+        """
+        const { clearGraphForNoIssues } = await import("./src/filigree/static/js/views/graph.js");
+
+        let destroyed = 0;
+        const graphState = { cy: { destroy: () => { destroyed += 1; } } };
+        const container = { innerHTML: "<div>stale graph</div>" };
+        clearGraphForNoIssues(container, graphState);
+
+        console.log(JSON.stringify({
+          destroyed,
+          cyCleared: graphState.cy === null,
+          blankState: container.innerHTML.includes("data-graph-blank"),
+          oldGraphGone: !container.innerHTML.includes("stale graph"),
+        }));
+        """
+    )
+
+    result = _run_node(script)
+
+    assert result == {
+        "destroyed": 1,
+        "cyCleared": True,
+        "blankState": True,
+        "oldGraphGone": True,
+    }
