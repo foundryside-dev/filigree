@@ -1479,6 +1479,58 @@ class TestTriggerScanBatchCommand:
         finally:
             os.chdir(original)
 
+    def test_batch_scan_all_rate_limited_returns_conflict(self, project_with_scanner: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                first = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+                second = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+            assert second.exit_code == 1
+            second_data = json.loads(second.output)
+            assert second_data["code"] == "CONFLICT"
+            assert second_data["details"]["skipped"][0]["reason"] == "rate_limited"
+            assert second_data["details"]["skipped"][0]["blocking_run_id"] == first_data["scan_run_ids"][0]
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_all_immediate_failure_preserves_prior_per_file_errors(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        _make_target_file(project_with_scanner.path, "target2.py")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[OSError("spawn broken"), _ImmediateFailureProc(101)],
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "missing.py", "target2.py", "--json"],
+                )
+
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["spawn_errors"][0]["file_path"] == "target.py"
+            assert "spawn broken" in data["details"]["spawn_errors"][0]["reason"]
+            assert data["details"]["skipped"][0] == {"file_path": "missing.py", "reason": "File not found"}
+        finally:
+            os.chdir(original)
+
     def test_batch_scan_spawn_failure_status_update_failure_is_reported(
         self,
         project_with_scanner: SeededProject,

@@ -596,6 +596,58 @@ class TestTriggerScanBatchTool:
         finally:
             _cleanup_files(mcp_db, files)
 
+    async def test_batch_scan_all_rate_limited_returns_conflict(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_reserved.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                first = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
+                    )
+                )
+                second = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
+                    )
+                )
+
+            assert first["status"] == "triggered"
+            assert second["code"] == ErrorCode.CONFLICT
+            assert second["details"]["skipped"][0]["reason"] == "rate_limited"
+            assert second["details"]["skipped"][0]["blocking_run_id"] == first["scan_run_ids"][0]
+            assert second["details"]["blocking_run_ids"] == [first["scan_run_ids"][0]]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_all_immediate_failure_preserves_prior_per_file_errors(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_spawn_fails.py", "batch_exits_fast.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=9))
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[OSError("spawn broken"), proc],
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {
+                            "scanner": "test-scanner",
+                            "file_paths": ["batch_spawn_fails.py", "missing_batch_file.py", "batch_exits_fast.py"],
+                        },
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["spawn_errors"][0]["file_path"] == "batch_spawn_fails.py"
+            assert "spawn broken" in data["details"]["spawn_errors"][0]["reason"]
+            assert data["details"]["skipped"][0] == {"file_path": "missing_batch_file.py", "reason": "File not found"}
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_batch_scan_empty_paths_rejected(self, mcp_db: FiligreeDB) -> None:
         _write_scanner_toml(mcp_db)
         data = _parse(

@@ -667,12 +667,21 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 skipped.append({"file_path": cp, "reason": f"reservation_failed: {exc}"})
                 continue
             if blocking is not None:
-                skipped.append({"file_path": cp, "reason": "rate_limited"})
+                skipped.append({"file_path": cp, "reason": "rate_limited", "blocking_run_id": blocking["id"]})
                 continue
             assert created is not None  # noqa: S101
             reserved.append({"scan_run_id": child_run_id, "canonical_path": cp, "file_id": fid, "index": i})
 
         if not reserved:
+            if skipped and all(item["reason"] == "rate_limited" for item in skipped):
+                blocking_run_ids = [item["blocking_run_id"] for item in skipped if "blocking_run_id" in item]
+                _emit_error(
+                    "All files are blocked by recent scanner runs. Retry after the blocking run(s) complete.",
+                    ErrorCode.CONFLICT,
+                    as_json=as_json,
+                    details={"skipped": skipped, "blocking_run_ids": blocking_run_ids},
+                )
+                return
             _emit_error(
                 "No files eligible for scanning",
                 ErrorCode.VALIDATION,
@@ -803,6 +812,8 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                     "batch_id": batch_id,
                     "scan_run_ids": scan_run_ids,
                     "per_file": per_file,
+                    **({"spawn_errors": spawn_errors} if spawn_errors else {}),
+                    **({"skipped": skipped} if skipped else {}),
                     **({"status_update_errors": status_update_errors} if status_update_errors else {}),
                 },
             )

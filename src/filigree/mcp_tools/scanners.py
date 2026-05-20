@@ -1113,7 +1113,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             skipped.append({"file_path": cp, "reason": f"reservation_failed: {exc}"})
             continue
         if blocking is not None:
-            skipped.append({"file_path": cp, "reason": "rate_limited"})
+            skipped.append({"file_path": cp, "reason": "rate_limited", "blocking_run_id": blocking["id"]})
             continue
         assert created is not None  # noqa: S101
         reserved.append(
@@ -1126,6 +1126,18 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         )
 
     if not reserved:
+        if skipped and all(item["reason"] == "rate_limited" for item in skipped):
+            blocking_run_ids = [item["blocking_run_id"] for item in skipped if "blocking_run_id" in item]
+            return _text(
+                ErrorResponse(
+                    error="All files are blocked by recent scanner runs. Retry after the blocking run(s) complete.",
+                    code=ErrorCode.CONFLICT,
+                    details={
+                        "skipped": skipped,
+                        "blocking_run_ids": blocking_run_ids,
+                    },
+                )
+            )
         return _text(
             ErrorResponse(
                 error="No files eligible for scanning",
@@ -1276,6 +1288,8 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                     "batch_id": batch_id,
                     "scan_run_ids": scan_run_ids,
                     "per_file": per_file,
+                    **({"spawn_errors": spawn_errors} if spawn_errors else {}),
+                    **({"skipped": skipped} if skipped else {}),
                     **({"status_update_errors": status_update_errors} if status_update_errors else {}),
                 },
             )
