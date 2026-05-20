@@ -1000,11 +1000,15 @@ async def _handle_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListLabelsArgs)
+    top = args.get("top", 10)
+    top_err = _validate_int_range(top, "top", min_val=0)
+    if top_err is not None:
+        return top_err
     tracker = _get_db()
     try:
         result = tracker.list_labels(
             namespace=label_namespace_from_public(args.get("namespace")),
-            top=args.get("top", 10),
+            top=top,
         )
     except (sqlite3.Error, ValueError) as exc:
         return _text(ErrorResponse(error=f"Failed to list labels: {exc}", code=ErrorCode.IO))

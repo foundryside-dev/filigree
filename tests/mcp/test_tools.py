@@ -4244,6 +4244,12 @@ class TestListLabels:
         assert unnamespaced["total"] == 12
         assert unnamespaced["truncated"] is True
 
+    @pytest.mark.parametrize("top", ["10", -1, True])
+    async def test_list_labels_invalid_top_returns_validation(self, mcp_db: FiligreeDB, top: object) -> None:
+        result = await call_tool("list_labels", {"top": top})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
 
 class TestGetLabelTaxonomy:
     async def test_taxonomy_returns_all_sections(self, mcp_db: FiligreeDB) -> None:
