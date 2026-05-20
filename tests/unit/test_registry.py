@@ -602,6 +602,108 @@ def test_clarion_registry_resolve_files_batch_separates_resolved_and_briefing_bl
     assert batch["errors"] == []
 
 
+def test_clarion_registry_rejects_batch_response_missing_requested_path() -> None:
+    """Every requested path must appear in exactly one batch result channel."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps({"resolved": [], "not_found": [], "briefing_blocked": [], "errors": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match="missing outcome") as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/missing-outcome.py", language="python")])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "resolved": [
+                    {
+                        "requested_path": "src/other.py",
+                        "entity_id": "core:file:abc123@src/other.py",
+                        "content_hash": "sha256:abc123",
+                        "canonical_path": "src/other.py",
+                        "language": "python",
+                    }
+                ],
+                "not_found": [],
+                "briefing_blocked": [],
+                "errors": [],
+            },
+            "unexpected path",
+        ),
+        (
+            {
+                "resolved": [
+                    {
+                        "requested_path": "src/requested.py",
+                        "entity_id": "core:file:abc123@src/requested.py",
+                        "content_hash": "sha256:abc123",
+                        "canonical_path": "src/requested.py",
+                        "language": "python",
+                    }
+                ],
+                "not_found": ["src/requested.py"],
+                "briefing_blocked": [],
+                "errors": [],
+            },
+            "multiple result channels",
+        ),
+    ],
+)
+def test_clarion_registry_rejects_batch_response_with_ambiguous_path_outcomes(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
+            registry.resolve_files_batch([BatchQuery(path="src/requested.py", language="python")])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

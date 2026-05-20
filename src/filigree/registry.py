@@ -687,9 +687,10 @@ class ClarionRegistry:
             msg = f"Clarion batch resolve returned non-object response from {url}: {type(payload).__name__}"
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
-        return self._parse_batch_response(payload, url=url)
+        requested_paths = [q["path"] for q in chunk]
+        return self._parse_batch_response(payload, url=url, requested_paths=requested_paths)
 
-    def _parse_batch_response(self, payload: dict[str, Any], *, url: str) -> BatchResolution:
+    def _parse_batch_response(self, payload: dict[str, Any], *, url: str, requested_paths: list[str]) -> BatchResolution:
         def require_list(field: str) -> list[Any]:
             if field not in payload:
                 return []
@@ -699,6 +700,15 @@ class ClarionRegistry:
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
             return value
 
+        def record_outcome(path: str, channel: str) -> None:
+            existing = outcomes.get(path)
+            if existing is not None:
+                msg = f"Clarion batch resolve at {url}: requested path {path!r} appears in multiple result channels: {existing}, {channel}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            outcomes[path] = channel
+
+        requested_path_set = set(requested_paths)
+        outcomes: dict[str, str] = {}
         resolved: dict[str, ResolvedFile] = {}
         for item in require_list("resolved"):
             if not isinstance(item, dict):
@@ -719,6 +729,7 @@ class ClarionRegistry:
             except ValueError as exc:
                 msg = f"Clarion batch resolve at {url} has invalid entity_id for {item['requested_path']!r}: {exc}"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
+            record_outcome(item["requested_path"], "resolved")
             resolved[item["requested_path"]] = ResolvedFile(
                 file_id=file_id,
                 content_hash=content_hash,
@@ -732,25 +743,37 @@ class ClarionRegistry:
             if not isinstance(item, str):
                 msg = f"Clarion batch resolve at {url}: 'not_found' item must be a string"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            record_outcome(item, "not_found")
             not_found.append(item)
         briefing_blocked: list[str] = []
         for item in require_list("briefing_blocked"):
             if not isinstance(item, str):
                 msg = f"Clarion batch resolve at {url}: 'briefing_blocked' item must be a string"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            record_outcome(item, "briefing_blocked")
             briefing_blocked.append(item)
         errors: list[BatchResolutionError] = []
         for item in require_list("errors"):
             if not isinstance(item, dict):
                 msg = f"Clarion batch resolve at {url}: 'errors' item must be an object"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
-            requested = item.get("requested_path")
+            requested_path = item.get("requested_path")
             code = item.get("code")
             message = item.get("message")
-            if not isinstance(requested, str) or not isinstance(code, str) or not isinstance(message, str):
+            if not isinstance(requested_path, str) or not isinstance(code, str) or not isinstance(message, str):
                 msg = f"Clarion batch resolve at {url}: errors entry missing string field(s): requested_path, code, message"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
-            errors.append(BatchResolutionError(requested_path=requested, code=code, message=message))
+            record_outcome(requested_path, "errors")
+            errors.append(BatchResolutionError(requested_path=requested_path, code=code, message=message))
+
+        unexpected = sorted(set(outcomes) - requested_path_set)
+        if unexpected:
+            msg = f"Clarion batch resolve at {url}: response included unexpected path(s): {', '.join(repr(path) for path in unexpected)}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        missing = sorted(requested_path_set - set(outcomes))
+        if missing:
+            msg = f"Clarion batch resolve at {url}: missing outcome for requested path(s): {', '.join(repr(path) for path in missing)}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
         return BatchResolution(
             resolved=resolved,
