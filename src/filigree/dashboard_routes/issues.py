@@ -162,12 +162,18 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
     expected_assignee = body.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _error_response("expected_assignee must be a string", ErrorCode.VALIDATION, 400)
+    assignee = body.get("assignee")
+    if assignee is not None and not isinstance(assignee, str):
+        return _error_response("assignee must be a string", ErrorCode.VALIDATION, 400)
+    fields = body.get("fields")
+    if fields is not None and not isinstance(fields, dict):
+        return _error_response("fields must be a dict", ErrorCode.VALIDATION, 400)
     return {
         "issue_ids": issue_ids,
         "status": status,
         "priority": priority,
-        "assignee": body.get("assignee"),
-        "fields": body.get("fields"),
+        "assignee": assignee,
+        "fields": fields,
         "actor": actor,
         "expected_assignee": expected_assignee,
     }

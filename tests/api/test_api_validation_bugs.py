@@ -536,6 +536,24 @@ class TestPatchStatusTypeValidation:
         assert body["code"] == "VALIDATION", body
 
 
+class TestBatchUpdateBodyValidation:
+    async def test_classic_batch_update_fields_must_be_object_even_with_empty_ids(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/batch/update", json={"issue_ids": [], "fields": []})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "fields" in body["error"]
+
+    async def test_loom_batch_update_assignee_must_be_string_even_with_empty_ids(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/batch/update", json={"issue_ids": [], "assignee": 42})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "assignee" in body["error"]
+
+
 class TestPatchParentIdNullValidation:
     async def test_classic_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         parent = bug_db.create_issue("Classic parent")
