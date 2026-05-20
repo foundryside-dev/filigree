@@ -1141,6 +1141,30 @@ class TestTriggerScanCooldownReservation:
         finally:
             _cleanup_files(mcp_db, files)
 
+    @pytest.mark.parametrize(
+        ("arguments", "expected_error"),
+        [
+            ({"file_path": "trigger_bad.py"}, "scanner must be a string"),
+            ({"scanner": "test-scanner"}, "file_path must be a string"),
+            ({"scanner": ["bad"], "file_path": "trigger_bad.py"}, "scanner must be a string"),
+            ({"scanner": "test-scanner", "file_path": 123}, "file_path must be a string"),
+            ({"scanner": "test-scanner", "file_path": "trigger_bad.py", "prompt": ["bad"]}, "prompt must be a string"),
+            ({"scanner": "test-scanner", "file_path": "trigger_bad.py", "api_url": ["bad"]}, "api_url must be a string"),
+        ],
+    )
+    async def test_trigger_scan_rejects_malformed_argument_types(
+        self,
+        mcp_db: FiligreeDB,
+        arguments: dict[str, object],
+        expected_error: str,
+    ) -> None:
+        _write_scanner_toml(mcp_db)
+
+        data = _parse(await call_tool("trigger_scan", arguments))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == expected_error
+
     async def test_spawn_failure_marks_reservation_failed(self, mcp_db: FiligreeDB) -> None:
         """If the scanner fails to spawn, the reservation is transitioned to
         'failed' so cooldown doesn't keep blocking retries."""

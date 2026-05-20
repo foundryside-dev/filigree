@@ -780,13 +780,22 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     args = _parse_args(arguments, TriggerScanArgs)
     tracker = _get_db()
-    scanner_name = args["scanner"]
-    file_path = args["file_path"]
+    scanner_name = args.get("scanner")
+    if not isinstance(scanner_name, str):
+        return _text(ErrorResponse(error="scanner must be a string", code=ErrorCode.VALIDATION))
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str):
+        return _text(ErrorResponse(error="file_path must be a string", code=ErrorCode.VALIDATION))
     prompt = args.get("prompt", "bug-hunt")
+    if not isinstance(prompt, str):
+        return _text(ErrorResponse(error="prompt must be a string", code=ErrorCode.VALIDATION))
+    api_url_arg = args.get("api_url")
+    if api_url_arg is not None and not isinstance(api_url_arg, str):
+        return _text(ErrorResponse(error="api_url must be a string", code=ErrorCode.VALIDATION))
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
-    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=api_url_arg)
     if api_resolution_err is not None:
         return _text(api_resolution_err)
     assert api_resolution is not None  # noqa: S101
