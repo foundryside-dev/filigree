@@ -228,6 +228,37 @@ export function updateBatchBar() {
   }
 }
 
+function batchFailureItems(result) {
+  if (!result?.ok) return [];
+  const data = result.data || {};
+  if (Array.isArray(data.errors)) return data.errors;
+  if (Array.isArray(data.failed)) return data.failed;
+  return [];
+}
+
+export function batchActionErrorMessage(result, actionLabel, selectedCount) {
+  if (!result?.ok) return result?.error || `${actionLabel} failed`;
+  const failures = batchFailureItems(result);
+  if (failures.length === 0) return "";
+  const issueLabel = selectedCount === 1 ? "issue" : "issues";
+  return `${actionLabel} failed for ${failures.length} of ${selectedCount} ${issueLabel}`;
+}
+
+async function handleBatchActionResult(result, { actionLabel, successMessage, selectedCount }) {
+  const errorMessage = batchActionErrorMessage(result, actionLabel, selectedCount);
+  if (errorMessage) {
+    showToast(errorMessage, "error");
+    if (result?.ok && callbacks.fetchData) await callbacks.fetchData();
+    return false;
+  }
+
+  state.selectedCards.clear();
+  state.multiSelectMode = false;
+  showToast(successMessage, "success");
+  if (callbacks.fetchData) await callbacks.fetchData();
+  return true;
+}
+
 export async function batchSetPriority() {
   const existing = document.getElementById("batchPrioModal");
   if (existing) existing.remove();
@@ -254,12 +285,14 @@ export async function batchSetPriority() {
   };
   document.getElementById("batchPrioConfirm").onclick = async () => {
     const prio = parseInt(document.getElementById("batchPrioSelect").value, 10);
+    const selectedIds = Array.from(state.selectedCards);
     modal.remove();
-    await postBatchUpdate(Array.from(state.selectedCards), { priority: prio });
-    state.selectedCards.clear();
-    state.multiSelectMode = false;
-    showToast("Priority updated", "success");
-    if (callbacks.fetchData) await callbacks.fetchData();
+    const result = await postBatchUpdate(selectedIds, { priority: prio });
+    await handleBatchActionResult(result, {
+      actionLabel: "Priority update",
+      successMessage: "Priority updated",
+      selectedCount: selectedIds.length,
+    });
   };
 }
 
@@ -285,12 +318,14 @@ export async function batchCloseSelected() {
     if (e.target === modal) modal.remove();
   };
   document.getElementById("batchCloseConfirm").onclick = async () => {
+    const selectedIds = Array.from(state.selectedCards);
     modal.remove();
-    await postBatchClose(Array.from(state.selectedCards));
-    state.selectedCards.clear();
-    state.multiSelectMode = false;
-    showToast(`${count} issue${count !== 1 ? "s" : ""} closed`, "success");
-    if (callbacks.fetchData) await callbacks.fetchData();
+    const result = await postBatchClose(selectedIds);
+    await handleBatchActionResult(result, {
+      actionLabel: "Batch close",
+      successMessage: `${count} issue${count !== 1 ? "s" : ""} closed`,
+      selectedCount: selectedIds.length,
+    });
   };
 }
 
