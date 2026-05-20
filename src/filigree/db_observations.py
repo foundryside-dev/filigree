@@ -274,6 +274,24 @@ class ObservationsMixin(DBMixinProtocol):
             file_path = _normalize_scan_path(file_path)
             if not _is_project_relative_scan_path(file_path):
                 raise ValueError("file_path must be project-relative")
+
+        now = _now_iso()
+        summary_stripped = summary.strip()
+        line_cmp = line if line is not None else -1
+
+        # Check for existing duplicate (dedup key: summary + file_path + line).
+        # Live duplicates are a no-op and must not require registry/file refresh.
+        # If the duplicate is expired, delete it so re-creation succeeds —
+        # otherwise the SELECT match would cause us to skip the new INSERT.
+        existing = self.conn.execute(
+            "SELECT * FROM observations WHERE summary = ? AND file_path = ? AND coalesce(line, -1) = ?",
+            (summary_stripped, file_path, line_cmp),
+        ).fetchone()
+        if existing and existing["expires_at"] > now:
+            # Live duplicate — return existing row
+            return cast(ObservationDict, dict(existing))
+
+        if file_path:
             if auto_commit:
                 # Standalone call — register_file commits, which is fine.
                 existing_fr = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
@@ -287,21 +305,6 @@ class ObservationsMixin(DBMixinProtocol):
                 # the caller is responsible for ensuring the file exists.
                 row = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
                 file_id = row["id"] if row else None
-
-        now = _now_iso()
-        summary_stripped = summary.strip()
-        line_cmp = line if line is not None else -1
-
-        # Check for existing duplicate (dedup key: summary + file_path + line).
-        # If the duplicate is expired, delete it so re-creation succeeds —
-        # otherwise the SELECT match would cause us to skip the new INSERT.
-        existing = self.conn.execute(
-            "SELECT * FROM observations WHERE summary = ? AND file_path = ? AND coalesce(line, -1) = ?",
-            (summary_stripped, file_path, line_cmp),
-        ).fetchone()
-        if existing and existing["expires_at"] > now:
-            # Live duplicate — return existing row
-            return cast(ObservationDict, dict(existing))
 
         savepoint_name = "create_observation_mutation"
         savepoint_active = False

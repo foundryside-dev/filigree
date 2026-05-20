@@ -11,9 +11,30 @@ import pytest
 
 from filigree.core import FiligreeDB
 from filigree.db_base import _now_iso
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 
 from .._db_factory import make_db
 from .._fakes.registry import FixedRegistry
+
+
+class _CanonicalThenUnavailableRegistry:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+        self.calls += 1
+        if self.calls > 1:
+            raise RegistryUnavailableError("registry down", path=path, cause_kind="network")
+        return {
+            "file_id": "clarion:file:canonical",
+            "content_hash": "hash:canonical",
+            "canonical_path": "src/canonical.py",
+            "language": language,
+            "registry_backend": "clarion",
+        }
+
+    def is_displaced(self) -> bool:
+        return True
 
 
 class TestCreateObservation:
@@ -86,6 +107,25 @@ class TestCreateObservation:
         result2 = db.create_observation("file-level bug", file_path="src/foo.py")
         assert db.observation_count() == 1
         assert result2["id"] == result1["id"]
+
+    def test_live_duplicate_returns_before_registry_refresh(self, tmp_path: Path) -> None:
+        registry = _CanonicalThenUnavailableRegistry()
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry=registry,
+            registry_backend="clarion",
+        )
+        try:
+            db.initialize()
+            result1 = db.create_observation("file-level bug", file_path="src/foo.py")
+
+            result2 = db.create_observation("file-level bug", file_path="src/foo.py")
+
+            assert result2["id"] == result1["id"]
+            assert registry.calls == 1
+        finally:
+            db.close()
 
     def test_create_duplicate_replaces_expired(self, db: FiligreeDB) -> None:
         """An expired duplicate is swept and replaced with a fresh observation."""
