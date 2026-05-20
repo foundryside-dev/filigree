@@ -966,6 +966,8 @@ class TemplateRegistry:
             for pack_file in sorted(packs_dir.glob("*.json")):
                 try:
                     pack_data = _json.loads(pack_file.read_text())
+                    if not isinstance(pack_data, dict):
+                        raise TypeError(f"pack root must be an object, got {type(pack_data).__name__}")
                     pack_name = pack_data.get("pack", pack_file.stem)
                     if "pack" not in pack_data:
                         pack_data["pack"] = pack_name
@@ -1011,7 +1013,10 @@ class TemplateRegistry:
 
         # Phase 1: Parse all types into staging dict (no side effects)
         types_dict: dict[str, TypeTemplate] = {}
-        for type_name, type_data in pack_data.get("types", {}).items():
+        raw_types = pack_data.get("types", {})
+        if not isinstance(raw_types, dict):
+            raise TypeError(f"pack {pack_name} types must be an object, got {type(raw_types).__name__}")
+        for type_name, type_data in raw_types.items():
             try:
                 tpl = self.parse_type_template(type_data)
                 # Ensure the type is tagged with the actual pack name,

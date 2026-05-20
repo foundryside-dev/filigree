@@ -603,6 +603,38 @@ class TestEnabledPacksValidation:
         # Should load core pack, not ['c','o','r','e']
         assert reg.get_type("task") is not None
 
+    def test_installed_pack_root_array_is_skipped(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Installed pack files must have object roots; malformed roots are skipped."""
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "bad"]}))
+        (packs_dir / "bad.json").write_text(json.dumps([]))
+
+        reg = TemplateRegistry()
+        caplog.set_level(logging.WARNING)
+        reg.load(filigree_dir)
+
+        assert reg.get_type("task") is not None
+        assert reg.get_pack("bad") is None
+        assert any("Skipping invalid pack file bad.json" in record.message for record in caplog.records)
+
+    def test_installed_pack_types_array_is_skipped(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Installed pack types must be a mapping; malformed packs are skipped."""
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "bad"]}))
+        (packs_dir / "bad.json").write_text(json.dumps({"pack": "bad", "types": []}))
+
+        reg = TemplateRegistry()
+        caplog.set_level(logging.WARNING)
+        reg.load(filigree_dir)
+
+        assert reg.get_type("task") is not None
+        assert reg.get_pack("bad") is None
+        assert any("Skipping invalid pack file bad.json" in record.message for record in caplog.records)
+
 
 class TestParseTemplateMalformedTransitionsFields:
     """Bug fix: filigree-b25e83 — raw TypeError for non-list transitions/fields."""
