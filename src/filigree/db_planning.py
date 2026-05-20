@@ -288,7 +288,7 @@ class PlanningMixin(DBMixinProtocol):
             f"  SELECT 1 FROM dependencies d "
             f"  JOIN issues blocker ON d.depends_on_id = blocker.id "
             f"  WHERE d.issue_id = i.id AND NOT ({blocker_done_sql})"
-            f") ORDER BY i.priority, i.created_at",
+            f") ORDER BY i.priority ASC, i.created_at ASC, i.id ASC",
             [*open_params, *blocker_done_params],
         ).fetchall()
 

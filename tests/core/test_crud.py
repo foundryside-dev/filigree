@@ -850,6 +850,31 @@ class TestClaimNextFilters:
         assert result is not None
         assert result.id == high_bug.id
 
+    @pytest.mark.parametrize("method_name", ["claim_next", "start_next_work"])
+    def test_equal_priority_and_created_at_tie_breaks_by_issue_id(self, db: FiligreeDB, method_name: str) -> None:
+        """Ready selection is deterministic when priority and created_at tie."""
+        for existing in db.get_ready():
+            db.claim_issue(existing.id, assignee="setup")
+        created_at = "2026-01-01T00:00:00+00:00"
+        lower_id = f"{db.prefix}-atie000001"
+        higher_id = f"{db.prefix}-ztie000001"
+        for issue_id, title in ((higher_id, "Higher inserted first"), (lower_id, "Lower inserted second")):
+            db.conn.execute(
+                "INSERT INTO issues (id, title, status, priority, type, assignee, created_at, updated_at, description, notes, fields) "
+                "VALUES (?, ?, 'open', 2, 'task', '', ?, ?, '', '', '{}')",
+                (issue_id, title, created_at, created_at),
+            )
+        db.conn.commit()
+
+        result = (
+            db.claim_next("agent")
+            if method_name == "claim_next"
+            else db.start_next_work(assignee="agent")
+        )
+
+        assert result is not None
+        assert result.id == lower_id
+
 
 class TestClaimNextExhaustion:
     """Bug fix: filigree-2e5383 — claim_next logs when all candidates fail."""
