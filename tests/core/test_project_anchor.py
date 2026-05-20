@@ -1192,6 +1192,25 @@ class TestWrongProjectErrorOnWrites:
         assert after == before
         db_p.close()
 
+    def test_update_issue_rejects_foreign_parent_id_even_when_row_exists(self, db_p: FiligreeDB) -> None:
+        child = db_p.create_issue("Local child")
+        db_p.bulk_insert_issue(
+            {
+                "id": "beefdata-abc1234567",
+                "title": "Imported foreign parent",
+                "status": "open",
+                "type": "task",
+            },
+            validate=False,
+        )
+        db_p.conn.commit()
+
+        with pytest.raises(WrongProjectError):
+            db_p.update_issue(child.id, parent_id="beefdata-abc1234567")
+
+        assert db_p.get_issue(child.id).parent_id is None
+        db_p.close()
+
     def test_create_issue_rejects_foreign_dep_id(self, db_p: FiligreeDB) -> None:
         before = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
 

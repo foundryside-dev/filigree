@@ -419,7 +419,7 @@ class TestReopen:
         assert data["succeeded"][0]["issue_id"] == good_id
         assert len(data["failed"]) == 1
 
-    def test_reopen_json_batch_claim_conflict_uses_conflict_code(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_reopen_json_batch_ignores_closed_audit_assignee(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         held = runner.invoke(cli, ["create", "Held reopen"])
         free = runner.invoke(cli, ["create", "Free reopen"])
@@ -431,12 +431,10 @@ class TestReopen:
 
         result = runner.invoke(cli, ["--actor", "other-agent", "reopen", held_id, free_id, "--json"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 0
         data = json.loads(result.output)
-        assert data["succeeded"][0]["issue_id"] == free_id
-        assert data["failed"][0]["id"] == held_id
-        assert data["failed"][0]["code"] == "CONFLICT"
-        assert data["failed"][0]["details"] == {"issue_id": held_id, "observed": "agent-holder", "expected": "other-agent"}
+        assert {item["issue_id"] for item in data["succeeded"]} == {held_id, free_id}
+        assert data["failed"] == []
 
     def test_reopen_json_all_success(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

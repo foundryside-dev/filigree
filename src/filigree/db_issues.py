@@ -810,6 +810,7 @@ class IssuesMixin(DBMixinProtocol):
                 msg = f"Issue {issue_id} cannot be its own parent"
                 raise ValueError(msg)
             self._validate_parent_id(parent_id)
+            self._check_id_prefix(parent_id)
             if self._would_create_parent_cycle(issue_id, parent_id):
                 msg = f"Setting parent_id to '{parent_id}' would create a circular parent chain"
                 raise ValueError(msg)
@@ -1189,6 +1190,7 @@ class IssuesMixin(DBMixinProtocol):
             issue_id,
             status=reopen_status,
             actor=actor,
+            expected_assignee=current.assignee,
             backward=True,
             _skip_begin=True,
         )

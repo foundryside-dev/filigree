@@ -942,6 +942,17 @@ class TestReopenIssue:
         assert reopened.status == "open"
         assert "close_reason" not in reopened.fields
 
+    def test_reopen_ignores_closed_issue_audit_assignee(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.start_work(issue.id, assignee="alice", actor="alice")
+        db.close_issue(issue.id, actor="alice")
+
+        reopened = db.reopen_issue(issue.id, actor="bob")
+
+        assert reopened.status == "in_progress"
+        assert reopened.assignee == "alice"
+        assert reopened.closed_at is None
+
     def test_reopen_already_open_raises(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Task", type="task")
         with pytest.raises(ValueError, match="not in a done-category state"):
