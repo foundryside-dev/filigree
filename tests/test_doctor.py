@@ -503,6 +503,16 @@ class TestDoctorGitignore:
         gi_result = next(r for r in results if r.name == ".gitignore")
         assert gi_result.passed is True
 
+    def test_gitignore_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / ".gitignore").mkdir()
+
+        results = run_doctor(tmp_path)
+
+        gi_result = next(r for r in results if r.name == ".gitignore")
+        assert gi_result.passed is False
+        assert "unreadable" in gi_result.message
+
 
 # ---------------------------------------------------------------------------
 # run_doctor — bundled scanner registration drift
@@ -613,6 +623,16 @@ class TestDoctorClaudeCodeMcp:
         _make_project(tmp_path)
         (tmp_path / ".mcp.json").write_text("{bad json")
         results = run_doctor(tmp_path)
+        mcp_result = next(r for r in results if r.name == "Claude Code MCP")
+        assert mcp_result.passed is False
+        assert "Invalid .mcp.json" in mcp_result.message
+
+    def test_mcp_json_directory_reports_failure(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / ".mcp.json").mkdir()
+
+        results = run_doctor(tmp_path)
+
         mcp_result = next(r for r in results if r.name == "Claude Code MCP")
         assert mcp_result.passed is False
         assert "Invalid .mcp.json" in mcp_result.message

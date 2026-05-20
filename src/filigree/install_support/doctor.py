@@ -636,18 +636,29 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # substrings) — see filigree-bc5d2af1ef for the previous divergence.
     gitignore = (filigree_dir.parent) / ".gitignore"
     if gitignore.exists():
-        content = gitignore.read_text()
-        if has_active_filigree_ignore(content):
-            results.append(CheckResult(".gitignore", True, ".filigree/ is ignored"))
-        else:
+        try:
+            content = gitignore.read_text()
+        except OSError as exc:
             results.append(
                 CheckResult(
                     ".gitignore",
                     False,
-                    ".filigree/ not in .gitignore",
-                    fix_hint="Run: filigree install --gitignore",
+                    f"Found at {gitignore} but unreadable: {exc}",
+                    fix_hint="Replace it with a readable .gitignore file containing .filigree/",
                 )
             )
+        else:
+            if has_active_filigree_ignore(content):
+                results.append(CheckResult(".gitignore", True, ".filigree/ is ignored"))
+            else:
+                results.append(
+                    CheckResult(
+                        ".gitignore",
+                        False,
+                        ".filigree/ not in .gitignore",
+                        fix_hint="Run: filigree install --gitignore",
+                    )
+                )
     else:
         results.append(
             CheckResult(
@@ -709,7 +720,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                         results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json (venv path)"))
                 else:
                     results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json"))
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, OSError):
             results.append(
                 CheckResult(
                     "Claude Code MCP",
