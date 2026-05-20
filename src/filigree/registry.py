@@ -313,12 +313,15 @@ def probe_clarion_capabilities(base_url: str, *, timeout_seconds: float, auth_to
         with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
-        reason = exc.reason or exc.msg
-        if exc.code == 401:
-            msg = f"Clarion capability probe rejected at {url}: HTTP 401 {reason} (check token_env)"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
-        msg = f"Clarion capability probe failed at {url}: HTTP {exc.code} {reason}"
-        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+        try:
+            reason = exc.reason or exc.msg
+            if exc.code == 401:
+                msg = f"Clarion capability probe rejected at {url}: HTTP 401 {reason} (check token_env)"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
+            msg = f"Clarion capability probe failed at {url}: HTTP {exc.code} {reason}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+        finally:
+            exc.close()
     except (URLError, TimeoutError, OSError) as exc:
         msg = f"Clarion capability probe unreachable at {url}: {exc}"
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
@@ -504,21 +507,24 @@ class ClarionRegistry:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
-            reason = exc.reason or exc.msg
-            if exc.code == 401:
-                msg = f"Clarion registry rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="auth") from exc
-            if exc.code == 403 and _is_briefing_blocked_body(exc):
-                msg = f"Clarion registry refuses briefing-blocked file at {url}: HTTP 403 {reason}"
-                raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
-            if exc.code == 404:
-                msg = f"Clarion registry could not resolve file at {url}: HTTP 404 {reason}"
-                raise RegistryFileNotFoundError(msg, status_code=exc.code, url=url) from exc
-            if 400 <= exc.code < 500:
-                msg = f"Clarion registry rejected file resolution at {url}: HTTP {exc.code} {reason}"
-                raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
-            msg = f"Clarion registry unavailable at {url}: HTTP {exc.code} {reason}"
-            raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error") from exc
+            try:
+                reason = exc.reason or exc.msg
+                if exc.code == 401:
+                    msg = f"Clarion registry rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                    raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="auth") from exc
+                if exc.code == 403 and _is_briefing_blocked_body(exc):
+                    msg = f"Clarion registry refuses briefing-blocked file at {url}: HTTP 403 {reason}"
+                    raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
+                if exc.code == 404:
+                    msg = f"Clarion registry could not resolve file at {url}: HTTP 404 {reason}"
+                    raise RegistryFileNotFoundError(msg, status_code=exc.code, url=url) from exc
+                if 400 <= exc.code < 500:
+                    msg = f"Clarion registry rejected file resolution at {url}: HTTP {exc.code} {reason}"
+                    raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
+                msg = f"Clarion registry unavailable at {url}: HTTP {exc.code} {reason}"
+                raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error") from exc
+            finally:
+                exc.close()
         except (URLError, TimeoutError, OSError) as exc:
             msg = f"Clarion registry unavailable at {url}: {exc}"
             raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="network") from exc
@@ -588,18 +594,21 @@ class ClarionRegistry:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
-            reason = exc.reason or exc.msg
-            if exc.code == 401:
-                msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
-            if exc.code == 403 and _is_briefing_blocked_body(exc):
-                msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
-                raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
-            if 400 <= exc.code < 500:
-                msg = f"Clarion batch resolve rejected request at {url}: HTTP {exc.code} {reason}"
-                raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
-            msg = f"Clarion batch resolve failed at {url}: HTTP {exc.code} {reason}"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+            try:
+                reason = exc.reason or exc.msg
+                if exc.code == 401:
+                    msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
+                if exc.code == 403 and _is_briefing_blocked_body(exc):
+                    msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
+                    raise RegistryBriefingBlockedError(msg, status_code=exc.code, url=url) from exc
+                if 400 <= exc.code < 500:
+                    msg = f"Clarion batch resolve rejected request at {url}: HTTP {exc.code} {reason}"
+                    raise RegistryResolutionError(msg, status_code=exc.code, url=url) from exc
+                msg = f"Clarion batch resolve failed at {url}: HTTP {exc.code} {reason}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
+            finally:
+                exc.close()
         except (URLError, TimeoutError, OSError) as exc:
             msg = f"Clarion batch resolve unreachable at {url}: {exc}"
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc

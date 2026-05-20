@@ -26,12 +26,13 @@ Project Setup".
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -45,11 +46,24 @@ from filigree.dashboard import create_app
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.slow,
-    pytest.mark.skipif(
-        shutil.which("clarion") is None,
-        reason="clarion CLI is not on PATH; install Clarion to run this integration test",
-    ),
 ]
+
+
+def _clarion_unavailable_action(*, require_live: bool | None = None) -> str:
+    """Return whether live-Clarion unavailability should skip or fail.
+
+    Normal contributor lanes may not have Clarion installed. Release lanes can
+    set ``FILIGREE_REQUIRE_LIVE_CLARION=1`` so cross-product drift is fatal
+    instead of silently reported as a skip.
+    """
+    required = os.environ.get("FILIGREE_REQUIRE_LIVE_CLARION") == "1" if require_live is None else require_live
+    return "fail" if required else "skip"
+
+
+def _clarion_unavailable(reason: str) -> None:
+    if _clarion_unavailable_action() == "fail":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 def _free_loopback_port() -> int:
@@ -80,6 +94,9 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
     is terminated on context exit; closing its stdin shuts down the MCP
     stdio half cleanly, which in turn shuts the HTTP half.
     """
+    if shutil.which("clarion") is None:
+        _clarion_unavailable("clarion CLI is not on PATH; install Clarion to run this integration test")
+
     install = subprocess.run(
         ["clarion", "install", "--path", str(project_root)],
         check=False,
@@ -87,7 +104,7 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
         text=True,
     )
     if install.returncode != 0:
-        pytest.skip(f"clarion install failed — installed binary may be too old for this test (stderr: {install.stderr.strip()!r})")
+        _clarion_unavailable(f"clarion install failed — installed binary may be too old for this test (stderr: {install.stderr.strip()!r})")
 
     port = _free_loopback_port()
     bind = f"127.0.0.1:{port}"
@@ -111,7 +128,7 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 _stdout, stderr = proc.communicate()
-            pytest.skip(
+            _clarion_unavailable(
                 f"clarion serve did not start an HTTP listener on {base_url}: {exc}; "
                 f"stderr={stderr.decode('utf-8', errors='replace')[:500]!r}"
             )
@@ -121,7 +138,7 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
         # that case, since the test's intent is "verify against a Clarion
         # build that ships the F-1 handshake."
         if not isinstance(capabilities.get("api_version"), int) or not isinstance(capabilities.get("instance_id"), str):
-            pytest.skip(
+            _clarion_unavailable(
                 "clarion CLI on PATH predates ADR-014 F-1 (no api_version / instance_id "
                 f"in /api/v1/_capabilities response: {capabilities!r}). Rebuild Clarion "
                 "from a tip that includes the F-1 handshake to run this test."
@@ -140,6 +157,10 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                with suppress(OSError):
+                    pipe.close()
 
 
 async def _post_scan_results(db: FiligreeDB, *, path: str) -> dict[str, object]:

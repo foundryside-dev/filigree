@@ -25,40 +25,46 @@ def _project_db(tmp_path: Path) -> FiligreeDB:
 class TestAnnotationSchema:
     def test_current_schema_creates_annotation_tables(self, tmp_path: Path) -> None:
         conn = sqlite3.connect(tmp_path / "schema.db")
-        conn.executescript(SCHEMA_SQL)
-        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
 
-        assert CURRENT_SCHEMA_VERSION >= 10
-        tables = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-        }
-        assert {
-            "annotations",
-            "annotation_provenance",
-            "annotation_links",
-            "annotation_events",
-            "annotation_closeout_acknowledgements",
-        }.issubset(tables)
+            assert CURRENT_SCHEMA_VERSION >= 10
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+            }
+            assert {
+                "annotations",
+                "annotation_provenance",
+                "annotation_links",
+                "annotation_events",
+                "annotation_closeout_acknowledgements",
+            }.issubset(tables)
+        finally:
+            conn.close()
 
     def test_v9_to_v10_migration_creates_annotation_tables(self, tmp_path: Path) -> None:
         conn = sqlite3.connect(tmp_path / "migration.db")
-        conn.executescript(SCHEMA_SQL)
-        for table in (
-            "annotation_closeout_acknowledgements",
-            "annotation_events",
-            "annotation_links",
-            "annotation_provenance",
-            "annotations",
-        ):
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.execute("PRAGMA user_version = 9")
-        conn.commit()
+        try:
+            conn.executescript(SCHEMA_SQL)
+            for table in (
+                "annotation_closeout_acknowledgements",
+                "annotation_events",
+                "annotation_links",
+                "annotation_provenance",
+                "annotations",
+            ):
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute("PRAGMA user_version = 9")
+            conn.commit()
 
-        applied = apply_pending_migrations(conn, 10)
+            applied = apply_pending_migrations(conn, 10)
 
-        assert applied == 1
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
-        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'annotations'").fetchone() is not None
+            assert applied == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'annotations'").fetchone() is not None
+        finally:
+            conn.close()
 
 
 class TestAnnotationCrud:

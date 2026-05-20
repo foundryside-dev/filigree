@@ -224,11 +224,14 @@ def test_export_import_roundtrip_with_files(db: FiligreeDB, tmp_path: Path) -> N
     assert count > 0
 
     fresh = FiligreeDB(tmp_path / "fresh.db", prefix="test")
-    fresh.initialize()
-    import_result = fresh.import_jsonl(str(out))
-    assert import_result["count"] == count
-    assert fresh.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
-    assert fresh.conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 1
+    try:
+        fresh.initialize()
+        import_result = fresh.import_jsonl(str(out))
+        assert import_result["count"] == count
+        assert fresh.conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
+        assert fresh.conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 1
+    finally:
+        fresh.close()
 
 
 # -- PlanningMixin ----------------------------------------------------------

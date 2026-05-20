@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -25,9 +26,15 @@ from filigree.migrations import (
 # ---------------------------------------------------------------------------
 
 
+class _AutoClosingConnection(sqlite3.Connection):
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
+
+
 def _make_db(tmp_path: Path, name: str = "test.db") -> sqlite3.Connection:
     """Create a raw SQLite connection with filigree PRAGMAs."""
-    conn = sqlite3.connect(str(tmp_path / name))
+    conn = sqlite3.connect(str(tmp_path / name), factory=_AutoClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,13 @@ from tests._db_factory import make_db
 
 
 @pytest.fixture
-def bug_db(tmp_path: Path) -> FiligreeDB:
+def bug_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
     """FiligreeDB for bug cluster tests."""
-    return make_db(tmp_path, check_same_thread=False)
+    db = make_db(tmp_path, check_same_thread=False)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -36,9 +41,11 @@ async def client(bug_db: FiligreeDB) -> AsyncClient:
     dash_module._db = bug_db
     app = create_app()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    dash_module._db = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        dash_module._db = None
 
 
 # ---------------------------------------------------------------------------

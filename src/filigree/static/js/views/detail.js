@@ -66,7 +66,8 @@ export async function openDetail(issueId) {
       return;
     }
     // Show stale-data banner so user knows they may be viewing outdated info
-    staleBanner = '<div class="text-xs rounded px-3 py-2 mb-3" style="background:var(--surface-overlay);border:1px dashed var(--border-strong);color:var(--text-secondary)">Showing cached data \u2014 could not reach server.</div>';
+    staleBanner =
+      '<div class="text-xs rounded px-3 py-2 mb-3" style="background:var(--surface-overlay);border:1px dashed var(--border-strong);color:var(--text-secondary)">Showing cached data \u2014 could not reach server.</div>';
   }
 
   const safeId = escJsSingle(d.id);
@@ -134,7 +135,9 @@ export async function openDetail(issueId) {
   const issueFilesHtml = issueFilesData
     .map((f) => {
       const safeFileId = escJsSingle(f.file_id);
-      const assoc = f.assoc_type ? ` <span style="color:var(--text-muted)">(${escHtml(f.assoc_type)})</span>` : "";
+      const assoc = f.assoc_type
+        ? ` <span style="color:var(--text-muted)">(${escHtml(f.assoc_type)})</span>`
+        : "";
       const lang = f.file_language
         ? `<span class="ml-2 text-[11px]" style="color:var(--text-muted)">${escHtml(f.file_language)}</span>`
         : "";
@@ -270,25 +273,25 @@ export async function openDetail(issueId) {
   // Load transitions async and render buttons
   loadTransitions(issueId)
     .then((transitions) => {
-    const container = document.getElementById("transitionBtns");
-    if (!container || !transitions || !transitions.length) return;
-    container.innerHTML = transitions
-      .map((t) => {
-        const btnStyle = t.ready
-          ? "background:var(--accent);color:var(--surface-base)"
-          : "background:var(--surface-overlay);color:var(--text-muted)";
-        const cls = t.ready ? "" : "cursor-not-allowed";
-        const missingText = t.missing_fields.length
-          ? ` <span style="color:var(--text-muted)">(missing: ${t.missing_fields.map((f) => escHtml(f)).join(", ")})</span>`
-          : "";
-        return (
-          `<button ${t.ready ? `onclick="updateIssue('${safeId}',{status:'${escJsSingle(t.to)}'},this)"` : "disabled"}` +
-          ` class="text-xs px-2 py-1 rounded ${cls}" style="${btnStyle}">` +
-          `${escHtml(t.to)}${missingText}</button>`
-        );
-      })
-      .join("");
-  })
+      const container = document.getElementById("transitionBtns");
+      if (!container || !transitions || !transitions.length) return;
+      container.innerHTML = transitions
+        .map((t) => {
+          const btnStyle = t.ready
+            ? "background:var(--accent);color:var(--surface-base)"
+            : "background:var(--surface-overlay);color:var(--text-muted)";
+          const cls = t.ready ? "" : "cursor-not-allowed";
+          const missingText = t.missing_fields.length
+            ? ` <span style="color:var(--text-muted)">(missing: ${t.missing_fields.map((f) => escHtml(f)).join(", ")})</span>`
+            : "";
+          return (
+            `<button ${t.ready ? `onclick="updateIssue('${safeId}',{status:'${escJsSingle(t.to)}'},this)"` : "disabled"}` +
+            ` class="text-xs px-2 py-1 rounded ${cls}" style="${btnStyle}">` +
+            `${escHtml(t.to)}${missingText}</button>`
+          );
+        })
+        .join("");
+    })
     .catch((err) => {
       const container = document.getElementById("transitionBtns");
       if (container) {

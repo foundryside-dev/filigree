@@ -274,7 +274,8 @@ async function loadProjects() {
     if (!projects) return;
     state.allProjects = projects;
     const currentMissing =
-      !!state.currentProjectKey && !state.allProjects.some((p) => p.key === state.currentProjectKey);
+      !!state.currentProjectKey &&
+      !state.allProjects.some((p) => p.key === state.currentProjectKey);
     const sel = document.getElementById("projectSwitcher");
     if (!sel) return;
     sel.innerHTML = "";
@@ -367,7 +368,10 @@ detailCallbacks.render = render;
 // ---------------------------------------------------------------------------
 
 registerView("kanban", renderKanban);
-registerView("graph", () => { renderGraphSidebar(); renderGraph(); });
+registerView("graph", () => {
+  renderGraphSidebar();
+  renderGraph();
+});
 registerView("insights", loadMetrics);
 registerView("files", loadFiles);
 registerView("ready", loadReady);

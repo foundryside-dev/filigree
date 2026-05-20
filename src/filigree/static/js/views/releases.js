@@ -18,10 +18,10 @@ let _pendingFocusTarget = null;
 export function scrollToReleaseCard(cardId) {
   const el = document.getElementById(cardId);
   if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  el.classList.remove('changed-flash');
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove("changed-flash");
   void el.offsetWidth;
-  el.classList.add('changed-flash');
+  el.classList.add("changed-flash");
 }
 // scrollToReleaseCard is exported and registered on window by app.js
 
@@ -71,7 +71,13 @@ function statusBadge(status) {
       style = "background:var(--surface-overlay);color:var(--text-secondary)";
       break;
   }
-  return '<span class="text-xs rounded px-1.5 py-0.5" style="' + style + '">' + escHtml(status || 'open') + '</span>';
+  return (
+    '<span class="text-xs rounded px-1.5 py-0.5" style="' +
+    style +
+    '">' +
+    escHtml(status || "open") +
+    "</span>"
+  );
 }
 
 // --- Progress bar rendering ---
@@ -80,11 +86,19 @@ function renderProgressBar(pct, name) {
   const safeName = escHtml(name);
   const clampedPct = Math.max(0, Math.min(100, pct));
   return (
-    '<div role="progressbar" aria-valuenow="' + clampedPct + '" aria-valuemin="0" aria-valuemax="100" ' +
-    'aria-label="' + safeName + ' progress: ' + clampedPct + '%" ' +
+    '<div role="progressbar" aria-valuenow="' +
+    clampedPct +
+    '" aria-valuemin="0" aria-valuemax="100" ' +
+    'aria-label="' +
+    safeName +
+    " progress: " +
+    clampedPct +
+    '%" ' +
     'style="background:var(--surface-base);height:8px;border-radius:4px;flex:1;min-width:60px;max-width:120px">' +
-    '<div style="width:' + clampedPct + '%;height:100%;background:var(--accent);border-radius:4px"></div>' +
-    '</div>'
+    '<div style="width:' +
+    clampedPct +
+    '%;height:100%;background:var(--accent);border-radius:4px"></div>' +
+    "</div>"
   );
 }
 
@@ -100,46 +114,63 @@ function renderTreeNode(node, level, releaseId) {
   const hasChildren = !isLeaf;
   const pct = node.progress?.pct ?? 0;
 
-  let html = '';
+  let html = "";
   html += '<li role="treeitem" aria-level="' + (maxLevel + 1) + '"';
   if (hasChildren) {
-    html += ' aria-expanded="' + (!isCollapsed) + '"';
+    html += ' aria-expanded="' + !isCollapsed + '"';
   }
   html += ' tabindex="-1"';
   html += ' data-node-id="' + escHtml(nodeId) + '"';
   html += ' data-release-id="' + escHtml(releaseId) + '"';
   html += ' data-has-children="' + hasChildren + '"';
-  html += ' style="list-style:none;padding-left:' + indent + 'px;';
+  html += ' style="list-style:none;padding-left:' + indent + "px;";
   if (level > 0) {
-    html += 'border-left:1px solid var(--border-default);margin-left:' + ((maxLevel - 1) * 24) + 'px;';
+    html +=
+      "border-left:1px solid var(--border-default);margin-left:" + (maxLevel - 1) * 24 + "px;";
   }
   html += '"';
   html += ' class="py-1 flex items-center gap-2">';
 
   // Toggle or leaf indicator
   if (hasChildren) {
-    const arrow = isCollapsed ? '\u25B6' : '\u25BC';
-    html += '<button class="text-xs flex items-center justify-center cursor-pointer" ' +
+    const arrow = isCollapsed ? "\u25B6" : "\u25BC";
+    html +=
+      '<button class="text-xs flex items-center justify-center cursor-pointer" ' +
       'style="width:44px;height:44px;min-width:44px;min-height:44px;background:none;border:none;color:var(--text-secondary)" ' +
-      'onclick="event.stopPropagation();window._toggleReleaseTreeNode(\'' + safeId + '\',\'' + escJsSingle(releaseId) + '\')" ' +
-      'aria-label="' + (isCollapsed ? 'Expand' : 'Collapse') + ' ' + escHtml(node.issue.title || nodeId) + '">' +
-      arrow + '</button>';
+      "onclick=\"event.stopPropagation();window._toggleReleaseTreeNode('" +
+      safeId +
+      "','" +
+      escJsSingle(releaseId) +
+      "')\" " +
+      'aria-label="' +
+      (isCollapsed ? "Expand" : "Collapse") +
+      " " +
+      escHtml(node.issue.title || nodeId) +
+      '">' +
+      arrow +
+      "</button>";
   } else {
     // Leaf — status badge inline
-    html += '<span style="width:44px;min-width:44px;display:inline-flex;align-items:center;justify-content:center">' +
-      statusBadge(node.issue.status || '') + '</span>';
+    html +=
+      '<span style="width:44px;min-width:44px;display:inline-flex;align-items:center;justify-content:center">' +
+      statusBadge(node.issue.status || "") +
+      "</span>";
   }
 
   // Title (clickable)
-  html += '<button class="cursor-pointer hover:underline text-xs text-left" ' +
+  html +=
+    '<button class="cursor-pointer hover:underline text-xs text-left" ' +
     'style="color:var(--text-primary);background:none;border:none;padding:0" ' +
-    'onclick="window.openDetail(\'' + safeId + '\')">' +
-    escHtml(node.issue.title || nodeId) + '</button>';
+    "onclick=\"window.openDetail('" +
+    safeId +
+    "')\">" +
+    escHtml(node.issue.title || nodeId) +
+    "</button>";
 
   // Progress bar for non-leaf nodes
   if (hasChildren) {
-    html += ' ' + renderProgressBar(pct, node.issue.title || nodeId);
-    html += ' <span class="text-xs" style="color:var(--text-muted)">' + pct + '%</span>';
+    html += " " + renderProgressBar(pct, node.issue.title || nodeId);
+    html += ' <span class="text-xs" style="color:var(--text-muted)">' + pct + "%</span>";
   }
 
   // Render children if expanded (INSIDE the li)
@@ -148,10 +179,10 @@ function renderTreeNode(node, level, releaseId) {
     for (const child of node.children) {
       html += renderTreeNode(child, level + 1, releaseId);
     }
-    html += '</ul>';
+    html += "</ul>";
   }
 
-  html += '</li>';
+  html += "</li>";
 
   return html;
 }
@@ -182,18 +213,21 @@ function renderTree(tree, releaseId) {
     return '<div class="text-xs py-2" style="color:var(--text-muted)">No child items.</div>';
   }
 
-  let html = '';
+  let html = "";
   html += '<div class="flex items-center gap-2 mb-2">';
-  html += '<button class="text-xs px-2 py-1 rounded bg-overlay bg-overlay-hover" ' +
+  html +=
+    '<button class="text-xs px-2 py-1 rounded bg-overlay bg-overlay-hover" ' +
     'style="min-height:44px" ' +
-    'onclick="window._collapseAllReleaseTree(\'' + escJsSingle(releaseId) + '\')">Collapse all</button>';
-  html += '</div>';
+    "onclick=\"window._collapseAllReleaseTree('" +
+    escJsSingle(releaseId) +
+    "')\">Collapse all</button>";
+  html += "</div>";
 
   html += '<ul role="tree" data-release-tree="' + escHtml(releaseId) + '">';
   for (const child of tree.children) {
     html += renderTreeNode(child, 0, releaseId);
   }
-  html += '</ul>';
+  html += "</ul>";
 
   return html;
 }
@@ -214,7 +248,7 @@ function setupTreeKeyboard(container) {
 
 function getVisibleTreeItems(tree) {
   return Array.from(tree.querySelectorAll('[role="treeitem"]')).filter(
-    (el) => el.offsetParent !== null
+    (el) => el.offsetParent !== null,
   );
 }
 
@@ -337,18 +371,19 @@ function setTreeFocus(items, idx) {
 // --- Child summary formatting ---
 
 function formatChildSummary(summary) {
-  if (!summary) return '';
+  if (!summary) return "";
   const parts = [];
-  if (summary.epics) parts.push(summary.epics + (summary.epics === 1 ? ' epic' : ' epics'));
-  if (summary.milestones) parts.push(summary.milestones + (summary.milestones === 1 ? ' milestone' : ' milestones'));
-  if (summary.tasks) parts.push(summary.tasks + (summary.tasks === 1 ? ' task' : ' tasks'));
-  if (summary.bugs) parts.push(summary.bugs + (summary.bugs === 1 ? ' bug' : ' bugs'));
-  if (summary.other) parts.push(summary.other + ' other');
-  return parts.join(', ');
+  if (summary.epics) parts.push(summary.epics + (summary.epics === 1 ? " epic" : " epics"));
+  if (summary.milestones)
+    parts.push(summary.milestones + (summary.milestones === 1 ? " milestone" : " milestones"));
+  if (summary.tasks) parts.push(summary.tasks + (summary.tasks === 1 ? " task" : " tasks"));
+  if (summary.bugs) parts.push(summary.bugs + (summary.bugs === 1 ? " bug" : " bugs"));
+  if (summary.other) parts.push(summary.other + " other");
+  return parts.join(", ");
 }
 
 function formatTargetDate(isoDate) {
-  if (!isoDate) return '';
+  if (!isoDate) return "";
   const target = new Date(isoDate);
   if (isNaN(target.getTime())) return escHtml(isoDate);
   const now = new Date();
@@ -356,40 +391,68 @@ function formatTargetDate(isoDate) {
   const targetStart = new Date(target.getFullYear(), target.getMonth(), target.getDate());
   const diffDays = Math.round((targetStart - todayStart) / (1000 * 60 * 60 * 24));
 
-  const formatted = target.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const formatted = target.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
   let relative;
-  let color = 'var(--text-muted)';
+  let color = "var(--text-muted)";
 
   if (diffDays < 0) {
     const absDays = Math.abs(diffDays);
-    relative = absDays === 1 ? '1 day overdue' : absDays + ' days overdue';
-    color = '#EF4444';
+    relative = absDays === 1 ? "1 day overdue" : absDays + " days overdue";
+    color = "#EF4444";
   } else if (diffDays === 0) {
-    relative = 'today';
-    color = '#F59E0B';
+    relative = "today";
+    color = "#F59E0B";
   } else if (diffDays <= 7) {
-    relative = diffDays === 1 ? 'tomorrow' : 'in ' + diffDays + ' days';
-    color = '#F59E0B';
+    relative = diffDays === 1 ? "tomorrow" : "in " + diffDays + " days";
+    color = "#F59E0B";
   } else {
-    relative = 'in ' + diffDays + ' days';
+    relative = "in " + diffDays + " days";
   }
 
-  return '<span style="color:' + color + '">Target: ' + escHtml(formatted) + ' (' + escHtml(relative) + ')</span>';
+  return (
+    '<span style="color:' +
+    color +
+    '">Target: ' +
+    escHtml(formatted) +
+    " (" +
+    escHtml(relative) +
+    ")</span>"
+  );
 }
 
 // --- Blocker link rendering ---
 
 function renderBlockerLink(ref) {
   const safeId = escJsSingle(ref.id);
-  if (ref.type === 'release') {
+  if (ref.type === "release") {
     // Release blockers scroll to the card on this page, falling back to detail view
-    return '<a href="#" class="hover:underline" style="color:var(--accent)" onclick="event.preventDefault();' +
-      'var el=document.getElementById(\'release-card-' + safeId + '\');' +
-      'if(el){window._scrollToReleaseCard(\'release-card-' + safeId + '\')}' +
-      'else{window.openDetail(\'' + safeId + '\')}">' + escHtml(ref.title) + '</a>';
+    return (
+      '<a href="#" class="hover:underline" style="color:var(--accent)" onclick="event.preventDefault();' +
+      "var el=document.getElementById('release-card-" +
+      safeId +
+      "');" +
+      "if(el){window._scrollToReleaseCard('release-card-" +
+      safeId +
+      "')}" +
+      "else{window.openDetail('" +
+      safeId +
+      "')}\">" +
+      escHtml(ref.title) +
+      "</a>"
+    );
   }
   // Non-release blockers (milestones, tasks, etc.) open the issue detail panel
-  return '<a href="#" class="hover:underline" style="color:var(--accent)" onclick="event.preventDefault();window.openDetail(\'' + safeId + '\')">' + escHtml(ref.title) + '</a>';
+  return (
+    '<a href="#" class="hover:underline" style="color:var(--accent)" onclick="event.preventDefault();window.openDetail(\'' +
+    safeId +
+    "')\">" +
+    escHtml(ref.title) +
+    "</a>"
+  );
 }
 
 // --- Card rendering ---
@@ -403,92 +466,119 @@ function renderReleaseCard(release) {
   const pct = release.progress?.pct ?? 0;
   const textColor = isBlocked ? "color:var(--text-secondary)" : "color:var(--text-primary)";
 
-  let html = '';
-  html += '<div class="rounded mb-3" role="article" aria-label="' + escHtml(release.title || release.id) + '" style="background:var(--surface-raised);border:1px solid var(--border-default);border-left:4px solid ' + borderColor + '" id="release-card-' + escHtml(release.id) + '">';
+  let html = "";
+  html +=
+    '<div class="rounded mb-3" role="article" aria-label="' +
+    escHtml(release.title || release.id) +
+    '" style="background:var(--surface-raised);border:1px solid var(--border-default);border-left:4px solid ' +
+    borderColor +
+    '" id="release-card-' +
+    escHtml(release.id) +
+    '">';
   html += '<div class="p-4">';
 
   // Header row: toggle + title + status badge
   html += '<div class="flex items-center gap-2 mb-2">';
 
   // Expand toggle
-  const arrow = isExpanded ? '\u25BC' : '\u25B6';
-  html += '<button class="text-xs flex items-center justify-center cursor-pointer" ' +
+  const arrow = isExpanded ? "\u25BC" : "\u25B6";
+  html +=
+    '<button class="text-xs flex items-center justify-center cursor-pointer" ' +
     'style="width:44px;height:44px;min-width:44px;min-height:44px;background:none;border:none;color:var(--text-secondary)" ' +
-    'onclick="window._toggleReleaseExpand(\'' + safeId + '\')" ' +
-    'aria-label="' + (isExpanded ? 'Collapse' : 'Expand') + ' release ' + escHtml(release.title || release.id) + '">' +
-    arrow + '</button>';
+    "onclick=\"window._toggleReleaseExpand('" +
+    safeId +
+    "')\" " +
+    'aria-label="' +
+    (isExpanded ? "Collapse" : "Expand") +
+    " release " +
+    escHtml(release.title || release.id) +
+    '">' +
+    arrow +
+    "</button>";
 
   // Title (clickable)
-  html += '<button class="cursor-pointer hover:underline text-sm font-medium flex-1 text-left" style="' + textColor + ';background:none;border:none;padding:0" ' +
-    'onclick="window.openDetail(\'' + safeId + '\')">' +
-    escHtml(release.title || release.id) + '</button>';
+  html +=
+    '<button class="cursor-pointer hover:underline text-sm font-medium flex-1 text-left" style="' +
+    textColor +
+    ';background:none;border:none;padding:0" ' +
+    "onclick=\"window.openDetail('" +
+    safeId +
+    "')\">" +
+    escHtml(release.title || release.id) +
+    "</button>";
 
   // Status badge
   html += statusBadge(release.status);
 
   // Blocked badge
   if (isBlocked) {
-    html += ' <span class="text-xs rounded px-1.5 py-0.5 shrink-0" style="background:#EF4444;color:#fff" aria-label="blocked">blocked</span>';
+    html +=
+      ' <span class="text-xs rounded px-1.5 py-0.5 shrink-0" style="background:#EF4444;color:#fff" aria-label="blocked">blocked</span>';
   }
 
-  html += '</div>';
+  html += "</div>";
 
   // Stats row
   html += '<div class="flex flex-wrap gap-2 items-center text-xs" style="color:var(--text-muted)">';
-  html += '<span>P' + (release.priority != null ? release.priority : '?') + '</span>';
+  html += "<span>P" + (release.priority != null ? release.priority : "?") + "</span>";
 
   const summaryText = formatChildSummary(release.child_summary);
   if (summaryText) {
-    html += '<span>' + escHtml(summaryText) + '</span>';
+    html += "<span>" + escHtml(summaryText) + "</span>";
   }
 
   html += renderProgressBar(pct, release.title || release.id);
-  html += '<span>' + pct + '%</span>';
-  html += '</div>';
+  html += "<span>" + pct + "%</span>";
+  html += "</div>";
 
   // Target date
   if (release.target_date) {
-    html += '<div class="text-xs mt-1">' + formatTargetDate(release.target_date) + '</div>';
+    html += '<div class="text-xs mt-1">' + formatTargetDate(release.target_date) + "</div>";
   }
 
   // Blocks / Blocked by links
   if (release.blocks && release.blocks.length > 0) {
     html += '<div class="text-xs mt-1" style="color:var(--text-muted)">Blocks: ';
-    html += release.blocks.map((b) => renderBlockerLink(b)).join(', ');
-    html += '</div>';
+    html += release.blocks.map((b) => renderBlockerLink(b)).join(", ");
+    html += "</div>";
   }
 
   if (release.blocked_by && release.blocked_by.length > 0) {
     html += '<div class="text-xs mt-1" style="color:var(--text-muted)">Blocked by: ';
-    html += release.blocked_by.map((b) => renderBlockerLink(b)).join(', ');
-    html += '</div>';
+    html += release.blocked_by.map((b) => renderBlockerLink(b)).join(", ");
+    html += "</div>";
   }
 
   // Expanded tree area
   if (isExpanded) {
     html += '<div class="mt-3 pt-3" style="border-top:1px solid var(--border-default)">';
     if (isLoading) {
-      html += '<div class="text-xs py-2" style="color:var(--text-muted)" role="status">Loading tree...</div>';
+      html +=
+        '<div class="text-xs py-2" style="color:var(--text-muted)" role="status">Loading tree...</div>';
     } else if (errorReleaseIds.has(release.id)) {
-      html += '<div class="text-xs py-2 flex items-center gap-2" style="color:var(--text-muted)">' +
-        'Failed to load release tree.' +
+      html +=
+        '<div class="text-xs py-2 flex items-center gap-2" style="color:var(--text-muted)">' +
+        "Failed to load release tree." +
         ' <button class="text-xs px-2 py-1 rounded cursor-pointer" ' +
         'style="background:var(--surface-overlay);color:var(--accent);border:1px solid var(--border-default);min-height:28px" ' +
-        'onclick="window._retryReleaseTree(\'' + safeId + '\')">Retry</button>' +
-        '</div>';
+        "onclick=\"window._retryReleaseTree('" +
+        safeId +
+        "')\">Retry</button>" +
+        "</div>";
     } else {
       const tree = releaseTreeCache.get(release.id);
       if (tree) {
         html += renderTree(tree, release.id);
       } else {
-        html += '<div class="text-xs py-2" style="color:var(--text-muted)">No tree data available.</div>';
+        html +=
+          '<div class="text-xs py-2" style="color:var(--text-muted)">No tree data available.</div>';
       }
     }
-    html += '</div>';
+    html += "</div>";
   }
 
-  html += '</div>';
-  html += '</div>';
+  html += "</div>";
+  html += "</div>";
 
   return html;
 }
@@ -617,7 +707,7 @@ export async function loadReleases() {
     container.innerHTML =
       '<div class="p-6 text-center" style="color:var(--text-muted)">' +
       '<div class="font-medium mb-2" style="color:var(--text-primary)">No active releases.</div>' +
-      '<div>Use the \u201CShow released &amp; cancelled\u201D checkbox above to view release history.</div></div>';
+      "<div>Use the \u201CShow released &amp; cancelled\u201D checkbox above to view release history.</div></div>";
     return;
   }
 
@@ -626,12 +716,16 @@ export async function loadReleases() {
   for (const id of expandedReleaseIds) {
     if (!loadingReleaseIds.has(id)) {
       expandedFetches.push(
-        fetchReleaseTree(id).then((tree) => {
-          if (tree) {
-            releaseTreeCache.set(id, tree);
-            drainStaleExpandedIds(tree);
-          }
-        }).catch(() => { /* best-effort */ })
+        fetchReleaseTree(id)
+          .then((tree) => {
+            if (tree) {
+              releaseTreeCache.set(id, tree);
+              drainStaleExpandedIds(tree);
+            }
+          })
+          .catch(() => {
+            /* best-effort */
+          }),
       );
     }
   }
@@ -641,7 +735,7 @@ export async function loadReleases() {
   }
 
   // Render cards
-  let html = '';
+  let html = "";
   for (const release of releases) {
     html += renderReleaseCard(release);
   }

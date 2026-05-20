@@ -619,6 +619,7 @@ class TestSessionContextDashboardUrl:
             raise PermissionError(1, "Operation not permitted")
 
         monkeypatch.setattr("filigree.hooks.socket.socket", _deny_socket)
+        monkeypatch.setattr("filigree.hooks.ensure_dashboard_running", MagicMock(side_effect=PermissionError(1, "Operation not permitted")))
         context = _build_context(db, filigree_dir)
         db.close()
 

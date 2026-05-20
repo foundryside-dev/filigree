@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -20,6 +21,29 @@ from filigree.core import (
     write_config,
 )
 from tests._db_factory import make_db
+
+
+def _close_idle_current_event_loop() -> None:
+    """Close pytest-asyncio's restored idle loop before ResourceWarning GC.
+
+    pytest-asyncio records the pre-runner "old loop" with get_event_loop();
+    on Python 3.13 that can create a selector loop solely for bookkeeping.
+    The plugin restores that loop after the async test runner exits, but it
+    does not own-close it. With ResourceWarning promoted to an error, that
+    loop's self-pipe sockets surface as unraisable cleanup failures.
+    """
+    policy = asyncio.get_event_loop_policy()
+    local = getattr(policy, "_local", None)
+    loop = getattr(local, "_loop", None)
+    if loop is None or loop.is_closed() or loop.is_running():
+        return
+    loop.close()
+    local._loop = None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown() -> None:
+    _close_idle_current_event_loop()
 
 
 @dataclass

@@ -1613,15 +1613,18 @@ def _run_one_create_race(db_path: Path, n_threads: int) -> tuple[list[str], list
     barrier = threading.Barrier(n_threads)
 
     def worker() -> None:
+        d: FiligreeDB | None = None
         try:
             d = FiligreeDB(db_path, prefix="test")
             d.initialize()
             barrier.wait(timeout=5)
             obs = d.create_observation("dedup-race")
             ids.append(obs["id"])
-            d.close()
         except Exception as e:
             errors.append(e)
+        finally:
+            if d is not None:
+                d.close()
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]
     for t in threads:
@@ -1650,18 +1653,21 @@ def _run_one_dismiss_race(db_path: Path, n_threads: int) -> tuple[str, list[str]
     barrier = threading.Barrier(n_threads)
 
     def worker(name: str) -> None:
+        d: FiligreeDB | None = None
         try:
             d = FiligreeDB(db_path, prefix="test")
             d.initialize()
             barrier.wait(timeout=5)
             d.dismiss_observation(obs_id, actor=name)
             successes.append(name)
-            d.close()
         except ValueError:
             # Expected: races that lose see "Observation not found".
             pass
         except Exception as e:
             errors.append(e)
+        finally:
+            if d is not None:
+                d.close()
 
     threads = [threading.Thread(target=worker, args=(f"t{i}",)) for i in range(n_threads)]
     for t in threads:

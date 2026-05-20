@@ -10,11 +10,11 @@ const TYPE_ORDER = ["milestone", "epic", "release", "feature", "task", "bug"];
 
 // --- Tree index (rebuilt when allIssues changes) ---
 
-let rootIssues = [];       // issues with parent_id === null
-let childIndex = {};       // parentId -> [childIssue, ...]
-let ancestorIndex = {};    // issueId -> top-level ancestor issueId
-let subtreeIndex = {};     // rootId -> Set<issueId> (all descendants including root)
-let crossTreeDeps = {};    // rootId -> count of cross-tree dependency edges
+let rootIssues = []; // issues with parent_id === null
+let childIndex = {}; // parentId -> [childIssue, ...]
+let ancestorIndex = {}; // issueId -> top-level ancestor issueId
+let subtreeIndex = {}; // rootId -> Set<issueId> (all descendants including root)
+let crossTreeDeps = {}; // rootId -> count of cross-tree dependency edges
 
 export function rebuildTreeIndex() {
   rootIssues = [];
@@ -44,7 +44,7 @@ export function rebuildTreeIndex() {
       visited.add(id);
       subtree.add(id);
       ancestorIndex[id] = root.id;
-      for (const child of (childIndex[id] || [])) {
+      for (const child of childIndex[id] || []) {
         stack.push(child.id);
       }
     }
@@ -65,10 +65,10 @@ export function rebuildTreeIndex() {
     for (const id of subtree) {
       const issue = state.issueMap[id];
       if (!issue) continue;
-      for (const depId of (issue.blocks || [])) {
+      for (const depId of issue.blocks || []) {
         if (!subtree.has(depId)) count++;
       }
-      for (const depId of (issue.blocked_by || [])) {
+      for (const depId of issue.blocked_by || []) {
         if (!subtree.has(depId)) count++;
       }
     }
@@ -168,7 +168,11 @@ export function renderGraphSidebar() {
     let hiddenCount = 0;
     for (const [id] of state.graphSidebarSelections) {
       const issue = state.issueMap[id];
-      if (issue && state.graphSidebarTypeFilter.size > 0 && !state.graphSidebarTypeFilter.has(issue.type)) {
+      if (
+        issue &&
+        state.graphSidebarTypeFilter.size > 0 &&
+        !state.graphSidebarTypeFilter.has(issue.type)
+      ) {
         hiddenCount++;
       }
     }
@@ -181,13 +185,15 @@ export function renderGraphSidebar() {
   }
 
   if (rootIssues.length === 0) {
-    list.innerHTML = '<div class="px-2 py-4 text-muted text-center">No top-level issues found. Issues must have no parent to appear here.</div>';
+    list.innerHTML =
+      '<div class="px-2 py-4 text-muted text-center">No top-level issues found. Issues must have no parent to appear here.</div>';
     renderTypeFilter();
     return;
   }
 
   if (visible.length === 0) {
-    list.innerHTML = '<div class="px-2 py-4 text-muted text-center">No issues match the current type filter.</div>';
+    list.innerHTML =
+      '<div class="px-2 py-4 text-muted text-center">No issues match the current type filter.</div>';
     renderTypeFilter();
     return;
   }
@@ -213,12 +219,14 @@ export function renderGraphSidebar() {
       } else if (selState === "clicked-in") {
         bgClass = "bg-amber-500/15 hover:bg-amber-500/25";
         textClass = "text-primary";
-        indicator = '<span class="text-amber-400 text-[10px] ml-auto shrink-0" title="Explored via dependency">dep</span>';
+        indicator =
+          '<span class="text-amber-400 text-[10px] ml-auto shrink-0" title="Explored via dependency">dep</span>';
       }
 
-      const depBadge = crossDeps > 0
-        ? `<span class="text-muted text-[10px]" title="${crossDeps} cross-tree dependencies">${crossDeps}x</span>`
-        : "";
+      const depBadge =
+        crossDeps > 0
+          ? `<span class="text-muted text-[10px]" title="${crossDeps} cross-tree dependencies">${crossDeps}x</span>`
+          : "";
 
       const title = issue.title.length > 40 ? issue.title.slice(0, 38) + ".." : issue.title;
 
@@ -386,7 +394,7 @@ export function resolveGraphScope() {
     const issue = state.issueMap[id];
     if (!issue) continue;
     // Dependency edges (blocks -> blocked)
-    for (const blockedId of (issue.blocks || [])) {
+    for (const blockedId of issue.blocks || []) {
       if (allVisibleIds.has(blockedId)) {
         const key = `${id}->${blockedId}`;
         if (!edgeSeen.has(key)) {
@@ -414,10 +422,10 @@ export function checkNodeCap(additionalRootId) {
   // Estimate total nodes if we add this root's subtree
   let total = 0;
   for (const [rootId] of state.graphSidebarSelections) {
-    total += (getSubtreeIds(rootId)).size;
+    total += getSubtreeIds(rootId).size;
   }
   if (additionalRootId) {
-    total += (getSubtreeIds(additionalRootId)).size;
+    total += getSubtreeIds(additionalRootId).size;
   }
   return { total, exceedsCap: total > SOFT_NODE_CAP };
 }
