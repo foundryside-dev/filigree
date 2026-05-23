@@ -2279,3 +2279,14 @@ def test_verify_legacy_filigree_db_returns_legacy(tmp_path):
     conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
     verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
     assert verdict == "legacy_needs_upgrade"
+
+
+def test_verify_legacy_db_already_at_current_version(tmp_path):
+    """app_id=0 but user_version already at CURRENT — pre-app-id install that ran the latest schema."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "current"
+    # Pin contract: the legacy "current" branch does NOT stamp application_id.
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0

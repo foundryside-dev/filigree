@@ -874,7 +874,6 @@ def classify_and_stamp_filigree_db(conn: sqlite3.Connection, *, db_path: Path) -
     a pure-read identity check on a separate connection (used by
     server-mode ``register_project``), see ``server._read_project_db_identity``.
     """
-    from filigree.db_schema import CURRENT_SCHEMA_VERSION
     from filigree.types.api import SchemaVersionMismatchError
 
     app_id: int = conn.execute("PRAGMA application_id").fetchone()[0]
