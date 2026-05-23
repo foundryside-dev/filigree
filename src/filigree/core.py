@@ -1352,28 +1352,22 @@ class FiligreeDB(
     def initialize(self) -> None:
         """Create tables (if new) or migrate (if existing), then seed templates.
 
-        For a fresh database (user_version == 0), creates all tables from
-        SCHEMA_SQL and stamps the current version. For an existing database,
-        applies any pending migrations to bring it up to CURRENT_SCHEMA_VERSION.
+        Verifies the file at ``self.db_path`` is a filigree DB before touching it
+        (catalog §6.8 errata): a foreign SQLite file at the same path raises
+        :class:`ForeignSqliteFileError` instead of being silently overwritten.
+        Schema-newer-than-installed raises ``SchemaVersionMismatchError`` from
+        inside the classifier.
         """
-        current_version = self.get_schema_version()
+        verdict = classify_and_stamp_filigree_db(self.conn, db_path=self.db_path)
 
-        if current_version == 0:
-            # Fresh database — create everything from scratch
+        if verdict == "fresh":
             self.conn.executescript(SCHEMA_SQL)
             self.conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-        elif current_version > CURRENT_SCHEMA_VERSION:
-            from filigree.types.api import SchemaVersionMismatchError
-
-            raise SchemaVersionMismatchError(
-                installed=CURRENT_SCHEMA_VERSION,
-                database=current_version,
-            )
-        elif current_version < CURRENT_SCHEMA_VERSION:
-            # Existing database — apply pending migrations
+        elif verdict in ("needs_upgrade", "legacy_needs_upgrade"):
             from filigree.migrations import apply_pending_migrations
 
             apply_pending_migrations(self.conn, CURRENT_SCHEMA_VERSION)
+        # "current" — nothing to do.
 
         self._seed_templates()
         self._seed_future_release()

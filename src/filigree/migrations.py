@@ -653,6 +653,25 @@ def migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
     add_column(conn, "file_records", "registry_backend", "TEXT NOT NULL", "'local'")
 
 
+def migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """v17 -> v18: Stamp ``application_id`` on pre-app-id-aware filigree DBs.
+
+    Pure metadata hop, no DDL. Every filigree DB created before the app-id-aware
+    install lacks ``application_id`` (it was never written). v18 closes the gap
+    by writing it during the normal migration path so subsequent opens can
+    distinguish a filigree DB from a foreign SQLite file at the same path
+    (catalog §6.8 errata).
+
+    The PRAGMA write lands in the database header on page 1 and is journaled
+    like any other page change, so it participates in the migration's
+    transaction — rollback reverts ``application_id`` along with
+    ``user_version``. Idempotent under re-run.
+    """
+    from filigree.core import FILIGREE_APPLICATION_ID
+
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -670,6 +689,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     14: migrate_v14_to_v15,
     15: migrate_v15_to_v16,
     16: migrate_v16_to_v17,
+    17: migrate_v17_to_v18,
 }
 
 

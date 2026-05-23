@@ -1817,6 +1817,10 @@ class TestFiligreeDBMigration:
         db_path = tmp_path / "future.db"
         conn = _make_db(tmp_path, "future.db")
         conn.executescript(SCHEMA_SQL)
+        # Stamp the filigree application_id so the classifier routes this
+        # through the newer-than-installed branch (SchemaVersionMismatchError)
+        # rather than treating an unstamped file as foreign.
+        conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
         conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
         conn.commit()
         conn.close()
@@ -2290,3 +2294,115 @@ def test_verify_legacy_db_already_at_current_version(tmp_path):
     assert verdict == "current"
     # Pin contract: the legacy "current" branch does NOT stamp application_id.
     assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# FiligreeDB.initialize() routes through classify_and_stamp_filigree_db
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_on_foreign_db_raises(tmp_path):
+    """Opening a non-filigree SQLite file at the DB path must raise."""
+    filigree_dir = tmp_path / ".filigree"
+    filigree_dir.mkdir()
+    (filigree_dir / "config.json").write_text('{"prefix": "test"}')
+    db_path = filigree_dir / "filigree.db"
+
+    # Pretend a different tool put its DB here.
+    foreign = sqlite3.connect(str(db_path))
+    # Use 0x12345678 (positive int32) — 0xDEADBEEF would silently overflow.
+    foreign.execute("PRAGMA application_id = 0x12345678")
+    foreign.execute("PRAGMA user_version = 3")
+    foreign.execute("CREATE TABLE not_filigree (id INTEGER)")
+    foreign.commit()
+    foreign.close()
+
+    with pytest.raises(ForeignSqliteFileError):
+        FiligreeDB.from_filigree_dir(filigree_dir)
+
+
+def test_initialize_on_fresh_db_stamps_application_id(tmp_path):
+    """Fresh DBs get application_id stamped."""
+    filigree_dir = tmp_path / ".filigree"
+    filigree_dir.mkdir()
+    (filigree_dir / "config.json").write_text('{"prefix": "test"}')
+
+    db = FiligreeDB.from_filigree_dir(filigree_dir)
+    try:
+        observed = db.conn.execute("PRAGMA application_id").fetchone()[0]
+        assert observed == FILIGREE_APPLICATION_ID
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# v17 -> v18: application_id stamp for legacy DBs
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_db_gets_application_id_stamped_by_v17_to_v18(tmp_path):
+    """A pre-app-id filigree DB at v17 must have application_id stamped after migration to v18."""
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("PRAGMA user_version = 17")
+    conn.commit()
+
+    # Sanity: legacy state.
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+
+    applied = apply_pending_migrations(conn, target_version=18)
+    assert applied == 1
+
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    conn.close()
+
+
+def test_v17_to_v18_rollback_reverts_application_id(tmp_path):
+    """If migrate_v17_to_v18 fails its FK check, the PRAGMA write rolls back with the rest.
+
+    Empirically, ``PRAGMA application_id`` IS transactional in modern SQLite
+    (the write lands in the database header on page 1 and is journaled with
+    every other page change). So on rollback, both ``application_id`` AND
+    ``user_version`` revert to their pre-migration values. The next run
+    re-applies v17→v18 cleanly and idempotently.
+    """
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("PRAGMA user_version = 17")
+    conn.commit()
+
+    # Force a rollback by injecting a post-stamp FK violation that
+    # foreign_key_check catches before commit (apply_pending_migrations
+    # runs PRAGMA foreign_key_check before each per-hop commit).
+    from filigree import migrations as mig
+
+    original = mig.MIGRATIONS[17]
+
+    def failing_v17_to_v18(c: sqlite3.Connection) -> None:
+        original(c)
+        # Dangling FK: comments.issue_id REFERENCES issues(id).
+        c.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at) "
+            "VALUES ('does-not-exist', 'test', 'orphan', '2026-05-23T00:00:00+00:00')"
+        )
+
+    mig.MIGRATIONS[17] = failing_v17_to_v18  # type: ignore[assignment]
+    try:
+        with pytest.raises(MigrationError):
+            apply_pending_migrations(conn, target_version=18)
+    finally:
+        mig.MIGRATIONS[17] = original
+
+    # Both PRAGMA writes reverted (application_id IS journaled in modern SQLite).
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+
+    # Idempotent clean re-run succeeds.
+    applied = apply_pending_migrations(conn, target_version=18)
+    assert applied == 1
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    conn.close()

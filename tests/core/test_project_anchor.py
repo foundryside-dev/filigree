@@ -29,6 +29,7 @@ from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
     DB_FILENAME,
+    FILIGREE_APPLICATION_ID,
     FILIGREE_DIR_NAME,
     FiligreeDB,
     ForeignDatabaseError,
@@ -917,6 +918,10 @@ class TestFactoriesCloseConnOnInitFailure:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path))
         try:
+            # Stamp filigree application_id so the classifier routes this through
+            # SchemaVersionMismatchError (newer-than-installed) instead of
+            # treating an unstamped file as a foreign SQLite database.
+            conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
             conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
             conn.commit()
         finally:
