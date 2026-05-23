@@ -1550,14 +1550,22 @@ def create_loom_router() -> APIRouter:
         """Remove a dependency. Path uses ``dep_issue_id`` (loom
         vocabulary); classic ``DELETE /api/issue/{id}/dependencies/{dep_id}``
         keeps its ``dep_id`` parameter name unchanged.
+
+        Idempotent at the wire layer per the loom contract
+        (tests/fixtures/contracts/loom/issues-dep-remove.json): a DELETE
+        between two valid-prefix IDs returns 200 ``{"removed": false}`` even
+        when one or both issues do not exist. The db layer still raises
+        ``KeyError`` for missing issues — CLI/MCP surfaces convert that to
+        NOT_FOUND — but the wire layer absorbs it so retried DELETEs after a
+        network glitch stay safe.
         """
         clean_actor, actor_err = _validate_actor(actor)
         if actor_err:
             return actor_err
         try:
             removed = db.remove_dependency(issue_id, dep_issue_id, actor=clean_actor)
-        except KeyError as e:
-            return _error_response(str(e), ErrorCode.NOT_FOUND, 404)
+        except KeyError:
+            return JSONResponse({"removed": False})
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse({"removed": removed})

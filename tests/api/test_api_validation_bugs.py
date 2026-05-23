@@ -230,17 +230,23 @@ class TestRemoveDependencyForeignPrefix:
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body
 
-    async def test_loom_remove_dependency_same_prefix_missing_source_returns_404(
+    async def test_loom_remove_dependency_same_prefix_missing_source_returns_200_idempotent(
         self, bug_db: FiligreeDB, client: AsyncClient
     ) -> None:
+        """Loom DELETE is idempotent at the wire layer per
+        tests/fixtures/contracts/loom/issues-dep-remove.json: a missing
+        issue between two valid-prefix IDs returns 200 ``{"removed": false}``
+        so a retried DELETE after a network glitch stays safe. Classic
+        keeps the 404 behaviour above — no classic fixture pins that
+        contract, and CLI/MCP surfaces still surface NOT_FOUND.
+        """
         target = bug_db.create_issue("Target")
         resp = await client.request(
             "DELETE",
             f"/api/loom/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
         )
-        assert resp.status_code == 404, resp.text
-        body = resp.json()
-        assert body["code"] == "NOT_FOUND", body
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"removed": False}
 
 
 # ---------------------------------------------------------------------------
