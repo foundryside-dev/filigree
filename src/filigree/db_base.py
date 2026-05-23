@@ -446,6 +446,7 @@ class DBMixinProtocol(Protocol):
         file_type: str = "",
         metadata: dict[str, Any] | None = None,
         actor: str = "",
+        _commit: bool = True,
     ) -> FileRecord: ...
 
     def get_file(self, file_id: str) -> FileRecord: ...
