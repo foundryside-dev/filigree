@@ -18,7 +18,7 @@ import sys
 import tempfile
 import uuid as _uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
@@ -846,6 +846,59 @@ def _seed_builtin_packs(conn: sqlite3.Connection, now: str) -> int:
             logger.debug("Seeded type template: %s (pack=%s)", type_name, pack_name)
 
     return count
+
+
+# ---------------------------------------------------------------------------
+# Schema-version gatekeeper
+# ---------------------------------------------------------------------------
+
+
+DbVerdict = Literal["fresh", "current", "needs_upgrade", "legacy_needs_upgrade"]
+
+
+def classify_and_stamp_filigree_db(conn: sqlite3.Connection, *, db_path: Path) -> DbVerdict:
+    """Inspect a SQLite DB and classify it.
+
+    Reads ``PRAGMA application_id`` and ``PRAGMA user_version``. For a fresh
+    DB (both zero), stamps ``application_id`` and returns ``"fresh"`` — the
+    caller is responsible for running ``SCHEMA_SQL`` and stamping
+    ``user_version``. For an existing filigree DB, returns one of
+    ``"current"``, ``"needs_upgrade"``, or ``"legacy_needs_upgrade"`` (the
+    last means ``application_id`` is still ``0`` from a pre-app-id-aware
+    install and the next migration must stamp it). Raises
+    :class:`SchemaVersionMismatchError` for newer-than-installed DBs and
+    :class:`ForeignSqliteFileError` for files whose ``application_id`` is
+    non-zero and not :data:`FILIGREE_APPLICATION_ID`.
+
+    Has a write side-effect on fresh DBs (stamps ``application_id``); for
+    a pure-read identity check on a separate connection (used by
+    server-mode ``register_project``), see ``server._read_project_db_identity``.
+    """
+    from filigree.db_schema import CURRENT_SCHEMA_VERSION
+    from filigree.types.api import SchemaVersionMismatchError
+
+    app_id: int = conn.execute("PRAGMA application_id").fetchone()[0]
+    version: int = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    if app_id == 0 and version == 0:
+        conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+        return "fresh"
+
+    if app_id == 0 and 0 < version <= CURRENT_SCHEMA_VERSION:
+        # Pre-application_id filigree DB. Trust user_version.
+        return "current" if version == CURRENT_SCHEMA_VERSION else "legacy_needs_upgrade"
+
+    if app_id != FILIGREE_APPLICATION_ID:
+        raise ForeignSqliteFileError(path=db_path, observed_application_id=app_id)
+
+    if version > CURRENT_SCHEMA_VERSION:
+        raise SchemaVersionMismatchError(
+            installed=CURRENT_SCHEMA_VERSION,
+            database=version,
+        )
+    if version == CURRENT_SCHEMA_VERSION:
+        return "current"
+    return "needs_upgrade"
 
 
 # ---------------------------------------------------------------------------

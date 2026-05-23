@@ -13,6 +13,7 @@ from filigree.core import (
     FILIGREE_APPLICATION_ID,
     FiligreeDB,
     ForeignSqliteFileError,
+    classify_and_stamp_filigree_db,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL, SCHEMA_V1_SQL
 from filigree.migrations import (
@@ -24,6 +25,7 @@ from filigree.migrations import (
     rebuild_table,
     rename_column,
 )
+from filigree.types.api import SchemaVersionMismatchError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2212,3 +2214,68 @@ def test_foreign_sqlite_file_error_carries_observed_id(tmp_path):
     assert err.observed_application_id == 0xDEADBEEF
     assert "alien.db" in str(err)
     assert err.safe_message  # untrusted-surface wording exists
+
+
+# ---------------------------------------------------------------------------
+# classify_and_stamp_filigree_db gatekeeper
+# ---------------------------------------------------------------------------
+
+
+def test_verify_fresh_db_stamps_application_id(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "fresh"
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    # Caller stamps user_version — verify the function did NOT stamp it.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_verify_current_filigree_db_is_noop(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "current"
+
+
+def test_verify_older_filigree_db_needs_upgrade(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "needs_upgrade"
+
+
+def test_verify_newer_db_raises_mismatch(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 5}")
+    with pytest.raises(SchemaVersionMismatchError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.database == CURRENT_SCHEMA_VERSION + 5
+
+
+def test_verify_foreign_db_raises(tmp_path):
+    # SQLite stores application_id as a signed int32, so we use a value
+    # that fits cleanly. 0xDEADBEEF would silently truncate to 0.
+    foreign_app_id = 0x12345678
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {foreign_app_id}")
+    conn.execute("PRAGMA user_version = 7")
+    with pytest.raises(ForeignSqliteFileError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.observed_application_id == foreign_app_id
+
+
+def test_verify_legacy_filigree_db_returns_legacy(tmp_path):
+    """user_version > 0 but application_id = 0 — pre-app-id filigree DB."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "legacy_needs_upgrade"
