@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import (
+    FILIGREE_APPLICATION_ID,
+    FiligreeDB,
+    ForeignSqliteFileError,
+)
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL, SCHEMA_V1_SQL
 from filigree.migrations import (
     MigrationError,
@@ -2186,3 +2190,25 @@ class TestMigrateV8ToV9:
         assert "idx_labels_label_issue" in indexes
         assert "idx_issues_assignee_priority" in indexes
         d.close()
+
+
+# ---------------------------------------------------------------------------
+# Application ID + ForeignSqliteFileError
+# ---------------------------------------------------------------------------
+
+
+def test_application_id_constant_is_filg_bigendian():
+    """FILIGREE_APPLICATION_ID must be the 32-bit BE encoding of 'FILG'."""
+    assert FILIGREE_APPLICATION_ID == 0x46494C47
+    assert FILIGREE_APPLICATION_ID.to_bytes(4, "big") == b"FILG"
+
+
+def test_foreign_sqlite_file_error_carries_observed_id(tmp_path):
+    """ForeignSqliteFileError surfaces the observed application_id."""
+    err = ForeignSqliteFileError(
+        path=tmp_path / "alien.db",
+        observed_application_id=0xDEADBEEF,
+    )
+    assert err.observed_application_id == 0xDEADBEEF
+    assert "alien.db" in str(err)
+    assert err.safe_message  # untrusted-surface wording exists

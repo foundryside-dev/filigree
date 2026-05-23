@@ -122,6 +122,11 @@ SUMMARY_FILENAME = "context.md"
 # Schema version for .filigree.conf — bump if the file format changes incompatibly.
 CONF_VERSION = 1
 
+# 32-bit application_id stamped on every filigree SQLite DB.
+# 'FILG' big-endian ASCII. Chosen 2026-05-23; do not change without
+# a migration that re-stamps existing DBs.
+FILIGREE_APPLICATION_ID = 0x46494C47
+
 
 def read_schema_version(conn: sqlite3.Connection) -> int:
     """Return the on-disk schema version for *conn*.
@@ -231,6 +236,42 @@ class WrongProjectError(ValueError):
         4xx response body. CLI handlers and ``filigree doctor`` keep
         ``str(exc)`` so operators still see the offending prefix.
         """
+        return self.SAFE_MESSAGE
+
+
+class ForeignSqliteFileError(ProjectNotInitialisedError):
+    """The file at the expected filigree DB path is a SQLite database, but
+    its ``application_id`` is non-zero and does not match
+    :data:`FILIGREE_APPLICATION_ID`.
+
+    Distinguished from :class:`ForeignDatabaseError`, which is raised when
+    walk-up discovery crosses a ``.git/`` boundary into another project's
+    *filigree* DB. This error is raised when the file at the discovered
+    path is *not a filigree DB at all* — e.g. an operator has put a SQLite
+    DB from another tool at ``.filigree/filigree.db``. Silently overwriting
+    that file with ``SCHEMA_SQL`` would destroy data, so discovery refuses.
+
+    Inherits from :class:`ProjectNotInitialisedError` so generic
+    "not set up" handlers still work; catch this class specifically when
+    the operator needs to be told to *move* the foreign file out of the
+    way before ``filigree init`` will succeed.
+    """
+
+    SAFE_MESSAGE = "A non-filigree SQLite file occupies the filigree database path"
+
+    def __init__(self, *, path: Path, observed_application_id: int) -> None:
+        self.path = path
+        self.observed_application_id = observed_application_id
+        msg = (
+            f"Refusing to open {path}: it is a SQLite database with "
+            f"application_id=0x{observed_application_id:08x}, which is not "
+            f"filigree's (0x{FILIGREE_APPLICATION_ID:08x}). Move or rename "
+            f"this file before running `filigree init` here."
+        )
+        super().__init__(msg)
+
+    @property
+    def safe_message(self) -> str:
         return self.SAFE_MESSAGE
 
 
