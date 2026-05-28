@@ -14,6 +14,7 @@ Shape invariants (from ErrorResponse TypedDict, types/api.py):
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 from pathlib import Path
 
@@ -433,3 +434,19 @@ class TestCLIActorValidationEnvelope:
         payload = json.loads(result.output)
         _assert_flat_envelope(payload, surface="cli")
         assert payload["code"] == ErrorCode.VALIDATION
+
+
+# Bundled agent-instruction surfaces must enumerate every current ErrorCode, so
+# agents following installed/bundled guidance never branch on a stale, partial
+# enum (filigree-adbdda2ee5). Loaded the same way the package ships them.
+_INSTRUCTION_DOCS: list[str] = [
+    "data/instructions.md",
+    "skills/filigree-workflow/SKILL.md",
+]
+
+
+@pytest.mark.parametrize("doc", _INSTRUCTION_DOCS)
+def test_bundled_instructions_enumerate_every_error_code(doc: str) -> None:
+    text = (importlib.resources.files("filigree") / doc).read_text(encoding="utf-8")
+    missing = sorted(code for code in _VALID_CODES if f"`{code}`" not in text)
+    assert not missing, f"{doc} omits current ErrorCode value(s): {missing}"
