@@ -22,7 +22,8 @@ from typing import Any
 import click
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
-from filigree.cli_common import get_db
+from filigree.cli_commands.files import finding_group
+from filigree.cli_common import add_hidden_flat_alias, get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
 from filigree.db_files import INGESTED_FILE_ID_KEY
 from filigree.mcp_tools.scanners import (
@@ -1205,21 +1206,45 @@ def report_finding_cmd(
 
 
 def register(cli: click.Group) -> None:
-    """Register scanner commands with the CLI group."""
+    """Register scanner commands with the CLI group.
+
+    Canonical visible surface is ``filigree scanner <subverb>`` (plus ``finding
+    report`` for the finding-reporting verb). Every pre-existing flat verb
+    (``list-scanners``, ``trigger-scan``, ...) stays resolvable as a hidden
+    back-compat alias. Two scanner subverbs are renamed for consistency
+    (``available``->``list-available``, ``prompts``->``prompt-packs``); the old
+    in-group spellings are kept as hidden in-group aliases so the already-shipped
+    ``scanner available`` / ``scanner prompts`` surface does not break.
+    (filigree-03303d6c5a)
+    """
+    # Canonical group subverbs. (``enable``/``disable`` are decorator-registered
+    # on scanner_group at definition time.)
     scanner_group.add_command(list_scanners_cmd, "list")
+    scanner_group.add_command(scanner_available_cmd, "list-available")
+    scanner_group.add_command(scanner_prompts_cmd, "prompt-packs")
     scanner_group.add_command(trigger_scan_cmd, "trigger")
     scanner_group.add_command(trigger_scan_batch_cmd, "trigger-batch")
     scanner_group.add_command(get_scan_status_cmd, "status")
     scanner_group.add_command(preview_scan_cmd, "preview")
-    scanner_group.add_command(report_finding_cmd, "report-finding")
     cli.add_command(scanner_group)
-    cli.add_command(scanner_available_cmd, "list-available-scanners")
-    cli.add_command(scanner_enable_cmd, "enable-scanner")
-    cli.add_command(scanner_disable_cmd, "disable-scanner")
-    cli.add_command(scanner_prompts_cmd, "list-prompt-packs")
-    cli.add_command(list_scanners_cmd)
-    cli.add_command(trigger_scan_cmd)
-    cli.add_command(trigger_scan_batch_cmd)
-    cli.add_command(get_scan_status_cmd)
-    cli.add_command(preview_scan_cmd)
-    cli.add_command(report_finding_cmd)
+
+    # report-finding moves to the finding group as ``finding report``; keep
+    # ``scanner report-finding`` as a hidden in-group alias for back-compat.
+    finding_group.add_command(report_finding_cmd, "report")
+    add_hidden_flat_alias(scanner_group, report_finding_cmd, "report-finding")
+
+    # Preserve previously-shipped in-group spellings as hidden aliases.
+    add_hidden_flat_alias(scanner_group, scanner_available_cmd, "available")
+    add_hidden_flat_alias(scanner_group, scanner_prompts_cmd, "prompts")
+
+    # Hidden flat back-compat aliases for every pre-existing top-level verb.
+    add_hidden_flat_alias(cli, scanner_enable_cmd, "enable-scanner")
+    add_hidden_flat_alias(cli, scanner_disable_cmd, "disable-scanner")
+    add_hidden_flat_alias(cli, get_scan_status_cmd, "get-scan-status")
+    add_hidden_flat_alias(cli, list_scanners_cmd, "list-scanners")
+    add_hidden_flat_alias(cli, scanner_available_cmd, "list-available-scanners")
+    add_hidden_flat_alias(cli, preview_scan_cmd, "preview-scan")
+    add_hidden_flat_alias(cli, trigger_scan_cmd, "trigger-scan")
+    add_hidden_flat_alias(cli, trigger_scan_batch_cmd, "trigger-scan-batch")
+    add_hidden_flat_alias(cli, scanner_prompts_cmd, "list-prompt-packs")
+    add_hidden_flat_alias(cli, report_finding_cmd, "report-finding")

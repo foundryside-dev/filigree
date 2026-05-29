@@ -12,7 +12,8 @@ from pathlib import Path
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_commands.files import finding_group
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     CONF_FILENAME,
     CONF_VERSION,
@@ -817,5 +818,8 @@ def register(cli: click.Group) -> None:
     cli.add_command(export_data)
     cli.add_command(import_data)
     cli.add_command(archive)
-    cli.add_command(clean_stale_findings)
     cli.add_command(compact)
+    # clean-stale-findings: canonical grouped form ``finding clean-stale``; the
+    # flat name stays as a hidden back-compat alias. (filigree-03303d6c5a)
+    finding_group.add_command(clean_stale_findings, "clean-stale")
+    add_hidden_flat_alias(cli, clean_stale_findings, "clean-stale-findings")

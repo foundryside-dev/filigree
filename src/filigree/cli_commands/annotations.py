@@ -8,7 +8,7 @@ import sys
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     VALID_ANNOTATION_INTENTS,
     VALID_ANNOTATION_RELATIONSHIPS,
@@ -275,9 +275,29 @@ def carry_forward_annotation_cmd(
         refresh_summary(db)
 
 
+@click.group("annotation", invoke_without_command=True)
+@click.pass_context
+def annotation_group(ctx: click.Context) -> None:
+    """Manage shared file annotations — get, list, resolve, carry forward.
+
+    Grouped form of the flat ``get-annotation`` / ``annotate-file`` / etc. verbs
+    (which still resolve as hidden back-compat aliases). (filigree-03303d6c5a)
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+
+
 def register(cli: click.Group) -> None:
-    cli.add_command(annotate_file_cmd)
-    cli.add_command(list_annotations_cmd)
-    cli.add_command(get_annotation_cmd)
-    cli.add_command(resolve_annotation_cmd)
-    cli.add_command(carry_forward_annotation_cmd)
+    annotation_group.add_command(get_annotation_cmd, "get")
+    annotation_group.add_command(list_annotations_cmd, "list")
+    annotation_group.add_command(resolve_annotation_cmd, "resolve")
+    annotation_group.add_command(carry_forward_annotation_cmd, "carry-forward")
+    annotation_group.add_command(annotate_file_cmd, "annotate-file")
+    cli.add_command(annotation_group)
+
+    add_hidden_flat_alias(cli, get_annotation_cmd, "get-annotation")
+    add_hidden_flat_alias(cli, list_annotations_cmd, "list-annotations")
+    add_hidden_flat_alias(cli, resolve_annotation_cmd, "resolve-annotation")
+    add_hidden_flat_alias(cli, carry_forward_annotation_cmd, "carry-forward-annotation")
+    add_hidden_flat_alias(cli, annotate_file_cmd, "annotate-file")

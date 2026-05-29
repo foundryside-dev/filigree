@@ -9,7 +9,7 @@ from typing import Any
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import observation_link_to_mcp, observation_to_mcp
 from filigree.models import Issue
@@ -690,14 +690,40 @@ def promote_observations_to_issue_cmd(
         refresh_summary(db)
 
 
+@click.group("observation", invoke_without_command=True)
+@click.pass_context
+def observation_group(ctx: click.Context) -> None:
+    """Manage observations (the agent scratchpad) — list, dismiss, promote, link.
+
+    Grouped form of the flat observation-management verbs (which still resolve as
+    hidden back-compat aliases). Note: ``observe`` (recording a new observation)
+    stays a flat, visible top-level verb. (filigree-03303d6c5a)
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+
+
 def register(cli: click.Group) -> None:
     """Register observation commands with the CLI group."""
+    # ``observe`` stays flat and visible — it is a common everyday verb.
     cli.add_command(observe_cmd)
-    cli.add_command(list_observations_cmd)
-    cli.add_command(dismiss_observation_cmd)
-    cli.add_command(promote_observation_cmd)
-    cli.add_command(batch_dismiss_observations_cmd)
-    cli.add_command(batch_promote_observations_cmd)
-    cli.add_command(link_observation_cmd)
-    cli.add_command(batch_link_observations_cmd)
-    cli.add_command(promote_observations_to_issue_cmd)
+
+    observation_group.add_command(list_observations_cmd, "list")
+    observation_group.add_command(dismiss_observation_cmd, "dismiss")
+    observation_group.add_command(promote_observation_cmd, "promote")
+    observation_group.add_command(link_observation_cmd, "link")
+    observation_group.add_command(promote_observations_to_issue_cmd, "promote-to-issue")
+    observation_group.add_command(batch_dismiss_observations_cmd, "batch-dismiss")
+    observation_group.add_command(batch_link_observations_cmd, "batch-link")
+    observation_group.add_command(batch_promote_observations_cmd, "batch-promote")
+    cli.add_command(observation_group)
+
+    add_hidden_flat_alias(cli, list_observations_cmd, "list-observations")
+    add_hidden_flat_alias(cli, dismiss_observation_cmd, "dismiss-observation")
+    add_hidden_flat_alias(cli, promote_observation_cmd, "promote-observation")
+    add_hidden_flat_alias(cli, link_observation_cmd, "link-observation")
+    add_hidden_flat_alias(cli, promote_observations_to_issue_cmd, "promote-observations-to-issue")
+    add_hidden_flat_alias(cli, batch_dismiss_observations_cmd, "batch-dismiss-observations")
+    add_hidden_flat_alias(cli, batch_link_observations_cmd, "batch-link-observations")
+    add_hidden_flat_alias(cli, batch_promote_observations_cmd, "batch-promote-observations")

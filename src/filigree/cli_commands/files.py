@@ -22,7 +22,7 @@ from typing import Any, cast
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES, find_filigree_anchor
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import (
@@ -1320,19 +1320,69 @@ def batch_update_findings_cmd(
 # ---------------------------------------------------------------------------
 
 
+@click.group("file", invoke_without_command=True)
+@click.pass_context
+def file_group(ctx: click.Context) -> None:
+    """Manage tracked files, the file registry, and issue<->file associations.
+
+    Grouped form of the flat ``register-file`` / ``list-files`` / ``get-file``
+    verbs (which still resolve as hidden back-compat aliases).
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+
+
+@click.group("finding", invoke_without_command=True)
+@click.pass_context
+def finding_group(ctx: click.Context) -> None:
+    """Triage code-scan findings — report, list, promote, dismiss, clean stale.
+
+    Grouped form of the flat ``report-finding`` / ``list-findings`` / etc. verbs
+    (which still resolve as hidden back-compat aliases). ``clean-stale`` lives in
+    the admin module and ``report`` in the scanners module; both register
+    themselves here.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+
+
 def register(cli: click.Group) -> None:
     """Register file and finding commands with the CLI group."""
-    cli.add_command(list_files_cmd)
-    cli.add_command(get_file_cmd)
-    cli.add_command(get_file_timeline_cmd)
-    cli.add_command(get_issue_files_cmd)
-    cli.add_command(add_file_association_cmd)
-    cli.add_command(register_file_cmd)
-    cli.add_command(migrate_registry_cmd)
-    cli.add_command(delete_file_record_cmd)
-    cli.add_command(list_findings_cmd)
-    cli.add_command(get_finding_cmd)
-    cli.add_command(update_finding_cmd)
-    cli.add_command(promote_finding_cmd)
-    cli.add_command(dismiss_finding_cmd)
-    cli.add_command(batch_update_findings_cmd)
+    # file group: grouped form is canonical/visible; flat names hidden aliases.
+    file_group.add_command(register_file_cmd, "register")
+    file_group.add_command(get_file_cmd, "get")
+    file_group.add_command(list_files_cmd, "list")
+    file_group.add_command(get_file_timeline_cmd, "timeline")
+    file_group.add_command(get_issue_files_cmd, "issue-files")
+    file_group.add_command(add_file_association_cmd, "add-association")
+    file_group.add_command(delete_file_record_cmd, "delete-record")
+    file_group.add_command(migrate_registry_cmd, "migrate-registry")
+    cli.add_command(file_group)
+
+    # finding group: file-module members. (clean-stale is added by
+    # admin.register and report by scanners.register against this same object.)
+    finding_group.add_command(list_findings_cmd, "list")
+    finding_group.add_command(get_finding_cmd, "get")
+    finding_group.add_command(dismiss_finding_cmd, "dismiss")
+    finding_group.add_command(promote_finding_cmd, "promote")
+    finding_group.add_command(update_finding_cmd, "update")
+    finding_group.add_command(batch_update_findings_cmd, "batch-update")
+    cli.add_command(finding_group)
+
+    # Hidden flat back-compat aliases (clones; shared object stays visible in group).
+    add_hidden_flat_alias(cli, register_file_cmd, "register-file")
+    add_hidden_flat_alias(cli, get_file_cmd, "get-file")
+    add_hidden_flat_alias(cli, list_files_cmd, "list-files")
+    add_hidden_flat_alias(cli, get_file_timeline_cmd, "get-file-timeline")
+    add_hidden_flat_alias(cli, get_issue_files_cmd, "get-issue-files")
+    add_hidden_flat_alias(cli, add_file_association_cmd, "add-file-association")
+    add_hidden_flat_alias(cli, delete_file_record_cmd, "delete-file-record")
+    add_hidden_flat_alias(cli, migrate_registry_cmd, "migrate-registry")
+    add_hidden_flat_alias(cli, list_findings_cmd, "list-findings")
+    add_hidden_flat_alias(cli, get_finding_cmd, "get-finding")
+    add_hidden_flat_alias(cli, dismiss_finding_cmd, "dismiss-finding")
+    add_hidden_flat_alias(cli, promote_finding_cmd, "promote-finding")
+    add_hidden_flat_alias(cli, update_finding_cmd, "update-finding")
+    add_hidden_flat_alias(cli, batch_update_findings_cmd, "batch-update-findings")

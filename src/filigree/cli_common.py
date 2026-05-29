@@ -7,6 +7,7 @@ without circular imports.
 
 from __future__ import annotations
 
+import copy
 import json as json_mod
 import logging
 import sqlite3
@@ -235,3 +236,19 @@ def refresh_summary(db: FiligreeDB) -> None:
         logger.warning("Failed to refresh context.md summary: %s", exc)
     except Exception:
         logger.warning("Unexpected error refreshing context.md summary", exc_info=True)
+
+
+def add_hidden_flat_alias(cli: click.Group, cmd: click.Command, flat_name: str) -> None:
+    """Register ``cmd`` on ``cli`` under ``flat_name`` as a hidden back-compat alias.
+
+    Sub-command grouping (filigree-03303d6c5a) makes ``filigree <group> <subverb>``
+    the canonical, visible invocation while every pre-existing flat verb keeps
+    resolving. Because the *same* Command object is registered both inside the
+    group (visible) and flat on ``cli`` (hidden), we cannot set ``.hidden`` on the
+    shared object — that would also hide the group's visible copy. Clone the
+    object and hide the clone, mirroring the same-object guard the
+    ``_HIDDEN_ALIAS_VERBS`` loop in ``cli.py`` uses for dual-registered verbs.
+    """
+    clone = copy.copy(cmd)
+    clone.hidden = True
+    cli.add_command(clone, flat_name)
