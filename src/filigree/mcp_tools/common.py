@@ -58,9 +58,22 @@ def _slim_issue(issue: Issue) -> SlimIssue:
     return issue_to_slim(issue)
 
 
-def _ready_issue(issue: Issue, *, include_context: bool = False, parent_title: str | None = None) -> ReadyIssue:
+def _ready_issue(
+    issue: Issue,
+    *,
+    include_context: bool = False,
+    parent_title: str | None = None,
+    startable: bool = True,
+    next_action: str | None = None,
+) -> ReadyIssue:
     """Return a ready-queue item, keeping the default shape slim."""
-    return issue_to_ready(issue, include_context=include_context, parent_title=parent_title)
+    return issue_to_ready(
+        issue,
+        include_context=include_context,
+        parent_title=parent_title,
+        startable=startable,
+        next_action=next_action,
+    )
 
 
 def _resolve_pagination(arguments: dict[str, Any]) -> tuple[int, int, list[TextContent] | None]:

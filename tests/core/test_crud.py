@@ -184,6 +184,130 @@ class TestStartNextWorkRollbackPreservesPriorClaim:
         assert db.get_issue(issue.id).assignee == ""
 
 
+class TestStartableVsReady:
+    """filigree-406e6b7ee0: "ready" != "startable" for multi-hop-to-wip types.
+
+    ``get_ready`` lists open-category issues; bugs start at ``triage`` which
+    has no single-hop transition to a wip state (triage->confirmed->fixing).
+    ``start_next_work`` must skip such non-startable candidates instead of
+    throwing, and ``start_work`` on a *named* triage bug must surface an
+    actionable hint rather than no-op.
+    """
+
+    def test_start_next_work_skips_triage_only_ready_set(self, db: FiligreeDB) -> None:
+        # type_filter="bug" makes the ready set effectively triage-only (the
+        # auto-seeded "Future" release singleton is filtered out).
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+
+        result = db.start_next_work(assignee="alice", type_filter="bug")
+
+        # No startable work: clean None, not an exception.
+        assert result is None
+        # The non-startable candidate is never claimed.
+        assert db.get_issue(bug.id).assignee == ""
+
+    def test_start_next_work_starts_startable_task_over_triage_bug(self, db: FiligreeDB) -> None:
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+        task = db.create_issue("Startable task", type="task", priority=2)
+
+        result = db.start_next_work(assignee="alice")
+
+        assert result is not None
+        assert result.id == task.id
+        assert result.status == "in_progress"
+        # The skipped triage bug remains untouched and unclaimed.
+        assert db.get_issue(bug.id).assignee == ""
+
+    def test_start_work_named_triage_bug_raises_with_next_action_hint(self, db: FiligreeDB) -> None:
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+
+        with pytest.raises(InvalidTransitionError) as exc_info:
+            db.start_work(bug.id, assignee="alice")
+
+        # Names the intermediate status the agent must move through first.
+        assert "confirmed" in str(exc_info.value)
+        # Named start_work must not silently no-op into a claim.
+        assert db.get_issue(bug.id).assignee == ""
+
+
+class TestAdvanceMultiHop:
+    """filigree-406e6b7ee0 Part 2: opt-in multi-hop ``advance`` walks SOFT
+    transitions to the nearest working state.
+
+    Default behaviour (no ``advance``) is unchanged — a named triage bug still
+    raises. ``advance=True`` walks ``triage -> confirmed -> fixing``, surfacing
+    required-field warnings rather than blocking, and never traverses a hard
+    edge.
+    """
+
+    def test_start_work_advance_walks_triage_bug_to_wip(self, db: FiligreeDB) -> None:
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+
+        result = db.start_work(bug.id, assignee="alice", advance=True)
+
+        assert result.status == "fixing"
+        assert result.assignee == "alice"
+        # The walk surfaces missing required fields as warnings, not blocks.
+        assert any("root_cause" in w for w in result.data_warnings)
+        # Full audit chain: claim + both soft hops.
+        events = db.get_issue_events(bug.id)
+        status_changes = [(e["old_value"], e["new_value"]) for e in events if e["event_type"] == "status_changed"]
+        assert ("triage", "confirmed") in status_changes
+        assert ("confirmed", "fixing") in status_changes
+
+    def test_start_work_default_still_raises_without_advance(self, db: FiligreeDB) -> None:
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+        with pytest.raises(InvalidTransitionError):
+            db.start_work(bug.id, assignee="alice")
+        assert db.get_issue(bug.id).status == "triage"
+        assert db.get_issue(bug.id).assignee == ""
+
+    def test_start_next_work_advance_starts_triage_bug(self, db: FiligreeDB) -> None:
+        bug = db.create_issue("Triage bug", type="bug", priority=1)
+
+        result = db.start_next_work(assignee="alice", type_filter="bug", advance=True)
+
+        assert result is not None
+        assert result.id == bug.id
+        assert result.status == "fixing"
+        assert result.assignee == "alice"
+
+
+class TestStartability:
+    """filigree-406e6b7ee0: TypeTemplate.startability single source of truth."""
+
+    def test_soft_path_to_working_status(self, db: FiligreeDB) -> None:
+        bug = db.templates.get_type("bug")
+        task = db.templates.get_type("task")
+        assert bug is not None
+        assert task is not None
+        assert bug.soft_path_to_working_status("triage") == ["confirmed", "fixing"]
+        assert task.soft_path_to_working_status("open") == ["in_progress"]
+        # Already wip -> nothing to walk.
+        assert bug.soft_path_to_working_status("fixing") == []
+
+    def test_task_is_startable_single_hop(self, db: FiligreeDB) -> None:
+        tpl = db.templates.get_type("task")
+        assert tpl is not None
+        startable, next_action = tpl.startability("open")
+        assert startable is True
+        assert next_action is None
+
+    def test_triage_bug_not_startable_next_action_is_first_soft_hop(self, db: FiligreeDB) -> None:
+        tpl = db.templates.get_type("bug")
+        assert tpl is not None
+        startable, next_action = tpl.startability("triage")
+        assert startable is False
+        assert next_action == "confirmed"
+
+    def test_already_wip_is_startable(self, db: FiligreeDB) -> None:
+        tpl = db.templates.get_type("bug")
+        assert tpl is not None
+        startable, next_action = tpl.startability("fixing")
+        assert startable is True
+        assert next_action is None
+
+
 class TestPriorityTypeValidation:
     """filigree-fa01508ee2: priority must reject non-int (incl. bool) before any write.
 

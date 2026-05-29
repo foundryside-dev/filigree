@@ -411,7 +411,18 @@ async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
     tracker = _get_db()
     issues = tracker.get_ready()
     parent_titles = _parent_titles_by_id(tracker, issues) if include_context else {}
-    items = [_ready_issue(i, include_context=include_context, parent_title=parent_titles.get(i.parent_id or "")) for i in issues]
+    items = []
+    for i in issues:
+        startable, next_action = tracker.issue_startability(i)
+        items.append(
+            _ready_issue(
+                i,
+                include_context=include_context,
+                parent_title=parent_titles.get(i.parent_id or ""),
+                startable=startable,
+                next_action=next_action,
+            )
+        )
     return _text(_list_response(items, has_more=False))
 
 

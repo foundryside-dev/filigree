@@ -103,12 +103,29 @@ class TestStartWorkCli:
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["code"] == "INVALID_TRANSITION"
-        assert "No wip-category transition from 'triage'" in data["error"]
+        # filigree-406e6b7ee0: the error names the source state and the
+        # intermediate status the agent must move through first.
+        assert "triage" in data["error"]
+        assert "not directly startable" in data["error"]
+        assert "confirmed" in data["error"]
         show = runner.invoke(cli, ["show", issue_id, "--json"])
         assert show.exit_code == 0, show.output
         current = json.loads(show.output)
         assert current["assignee"] == ""
         assert current["status"] == "triage"
+
+    def test_fresh_bug_advance_walks_to_wip(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """filigree-406e6b7ee0 Part 2: --advance walks triage->confirmed->fixing."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Fresh bug to advance", "--type", "bug"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "bug-bot", "--advance", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "fixing"
+        assert data["assignee"] == "bug-bot"
 
     def test_plain_text_output(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """Without --json, emits 'Started work on ...' message on stdout."""

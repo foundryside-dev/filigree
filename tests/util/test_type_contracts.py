@@ -680,6 +680,10 @@ class TestStatsResultShape:
         db.create_issue("Test", type="task")
         result = db.get_stats()
         assert isinstance(result["by_status"], dict)
+        # status_name_counts / status_category_counts are DEPRECATED
+        # (filigree-17694d2db8) exact duplicates of by_status / by_category,
+        # retained as wire-compatibility aliases per ADR-009 §7. Lock the
+        # contract: still present, still identical, until the next major.
         assert isinstance(result["status_name_counts"], dict)
         assert result["status_name_counts"] == result["by_status"]
         assert isinstance(result["status_category_counts"], dict)
@@ -828,7 +832,9 @@ class TestReadyIssueShape:
         slim_keys = set(get_type_hints(SlimIssue).keys())
         ready_keys = set(get_type_hints(ReadyIssue).keys())
         assert slim_keys < ready_keys
-        assert {"parent_issue_id", "parent_title"} <= ready_keys - slim_keys
+        # startable always rides along (filigree-406e6b7ee0); next_action and the
+        # parent-context fields are NotRequired extras.
+        assert {"startable", "next_action", "parent_issue_id", "parent_title"} <= ready_keys - slim_keys
 
 
 class TestPublicIssueShape:

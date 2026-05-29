@@ -348,7 +348,7 @@ class TestStartNextWork:
             issue_id: str,
             *,
             assignee: str,
-            target_status: str,
+            target_path: list[str],
             actor: str,
         ):
             if issue_id == doomed.id and not deleted["done"]:
@@ -359,7 +359,7 @@ class TestStartNextWork:
             return real_start_locked(
                 issue_id,
                 assignee=assignee,
-                target_status=target_status,
+                target_path=target_path,
                 actor=actor,
             )
 

@@ -9,7 +9,7 @@ from typing import Any
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import ActorCommand, get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
 from filigree.types.api import (
@@ -131,7 +131,7 @@ def _min_check_int(value: int, name: str, *, min_val: int, as_json: bool) -> Non
         sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("title")
 @click.option(
     "--type",
@@ -526,7 +526,7 @@ def _update_impl(
         refresh_summary(db)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--status", default=None, help="New status")
 @click.option("--priority", "-p", default=None, type=int, help="New priority")
@@ -573,7 +573,7 @@ def update(
     )
 
 
-@click.command("update-issue")
+@click.command("update-issue", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--status", default=None, help="New status")
 @click.option("--priority", "-p", default=None, type=int, help="New priority")
@@ -620,7 +620,7 @@ def update_issue_cmd(
     )
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--reason", default="", help="Close reason")
 @click.option(
@@ -722,14 +722,18 @@ def close(
                 for i in ready
                 if i.id not in ready_before
             ]
-            payload: dict[str, Any] = {"succeeded": succeeded, "failed": errors, "newly_unblocked": newly_unblocked}
+            # Batch envelope contract: ``newly_unblocked`` is OMITTED when
+            # empty (matches MCP ``batch_close`` at mcp_tools/issues.py).
+            payload: dict[str, Any] = {"succeeded": succeeded, "failed": errors}
+            if newly_unblocked:
+                payload["newly_unblocked"] = newly_unblocked
             click.echo(json_mod.dumps(payload, indent=2, default=str))
         refresh_summary(db)
         if errors:
             sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -775,7 +779,7 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
             sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="Who is claiming (agent name)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -827,7 +831,7 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
         refresh_summary(db)
 
 
-@click.command("claim-next")
+@click.command("claim-next", cls=ActorCommand)
 @click.option("--assignee", required=True, help="Who is claiming")
 @click.option("--type", "type_filter", default=None, help="Filter by issue type")
 @click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
@@ -947,7 +951,7 @@ def _release_impl(
         refresh_summary(db)
 
 
-@click.command("release")
+@click.command("release", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
     "--if-held",
@@ -970,7 +974,7 @@ def release(
     _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
 
 
-@click.command("release-claim")
+@click.command("release-claim", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
     "--if-held",
@@ -993,7 +997,7 @@ def release_claim_cmd(
     _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
 
 
-@click.command("release-my-claims")
+@click.command("release-my-claims", cls=ActorCommand)
 @click.option("--label", default=None, help="Restrict to issues carrying this exact label.")
 @click.option("--label-prefix", default=None, help="Restrict to issues with a label starting with this prefix (must end with ':').")
 @click.option("--dry-run", is_flag=True, help="List the issues that would be released without making changes.")
@@ -1071,7 +1075,7 @@ def release_my_claims_cmd(
             sys.exit(1)
 
 
-@click.command("heartbeat-work")
+@click.command("heartbeat-work", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--expected-assignee", default=None, help="Expected current assignee; defaults to global --actor.")
 @click.option("--lease-hours", default=48, type=int, help="Lease duration from this heartbeat.")
@@ -1162,7 +1166,7 @@ def stale_claims_cmd(stale_after_hours: int, expires_within_hours: int | None, a
                 click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}" -> {issue.assignee}')
 
 
-@click.command("reclaim")
+@click.command("reclaim", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="New assignee")
 @click.option("--expected-assignee", required=True, help="Current assignee expected by the caller")
@@ -1261,7 +1265,7 @@ def _undo_impl(actor: str, issue_id: str, as_json: bool) -> None:
         refresh_summary(db)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1270,7 +1274,7 @@ def undo(ctx: click.Context, issue_id: str, as_json: bool) -> None:
     _undo_impl(ctx.obj["actor"], issue_id, as_json)
 
 
-@click.command("undo-last")
+@click.command("undo-last", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1284,12 +1288,14 @@ def undo_last_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
 @click.option("--assignee", required=True, help="Who is starting work (agent name)")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--advance", is_flag=True, help="Walk soft transitions to the nearest wip state (e.g. triage->confirmed->fixing)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_work(
     issue_id: str,
     assignee: str,
     target_status: str | None,
     actor: str | None,
+    advance: bool,
     as_json: bool,
 ) -> None:
     """Atomically claim an issue and transition it to its wip status."""
@@ -1310,6 +1316,7 @@ def start_work(
                 assignee=assignee,
                 target_status=target_status,
                 actor=resolved_actor,
+                advance=advance,
             )
         except KeyError:
             if as_json:
@@ -1377,6 +1384,7 @@ def start_work(
 @click.option("--priority-max", default=None, type=int, help="Maximum priority")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--advance", is_flag=True, help="Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_next_work(
     assignee: str,
@@ -1385,6 +1393,7 @@ def start_next_work(
     priority_max: int | None,
     target_status: str | None,
     actor: str | None,
+    advance: bool,
     as_json: bool,
 ) -> None:
     """Claim and start the highest-priority ready issue matching filters."""
@@ -1409,6 +1418,7 @@ def start_next_work(
                 priority_max=priority_max,
                 target_status=target_status,
                 actor=resolved_actor,
+                advance=advance,
             )
         except (AmbiguousTransitionError, InvalidTransitionError) as e:
             if as_json:

@@ -23,6 +23,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dedup unique index is rebuilt as a partial index over fingerprint-less
   rows, with a new partial unique index over `(scan_source, fingerprint)`).
 
+- **`get_ready` items carry a `startable` flag (and `next_action` hint).**
+  Ready surfaces (MCP `get_ready`, CLI `ready` / `get-ready --json`) now mark
+  each item `startable: true/false`. `false` means the issue is ready (open,
+  unblocked) but cannot be transitioned into work in a single hop — notably
+  `triage` bugs, which walk `triage → confirmed → fixing`. Non-startable items
+  also carry `next_action`, the intermediate status to move through first. The
+  CLI human-readable `ready` list flags non-startable rows inline.
+
+- **Opt-in multi-hop `advance` for `start_work` / `start_next_work`.**
+  New `advance` parameter (MCP `start_work` / `start_next_work`; CLI
+  `--advance`) walks the shortest **soft**-edge path to the nearest working
+  status when no single-hop wip target exists — e.g.
+  `start-work <bug> --advance` walks `triage → confirmed → fixing` in one atomic
+  claim+walk. Missing required fields surface as warnings rather than blocking;
+  hard edges are never auto-walked (the confirm gate stays intact by default).
+  Default off.
+
+### Deprecated
+
+- **`get_stats` keys `status_name_counts` / `status_category_counts` are
+  deprecated (filigree-17694d2db8).** They have always been exact duplicates of
+  `by_status` / `by_category` respectively, doubling the payload with no added
+  information. They remain emitted as compatibility aliases on every wire
+  surface (MCP `get_stats`, the `get_summary` `stats` envelope, and the HTTP
+  `StatsWithPrefix` projection) per ADR-009 §7 and will be **removed in the next
+  major**. Read `by_status` / `by_category` instead.
+
+### Fixed
+
+- **"ready" no longer falsely implies "startable" (filigree-406e6b7ee0).**
+  `get_ready` listed open-category `triage` bugs as ready, but
+  `start_work` / `start_next_work` then raised `InvalidTransitionError` because
+  `triage` has no single-hop transition to a wip state. `start_next_work` now
+  **skips** non-startable (and ambiguous, and template-less) candidates instead
+  of throwing on the queue, returning the next startable issue or a clean empty
+  result. A *named* `start_work` on such an issue still raises
+  `INVALID_TRANSITION`, but with an actionable message naming the intermediate
+  status to move through first (or to pass `advance`), rather than the bare
+  "no wip-category transition" text. The explicit-`target_status` error contract
+  is unchanged.
+
 ## [2.1.0] - 2026-05-19
 
 Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).

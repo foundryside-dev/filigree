@@ -411,6 +411,11 @@ class MetaMixin(DBMixinProtocol):
         return {
             "by_status": by_status,
             "by_category": by_category,
+            # DEPRECATED (filigree-17694d2db8): exact duplicates of by_status /
+            # by_category. Retained as compatibility aliases on a wire surface
+            # (MCP get_stats / get_summary, HTTP StatsWithPrefix) per ADR-009 §7.
+            # Remove in the next major; consumers should read by_status /
+            # by_category.
             "status_name_counts": dict(by_status),
             "status_category_counts": dict(by_category),
             "by_type": by_type,

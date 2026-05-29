@@ -844,9 +844,12 @@ Returns project statistics:
 }
 ```
 
-`status_name_counts` is the explicit alias for literal workflow status names.
-`status_category_counts` is the explicit alias for template-aware categories.
-`by_status` and `by_category` are retained for compatibility.
+`by_status` holds counts keyed by literal workflow status name; `by_category`
+holds template-aware category counts (`open`/`wip`/`done`). `status_name_counts`
+and `status_category_counts` are **deprecated** exact duplicates of `by_status`
+and `by_category` respectively (filigree-17694d2db8), retained as compatibility
+aliases per ADR-009 §7 and scheduled for removal in the next major. Read
+`by_status` / `by_category`.
 
 #### `get_recent_events`
 

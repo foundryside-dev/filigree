@@ -63,6 +63,24 @@ def test_start_work_held_writer_window_excludes_template_lookup(
     _assert_no_discovery_or_template_sql(tracker.windows[0])
 
 
+def test_start_work_advance_multihop_holds_single_window(db: FiligreeDB) -> None:
+    """filigree-406e6b7ee0 Part 2: an ``advance`` multi-hop walk (triage ->
+    confirmed -> fixing) still opens exactly one writer-lock window and reads no
+    templates inside it — the extra hops are in-memory template lookups."""
+    bug = db.create_issue("advance-window", type="bug", priority=1)
+
+    tracker = _LockWindowTracker()
+    db.conn.set_trace_callback(tracker)
+    try:
+        result = db.start_work(bug.id, assignee="alice", advance=True)
+    finally:
+        db.conn.set_trace_callback(None)
+
+    assert result.status == "fixing"
+    assert len(tracker.windows) == 1, f"expected 1 BEGIN/COMMIT pair, got {tracker.windows}"
+    _assert_no_discovery_or_template_sql(tracker.windows[0])
+
+
 def test_start_next_work_iteration_runs_outside_writer_lock(db: FiligreeDB) -> None:
     """``start_next_work`` iterates ``get_ready()`` candidates outside any
     writer lock; only the per-candidate claim+update enters BEGIN IMMEDIATE."""

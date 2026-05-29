@@ -27,8 +27,59 @@ from filigree.registry import RegistryVersionMismatchError
 from filigree.registry_errors import registry_error_response
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
+from filigree.validation import sanitize_actor
 
 logger = logging.getLogger(__name__)
+
+
+class ActorCommand(click.Command):
+    """Command that also accepts ``--actor`` in the post-verb position.
+
+    The group-level ``--actor`` (cli.py) only binds when supplied *before*
+    the verb (``filigree --actor X update …``). Agents naturally type it
+    *after* the verb (``filigree update … --actor X``); without this, that
+    form was rejected with "No such option" and attribution was silently
+    lost. (filigree-873dd5817c)
+
+    This subclass appends an ``--actor`` option (``default=None`` so an
+    omitted flag is distinguishable from an explicit one) to every command
+    that uses it, and resolves precedence in :meth:`invoke`:
+
+    * explicit post-verb ``--actor`` wins (sanitized through the same
+      ``sanitize_actor`` validator the group uses), overwriting
+      ``ctx.obj["actor"]`` so command bodies that already read that key
+      pick it up with zero changes;
+    * otherwise the group-level ``ctx.obj["actor"]`` (its own value, or the
+      ``"cli"`` default) is left untouched.
+
+    The injected param is popped from ``ctx.params`` before the callback
+    runs so callbacks that do not declare an ``actor`` kwarg are unaffected.
+    """
+
+    _ACTOR_DEST = "_post_verb_actor"
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.params.append(
+            click.Option(
+                ["--actor", self._ACTOR_DEST],
+                default=None,
+                help="Actor identity for the audit trail (overrides the group-level --actor).",
+            )
+        )
+
+    def invoke(self, ctx: click.Context) -> object:
+        override = ctx.params.pop(self._ACTOR_DEST, None)
+        if override is not None:
+            cleaned, err = sanitize_actor(override)
+            if err:
+                if _wants_json():
+                    click.echo(json_mod.dumps({"error": err, "code": ErrorCode.VALIDATION}))
+                    ctx.exit(1)
+                raise click.BadParameter(err, param_hint="'--actor'")
+            ctx.ensure_object(dict)
+            ctx.obj["actor"] = cleaned
+        return super().invoke(ctx)
 
 
 def _wants_json() -> bool:

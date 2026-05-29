@@ -320,8 +320,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="get_stats",
             description=(
-                "Get project statistics: status_name_counts are literal workflow statuses, "
-                "status_category_counts are template categories (open/wip/done), plus type and ready/blocked counts."
+                "Get project statistics: by_status counts literal workflow statuses, "
+                "by_category counts template categories (open/wip/done), plus by_type and ready/blocked counts. "
+                "status_name_counts / status_category_counts are deprecated duplicates of by_status / by_category."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),

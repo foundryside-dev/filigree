@@ -27,7 +27,15 @@ from filigree.db_base import (
 )
 from filigree.models import Issue
 from filigree.templates import TransitionOption, TransitionResult, validate_field_pattern
-from filigree.types.api import BatchFailure, ClaimConflictError, ErrorCode, InvalidTransitionError, TransitionHint, classify_value_error
+from filigree.types.api import (
+    AmbiguousTransitionError,
+    BatchFailure,
+    ClaimConflictError,
+    ErrorCode,
+    InvalidTransitionError,
+    TransitionHint,
+    classify_value_error,
+)
 from filigree.types.core import StatusCategory
 
 if TYPE_CHECKING:
@@ -1924,21 +1932,29 @@ class IssuesMixin(DBMixinProtocol):
         assignee: str,
         target_status: str | None = None,
         actor: str = "",
+        advance: bool = False,
     ) -> Issue:
         """Atomically claim an issue and transition it to a working status.
 
-        ``target_status`` resolution runs lock-free in this public wrapper;
-        the writer lock is acquired only inside ``_start_work_locked``, which
-        composes ``claim_issue`` + ``update_issue`` under one
+        Target resolution runs lock-free in this public wrapper; the writer
+        lock is acquired only inside ``_start_work_locked``, which composes
+        ``claim_issue`` + the status ``update_issue`` hop(s) under one
         ``BEGIN IMMEDIATE``. The held-writer window is limited to claim UPDATE
-        + status UPDATE + event INSERTs + COMMIT; template lookup happens
+        + status UPDATE(s) + event INSERTs + COMMIT; template lookup happens
         before the transaction opens.
 
         ``target_status`` defaults to the unique wip-category status reachable
         from the issue's current status. If the current status can transition
         to multiple wip statuses an ``AmbiguousTransitionError`` surfaces
         (caller must specify ``target_status`` explicitly); if zero,
-        ``InvalidTransitionError``.
+        ``InvalidTransitionError`` — unless ``advance=True``.
+
+        ``advance`` (filigree-406e6b7ee0 Part 2, opt-in / default off) walks the
+        shortest SOFT-edge path to the nearest wip state when no single-hop wip
+        target exists — e.g. a ``triage`` bug walks ``triage -> confirmed ->
+        fixing``. Missing required fields surface as warnings on the returned
+        issue rather than blocking. Hard edges are never auto-walked. ``advance``
+        is ignored when ``target_status`` is given explicitly.
 
         Transaction rollback preserves the prior ownership state
         (filigree-31404d228f). ``claim_issue`` is idempotent for the same
@@ -1948,13 +1964,12 @@ class IssuesMixin(DBMixinProtocol):
         """
         actor = actor or assignee
         self._check_id_prefix(issue_id)
-        if target_status is None:
-            target_status = self._resolve_start_target(issue_id)
+        target_path = [target_status] if target_status is not None else self._resolve_start_path(issue_id, advance=advance)
         try:
             return self._start_work_locked(
                 issue_id,
                 assignee=assignee,
-                target_status=target_status,
+                target_path=target_path,
                 actor=actor,
             )
         except _StartCandidateUnclaimableError as exc:
@@ -1970,16 +1985,22 @@ class IssuesMixin(DBMixinProtocol):
         priority_max: int | None = None,
         target_status: str | None = None,
         actor: str = "",
+        advance: bool = False,
     ) -> Issue | None:
         """Claim the highest-priority ready issue (filtered) and atomically
         transition it to a working status.
 
-        Candidate discovery (``get_ready``) and per-candidate
-        ``target_status`` resolution run lock-free; only the per-candidate
-        claim+transition composite acquires a writer lock via
-        ``_start_work_locked``. On a per-candidate race (claim conflict,
-        status mismatch, deleted issue), the iteration continues to the next
-        candidate without holding any lock.
+        Candidate discovery (``get_ready``) and per-candidate target
+        resolution run lock-free; only the per-candidate claim+transition
+        composite acquires a writer lock via ``_start_work_locked``. On a
+        per-candidate race (claim conflict, status mismatch, deleted issue),
+        the iteration continues to the next candidate without holding any lock.
+
+        Candidates that are ready but not single-hop startable (e.g. ``triage``
+        bugs, filigree-406e6b7ee0) are *skipped* rather than fatal. With
+        ``advance=True`` they instead become startable via the multi-hop SOFT
+        walk (``triage -> confirmed -> fixing``), so the highest-priority such
+        candidate is started rather than skipped.
 
         Returns ``None`` if no ready issue matches the filters.
 
@@ -2004,26 +2025,34 @@ class IssuesMixin(DBMixinProtocol):
             if priority_max is not None and issue.priority > priority_max:
                 continue
 
-            # Resolve target_status per-candidate, lock-free. Template
-            # errors (no template, AmbiguousTransitionError, no reachable
-            # wip status) propagate — they signal a programmer error or
-            # workflow mismatch that retrying a different candidate
-            # cannot fix.
+            # Resolve target_status per-candidate, lock-free. When no explicit
+            # target was given, a candidate that has no single-hop wip target
+            # (e.g. a ``triage`` bug — ready but not startable,
+            # filigree-406e6b7ee0) or an ambiguous one is *skipped*, not fatal:
+            # "ready" no longer implies "startable", so start_next_work walks
+            # past it to the next candidate instead of throwing on the queue.
+            # An explicit ``target_status`` keeps its original error contract
+            # (handled below via ``first_explicit_transition_error``).
             if target_status is None:
                 tpl = self.templates.get_type(issue.type)
                 if tpl is None:
-                    from filigree.types.api import InvalidTransitionError
-
-                    raise InvalidTransitionError(issue.type, issue.status)
-                this_target = tpl.reachable_working_status(issue.status)
+                    skipped += 1
+                    logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
+                    continue
+                try:
+                    this_path = tpl.soft_path_to_working_status(issue.status) if advance else [tpl.reachable_working_status(issue.status)]
+                except (InvalidTransitionError, AmbiguousTransitionError) as exc:
+                    skipped += 1
+                    logger.debug("start_next_work: skipping non-startable %s: %s", issue.id, exc)
+                    continue
             else:
-                this_target = target_status
+                this_path = [target_status]
 
             try:
                 return self._start_work_locked(
                     issue.id,
                     assignee=assignee,
-                    target_status=this_target,
+                    target_path=this_path,
                     actor=actor,
                 )
             except _StartCandidateUnclaimableError as exc:
@@ -2045,13 +2074,18 @@ class IssuesMixin(DBMixinProtocol):
             logger.warning("start_next_work: all %d candidate(s) failed to claim for '%s'", skipped, assignee)
         return None
 
-    def _resolve_start_target(self, issue_id: str) -> str:
-        """Resolve the default wip-target status for ``issue_id`` lock-free.
+    def _resolve_start_path(self, issue_id: str, *, advance: bool) -> list[str]:
+        """Resolve the lock-free status hop sequence for a default start_work.
 
-        Reads the issue's type and current status, then asks the template
-        for the unique reachable wip-category status. Surfaces
-        ``InvalidTransitionError`` / ``AmbiguousTransitionError`` for
-        callers that did not pass an explicit ``target_status``.
+        Reads the issue's type and current status, then asks the template for
+        the walk to a working state. Without ``advance`` this is the single
+        unique reachable wip status (``[target]``); with ``advance`` it is the
+        shortest SOFT-edge path (``[hop1, ..., wip]``). Surfaces
+        ``AmbiguousTransitionError`` when a target cannot be chosen, and an
+        enriched ``InvalidTransitionError`` for a *named* start_work on a
+        non-startable issue (e.g. a triage bug) so the caller learns the
+        intermediate status to move through first (filigree-406e6b7ee0). It
+        must still raise — never silently no-op into a claim.
         """
         row = self.conn.execute("SELECT type, status FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
@@ -2059,10 +2093,24 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         tpl = self.templates.get_type(row["type"])
         if tpl is None:
-            from filigree.types.api import InvalidTransitionError
-
             raise InvalidTransitionError(row["type"], row["status"])
-        return tpl.reachable_working_status(row["status"])
+        if advance:
+            # Multi-hop walk: ambiguous / no-soft-path errors propagate as-is.
+            return tpl.soft_path_to_working_status(row["status"])
+        startable, next_action = tpl.startability(row["status"])
+        if not startable and next_action is not None:
+            raise InvalidTransitionError(
+                row["type"],
+                row["status"],
+                message=(
+                    f"{row['type']!r} in {row['status']!r} is not directly startable: no single-hop "
+                    f"transition to a working state. Move it to {next_action!r} first (or pass advance=True), "
+                    f"then start work."
+                ),
+            )
+        # startable -> resolves the target; ambiguous / no-soft-path -> the
+        # canonical Ambiguous/InvalidTransition error from the resolver stands.
+        return [tpl.reachable_working_status(row["status"])]
 
     @_retry_busy()
     @_in_immediate_tx("start_work")
@@ -2071,7 +2119,7 @@ class IssuesMixin(DBMixinProtocol):
         issue_id: str,
         *,
         assignee: str,
-        target_status: str,
+        target_path: list[str],
         actor: str,
     ) -> Issue:
         """Private critical section for ``start_work`` / ``start_next_work``.
@@ -2088,9 +2136,16 @@ class IssuesMixin(DBMixinProtocol):
         sentinel to preserve its public error contract; ``start_next_work``
         re-raises an explicit target-status transition error only after no
         compatible candidate succeeds.
+
+        ``target_path`` is the pre-resolved status hop sequence (one element
+        for the single-hop default, several for an ``advance`` multi-hop walk,
+        empty when the issue is already wip). All hops apply inside the single
+        ``BEGIN IMMEDIATE`` so the claim+walk composite is atomic; the
+        per-hop ``update_issue`` reads templates from the in-memory registry,
+        not SQL, keeping the held-writer window free of template reads.
         """
         try:
-            self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
+            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
         except (ClaimConflictError, KeyError) as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:
@@ -2098,13 +2153,15 @@ class IssuesMixin(DBMixinProtocol):
                 raise _StartCandidateUnclaimableError(issue_id) from exc
             raise
         try:
-            return self.update_issue(issue_id, status=target_status, actor=actor, expected_assignee=assignee, _skip_begin=True)
+            for next_status in target_path:
+                result = self.update_issue(issue_id, status=next_status, actor=actor, expected_assignee=assignee, _skip_begin=True)
         except InvalidTransitionError as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:
             if classify_value_error(str(exc)) == ErrorCode.INVALID_TRANSITION:
                 raise _StartCandidateUnclaimableError(issue_id) from exc
             raise
+        return result
 
     def _batch_with_transition_errors(
         self,

@@ -10,7 +10,7 @@ CLI otherwise.
 # At session start
 filigree session-context                            # ready / in-progress / critical path
 
-# Pick up the next ready issue (atomic claim + transition to in_progress)
+# Pick up the next startable issue (atomic claim + transition into its working status)
 filigree start-next-work --assignee <name>
 # ...or claim a specific issue
 filigree start-work <id> --assignee <name>
@@ -24,6 +24,15 @@ Use the atomic claim+transition verbs — `start_work` / `start_next_work`
 `claim_issue` (MCP) or `filigree claim` (CLI) with a subsequent status
 update — the two-step form races against other agents; the combined verb is
 atomic.
+
+**Ready ≠ startable.** The working status is type-specific (tasks →
+`in_progress`, features → `building`). Bugs start at `triage`, which has no
+single-hop transition into work (`triage → confirmed → fixing`), so a triage
+bug is *ready* but not directly *startable*: `start_work` on one returns
+`INVALID_TRANSITION` naming the next status, and `start_next_work` skips it.
+`get_ready` items carry a `startable` flag (plus a `next_action` hint when
+false). Pass `advance=true` (MCP) / `--advance` (CLI) to walk the soft
+transitions to the nearest working status automatically.
 
 ### Observations: when (and when not) to use them
 

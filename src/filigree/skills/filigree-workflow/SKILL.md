@@ -23,12 +23,22 @@ Every task follows this lifecycle:
 filigree ready                                      → find available work (no blockers)
 filigree show <issue-id>                            → read requirements and context
 filigree transitions <issue-id>                     → check valid status transitions
-filigree start-work <issue-id> --assignee <name>    → atomically claim + transition to in_progress
+filigree start-work <issue-id> --assignee <name>    → atomically claim + transition into its working status
 [do the work, commit code]
 filigree close <issue-id> --reason="summary of what was done"
 ```
 
-Or skip steps 1–3 entirely with `filigree start-next-work --assignee <name>` to grab the highest-priority ready issue.
+Or skip steps 1–3 entirely with `filigree start-next-work --assignee <name>` to grab the highest-priority **startable** issue.
+
+> **Ready ≠ startable.** The working status is type-specific (tasks →
+> `in_progress`, features → `building`). Bugs start at `triage`, which has no
+> single-hop transition into work — they walk `triage → confirmed → fixing`. So
+> a triage bug is *ready* but not directly *startable*: `start-work` on one
+> returns `INVALID_TRANSITION` naming the next status to move through, and
+> `start-next-work` skips it. `ready` items carry a `startable` flag (and a
+> `next_action` hint when false). Pass `--advance` to either command to walk the
+> soft transitions automatically (`triage → confirmed → fixing`) instead of
+> being blocked or skipped.
 
 Always close with a `--reason` — it becomes audit trail for the next agent.
 
@@ -49,17 +59,25 @@ When triaging, use `filigree batch-update <ids...> --priority=N` for bulk change
 ### Solo or Swarm — Same Tool
 
 Use `start-work` (or `start-next-work`) for the usual case. Both atomically
-claim the issue *and* transition it to `in_progress` in one DB transaction —
-optimistic-locking on the assignee, so concurrent callers can't both think
-they own the issue.
+claim the issue *and* transition it into its working status in one DB
+transaction — optimistic-locking on the assignee, so concurrent callers can't
+both think they own the issue. The working status is type-specific (tasks →
+`in_progress`, features → `building`, bugs → `fixing`).
 
 ```bash
-filigree start-work <issue-id> --assignee <agent-name>     # specific issue
-filigree start-next-work --assignee <agent-name>           # highest-priority ready
+filigree start-work <issue-id> --assignee <agent-name>              # specific issue
+filigree start-next-work --assignee <agent-name>                    # highest-priority startable
+filigree start-work <bug-id> --assignee <agent-name> --advance      # walk triage → confirmed → fixing
 ```
 
 If another agent already owns the claim, the call fails with `code: CONFLICT`
 (CLI exit 4). Safe to retry against a different issue.
+
+`start-work` on a `triage` bug (or any type with no single-hop working status)
+returns `INVALID_TRANSITION` naming the intermediate status to move through
+first; `start-next-work` skips such issues. Pass `--advance` to walk the soft
+transitions to the nearest working status automatically (missing required
+fields become warnings, not blocks; hard edges are never auto-walked).
 
 ### Niche: Claim Without Transitioning
 

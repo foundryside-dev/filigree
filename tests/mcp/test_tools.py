@@ -472,12 +472,31 @@ class TestReadyAndBlocked:
         assert issue.id not in ids
 
     async def test_get_ready_shape(self, mcp_db: FiligreeDB) -> None:
-        """get_ready must return SlimIssue shape (5 keys including status)."""
-        mcp_db.create_issue("Ready")
+        """get_ready returns the slim shape plus the startability flag.
+
+        ``startable`` is always present (filigree-406e6b7ee0); ``next_action``
+        is omitted for a single-hop-startable item to keep the shape slim.
+        """
+        task = mcp_db.create_issue("Ready", type="task")
         result = await call_tool("get_ready", {})
         data = _parse(result)
-        expected_keys = {"issue_id", "title", "status", "priority", "type"}
-        assert set(data["items"][0].keys()) == expected_keys
+        item = next(i for i in data["items"] if i["issue_id"] == task.id)
+        expected_keys = {"issue_id", "title", "status", "priority", "type", "startable"}
+        assert set(item.keys()) == expected_keys
+        assert item["startable"] is True
+
+    async def test_get_ready_marks_triage_bug_not_startable(self, mcp_db: FiligreeDB) -> None:
+        """filigree-406e6b7ee0: a triage bug is ready but not single-hop startable.
+
+        It carries ``startable: false`` and ``next_action`` pointing at the
+        intermediate status the agent must move through first.
+        """
+        bug = mcp_db.create_issue("Triage bug", type="bug")
+        result = await call_tool("get_ready", {})
+        data = _parse(result)
+        item = next(i for i in data["items"] if i["issue_id"] == bug.id)
+        assert item["startable"] is False
+        assert item["next_action"] == "confirmed"
 
     async def test_get_ready_include_context_adds_parent_context(self, mcp_db: FiligreeDB) -> None:
         parent = mcp_db.create_issue("Parent epic", type="epic")
@@ -698,6 +717,10 @@ class TestTemplateAndSummary:
         result = await call_tool("get_stats", {})
 
         data = _parse(result)
+        # status_name_counts / status_category_counts are DEPRECATED
+        # (filigree-17694d2db8) duplicates of by_status / by_category, kept as
+        # wire-compatibility aliases per ADR-009 §7. Pin them on the MCP wire
+        # surface: present and identical until the next major.
         assert data["status_name_counts"] == data["by_status"]
         assert data["status_category_counts"] == data["by_category"]
         assert data["status_name_counts"]["in_progress"] == 1
@@ -1321,10 +1344,23 @@ class TestStartWork:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.INVALID_TRANSITION
-        assert "No wip-category transition from 'triage'" in data["error"]
+        # filigree-406e6b7ee0: actionable hint naming the intermediate hop.
+        assert "triage" in data["error"]
+        assert "not directly startable" in data["error"]
+        assert "confirmed" in data["error"]
         current = mcp_db.get_issue(issue.id)
         assert current.assignee == ""
         assert current.status == "triage"
+
+    async def test_start_work_advance_walks_triage_bug_to_wip(self, mcp_db: FiligreeDB) -> None:
+        """filigree-406e6b7ee0 Part 2: advance=true walks the soft path to wip."""
+        issue = mcp_db.create_issue("mcp-advance-bug", type="bug")
+
+        result = await call_tool("start_work", {"issue_id": issue.id, "assignee": "bob", "advance": True})
+
+        data = _parse(result)
+        assert data["status"] == "fixing"
+        assert data["assignee"] == "bob"
 
     async def test_start_work_blank_assignee_rejected(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("mcp-d6-blank", type="task")

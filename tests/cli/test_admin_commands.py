@@ -85,7 +85,9 @@ class TestJsonRetrofit:
         data = json.loads(result.output)
         assert isinstance(data, dict)
         assert "succeeded" in data
-        assert "newly_unblocked" in data
+        # Standalone issue, no dependents: newly_unblocked is empty and therefore
+        # OMITTED from the envelope (batch contract; filigree-1025b9f6ab / F6).
+        assert "newly_unblocked" not in data
         assert data["succeeded"][0]["issue_id"] == issue_id
 
     def test_reopen_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:

@@ -110,23 +110,19 @@ def _ready_impl(as_json: bool, include_context: bool) -> None:
                 parent_titles = _parent_titles_by_id(db, issues) if include_context else {}
             except sqlite3.Error as e:
                 _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
-            click.echo(
-                json_mod.dumps(
-                    {
-                        "items": [
-                            issue_to_ready(
-                                i,
-                                include_context=include_context,
-                                parent_title=parent_titles.get(i.parent_id or ""),
-                            )
-                            for i in issues
-                        ],
-                        "has_more": False,
-                    },
-                    indent=2,
-                    default=str,
+            items = []
+            for i in issues:
+                startable, next_action = db.issue_startability(i)
+                items.append(
+                    issue_to_ready(
+                        i,
+                        include_context=include_context,
+                        parent_title=parent_titles.get(i.parent_id or ""),
+                        startable=startable,
+                        next_action=next_action,
+                    )
                 )
-            )
+            click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2, default=str))
             return
 
         for issue in issues:
@@ -139,7 +135,12 @@ def _ready_impl(as_json: bool, include_context: bool) -> None:
                     _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
                 except KeyError:
                     pass
-            click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}"{parent_ctx}')
+            # Flag ready-but-not-startable items (e.g. triage bugs) so the
+            # human-facing list does not advertise work that start-work will
+            # reject (filigree-406e6b7ee0).
+            startable, next_action = db.issue_startability(issue)
+            start_hint = "" if startable else (f" — not startable; move to '{next_action}' first" if next_action else " — not startable")
+            click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}"{parent_ctx}{start_hint}')
         click.echo(f"\n{len(issues)} ready")
 
 

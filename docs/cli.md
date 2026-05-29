@@ -521,16 +521,21 @@ holder. The reason is required and is recorded on the reclaim event.
 
 Atomically claim an issue AND transition it to its working status in a single call. Backs `FiligreeDB.start_work` with compensating-action rollback — if the transition fails, the claim is released. Returns the full updated issue dict.
 
+The working status is type-specific (the unique wip-category status reachable in one hop): tasks → `in_progress`, features → `building`. Types whose initial state has **no** single-hop wip transition — notably bugs, which start at `triage` and walk `triage → confirmed → fixing` — are *ready* but not *startable*. Calling `start-work` on such an issue returns `INVALID_TRANSITION` naming the intermediate status to move through first; pass `--advance` to walk the soft transitions automatically (see below).
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `--assignee` | string | Who is claiming (required) |
 | `--target-status` | string | Target wip status (default: unique reachable wip target) |
+| `--advance` | flag | Walk soft transitions to the nearest wip state (e.g. `triage → confirmed → fixing`) when no single-hop wip target exists. Missing required fields surface as warnings, not blocks; hard edges are never auto-walked. Ignored when `--target-status` is given. |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ### `start-next-work`
 
 Claim AND transition the highest-priority ready issue. Returns `{status: "empty", reason: ...}` when no matching issue exists.
+
+Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are **skipped**, so the command returns the next startable issue rather than failing. Pass `--advance` to make such candidates startable via the multi-hop soft walk instead of skipping them.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -539,6 +544,7 @@ Claim AND transition the highest-priority ready issue. Returns `{status: "empty"
 | `--priority-min` | 0-4 | Minimum priority filter |
 | `--priority-max` | 0-4 | Maximum priority filter |
 | `--target-status` | string | Target wip status (default: unique reachable wip target) |
+| `--advance` | flag | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ## Batch Operations
@@ -735,10 +741,12 @@ filigree events <id>                        # Event history for one issue
 
 ### `stats`
 
-Project statistics: counts by literal status name, template status category,
-type, ready, and blocked. JSON includes explicit `status_name_counts` and
-`status_category_counts` maps; `by_status` and `by_category` remain for
-compatibility.
+Project statistics: counts by literal status name (`by_status`), template
+status category (`by_category`), type, ready, and blocked. JSON also includes
+the **deprecated** `status_name_counts` and `status_category_counts` maps —
+exact duplicates of `by_status` and `by_category` (filigree-17694d2db8), kept as
+compatibility aliases per ADR-009 §7 and scheduled for removal in the next
+major. Read `by_status` / `by_category`.
 
 ### `metrics`
 

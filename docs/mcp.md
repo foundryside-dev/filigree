@@ -197,8 +197,13 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 | `get_blocked` | Blocked issues with their blocker lists, optionally hydrated with blocker context |
 | `get_critical_path` | Longest dependency chain |
 
-`get_ready` returns slim five-key issue items by default. Pass
-`include_context=true` to add `parent_issue_id` and `parent_title` to each item.
+`get_ready` returns the slim issue shape plus a `startable` flag on each item.
+`startable` is `true` when the issue can be transitioned into a working state in
+one hop (what `start_work` does by default); it is `false` for issues that are
+*ready* but not directly *startable* — notably `triage` bugs, which must walk
+`triage → confirmed → fixing`. Non-startable items also carry `next_action`, the
+intermediate status to move through first (e.g. `"confirmed"`). Pass
+`include_context=true` to additionally add `parent_issue_id` and `parent_title`.
 `get_blocked` returns blocker IDs by default. Pass `include_blockers=true` to
 add slim blocker records under `blockers[]` while preserving `blocked_by`.
 `get_critical_path` takes no required parameters.
@@ -285,10 +290,13 @@ callers can confirm the exact inserted comment without a follow-up read.
 
 #### `get_stats`
 
-Returns both legacy count maps and explicit aliases:
-`status_name_counts` contains literal workflow status names such as `open` or
-`in_progress`; `status_category_counts` contains template categories
-`open`/`wip`/`done`. `by_status` and `by_category` remain for compatibility.
+Returns `by_status` (counts by literal workflow status name such as `open` or
+`in_progress`) and `by_category` (template categories `open`/`wip`/`done`),
+plus `by_type`, `ready_count`, `blocked_count`, and `total_dependencies`. The
+`status_name_counts` and `status_category_counts` maps are **deprecated** exact
+duplicates of `by_status` / `by_category` (filigree-17694d2db8), kept as
+compatibility aliases per ADR-009 §7 and scheduled for removal in the next
+major.
 
 ### Planning
 
@@ -330,8 +338,8 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 
 | Tool | Description |
 |------|-------------|
-| `start_work` | Atomically claim and transition an issue into work |
-| `start_next_work` | Claim highest-priority ready issue and transition it into work |
+| `start_work` | Atomically claim and transition an issue into work (single-hop; `advance` walks multi-hop types) |
+| `start_next_work` | Claim highest-priority ready issue and transition it into work (skips non-startable candidates) |
 | `claim_issue` | Claim only, with optimistic locking |
 | `claim_next` | Claim highest-priority ready issue only |
 | `release_claim` | Release a claim, optionally idempotently with `if_held` |
@@ -342,14 +350,22 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 
 #### `start_work`
 
+A `triage` bug (and any type with no single-hop wip target) is *ready* but not
+directly *startable*: without `advance`, `start_work` returns `INVALID_TRANSITION`
+naming the intermediate status to move through first.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 | `assignee` | string | yes | Who is starting work |
 | `target_status` | string | no | Working status override |
+| `advance` | boolean | no | Walk soft transitions to the nearest wip state (e.g. `triage → confirmed → fixing`) when no single-hop wip target exists. Missing required fields surface as warnings, not blocks; hard edges are never auto-walked. Ignored when `target_status` is given. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
 #### `start_next_work`
+
+Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are
+skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -358,6 +374,7 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 | `priority_min` | 0-4 | no | Minimum priority |
 | `priority_max` | 0-4 | no | Maximum priority |
 | `target_status` | string | no | Working status override |
+| `advance` | boolean | no | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
 #### `claim_issue`

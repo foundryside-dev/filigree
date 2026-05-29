@@ -72,11 +72,20 @@ class SlimIssue(TypedDict):
 class ReadyIssue(SlimIssue):
     """Ready-queue issue projection.
 
-    By default ready surfaces return the inherited slim keys only. When callers
-    request context, parent fields are added so agents can display the owning
-    epic/plan without an immediate follow-up ``get_issue`` call.
+    By default ready surfaces return the inherited slim keys plus ``startable``.
+    When callers request context, parent fields are added so agents can display
+    the owning epic/plan without an immediate follow-up ``get_issue`` call.
+
+    ``startable`` (always present, filigree-406e6b7ee0) distinguishes "ready"
+    (open-category, unblocked) from "startable" (``start_work`` /
+    ``start_next_work`` can transition it to a working state in one hop): a
+    ``triage`` bug is ready but not startable. ``next_action`` is present only
+    when the item is not startable but a soft path to a working state exists —
+    it names the intermediate status to move through first (e.g. ``confirmed``).
     """
 
+    startable: bool
+    next_action: NotRequired[str | None]
     parent_issue_id: NotRequired[str | None]
     parent_title: NotRequired[str | None]
 

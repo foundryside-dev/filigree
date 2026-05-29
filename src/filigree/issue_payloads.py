@@ -19,9 +19,24 @@ def issue_to_slim(issue: Issue) -> SlimIssue:
     )
 
 
-def issue_to_ready(issue: Issue, *, include_context: bool = False, parent_title: str | None = None) -> ReadyIssue:
-    """Return a ready-queue projection, optionally enriched with parent context."""
+def issue_to_ready(
+    issue: Issue,
+    *,
+    include_context: bool = False,
+    parent_title: str | None = None,
+    startable: bool = True,
+    next_action: str | None = None,
+) -> ReadyIssue:
+    """Return a ready-queue projection, optionally enriched with parent context.
+
+    ``startable`` / ``next_action`` are computed by the caller from the issue's
+    workflow template (filigree-406e6b7ee0). ``startable`` is always emitted;
+    ``next_action`` is omitted when None to keep the default shape slim.
+    """
     payload = cast(ReadyIssue, dict(issue_to_slim(issue)))
+    payload["startable"] = startable
+    if next_action is not None:
+        payload["next_action"] = next_action
     if include_context:
         payload["parent_issue_id"] = issue.parent_id
         payload["parent_title"] = parent_title if issue.parent_id else None

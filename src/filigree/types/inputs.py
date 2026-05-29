@@ -172,6 +172,7 @@ class StartWorkArgs(TypedDict):
     assignee: str
     target_status: NotRequired[str]
     actor: NotRequired[str]
+    advance: NotRequired[bool]
 
 
 class StartNextWorkArgs(TypedDict):
@@ -181,6 +182,7 @@ class StartNextWorkArgs(TypedDict):
     priority_max: NotRequired[int]
     target_status: NotRequired[str]
     actor: NotRequired[str]
+    advance: NotRequired[bool]
 
 
 class BatchCloseArgs(TypedDict):

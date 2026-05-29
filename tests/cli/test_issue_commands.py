@@ -352,6 +352,35 @@ class TestUpdateAndClose:
         assert blocked in unblocked_ids, "issue whose only dep closed must appear in newly_unblocked"
         assert already_ready not in unblocked_ids, f"pre-existing ready issue must NOT appear in newly_unblocked; got {unblocked_ids}"
 
+    def test_close_json_omits_newly_unblocked_when_empty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Batch envelope contract: ``newly_unblocked`` is OMITTED when empty.
+
+        Closing an issue with no downstream dependents must not attach an
+        empty ``newly_unblocked`` list (matches MCP ``batch_close``).
+        (filigree-1025b9f6ab / F6)
+        """
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Standalone"]).output)
+        result = runner.invoke(cli, ["close", issue_id, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "newly_unblocked" not in data, f"empty newly_unblocked must be absent; got keys {list(data)}"
+
+    def test_close_json_includes_newly_unblocked_when_nonempty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """The key MUST be present (with the unblocked id) when a dependent unblocks.
+
+        Complements the ABSENT case above. (filigree-1025b9f6ab / F6)
+        """
+        runner, _ = cli_in_project
+        dep = _extract_id(runner.invoke(cli, ["create", "Dependency"]).output)
+        blocked = _extract_id(runner.invoke(cli, ["create", "Blocked by dep"]).output)
+        assert runner.invoke(cli, ["add-dep", blocked, dep]).exit_code == 0
+        result = runner.invoke(cli, ["close", dep, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "newly_unblocked" in data, f"non-empty newly_unblocked must be present; got keys {list(data)}"
+        assert {i["issue_id"] for i in data["newly_unblocked"]} == {blocked}
+
     def test_close_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         created = runner.invoke(cli, ["create", "Claim-aware close", "--json"])
@@ -1158,3 +1187,104 @@ class TestListLabelQuery:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION", data
         assert "label_prefix" in data["error"].lower() or "colon" in data["error"].lower()
+
+
+class TestPostVerbActor:
+    """`--actor` accepted AFTER the verb, recorded on the event.
+
+    Regression for filigree-873dd5817c (F1): `--actor` was a group-only
+    option, so the natural post-verb position (`filigree update <id>
+    --actor X`) was rejected with "No such option", silently losing
+    attribution.
+    """
+
+    def _events(self, runner: CliRunner, issue_id: str) -> list[dict]:
+        res = runner.invoke(cli, ["events", issue_id, "--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)
+        return data.get("items", []) if isinstance(data, dict) else data
+
+    def test_post_verb_actor_accepted_and_recorded_on_update(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Post-verb actor"]).output)
+
+        result = runner.invoke(cli, ["update", issue_id, "--priority", "1", "--actor", "agent-zeta"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, f"no priority_changed event; events: {events}"
+        assert prio_events[0]["actor"] == "agent-zeta"
+
+    def test_post_verb_actor_recorded_on_close(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Close actor"]).output)
+
+        result = runner.invoke(cli, ["close", issue_id, "--actor", "agent-closer"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        closed = [e for e in events if e.get("event_type") in ("closed", "status_changed")]
+        assert any(e["actor"] == "agent-closer" for e in closed), f"events: {events}"
+
+    def test_post_verb_actor_recorded_on_add_comment(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Comment actor"]).output)
+
+        result = runner.invoke(cli, ["add-comment", issue_id, "hello", "--actor", "agent-commenter"])
+        assert result.exit_code == 0, result.output
+
+        comments = runner.invoke(cli, ["get-comments", issue_id, "--json"])
+        assert comments.exit_code == 0, comments.output
+        data = json.loads(comments.output)
+        items = data.get("items", data) if isinstance(data, dict) else data
+        assert any(c.get("author") == "agent-commenter" for c in items), data
+
+    def test_post_verb_actor_wins_over_group_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Precedence: explicit post-verb --actor beats the group-level --actor."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Precedence"]).output)
+
+        result = runner.invoke(cli, ["--actor", "group-actor", "update", issue_id, "--priority", "1", "--actor", "post-actor"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, events
+        assert prio_events[0]["actor"] == "post-actor", events
+
+    def test_pre_verb_actor_still_works(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Fallback: with no post-verb --actor, the group-level value is used."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Pre-verb"]).output)
+
+        result = runner.invoke(cli, ["--actor", "group-only", "update", issue_id, "--priority", "1"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, events
+        assert prio_events[0]["actor"] == "group-only", events
+
+    def test_post_verb_actor_validation_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """A blank post-verb --actor is sanitized like the group-level one."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Bad actor"]).output)
+
+        result = runner.invoke(cli, ["update", issue_id, "--priority", "1", "--actor", "   ", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+
+    def test_start_work_local_actor_unaffected(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """start-work owns its own --actor (assignee fallback); not double-injected."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Start-work actor"]).output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "frank", "--actor", "agent-sw", "--json"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        claimed = [e for e in events if e.get("event_type") == "claimed"]
+        assert claimed, events
+        assert claimed[0]["actor"] == "agent-sw", events

@@ -232,9 +232,13 @@ class TestJsonOutput:
         data = json.loads(result.output)
         # 1 created + auto-seeded "Future" release = 2 ready
         assert len(data["items"]) == 2
-        # Items must be SlimIssue shape (5 keys): no full IssueDict.
+        # Items are the slim shape plus the startability flag — no full
+        # IssueDict (filigree-406e6b7ee0). The P2 task sorts ahead of the P4
+        # release singleton and is single-hop startable, so next_action is
+        # omitted to keep the shape slim.
         item = data["items"][0]
-        assert set(item.keys()) == {"issue_id", "title", "status", "priority", "type"}
+        assert set(item.keys()) == {"issue_id", "title", "status", "priority", "type", "startable"}
+        assert item["startable"] is True
 
     def test_ready_json_include_context_adds_parent_context(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -291,6 +295,8 @@ class TestJsonOutput:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "by_status" in data
+        # DEPRECATED (filigree-17694d2db8) aliases, retained on the CLI JSON
+        # wire surface per ADR-009 §7: still present, still duplicates.
         assert data["status_name_counts"] == data["by_status"]
         assert data["status_category_counts"] == data["by_category"]
 

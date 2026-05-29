@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from pathlib import Path
@@ -208,6 +209,119 @@ class TypeTemplate:
         if not candidates:
             raise InvalidTransitionError(self.type, current_status)
         raise AmbiguousTransitionError(self.type, candidates, current_status=current_status)
+
+    def startability(self, current_status: str) -> tuple[bool, str | None]:
+        """Return ``(startable, next_action)`` for ``current_status``.
+
+        ``startable`` is True iff ``start_work`` / ``start_next_work`` can
+        transition this status into a working state *without* an explicit
+        ``target_status`` — i.e. ``reachable_working_status`` resolves a unique
+        single-hop wip target (or the status is already wip). This is the
+        single source of truth that distinguishes "ready" (open-category,
+        unblocked) from "startable" (filigree-406e6b7ee0): a ``triage`` bug is
+        ready but not startable because ``triage`` reaches no wip state in one
+        hop.
+
+        When not startable because no single-hop wip target exists,
+        ``next_action`` names the next SOFT hop on the shortest path toward the
+        nearest wip state (``triage`` bugs return ``"confirmed"``). It is an
+        informational hint only — callers never auto-walk it. When the status
+        is *ambiguous* (multiple single-hop wip targets) ``next_action`` is
+        None: the caller must choose a ``target_status``.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        try:
+            self.reachable_working_status(current_status)
+        except AmbiguousTransitionError:
+            return False, None
+        except InvalidTransitionError:
+            return False, self._next_soft_hop_to_wip(current_status)
+        return True, None
+
+    def soft_path_to_working_status(self, current_status: str) -> list[str]:
+        """Return the SOFT-edge hop sequence from ``current_status`` to the
+        nearest wip-category state — e.g. a bug at ``triage`` yields
+        ``["confirmed", "fixing"]``.
+
+        This is the multi-hop "advance" walk behind ``start_work(advance=True)``
+        (filigree-406e6b7ee0 Part 2). Returns ``[]`` when the status is already
+        wip (nothing to walk). Raises ``AmbiguousTransitionError`` when the
+        status has multiple single-hop wip targets (caller must choose a
+        ``target_status``). Raises ``InvalidTransitionError`` when no soft path
+        reaches a wip state.
+
+        The *terminal* single hop mirrors ``reachable_working_status`` exactly
+        (any enforcement), so ``advance`` is always a superset of the default
+        resolver — never more restrictive — and agrees with it on ambiguity. It
+        is only the *intermediate* hops of a multi-hop walk that are restricted
+        to SOFT edges: hard edges gate deliberate progression (e.g.
+        ``verifying -> closed``), and auto-walking *through* one to reach a more
+        distant wip state would bypass a gate the workflow author marked as
+        requiring an explicit decision.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        categories = {state.name: state.category for state in self.states}
+        if categories.get(current_status) == "wip":
+            return []
+
+        # The single-hop case mirrors reachable_working_status (any enforcement)
+        # so advance and the default resolver agree on directly-startable states
+        # and on ambiguity — advance must be a superset, never a subset.
+        direct = [
+            transition.to_state
+            for transition in self.transitions
+            if transition.from_state == current_status and categories.get(transition.to_state) == "wip"
+        ]
+        direct = list(dict.fromkeys(direct))
+        if len(direct) > 1:
+            raise AmbiguousTransitionError(self.type, direct, current_status=current_status)
+        if len(direct) == 1:
+            return [direct[0]]
+
+        # Breadth-first search over soft edges for the shortest path to any wip
+        # state, reconstructing the hop sequence from a predecessor map.
+        predecessor: dict[str, str] = {}
+        visited = {current_status}
+        queue: deque[str] = deque([current_status])
+        target: str | None = None
+        while queue and target is None:
+            node = queue.popleft()
+            for transition in self.transitions:
+                if transition.from_state != node or transition.enforcement != "soft" or transition.to_state in visited:
+                    continue
+                visited.add(transition.to_state)
+                predecessor[transition.to_state] = node
+                if categories.get(transition.to_state) == "wip":
+                    target = transition.to_state
+                    break
+                queue.append(transition.to_state)
+        if target is None:
+            raise InvalidTransitionError(self.type, current_status)
+
+        path: list[str] = []
+        node = target
+        while node != current_status:
+            path.append(node)
+            node = predecessor[node]
+        path.reverse()
+        return path
+
+    def _next_soft_hop_to_wip(self, current_status: str) -> str | None:
+        """First hop toward the nearest wip state, or None when none exists.
+
+        Thin wrapper over ``soft_path_to_working_status`` for the informational
+        ``next_action`` hint: swallows the ambiguous / no-path errors into None
+        so ``startability`` can report a hint without raising.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        try:
+            path = self.soft_path_to_working_status(current_status)
+        except (AmbiguousTransitionError, InvalidTransitionError):
+            return None
+        return path[0] if path else None
 
 
 @dataclass(frozen=True)

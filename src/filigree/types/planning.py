@@ -150,6 +150,9 @@ class StatsResult(TypedDict):
 
     by_status: dict[str, int]
     by_category: dict[str, int]
+    # DEPRECATED (filigree-17694d2db8): exact duplicates of by_status /
+    # by_category, kept as wire-compatibility aliases per ADR-009 §7.
+    # Remove in the next major.
     status_name_counts: dict[str, int]
     status_category_counts: dict[str, int]
     by_type: dict[str, int]

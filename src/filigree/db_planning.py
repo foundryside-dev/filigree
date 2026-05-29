@@ -357,6 +357,20 @@ class PlanningMixin(DBMixinProtocol):
 
         return self._build_issues_batch([r["id"] for r in rows])
 
+    def issue_startability(self, issue: Issue) -> tuple[bool, str | None]:
+        """Return ``(startable, next_action)`` for a ready-queue projection.
+
+        Resolves the issue's workflow template and delegates to
+        ``TypeTemplate.startability`` (filigree-406e6b7ee0). A missing template
+        is treated as non-startable with no actionable hop. This is the bridge
+        wire surfaces use to attach ``startable`` / ``next_action`` to
+        ``get_ready`` items without the projection layer importing templates.
+        """
+        tpl = self.templates.get_type(issue.type)
+        if tpl is None:
+            return False, None
+        return tpl.startability(issue.status)
+
     def get_blocked(self) -> list[Issue]:
         """Issues in open- or wip-category states that have at least one non-done blocker.
 

@@ -606,7 +606,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Atomically claim an issue and transition it to a working status. "
                 "target_status defaults to the unique wip-category status reachable from the current status; "
                 "AmbiguousTransitionError surfaces if the current status has multiple reachable wip targets "
-                "(specify target_status explicitly). On transition failure the claim is rolled back."
+                "(specify target_status explicitly). Issues with no single-hop wip target (e.g. triage bugs) "
+                "raise INVALID_TRANSITION with the intermediate status to move through first, unless advance=true. "
+                "On transition failure the claim is rolled back."
             ),
             inputSchema={
                 "type": "object",
@@ -624,6 +626,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
                     },
+                    "advance": {
+                        "type": "boolean",
+                        "description": (
+                            "Walk soft transitions to the nearest wip state when no single-hop wip target exists "
+                            "(e.g. triage->confirmed->fixing). Missing required fields surface as warnings, not blocks; "
+                            "hard edges are never auto-walked. Default false."
+                        ),
+                    },
                 },
                 "required": ["issue_id", "assignee"],
             },
@@ -633,6 +643,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Claim the highest-priority open-category ready issue and atomically transition it to a working status. "
                 "Tie-break ordering: priority asc, created_at asc, issue_id asc (same as claim_next). "
+                "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
+                "to make them startable via the multi-hop soft walk. "
                 "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches."
             ),
             inputSchema={
@@ -657,6 +669,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
+                    },
+                    "advance": {
+                        "type": "boolean",
+                        "description": (
+                            "Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable "
+                            "instead of skipped. Default false."
+                        ),
                     },
                 },
                 "required": ["assignee"],
@@ -1473,6 +1492,9 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
+    advance = args.get("advance", False)
+    if not isinstance(advance, bool):
+        return _text(ErrorResponse(error="advance must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         issue = tracker.start_work(
@@ -1480,6 +1502,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
             assignee=assignee,
             target_status=args.get("target_status"),
             actor=actor,
+            advance=advance,
         )
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1524,6 +1547,9 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
     pmax_err = _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4)
     if pmax_err:
         return pmax_err
+    advance = args.get("advance", False)
+    if not isinstance(advance, bool):
+        return _text(ErrorResponse(error="advance must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
     try:
         claimed = tracker.start_next_work(
@@ -1533,6 +1559,7 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
             priority_max=priority_max,
             target_status=args.get("target_status"),
             actor=actor,
+            advance=advance,
         )
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
