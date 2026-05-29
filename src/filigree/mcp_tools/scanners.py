@@ -728,9 +728,7 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
 
     reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
     reported_line_start = finding.get("line_start")
-    lookup_line_start = (
-        reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
-    )
+    lookup_line_start = reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
     finding_record = _reported_finding_record(
         tracker,
         result,

@@ -257,9 +257,7 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
-    def test_failed_annotation_event_rolls_back_file_registration(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_failed_annotation_event_rolls_back_file_registration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         db = _project_db(tmp_path)
         try:
             (tmp_path / "event.py").write_text("one\n")

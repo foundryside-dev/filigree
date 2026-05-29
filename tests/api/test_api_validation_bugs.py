@@ -218,9 +218,7 @@ class TestRemoveDependencyForeignPrefix:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_classic_remove_dependency_same_prefix_missing_source_returns_404(
-        self, bug_db: FiligreeDB, client: AsyncClient
-    ) -> None:
+    async def test_classic_remove_dependency_same_prefix_missing_source_returns_404(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         target = bug_db.create_issue("Target")
         resp = await client.request(
             "DELETE",

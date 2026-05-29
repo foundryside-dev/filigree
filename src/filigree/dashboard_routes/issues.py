@@ -532,7 +532,7 @@ def create_classic_router() -> APIRouter:
         except ValueError as e:
             code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        result = issue.to_dict()
+        result: dict[str, Any] = dict(issue.to_dict())
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
         return JSONResponse(result)

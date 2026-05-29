@@ -782,7 +782,7 @@ class MetaMixin(DBMixinProtocol):
         rec_id = record["id"]
         existing = self.conn.execute("SELECT id FROM scan_findings WHERE id = ?", (rec_id,)).fetchone()
         if existing is not None:
-            return existing["id"]
+            return str(existing["id"])
         existing = self.conn.execute(
             "SELECT id FROM scan_findings "
             "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
@@ -790,7 +790,7 @@ class MetaMixin(DBMixinProtocol):
             (file_id, record.get("scan_source", ""), record.get("rule_id", ""), record.get("line_start")),
         ).fetchone()
         if existing is not None:
-            return existing["id"]
+            return str(existing["id"])
         msg = f"Could not reconcile imported scan_finding {rec_id!r}"
         raise sqlite3.IntegrityError(msg)
 
@@ -1151,10 +1151,7 @@ class MetaMixin(DBMixinProtocol):
                         msg = f"import_jsonl: issue {issue_id!r} cannot be its own parent"
                         raise ValueError(msg)
                     if self._would_create_parent_cycle(issue_id, parent_id):
-                        msg = (
-                            f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} "
-                            "would create a circular parent chain"
-                        )
+                        msg = f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} would create a circular parent chain"
                         raise ValueError(msg)
                     self.conn.execute("UPDATE issues SET parent_id = ? WHERE id = ?", (parent_id, issue_id))
 

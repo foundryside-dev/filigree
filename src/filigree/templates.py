@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from filigree.types.core import StatusCategory as StateCategory
 
@@ -486,7 +486,7 @@ class TemplateRegistry:
         logger.debug("Parsing template for type: %s", type_name)
 
         # StateDefinition.__post_init__ validates each state name format + category
-        states = tuple(StateDefinition(name=name, category=category) for name, category in state_specs)
+        states = tuple(StateDefinition(name=name, category=cast("StateCategory", category)) for name, category in state_specs)
 
         # Detect duplicate state names (filigree-eff214)
         seen_names: set[str] = set()
@@ -500,7 +500,7 @@ class TemplateRegistry:
             TransitionDefinition(
                 from_state=from_state,
                 to_state=to_state,
-                enforcement=enforcement,
+                enforcement=cast("EnforcementLevel", enforcement),
                 requires_fields=requires_fields,
             )
             for from_state, to_state, enforcement, requires_fields in transition_specs
@@ -509,7 +509,7 @@ class TemplateRegistry:
             TransitionDefinition(
                 from_state=from_state,
                 to_state=to_state,
-                enforcement=enforcement,
+                enforcement=cast("EnforcementLevel", enforcement),
                 requires_fields=requires_fields,
             )
             for from_state, to_state, enforcement, requires_fields in reverse_transition_specs
@@ -533,7 +533,7 @@ class TemplateRegistry:
         fields_schema = tuple(
             FieldSchema(
                 name=name,
-                type=field_type,
+                type=cast("FieldType", field_type),
                 description=field_description,
                 options=options,
                 default=default,

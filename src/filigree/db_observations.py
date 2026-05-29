@@ -899,9 +899,7 @@ class ObservationsMixin(DBMixinProtocol):
         _begin_immediate(self.conn, "promote_observations_to_issue")
         try:
             existing_issue_row = self.conn.execute(
-                "SELECT id FROM issues "
-                "WHERE json_valid(fields) "
-                "AND json_extract(fields, '$.source_observation_ids') = json(?)",
+                "SELECT id FROM issues WHERE json_valid(fields) AND json_extract(fields, '$.source_observation_ids') = json(?)",
                 (source_ids_json,),
             ).fetchone()
             if existing_issue_row is not None:
@@ -931,8 +929,7 @@ class ObservationsMixin(DBMixinProtocol):
                         )
                     except (sqlite3.Error, ValueError) as exc:
                         cleanup_msg = (
-                            f"Failed to clean up linked observation {obs_id} after finding existing issue "
-                            f"{existing_issue.id}: {exc}"
+                            f"Failed to clean up linked observation {obs_id} after finding existing issue {existing_issue.id}: {exc}"
                         )
                         logger.warning(cleanup_msg, exc_info=True)
                         warnings.append(cleanup_msg)

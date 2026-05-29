@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from filigree.db_base import DBMixinProtocol, _now_iso
@@ -72,7 +73,7 @@ def _validate_plan_object(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
-def _validate_plan_title(data: dict[str, Any], label: str) -> None:
+def _validate_plan_title(data: Mapping[str, Any], label: str) -> None:
     title = data.get("title", "")
     if not isinstance(title, str):
         msg = f"{label} 'title' must be a string"
@@ -82,7 +83,7 @@ def _validate_plan_title(data: dict[str, Any], label: str) -> None:
         raise ValueError(msg)
 
 
-def _validate_plan_optional_string(data: dict[str, Any], key: str, label: str) -> None:
+def _validate_plan_optional_string(data: Mapping[str, Any], key: str, label: str) -> None:
     if key in data and not isinstance(data[key], str):
         msg = f"{label} '{key}' must be a string"
         raise ValueError(msg)
@@ -888,9 +889,7 @@ class PlanningMixin(DBMixinProtocol):
                 steps = phase_data.get("steps") or []
                 for step_idx, step_data in enumerate(steps):
                     step_id = self._generate_unique_id("issues")
-                    step_fields = dict(
-                        _normalize_plan_fields(step_data.get("fields"), f"Phase {phase_idx + 1}, Step {step_idx + 1}")
-                    )
+                    step_fields = dict(_normalize_plan_fields(step_data.get("fields"), f"Phase {phase_idx + 1}, Step {step_idx + 1}"))
                     step_fields["sequence"] = step_idx + 1
                     self.conn.execute(
                         "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "

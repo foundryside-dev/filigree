@@ -58,7 +58,8 @@ def _project_db_path(filigree_dir: Path) -> Path:
     conf_path = filigree_dir.parent / CONF_FILENAME
     if conf_path.is_file():
         conf = read_conf(conf_path)
-        return (conf_path.parent / conf["db"]).resolve()
+        db_name: str = conf["db"]
+        return (conf_path.parent / db_name).resolve()
     return filigree_dir / DB_FILENAME
 
 

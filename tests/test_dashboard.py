@@ -516,9 +516,7 @@ class TestGetDbErrorPaths:
             store.close_all()
             dash_module._project_store = None
 
-    async def test_server_mode_isolates_bad_project_config_from_good_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_server_mode_isolates_bad_project_config_from_good_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """One malformed registered project must not prevent serving the rest."""
         config_dir = tmp_path / ".config" / "filigree"
         config_dir.mkdir(parents=True)
@@ -619,9 +617,7 @@ class TestProjectStoreLoadCorruption:
         """A malformed prefix must fail load() instead of dropping the project."""
         config_dir = self._setup_server_config(tmp_path, monkeypatch)
         project_path = str(tmp_path / "proj" / ".filigree")
-        (config_dir / "server.json").write_text(
-            json.dumps({"port": 8377, "projects": {project_path: {"prefix": ["bad"]}}})
-        )
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {project_path: {"prefix": ["bad"]}}}))
 
         store = ProjectStore()
         with pytest.raises(ValueError, match="project prefix"):

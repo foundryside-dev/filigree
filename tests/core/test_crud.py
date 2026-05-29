@@ -895,11 +895,7 @@ class TestClaimNextFilters:
             )
         db.conn.commit()
 
-        result = (
-            db.claim_next("agent")
-            if method_name == "claim_next"
-            else db.start_next_work(assignee="agent")
-        )
+        result = db.claim_next("agent") if method_name == "claim_next" else db.start_next_work(assignee="agent")
 
         assert result is not None
         assert result.id == lower_id

@@ -486,12 +486,12 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 f"Scanner process terminated after DB tracking failed: {exc}",
                 context="single DB tracking failure",
             )
-            details = {"status_update_error": status_update_error} if status_update_error else None
+            tracking_details = {"status_update_error": status_update_error} if status_update_error else None
             _emit_error(
                 f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
                 ErrorCode.IO,
                 as_json=as_json,
-                details=details,
+                details=tracking_details,
             )
             return
 
@@ -511,7 +511,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 log_hint = f" Check log: {log_rel}"
             elif spawn_result.get("log_warning"):
                 log_hint = f" Note: {spawn_result['log_warning']}"
-            details: dict[str, Any] = {
+            exit_details: dict[str, Any] = {
                 "scanner": scanner,
                 "file_id": file_record.id,
                 "scan_run_id": scan_run_id,
@@ -519,12 +519,12 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 "log_path": log_rel,
             }
             if status_update_error:
-                details["status_update_error"] = status_update_error
+                exit_details["status_update_error"] = status_update_error
             _emit_error(
                 f"Scanner process exited immediately with code {exit_code}.{log_hint}",
                 ErrorCode.IO,
                 as_json=as_json,
-                details=details,
+                details=exit_details,
             )
             return
 

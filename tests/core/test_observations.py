@@ -1215,9 +1215,7 @@ class TestPromoteObservation:
         linked = db.conn.execute("SELECT obs_id FROM observation_links WHERE issue_id = ? ORDER BY id", (issue.id,)).fetchall()
         assert [row["obs_id"] for row in linked] == [obs1["id"], obs2["id"]]
 
-    def test_promote_many_cleanup_failure_prevents_duplicate_issue(
-        self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_promote_many_cleanup_failure_prevents_duplicate_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         obs1 = db.create_observation("First retry signal", detail="one", priority=3)
         obs2 = db.create_observation("Second retry signal", detail="two", priority=1)
         real_link = db.link_observation_to_issue
