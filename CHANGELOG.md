@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /api/loom/findings/clean-stale` — findings retention over HTTP, for
+  federation consumers (ADR-015).** Exposes the existing
+  `clean_stale_findings` core method (already reachable via CLI `filigree
+  finding clean-stale`) on the loom generation so a federation consumer like
+  Clarion — which cannot drive a CLI — can trigger retention. Soft-archives
+  `unseen_in_latest` findings older than `older_than_days` (default 30) to
+  `fixed`, scoped to a required `scan_source`; rows persist and a finding that
+  reappears in a later scan auto-reopens (`fixed` → `open`) with `seen_count`
+  intact. Request `{scan_source, older_than_days?, actor?}` → response
+  `{findings_fixed, scan_source, older_than_days}`; no auth (loopback-only,
+  `actor` from body, mirroring scan-results); `scan_source` is required as an
+  accident-guard (not an authorization boundary). Wire shape pinned at
+  `tests/fixtures/contracts/loom/findings-clean-stale.json`. *Enables*
+  federation cooperation (ADR-002 §7); Filigree's finding lifecycle is correct
+  whether or not a consumer ever calls it. No schema change; no MCP/CLI change
+  (the CLI verb already exists). ADR-015 also records the REQ-FINDING-05
+  scan-run-create contract: Filigree tolerates an unknown client-supplied
+  `scan_run_id` and proceeds — no create endpoint — and a consumer not managing
+  run lifecycle should send `complete_scan_run: false` so the path stays
+  warning-free.
+
 - **`delete_issue` — general-purpose hard-delete with a federation tombstone (F5).**
   New MCP tool `delete_issue` and CLI verb `delete-issue` (`--force`, `--json`)
   permanently remove an issue and all of its dependent rows (events, comments,

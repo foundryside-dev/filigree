@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from httpx import AsyncClient
 
 from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from tests.conftest import PopulatedDB
+
+_OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
+
+_CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "findings-clean-stale.json"
 
 
 class TestFilesSchemaAPI:
@@ -318,3 +325,193 @@ class TestScanResultsFingerprintAPI:
         )
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
+
+
+class TestLoomCleanStaleFindingsAPI:
+    """POST /api/loom/findings/clean-stale — federation retention surface.
+
+    Thin loom HTTP adapter over the core ``clean_stale_findings`` (ADR-015).
+    Soft retention: stale ``unseen_in_latest`` findings move to ``fixed``,
+    scoped to a single ``scan_source``. Reuses the existing core method —
+    these tests assert the wire contract and the scan_source-isolation /
+    enrich-only invariants Clarion depends on.
+    """
+
+    def _status_by_rule(self, db: PopulatedDB, path: str) -> dict[str, str]:
+        f = db.db.get_file_by_path(path)
+        assert f is not None
+        return {fi.rule_id: fi.status for fi in db.db.get_findings(f.id)}
+
+    async def test_clean_stale_matrix(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """One seeded matrix proving scoping + enrich-only in a single sweep.
+
+        | finding                              | after clarion/30d sweep |
+        | ------------------------------------ | ----------------------- |
+        | clarion + unseen + old               | fixed (cleaned)         |
+        | clarion + unseen + recent            | kept unseen_in_latest   |
+        | clarion + open (still in latest)     | kept open (enrich-only) |
+        | wardline + unseen + old              | kept (scan_source iso)  |
+        """
+        db = dashboard_db.db
+        db.process_scan_results(
+            scan_source="clarion",
+            findings=[
+                {"path": "clar_old.py", "rule_id": "C-OLD", "severity": "high", "message": "m"},
+                {"path": "clar_recent.py", "rule_id": "C-RECENT", "severity": "high", "message": "m"},
+                {"path": "clar_open.py", "rule_id": "C-OPEN", "severity": "high", "message": "m"},
+            ],
+        )
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[{"path": "ward_old.py", "rule_id": "W-OLD", "severity": "high", "message": "m"}],
+        )
+        # Backdate the two "old" findings to unseen; recent one to unseen but
+        # leave its (now) last_seen_at; the open one stays open.
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE rule_id IN ('C-OLD', 'W-OLD')",
+            (_OLD_TS,),
+        )
+        db.conn.execute("UPDATE scan_findings SET status = 'unseen_in_latest' WHERE rule_id = 'C-RECENT'")
+        db.conn.commit()
+
+        resp = await client.post(
+            "/api/loom/findings/clean-stale",
+            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+
+        # Only the old clarion unseen finding was swept.
+        assert self._status_by_rule(dashboard_db, "clar_old.py")["C-OLD"] == "fixed"
+        # Recent clarion unseen finding untouched.
+        assert self._status_by_rule(dashboard_db, "clar_recent.py")["C-RECENT"] == "unseen_in_latest"
+        # Live (open) clarion finding untouched — enrich-only: still-present
+        # findings keep their seen state.
+        assert self._status_by_rule(dashboard_db, "clar_open.py")["C-OPEN"] == "open"
+        # Wardline finding untouched — scan_source isolation: a clarion-scoped
+        # sweep can never affect another tool's findings.
+        assert self._status_by_rule(dashboard_db, "ward_old.py")["W-OLD"] == "unseen_in_latest"
+
+    async def test_default_older_than_days_is_30(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """``older_than_days`` is optional; omitting it defaults to 30 (REQ-FINDING-06)."""
+        db = dashboard_db.db
+        db.process_scan_results(
+            scan_source="clarion",
+            findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
+        )
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE rule_id = 'C1'",
+            (_OLD_TS,),
+        )
+        db.conn.commit()
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        assert resp.status_code == 200
+        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+
+    async def test_coalesce_fallback_null_last_seen_at(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Age gate is coalesce(last_seen_at, updated_at): a NULL last_seen_at
+        with an old updated_at is still swept (inherited from the core method)."""
+        db = dashboard_db.db
+        db.process_scan_results(
+            scan_source="clarion",
+            findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
+        )
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = NULL, updated_at = ? WHERE rule_id = 'C1'",
+            (_OLD_TS,),
+        )
+        db.conn.commit()
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 30})
+        assert resp.status_code == 200
+        assert resp.json()["findings_fixed"] == 1
+        assert self._status_by_rule(dashboard_db, "a.py")["C1"] == "fixed"
+
+    async def test_older_than_days_zero_sweeps_whole_unseen_backlog(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """older_than_days=0 is permitted: cutoff = now, so the entire current
+        unseen backlog for the source is swept. Bounded blast radius — only
+        already-unseen rows, and open (live) findings are still untouched."""
+        db = dashboard_db.db
+        db.process_scan_results(
+            scan_source="clarion",
+            findings=[
+                {"path": "u.py", "rule_id": "C-UNSEEN", "severity": "low", "message": "m"},
+                {"path": "o.py", "rule_id": "C-OPEN", "severity": "low", "message": "m"},
+            ],
+        )
+        # Mark one unseen with a *recent* last_seen_at (would survive a 30-day window).
+        db.conn.execute("UPDATE scan_findings SET status = 'unseen_in_latest' WHERE rule_id = 'C-UNSEEN'")
+        db.conn.commit()
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 0})
+        assert resp.status_code == 200
+        assert resp.json()["findings_fixed"] == 1
+        assert self._status_by_rule(dashboard_db, "u.py")["C-UNSEEN"] == "fixed"
+        # Live finding untouched even at days=0 — only unseen rows are eligible.
+        assert self._status_by_rule(dashboard_db, "o.py")["C-OPEN"] == "open"
+
+    async def test_dismisses_linked_observations_for_swept_findings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """The route inherits the core method's observation-dismissal cascade:
+        sweeping a finding dismisses the observation linked to it."""
+        db = dashboard_db.db
+        db.process_scan_results(
+            scan_source="clarion",
+            findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
+            create_observations=True,
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        finding_id = db.get_findings(f.id)[0].id
+        obs_before = db.conn.execute("SELECT COUNT(*) AS c FROM observations WHERE source_finding_id = ?", (finding_id,)).fetchone()["c"]
+        assert obs_before == 1
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE id = ?",
+            (_OLD_TS, finding_id),
+        )
+        db.conn.commit()
+
+        resp = await client.post(
+            "/api/loom/findings/clean-stale",
+            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["findings_fixed"] == 1
+        obs_after = db.conn.execute("SELECT COUNT(*) AS c FROM observations WHERE source_finding_id = ?", (finding_id,)).fetchone()["c"]
+        assert obs_after == 0  # observation cascade-dismissed
+
+    async def test_missing_scan_source_rejected(self, client: AsyncClient) -> None:
+        """scan_source is mandatory on the HTTP surface (accident-guard): the
+        core method's None='all sources' mode is deliberately not reachable."""
+        resp = await client.post("/api/loom/findings/clean-stale", json={"older_than_days": 30})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_empty_scan_source_rejected(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "", "older_than_days": 30})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    @pytest.mark.parametrize("bad_days", [-1, True, "30", 1.5])
+    async def test_invalid_older_than_days_rejected(self, client: AsyncClient, bad_days: object) -> None:
+        resp = await client.post(
+            "/api/loom/findings/clean-stale",
+            json={"scan_source": "clarion", "older_than_days": bad_days},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_fixture_examples_match_live_shape(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Pin the published contract fixture against live responses (key set +
+        value types), the shape-reference discipline from contracts.md."""
+        fixture = json.loads(_CLEAN_STALE_FIXTURE.read_text())
+        assert fixture["_meta"]["endpoint"] == "POST /api/loom/findings/clean-stale"
+
+        for example in fixture["examples"]:
+            req = example["request"]
+            expected = example["response"]
+            resp = await client.post(req["path"], json=req["body"])
+            assert resp.status_code == expected["status"], example["name"]
+            body = resp.json()
+            exp_body = expected["body"]
+            assert set(body.keys()) == set(exp_body.keys()), example["name"]
+            for key, val in exp_body.items():
+                assert type(body[key]) is type(val), f"{example['name']}:{key}"

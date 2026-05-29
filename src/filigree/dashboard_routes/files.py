@@ -25,6 +25,7 @@ from filigree.dashboard_routes.common import (
     _parse_json_body,
     _parse_pagination,
     _safe_int,
+    _validate_actor,
 )
 from filigree.registry import (
     REGISTRY_BACKEND_FEATURES,
@@ -47,8 +48,11 @@ _MAX_MIN_FINDINGS = 2_147_483_647
 # Connection level). This module-level asyncio.Lock serializes scan-results
 # handler calls across the three router factories so concurrent POSTs serialize
 # (no DB race) while OTHER endpoints stay responsive during the wait.
-# True parallelism for scan-results requires a per-thread DB connection pool —
-# tracked separately as a follow-up.
+# The findings/clean-stale handler also acquires this lock: it is the other
+# worker-thread DB *write* path, so it must mutually exclude with scan-results
+# ingest to avoid the same shared-connection race.
+# True parallelism (and closing the race for the remaining plain-async write
+# handlers) requires a per-thread DB connection pool — tracked as a follow-up.
 _SCAN_RESULTS_LOCK = asyncio.Lock()
 
 
@@ -537,6 +541,76 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         items = [scan_finding_to_loom(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
+
+    @router.post("/findings/clean-stale")
+    async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Retention sweep — soft-archive stale ``unseen_in_latest`` findings.
+
+        Federation surface over the existing core ``clean_stale_findings``
+        (the same operation as CLI ``filigree finding clean-stale``). Moves
+        ``unseen_in_latest`` findings older than ``older_than_days`` (default
+        30) to ``fixed`` status, scoped to a single ``scan_source``. Soft, not
+        a delete: rows persist and a finding that reappears in a later scan
+        auto-reopens (``fixed`` → ``open``) with its ``seen_count`` intact.
+        See ADR-015 for the retention policy and the scan-run contract.
+
+        Enrich-only (loom.md sec 3-5, ADR-002 sec 7): pure local DB write,
+        fully functional with no federation peer present.
+
+        ``scan_source`` is REQUIRED here — it is an *accident-guard*, not an
+        auth boundary: the core method treats ``None`` as "all sources", which
+        we refuse to expose so a caller cannot accidentally sweep every tool's
+        findings. The actual trust boundary is loopback-only binding (there is
+        no inbound auth on any route; see ADR-015 §1). ``older_than_days=0`` is
+        permitted (sweep the whole current unseen backlog); blast radius is
+        bounded because the op is soft and only touches already-unseen rows.
+
+        No tombstone: findings are not federated through a changes feed, and
+        this is a soft transition anyway (cf. the issue-deletion tombstone,
+        which is for hard-deletes of federated entities).
+
+        Concurrency: this is a bulk write (``UPDATE scan_findings SET
+        status='fixed' ...``) on the shared SQLite connection, so it serializes
+        under ``_SCAN_RESULTS_LOCK`` and runs via ``asyncio.to_thread`` — the
+        same idiom as the scan-results handlers. The lock stops the sweep's
+        writes from racing a concurrent scan-results ingest on the worker
+        thread; the shared connection is not safe for concurrent multi-thread
+        access (see the lock's CONTRACT-E note). This does NOT close the
+        codebase-wide shared-connection race for the other plain-async write
+        handlers (e.g. PATCH findings) — that remains the deferred
+        connection-pool follow-up — but the new bulk-write surface does not add
+        to it.
+        """
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        if not isinstance(scan_source, str) or not scan_source:
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        older_than_days = body.get("older_than_days", 30)
+        # JSON booleans are ints in Python; reject them explicitly so
+        # {"older_than_days": true} does not silently become 1.
+        if isinstance(older_than_days, bool) or not isinstance(older_than_days, int) or older_than_days < 0:
+            return _error_response("older_than_days must be a non-negative integer", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        async with _SCAN_RESULTS_LOCK:
+            result = await asyncio.to_thread(db.clean_stale_findings, days=older_than_days, scan_source=scan_source, actor=actor)
+        logger.info(
+            "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
+            result["findings_fixed"],
+            scan_source,
+            older_than_days,
+            actor,
+        )
+        return JSONResponse(
+            {
+                "findings_fixed": result["findings_fixed"],
+                "scan_source": scan_source,
+                "older_than_days": older_than_days,
+            }
+        )
 
     @router.get("/scanners")
     async def api_loom_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
