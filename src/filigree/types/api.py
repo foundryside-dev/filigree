@@ -416,6 +416,7 @@ class WorkflowGuideResponse(TypedDict):
     guide: dict[str, Any] | None
     message: NotRequired[str]
     note: NotRequired[str]
+    tool_catalog: NotRequired[dict[str, Any]]
 
 
 class StatusExplanation(TypedDict):

@@ -33,6 +33,7 @@ from mcp.types import (
     Resource,
     TextContent,
     Tool,
+    ToolAnnotations,
 )
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -316,9 +317,23 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
+from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
 _all_handlers: dict[str, Callable[..., Any]] = {}
+
+# Subsystem (= owning tool module's short name) per tool, captured during
+# assembly so it is complete-by-construction: a new tool registered by a
+# module can never be missing a subsystem. Consumed by the curated tool
+# catalogue surfaced from get_workflow_guide.
+_tool_subsystem: dict[str, str] = {}
+
+
+def _record_subsystem(tools: list[Tool], module: Any) -> None:
+    subsystem = module.__name__.rsplit(".", 1)[-1]
+    for _tool in tools:
+        _tool_subsystem[_tool.name] = subsystem
+
 
 for _mod in (
     _issues_mod,
@@ -331,13 +346,66 @@ for _mod in (
     _entities_mod,
 ):
     _tools, _handlers = _mod.register()
+    _record_subsystem(_tools, _mod)
     _all_tools.extend(_tools)
     _all_handlers.update(_handlers)
 
 # Scanner module uses include_legacy=True to own list_scanners + trigger_scan
 _tools, _handlers = _scanners_mod.register(include_legacy=True)
+_record_subsystem(_tools, _scanners_mod)
 _all_tools.extend(_tools)
 _all_handlers.update(_handlers)
+
+
+# ---------------------------------------------------------------------------
+# Tier tagging (MCP tool discoverability)
+# ---------------------------------------------------------------------------
+# Post-process the assembled tool list ONCE, at import, before anything reads
+# descriptions or input schemas. This is the single central seam: list_tools()
+# returns _all_tools verbatim (in both normal and schema-mismatch degraded
+# mode), so tagging here covers every served path without per-call work and
+# without risk of double-appending the marker. inputSchema is untouched, so
+# _tool_argument_names (below) and arg validation are unaffected.
+
+# Pure getters get readOnlyHint; the one hard-destructive tool gets
+# destructiveHint. Anything ambiguous is left without an annotation on
+# purpose — a wrong hint is worse than none.
+_READ_ONLY_PREFIXES: tuple[str, ...] = ("get_", "list_", "search_", "explain_", "preview_")
+_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"delete_issue", "delete_file_record"})
+
+
+def _is_read_only(name: str) -> bool:
+    # session_context is deliberately NOT here: it can opportunistically
+    # restart the dashboard process (_build_context -> ensure_dashboard_running),
+    # so it is not unambiguously side-effect free. Skip-if-uncertain.
+    return name.startswith(_READ_ONLY_PREFIXES) or name in {
+        "get_critical_path",
+        "validate_issue",
+    }
+
+
+def _apply_tier_metadata(tools: list[Tool]) -> None:
+    for tool in tools:
+        tier = tier_for(tool.name)
+        base = tool.description or ""
+        marker = f" [tier: {tier}]"
+        if not base.endswith(marker):
+            tool.description = f"{base}{marker}"
+
+        # Only set MCP ToolAnnotations where cheap and clearly correct.
+        read_only = _is_read_only(tool.name)
+        destructive = tool.name in _DESTRUCTIVE_TOOLS
+        if not (read_only or destructive):
+            continue
+        existing = tool.annotations or ToolAnnotations()
+        if read_only:
+            existing.readOnlyHint = True
+        if destructive:
+            existing.destructiveHint = True
+        tool.annotations = existing
+
+
+_apply_tier_metadata(_all_tools)
 
 
 def _allowed_tool_arguments(tool: Tool) -> set[str]:
