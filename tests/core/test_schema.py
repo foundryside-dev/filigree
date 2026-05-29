@@ -2296,6 +2296,19 @@ def test_verify_legacy_db_already_at_current_version(tmp_path):
     assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
 
 
+def test_verify_legacy_too_new_db_raises_mismatch(tmp_path):
+    """app_id=0 (pre-app-id filigree) but user_version above CURRENT — a
+    downgrade. The lineage is trusted, so this is a version mismatch (upgrade
+    filigree), not a foreign-file error (which would tell the operator to move
+    the file)."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 5}")
+    with pytest.raises(SchemaVersionMismatchError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.database == CURRENT_SCHEMA_VERSION + 5
+
+
 # ---------------------------------------------------------------------------
 # FiligreeDB.initialize() routes through classify_and_stamp_filigree_db
 # ---------------------------------------------------------------------------

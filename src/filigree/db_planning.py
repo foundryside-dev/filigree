@@ -39,14 +39,31 @@ logger = logging.getLogger(__name__)
 _MAX_TREE_DEPTH = 10
 
 
-def _sequence_sort_key(value: object) -> tuple[int, int | str]:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return (0, value)
+def _coerce_sequence(value: object) -> int | None:
+    """Return the numeric sequence for *value*, or None if it has none.
+
+    Accepts ints and int-valued strings (the CLI stores ``--field`` values as
+    strings). Unlike :func:`_sequence_sort_key`, it substitutes no sentinel for
+    missing / non-numeric values, so callers computing a max can ignore them.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
     if isinstance(value, str):
         try:
-            return (0, int(value))
+            return int(value)
         except ValueError:
-            return (1, value)
+            return None
+    return None
+
+
+def _sequence_sort_key(value: object) -> tuple[int, int | str]:
+    coerced = _coerce_sequence(value)
+    if coerced is not None:
+        return (0, coerced)
+    if isinstance(value, str):
+        return (1, value)
     return (0, 999)
 
 
@@ -607,8 +624,8 @@ class PlanningMixin(DBMixinProtocol):
             except json.JSONDecodeError:
                 continue
             sequence = fields.get("sequence") if isinstance(fields, dict) else None
-            sort_kind, normalized = _sequence_sort_key(sequence)
-            if sort_kind == 0 and isinstance(normalized, int) and normalized > max_sequence:
+            normalized = _coerce_sequence(sequence)
+            if normalized is not None and normalized > max_sequence:
                 max_sequence = normalized
         return max_sequence + 1
 

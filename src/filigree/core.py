@@ -883,8 +883,17 @@ def classify_and_stamp_filigree_db(conn: sqlite3.Connection, *, db_path: Path) -
         conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
         return "fresh"
 
-    if app_id == 0 and 0 < version <= CURRENT_SCHEMA_VERSION:
-        # Pre-application_id filigree DB. Trust user_version.
+    if app_id == 0 and version > 0:
+        # Pre-application_id filigree DB. Trust user_version. A value above the
+        # installed schema is a too-new filigree DB (a downgrade), not a foreign
+        # file — surface it as a version mismatch ("upgrade filigree") rather
+        # than a foreign-file error ("move this file"), matching the verdict the
+        # stamped path below gives for the same situation.
+        if version > CURRENT_SCHEMA_VERSION:
+            raise SchemaVersionMismatchError(
+                installed=CURRENT_SCHEMA_VERSION,
+                database=version,
+            )
         return "current" if version == CURRENT_SCHEMA_VERSION else "legacy_needs_upgrade"
 
     if app_id != FILIGREE_APPLICATION_ID:

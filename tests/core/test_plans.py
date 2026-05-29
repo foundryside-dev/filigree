@@ -125,6 +125,20 @@ class TestCreatePlan:
         plan = db.get_plan(ms.id)
         assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2", "Step 3"]
 
+    def test_add_plan_step_ignores_siblings_without_sequence(self, db: FiligreeDB) -> None:
+        """Regression (622da44): a sibling step lacking a 'sequence' field must
+        not inflate the next sequence to the (0, 999) sort sentinel + 1."""
+        ms = db.create_issue("Milestone", type="milestone")
+        phase = db.create_issue("Phase", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        # Steps created via generic create_issue carry no 'sequence' field.
+        db.create_issue("Bare step", type="step", parent_id=phase.id)
+        db.create_issue("Step 2", type="step", parent_id=phase.id, fields={"sequence": 2})
+
+        added = db.add_plan_step(phase.id, "Next")
+
+        # Highest real sequence is 2, so the next step is 3 — not 1000.
+        assert added.fields["sequence"] == 3
+
     def test_move_plan_step_counts_numeric_string_sequences(self, db: FiligreeDB) -> None:
         ms = db.create_issue("Milestone", type="milestone")
         source = db.create_issue("Source", type="phase", parent_id=ms.id, fields={"sequence": 1})
