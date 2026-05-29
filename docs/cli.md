@@ -1,6 +1,6 @@
 # CLI Reference
 
-Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The global `--actor` flag sets identity for the audit trail (default: `cli`).
+Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
 
 ## Contents
 
@@ -245,8 +245,9 @@ Close one or more issues. Accepts multiple IDs.
 | `--force` | flag | Use the declared reverse/escape edge for cleanup closes |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
-When using `--json`, the output includes `succeeded`, `failed`, and
-`newly_unblocked`. Closed issues with active critical `must_consider`
+When using `--json`, the output includes `succeeded` and `failed` (always
+present), plus `newly_unblocked` only when the close unblocked something
+(omitted when empty). Closed issues with active critical `must_consider`
 annotations include an `annotation_warnings` array. Plain-text close prints the
 same warning after the close; V1 warnings are advisory and do not block closure.
 `--force` validates through template `reverse_transitions` and records

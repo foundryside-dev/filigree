@@ -188,7 +188,7 @@ When parsing `--json` output or MCP responses, expect these unified envelopes:
 
 - **Batch ops** → `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`.
   `failed` is always present (empty list if none); `newly_unblocked` is
-  omitted when the op cannot unblock. Pass `--detail=full` (CLI) or
+  present only when non-empty (omitted when the op unblocked nothing). Pass `--detail=full` (CLI) or
   `response_detail="full"` (MCP) to get full records back.
 - **List ops** → `{items: [...], has_more: bool, next_offset?: int}`.
   `next_offset` only appears when there is a next page.
