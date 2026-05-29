@@ -9,6 +9,7 @@ template seeding, and shared file helpers.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -76,6 +77,8 @@ from filigree.types.core import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from filigree.templates import TemplateRegistry
 
 logger = logging.getLogger(__name__)
@@ -964,6 +967,11 @@ class FiligreeDB(
         self.enabled_packs = self._enabled_packs_override if self._enabled_packs_override is not None else ["core", "planning", "release"]
         self._conn: sqlite3.Connection | None = None
         self._check_same_thread = check_same_thread
+        # Whether this instance owns (and must close) ``self.registry``.
+        # ``borrow_for_worker_thread`` clones share the registry by reference
+        # and set this False so tearing the clone down never closes the
+        # parent's Clarion client. See ``_close_registry``.
+        self._owns_registry = True
         self._template_registry: TemplateRegistry | None = template_registry
         if registry_backend not in VALID_REGISTRY_BACKENDS:
             msg = f"registry_backend must be one of {sorted(VALID_REGISTRY_BACKENDS)}, got {registry_backend!r}"
@@ -1521,6 +1529,59 @@ class FiligreeDB(
                     self._conn = None
 
     def _close_registry(self) -> None:
+        # Borrowed clones (see ``borrow_for_worker_thread``) share the parent's
+        # registry by reference and do not own it; closing such a clone — via
+        # the context manager, ``close``, or ``__del__`` — must leave the
+        # parent's Clarion client open.
+        if not self._owns_registry:
+            return
         close_registry = getattr(self.registry, "close", None)
         if callable(close_registry):
             close_registry()
+
+    @contextlib.contextmanager
+    def borrow_for_worker_thread(self) -> Iterator[FiligreeDB]:
+        """Yield a short-lived sibling bound to its OWN sqlite connection.
+
+        Dashboard handlers that run DB work on an asyncio worker thread
+        (scan-results ingest, clean-stale sweep) must not touch the shared
+        event-loop connection from that thread: concurrent cross-thread use of
+        one ``sqlite3.Connection`` interleaves statements on the connection's
+        single implicit transaction, so one writer's ``COMMIT``/``ROLLBACK``
+        can land mid-transaction in another's (silent partial/lost writes).
+        ``_SCAN_RESULTS_LOCK`` serialises the worker paths against each other
+        but not against the event-loop handlers — only a separate connection
+        closes that race class (the CONTRACT-E follow-up).
+
+        The clone shares all config, the registry client, and the Clarion
+        capability-probe state by reference (read-only on the worker side, so
+        no second ADR-014 probe runs) but lazily opens its OWN connection on
+        first ``self.conn`` access. ``check_same_thread=True`` on the clone
+        turns any stray cross-thread use of that connection into a loud
+        ``ProgrammingError`` rather than silent interleaving.
+
+        The clone does NOT own the registry: exiting the context tears down
+        only the private connection (commit on clean exit, rollback on an
+        in-flight transaction), never the shared Clarion client.
+
+        MUST be entered and exited entirely within the worker thread (i.e.
+        inside the ``asyncio.to_thread`` callable) so the connection is
+        opened, used, committed, and closed on one and the same thread.
+        """
+        clone = copy.copy(self)
+        clone._conn = None
+        clone._check_same_thread = True
+        clone._owns_registry = False
+        try:
+            yield clone
+        finally:
+            conn = clone._conn
+            clone._conn = None
+            if conn is not None:
+                try:
+                    if conn.in_transaction:
+                        conn.rollback()
+                    else:
+                        conn.commit()
+                finally:
+                    conn.close()

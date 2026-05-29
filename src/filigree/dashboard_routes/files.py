@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from fastapi.responses import JSONResponse
 
+    from filigree.types.files import CleanStaleResult, ScanIngestResult
+
 from starlette.requests import Request
 
 from filigree.core import (
@@ -41,19 +43,51 @@ logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 
-# CONTRACT-E: process_scan_results runs in a worker thread via asyncio.to_thread
-# (keeps the event loop responsive during the Clarion HTTP wait). The shared
-# FiligreeDB connection is opened with check_same_thread=False but is NOT
-# safe for concurrent worker-thread access (writes can race at the sqlite3.
-# Connection level). This module-level asyncio.Lock serializes scan-results
-# handler calls across the three router factories so concurrent POSTs serialize
-# (no DB race) while OTHER endpoints stay responsive during the wait.
-# The findings/clean-stale handler also acquires this lock: it is the other
-# worker-thread DB *write* path, so it must mutually exclude with scan-results
-# ingest to avoid the same shared-connection race.
-# True parallelism (and closing the race for the remaining plain-async write
-# handlers) requires a per-thread DB connection pool — tracked as a follow-up.
+# CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
+# router factories, and the findings/clean-stale sweep) run via
+# asyncio.to_thread so the event loop stays responsive during the Clarion HTTP
+# wait / bulk write. They do their DB work on a PRIVATE connection obtained from
+# FiligreeDB.borrow_for_worker_thread() — NOT the shared event-loop connection.
+# That closes the cross-thread shared-connection race for good: the connection
+# invariant is connection-scoped, not route-scoped —
+#
+#   * Handlers that touch the shared connection stay plain ``async def`` and do
+#     no ``await`` mid-transaction, so they run to completion on the event-loop
+#     thread and are cooperatively serialised against each other.
+#   * Any handler that goes off the event-loop thread (to_thread/executor) MUST
+#     use its own connection via ``borrow_for_worker_thread`` so it never shares
+#     a connection cross-thread.
+#
+# clean-stale conforms under this invariant despite using to_thread, because it
+# borrows a private connection. This module-level asyncio.Lock still serialises
+# the two worker WRITE paths against each other: WAL permits a single writer at
+# the file level, so two concurrent worker writers would otherwise contend for
+# the write lock (SQLITE_BUSY churn up to busy_timeout). Event-loop handlers do
+# not take this lock — they run on a different connection and SQLite's file
+# locking (WAL + busy_timeout) mediates writer/writer contention between them
+# and a worker.
 _SCAN_RESULTS_LOCK = asyncio.Lock()
+
+
+def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any]) -> ScanIngestResult:
+    """Run ``process_scan_results`` on a private worker-thread connection.
+
+    Handed to ``asyncio.to_thread``, so the borrowed connection is opened,
+    used, committed, and closed entirely on the worker thread (CONTRACT-E /
+    ``FiligreeDB.borrow_for_worker_thread``). Never touches the shared
+    event-loop connection.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        return worker_db.process_scan_results(**parsed)
+
+
+def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_source: str, actor: str) -> CleanStaleResult:
+    """Run ``clean_stale_findings`` on a private worker-thread connection.
+
+    Same CONTRACT-E rationale as ``_ingest_scan_results_on_private_conn``.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        return worker_db.clean_stale_findings(days=days, scan_source=scan_source, actor=actor)
 
 
 def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONResponse:
@@ -393,15 +427,16 @@ def create_classic_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
-        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
-        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). asyncio.to_thread + the module-level
-        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
-        # during the wait while serializing scan-results POSTs to avoid the
-        # shared-sqlite-connection race documented at the lock.
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
             async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(db.process_scan_results, **parsed)
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -462,15 +497,16 @@ def create_loom_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
-        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
-        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). asyncio.to_thread + the module-level
-        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
-        # during the wait while serializing scan-results POSTs to avoid the
-        # shared-sqlite-connection race documented at the lock.
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
             async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(db.process_scan_results, **parsed)
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -570,16 +606,16 @@ def create_loom_router() -> APIRouter:
         which is for hard-deletes of federated entities).
 
         Concurrency: this is a bulk write (``UPDATE scan_findings SET
-        status='fixed' ...``) on the shared SQLite connection, so it serializes
-        under ``_SCAN_RESULTS_LOCK`` and runs via ``asyncio.to_thread`` — the
-        same idiom as the scan-results handlers. The lock stops the sweep's
-        writes from racing a concurrent scan-results ingest on the worker
-        thread; the shared connection is not safe for concurrent multi-thread
-        access (see the lock's CONTRACT-E note). This does NOT close the
-        codebase-wide shared-connection race for the other plain-async write
-        handlers (e.g. PATCH findings) — that remains the deferred
-        connection-pool follow-up — but the new bulk-write surface does not add
-        to it.
+        status='fixed' ...``) that runs via ``asyncio.to_thread`` on a PRIVATE
+        worker-thread connection (see ``_clean_stale_findings_on_private_conn``
+        and ``FiligreeDB.borrow_for_worker_thread``) — the same idiom as the
+        scan-results handlers. Because it never touches the shared event-loop
+        connection, it cannot race the plain-async event-loop write handlers
+        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It still
+        acquires ``_SCAN_RESULTS_LOCK`` to serialise against the scan-results
+        worker WRITE path (WAL allows one writer at the file level; the lock
+        avoids SQLITE_BUSY churn between the two worker writers). See the lock's
+        CONTRACT-E note for the connection-scoped invariant.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -596,7 +632,13 @@ def create_loom_router() -> APIRouter:
         if actor_err:
             return actor_err
         async with _SCAN_RESULTS_LOCK:
-            result = await asyncio.to_thread(db.clean_stale_findings, days=older_than_days, scan_source=scan_source, actor=actor)
+            result = await asyncio.to_thread(
+                _clean_stale_findings_on_private_conn,
+                db,
+                days=older_than_days,
+                scan_source=scan_source,
+                actor=actor,
+            )
         logger.info(
             "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
             result["findings_fixed"],
@@ -673,15 +715,16 @@ def create_living_surface_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
-        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip
-        # to Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). asyncio.to_thread + the module-level
-        # _SCAN_RESULTS_LOCK keep the event loop responsive for OTHER handlers
-        # during the wait while serializing scan-results POSTs to avoid the
-        # shared-sqlite-connection race documented at the lock.
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
             async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(db.process_scan_results, **parsed)
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:

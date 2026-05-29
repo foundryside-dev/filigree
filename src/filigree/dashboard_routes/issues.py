@@ -1,4 +1,15 @@
-"""Issue, workflow, and dependency route handlers."""
+"""Issue, workflow, and dependency route handlers.
+
+CONNECTION INVARIANT (CONTRACT-E, see dashboard_routes/files.py): the write
+handlers here (``update_issue``, ``close_issue``, ``add_comment``,
+``batch_update``, ``claim_*``, dependency edits, …) run synchronous DB work on
+the shared event-loop connection. They MUST stay plain ``async def`` with no
+``await`` mid-transaction, so they run to completion on the event-loop thread
+and stay cooperatively serialised. Do NOT move one onto a worker thread
+(``asyncio.to_thread``/executor) without giving it its own connection via
+``FiligreeDB.borrow_for_worker_thread`` — otherwise it races the worker-thread
+paths at the ``sqlite3.Connection`` level.
+"""
 
 from __future__ import annotations
 

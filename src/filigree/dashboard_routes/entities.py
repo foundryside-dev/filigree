@@ -15,6 +15,12 @@ Routes:
 The ``entity_id`` contains colons (``py:func:foo``); to keep it out of
 URL path parameters it travels in request bodies (POST) and query
 strings (DELETE), URL-encoded by the client.
+
+CONNECTION INVARIANT (CONTRACT-E, see dashboard_routes/files.py): the write
+handlers here (``add_entity_association``, ``remove_entity_association``) do
+synchronous DB work on the shared event-loop connection and MUST stay plain
+``async def`` with no ``await`` mid-transaction. Do NOT move one onto a worker
+thread without its own connection via ``FiligreeDB.borrow_for_worker_thread``.
 """
 
 from __future__ import annotations
