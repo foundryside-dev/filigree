@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`delete_issue` — general-purpose hard-delete with a federation tombstone (F5).**
+  New MCP tool `delete_issue` and CLI verb `delete-issue` (`--force`, `--json`)
+  permanently remove an issue and all of its dependent rows (events, comments,
+  labels, dependencies in/out, file associations, observation links, annotation
+  links + close-out acks) in one IMMEDIATE transaction; children and
+  `scan_findings` orphan via `ON DELETE SET NULL`, entity associations cascade.
+  The delete is **irreversible** — events are destroyed, so `undo_last` cannot
+  reverse it. Force-gated guards refuse by default unless the issue is terminal
+  (a done-category status or `archived`), has no children, and has no other
+  issues blocked by it; `force=true` deletes anyway (orphaning children,
+  cascading inbound dependencies). Guard refusals raise the typed
+  `IssueDeletionRefusedError` (a `ValueError` subclass) and surface as
+  `ErrorCode.CONFLICT` via `isinstance`, not message-text matching. Because a
+  hard-deleted issue leaves no row for the `GET /api/loom/changes` feed to
+  join, `delete_issue` writes a row to a new `deleted_issues` tombstone table,
+  surfaced on `/changes` as an `issue_deleted` change record cursored on
+  `deleted_at` so federation consumers (Clarion / Wardline / Shuttle) learn of
+  each deletion exactly once. Schema **v19 → v20** (new `deleted_issues` table,
+  keyed on a VACUUM-stable `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a
+  `UNIQUE` `issue_id`).
+
 - **Scan findings accept an optional `fingerprint` as cross-run identity.**
   When a finding supplied to `process_scan_results` / `POST /api/v1/scan-results`
   / `POST /api/loom/scan-results` carries a non-empty `fingerprint`, lifecycle

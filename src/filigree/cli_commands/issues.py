@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as json_mod
 import logging
+import sqlite3
 import sys
 from typing import Any
 
@@ -17,6 +18,7 @@ from filigree.types.api import (
     ClaimConflictError,
     ErrorCode,
     InvalidTransitionError,
+    IssueDeletionRefusedError,
     claim_conflict_envelope,
     classify_release_claim_error,
     classify_value_error,
@@ -1283,6 +1285,64 @@ def undo_last_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
     _undo_impl(ctx.obj["actor"], issue_id, as_json)
 
 
+@click.command("delete-issue", cls=ActorCommand)
+@click.argument("issue_id")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Delete a non-terminal issue; orphan children and cascade inbound dependencies",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def delete_issue_cmd(ctx: click.Context, issue_id: str, force: bool, as_json: bool) -> None:
+    """Hard-delete an issue and all of its dependent rows. IRREVERSIBLE.
+
+    Destroys the issue's events, so `undo-last` cannot reverse it. Writes a
+    deletion tombstone so federation consumers see an issue_deleted record on
+    /changes. Refuses unless the issue is in a done-category status or
+    'archived', has no children, and has no other issues blocked by it. Pass
+    --force to delete anyway: children orphan and inbound dependencies cascade.
+    """
+    with get_db() as db:
+        try:
+            result = db.delete_issue(issue_id, force=force, actor=ctx.obj["actor"])
+            refresh_summary(db)
+        except KeyError:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Not found: {issue_id}", "code": ErrorCode.NOT_FOUND}))
+            else:
+                click.echo(f"Error: issue {issue_id} not found", err=True)
+            sys.exit(1)
+        except IssueDeletionRefusedError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except ValueError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
+            click.echo(json_mod.dumps(result, indent=2, default=str))
+        else:
+            click.echo(
+                f"Deleted {issue_id} "
+                f"({result['deleted_events']} event(s), "
+                f"{result['orphaned_children']} child(ren) orphaned, "
+                f"{result['deleted_dependencies_in']} inbound dep(s) cascaded)"
+            )
+
+
 @click.command("start-work")
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="Who is starting work (agent name)")
@@ -1465,6 +1525,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(update_issue_cmd)
     cli.add_command(close)
     cli.add_command(reopen)
+    cli.add_command(delete_issue_cmd)
     cli.add_command(claim)
     cli.add_command(claim_next)
     cli.add_command(release)

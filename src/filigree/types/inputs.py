@@ -100,6 +100,12 @@ class CloseIssueArgs(TypedDict):
     force: NotRequired[bool]
 
 
+class DeleteIssueArgs(TypedDict):
+    issue_id: str
+    force: NotRequired[bool]
+    actor: NotRequired[str]
+
+
 class ReopenIssueArgs(TypedDict):
     issue_id: str
     actor: NotRequired[str]
@@ -847,6 +853,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "create_issue": CreateIssueArgs,
     "update_issue": UpdateIssueArgs,
     "close_issue": CloseIssueArgs,
+    "delete_issue": DeleteIssueArgs,
     "reopen_issue": ReopenIssueArgs,
     "search_issues": SearchIssuesArgs,
     "claim_issue": ClaimIssueArgs,

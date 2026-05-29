@@ -49,7 +49,7 @@ def test_mcp_tools_register_shape() -> None:
 
 
 def test_mcp_tools_total_count() -> None:
-    """All 113 tools are registered across domain modules.
+    """All 114 tools are registered across domain modules.
 
     Count includes the structured observation triage surfaces and the
     four entity-association tools (ADR-029) so the split-module
@@ -66,7 +66,7 @@ def test_mcp_tools_total_count() -> None:
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
     # +4 for entity_associations (ADR-029): add/remove/list-by-issue/list-by-entity.
-    assert total == 113, f"Expected 113 tools total, got {total}"
+    assert total == 114, f"Expected 114 tools total, got {total}"
 
 
 def test_mcp_docs_tool_count_matches_registry() -> None:

@@ -1288,3 +1288,68 @@ class TestPostVerbActor:
         claimed = [e for e in events if e.get("event_type") == "claimed"]
         assert claimed, events
         assert claimed[0]["actor"] == "agent-sw", events
+
+
+class TestDeleteIssueCommand:
+    """CLI `delete-issue` verb (F5)."""
+
+    def _create_closed(self, runner: CliRunner, title: str) -> str:
+        issue_id = _extract_id(runner.invoke(cli, ["create", title]).output)
+        assert runner.invoke(cli, ["close", issue_id]).exit_code == 0
+        return issue_id
+
+    def test_registered_in_help(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["delete-issue", "--help"])
+        assert result.exit_code == 0
+        assert "IRREVERSIBLE" in result.output
+        assert "--force" in result.output
+
+    def test_delete_success_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = self._create_closed(runner, "Delete via CLI")
+        result = runner.invoke(cli, ["delete-issue", issue_id, "--json", "--actor", "alice"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "deleted"
+        assert data["issue_id"] == issue_id
+        assert data["actor"] == "alice"
+        # Gone.
+        assert runner.invoke(cli, ["show", issue_id, "--json"]).exit_code == 1
+
+    def test_delete_success_plain(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = self._create_closed(runner, "Delete plain")
+        result = runner.invoke(cli, ["delete-issue", issue_id])
+        assert result.exit_code == 0, result.output
+        assert f"Deleted {issue_id}" in result.output
+
+    def test_not_found_maps_to_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["delete-issue", "test-nonexistent", "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["code"] == "NOT_FOUND"
+
+    def test_non_terminal_maps_to_conflict(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Still open"]).output)
+        result = runner.invoke(cli, ["delete-issue", issue_id, "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["code"] == "CONFLICT"
+
+    def test_has_children_refused_then_force(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        parent_id = _extract_id(runner.invoke(cli, ["create", "Parent"]).output)
+        child = json.loads(runner.invoke(cli, ["create", "Child", "--parent", parent_id, "--json"]).output)
+        assert runner.invoke(cli, ["close", parent_id]).exit_code == 0
+
+        refused = runner.invoke(cli, ["delete-issue", parent_id, "--json"])
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["code"] == "CONFLICT"
+
+        forced = runner.invoke(cli, ["delete-issue", parent_id, "--force", "--json"])
+        assert forced.exit_code == 0, forced.output
+        assert json.loads(forced.output)["orphaned_children"] == 1
+        # Child orphaned, still present.
+        child_shown = json.loads(runner.invoke(cli, ["show", child["issue_id"], "--json"]).output)
+        assert child_shown["parent_id"] is None

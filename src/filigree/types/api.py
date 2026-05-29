@@ -605,6 +605,22 @@ def claim_conflict_envelope(exc: ClaimConflictError) -> ErrorResponse:
     return ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT, details=claim_conflict_details(exc))
 
 
+class IssueDeletionRefusedError(ValueError):
+    """Raised when ``delete_issue``'s force-gated guards refuse a hard delete.
+
+    Carries the issue id and the human-readable blocker list. Subclasses
+    ``ValueError`` so pre-typed-exception callers (``except ValueError``)
+    continue to work; the MCP / CLI surfaces route this class to
+    ``ErrorCode.CONFLICT`` via ``isinstance`` rather than message-text matching
+    (mirrors ``ClaimConflictError``; 2.1.0 §0.3). A bare ``ValueError`` (e.g.
+    ``force`` not a bool) stays VALIDATION.
+    """
+
+    def __init__(self, issue_id: str, message: str) -> None:
+        self.issue_id = issue_id
+        super().__init__(message)
+
+
 class AmbiguousTransitionError(ValueError):
     """Raised when start-work cannot choose between multiple wip-category targets.
 

@@ -162,7 +162,123 @@ class EventsMixin(DBMixinProtocol):
             "ORDER BY e.created_at ASC, e.id ASC LIMIT ?",
             params,
         ).fetchall()
-        return [self._build_event_record_with_title(r) for r in rows]
+        events = [self._build_event_record_with_title(r) for r in rows]
+
+        # Merge in hard-deletion tombstones as synthetic ``issue_deleted``
+        # records. A hard-deleted issue has no events row (and no issues row
+        # to JOIN), so the SELECT above can never surface it — yet federation
+        # consumers reconciling off this feed must learn of deletions exactly
+        # once. The tombstone rows in ``deleted_issues`` carry ``deleted_at``
+        # (the cursor timestamp) and a synthetic high-range ``event_id`` so the
+        # (created_at, id) total order — and thus the caller's has_more /
+        # next_event_id cursor math — stays correct across both sources.
+        tombstones = self._deleted_issue_changes(
+            since,
+            after_event_id=after_event_id,
+            limit=limit,
+            actor=actor,
+            issue_id=issue_id,
+            label=label,
+            event_type=event_type,
+            exclude_types=exclude_types,
+        )
+        if not tombstones:
+            return events
+
+        merged = events + tombstones
+        merged.sort(key=lambda r: (r["created_at"], r["id"]))
+        return merged[:limit]
+
+    # Synthetic ``event_id`` base for deletion tombstones. Deletions sort
+    # strictly above every real ``events.id`` (an AUTOINCREMENT INTEGER that in
+    # practice never approaches 2**62), so at equal ``created_at`` a deletion
+    # always orders last. This preserves the ``(created_at, id)`` total order
+    # the /changes cursor relies on, and stays well under the route's
+    # ``after_event_id`` ceiling of 2**63-1 (negatives would be rejected by the
+    # route's min_value=0 validator, so a high-positive base is required).
+    #
+    # The id is derived from ``deleted_issues.seq``, an AUTOINCREMENT key, NOT
+    # the implicit rowid. VACUUM (``filigree compact``) renumbers implicit
+    # rowids across the whole file; an unseen same-``deleted_at`` tombstone
+    # could be dragged below a consumer's frozen cursor and skipped forever.
+    # AUTOINCREMENT keys are never renumbered or reused, so the synthetic id is
+    # stable across compaction.
+    _TOMBSTONE_EVENT_ID_BASE = 1 << 62
+
+    def _deleted_issue_changes(
+        self,
+        since: str,
+        *,
+        after_event_id: int | None = None,
+        limit: int = 100,
+        actor: str | None = None,
+        issue_id: str | None = None,
+        label: str | None = None,
+        event_type: str | None = None,
+        exclude_types: list[str] | None = None,
+    ) -> list[EventRecordWithTitle]:
+        """Return hard-deletion tombstones as synthetic ``issue_deleted`` records.
+
+        Applies the same cursor and filter predicates as ``get_events_since``.
+        A ``label`` filter excludes all tombstones — a deleted issue's labels
+        are gone, so it can never match (documented-intentional). ``issue_deleted``
+        is never default-excluded the way ``heartbeat`` is; it only drops out
+        when an explicit ``event_type`` selects something else or
+        ``exclude_types`` names it.
+        """
+        if label is not None:
+            return []
+        if event_type is not None and event_type != "issue_deleted":
+            return []
+        if exclude_types and "issue_deleted" in exclude_types:
+            return []
+
+        # Mirror ``get_events_since``'s cursor *in SQL* (before LIMIT) so the
+        # tombstone source returns its true smallest ``limit`` rows above the
+        # cursor — a fetch-then-filter would under-fetch and let the merge
+        # boundary skip past un-returned tombstones. The synthetic id is
+        # ``BASE + seq``, so the seq-space cursor is ``after_event_id - BASE``:
+        # when the cursor's last item was a tombstone this is its seq; when it
+        # was a real event the value is hugely negative, so all same-timestamp
+        # tombstones (which always sort after any real id) are correctly
+        # included.
+        if after_event_id is None:
+            clauses = ["d.deleted_at > ?"]
+            params: list[object] = [since]
+        else:
+            clauses = ["(d.deleted_at > ? OR (d.deleted_at = ? AND d.seq > ?))"]
+            params = [since, since, after_event_id - self._TOMBSTONE_EVENT_ID_BASE]
+        if actor is not None:
+            clauses.append("d.deleted_by = ?")
+            params.append(actor)
+        if issue_id is not None:
+            clauses.append("d.issue_id = ?")
+            params.append(issue_id)
+        where_sql = " AND ".join(clauses)
+        rows = self.conn.execute(
+            "SELECT d.issue_id, d.title, d.type, d.deleted_at, d.deleted_by, d.seq AS _seq "
+            f"FROM deleted_issues d WHERE {where_sql} "
+            "ORDER BY d.deleted_at ASC, d.seq ASC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+
+        records: list[EventRecordWithTitle] = []
+        for r in rows:
+            synthetic_id = self._TOMBSTONE_EVENT_ID_BASE + int(r["_seq"])
+            records.append(
+                EventRecordWithTitle(
+                    id=synthetic_id,
+                    issue_id=r["issue_id"],
+                    event_type="issue_deleted",
+                    actor=r["deleted_by"] or "",
+                    old_value=None,
+                    new_value=None,
+                    comment="",
+                    created_at=r["deleted_at"],
+                    issue_title=r["title"] or "",
+                )
+            )
+        return records
 
     def get_issue_events(self, issue_id: str, *, limit: int = 50, offset: int = 0) -> list[EventRecord]:
         """Get events for a specific issue, newest first."""

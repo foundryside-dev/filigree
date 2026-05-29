@@ -702,6 +702,39 @@ def migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """v19 -> v20: Add the ``deleted_issues`` tombstone table.
+
+    A hard delete (``FiligreeDB.delete_issue``) removes the issue row and all
+    of its child rows, including its ``events``. Because ``GET
+    /api/loom/changes`` (``get_events_since``) INNER JOINs ``issues``, a
+    hard-deleted issue is otherwise invisible to federation consumers — they
+    keep a stale reference forever. ``delete_issue`` writes a tombstone row
+    here in the same transaction, and the changes feed surfaces it as a
+    synthetic ``issue_deleted`` change record cursored on ``deleted_at`` so
+    incremental consumers see each deletion exactly once. Idempotent under
+    re-run.
+
+    ``seq`` is an AUTOINCREMENT key (not implicit rowid) so VACUUM never
+    renumbers it and the synthetic change-feed event_id stays stable across
+    ``filigree compact``. The DDL is byte-identical to the ``deleted_issues``
+    block in ``SCHEMA_SQL`` so fresh-create and migrated schemas are textually
+    the same.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted_issues (\n"
+        "    seq        INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        "    issue_id   TEXT NOT NULL UNIQUE,\n"
+        "    title      TEXT NOT NULL DEFAULT '',\n"
+        "    type       TEXT NOT NULL DEFAULT '',\n"
+        "    deleted_at TEXT NOT NULL,\n"
+        "    deleted_by TEXT DEFAULT '',\n"
+        "    reason     TEXT DEFAULT ''\n"
+        ")"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq)")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -721,6 +754,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     16: migrate_v16_to_v17,
     17: migrate_v17_to_v18,
     18: migrate_v18_to_v19,
+    19: migrate_v19_to_v20,
 }
 
 

@@ -11,7 +11,7 @@ Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, n
 
 ## What Is Filigree?
 
-Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 113 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
+Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 114 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
@@ -21,7 +21,7 @@ Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/`
 
 ### Key Features
 
-- **MCP server** with 113 tools — agents interact natively without parsing text
+- **MCP server** with 114 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
 - **Loom HTTP generation** — stable `/api/loom/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
@@ -131,7 +131,7 @@ Nothing in Filigree is encrypted or secured beyond ordinary local filesystem pro
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
-| [MCP Server Reference](docs/mcp.md) | 113 MCP tools for agent-native interaction |
+| [MCP Server Reference](docs/mcp.md) | 114 MCP tools for agent-native interaction |
 | [Federation Contracts](docs/federation/contracts.md) | Classic and Loom HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |

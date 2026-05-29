@@ -417,6 +417,66 @@ class TestUpdateAndClose:
         assert data["code"] == ErrorCode.NOT_FOUND
 
 
+class TestDeleteIssue:
+    async def test_delete_issue_tool_registered(self, mcp_db: FiligreeDB) -> None:
+        tools = {tool.name: tool for tool in await list_tools()}
+        assert "delete_issue" in tools
+        schema = tools["delete_issue"].inputSchema
+        assert set(schema["properties"]) == {"issue_id", "force", "actor"}
+        assert schema["required"] == ["issue_id"]
+        assert "IRREVERSIBLE" in tools["delete_issue"].description
+        assert "undo_last cannot reverse" in tools["delete_issue"].description
+
+    async def test_delete_success_envelope(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Delete me")
+        mcp_db.close_issue(issue.id)
+        result = await call_tool("delete_issue", {"issue_id": issue.id, "actor": "alice"})
+        data = _parse(result)
+        assert data["status"] == "deleted"
+        assert data["issue_id"] == issue.id
+        assert data["actor"] == "alice"
+        assert "deleted_events" in data
+        # Tombstone exists.
+        row = mcp_db.conn.execute("SELECT * FROM deleted_issues WHERE issue_id = ?", (issue.id,)).fetchone()
+        assert row is not None
+
+    async def test_delete_not_found(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("delete_issue", {"issue_id": "mcp-nonexistent"})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.NOT_FOUND
+
+    async def test_delete_non_terminal_conflict(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Still open")
+        result = await call_tool("delete_issue", {"issue_id": issue.id})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+
+    async def test_delete_has_children_conflict(self, mcp_db: FiligreeDB) -> None:
+        parent = mcp_db.create_issue("Parent")
+        mcp_db.create_issue("Child", parent_id=parent.id)
+        mcp_db.close_issue(parent.id)
+        result = await call_tool("delete_issue", {"issue_id": parent.id})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+
+    async def test_delete_force_orphans_children(self, mcp_db: FiligreeDB) -> None:
+        parent = mcp_db.create_issue("Parent")
+        child = mcp_db.create_issue("Child", parent_id=parent.id)
+        mcp_db.close_issue(parent.id)
+        result = await call_tool("delete_issue", {"issue_id": parent.id, "force": True})
+        data = _parse(result)
+        assert data["status"] == "deleted"
+        assert data["orphaned_children"] == 1
+        assert mcp_db.get_issue(child.id).parent_id is None
+
+    async def test_delete_force_bool_validation(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("x")
+        mcp_db.close_issue(issue.id)
+        result = await call_tool("delete_issue", {"issue_id": issue.id, "force": "yes"})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+
 class TestDependencies:
     async def test_add_dependency(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("Blocked")

@@ -1784,6 +1784,91 @@ class TestSchemaEquivalence:
     #     fresh.close()
 
 
+class TestDeletedIssuesTombstoneSchema:
+    """v19 -> v20: the ``deleted_issues`` tombstone table (F5)."""
+
+    def test_current_schema_version_is_20(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 20
+
+    def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        assert "deleted_issues" in _get_table_names(conn)
+        cols = _get_table_columns(conn, "deleted_issues")
+        assert set(cols) == {"seq", "issue_id", "title", "type", "deleted_at", "deleted_by", "reason"}
+        # seq is the AUTOINCREMENT PK (VACUUM-stable cursor); issue_id is UNIQUE
+        # so a re-delete via INSERT OR REPLACE assigns a fresh higher seq.
+        pk_rows = conn.execute("PRAGMA table_info(deleted_issues)").fetchall()
+        assert {row[1] for row in pk_rows if row[5]} == {"seq"}
+        # AUTOINCREMENT registers the table in sqlite_sequence.
+        autoinc = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'").fetchone()
+        assert autoinc is not None
+        assert "AUTOINCREMENT" in conn.execute("SELECT sql FROM sqlite_master WHERE name='deleted_issues'").fetchone()[0]
+        # issue_id UNIQUE constraint present.
+        idx_list = conn.execute("PRAGMA index_list(deleted_issues)").fetchall()
+        unique_cols = set()
+        for idx in idx_list:
+            if idx[2]:  # unique flag
+                for info in conn.execute(f"PRAGMA index_info({idx[1]})").fetchall():
+                    unique_cols.add(info[2])
+        assert "issue_id" in unique_cols
+        assert "idx_deleted_issues_deleted_at" in _get_index_names(conn)
+        conn.close()
+
+    def test_migration_v19_to_v20_adds_table(self, tmp_path: Path) -> None:
+        """Pin the v19->v20 migration in isolation."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Bump *down* to v19 and drop the table so the migration re-creates it.
+        conn.execute("DROP INDEX IF EXISTS idx_deleted_issues_deleted_at")
+        conn.execute("DROP TABLE IF EXISTS deleted_issues")
+        conn.execute("PRAGMA user_version = 19")
+        conn.commit()
+        assert "deleted_issues" not in _get_table_names(conn)
+
+        applied = apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+        assert applied == 1
+        assert _get_schema_version(conn) == 20
+        assert "deleted_issues" in _get_table_names(conn)
+        assert "idx_deleted_issues_deleted_at" in _get_index_names(conn)
+        conn.close()
+
+    def test_migrated_and_fresh_ddl_byte_identical(self, tmp_path: Path) -> None:
+        """The migration and SCHEMA_SQL must produce textually-identical DDL.
+
+        sqlite_master stores the CREATE statement verbatim; if the two paths
+        drift (whitespace or otherwise) the stored ``sql`` text differs.
+        """
+        from filigree.migrations import migrate_v19_to_v20
+
+        fresh = _make_db(tmp_path, "fresh.db")
+        fresh.executescript(SCHEMA_SQL)
+        fresh.commit()
+
+        migrated = _make_db(tmp_path, "migrated.db")
+        migrate_v19_to_v20(migrated)
+        migrated.commit()
+
+        def _ddl(conn: sqlite3.Connection, name: str) -> str:
+            return conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
+
+        assert _ddl(fresh, "deleted_issues") == _ddl(migrated, "deleted_issues")
+        assert _ddl(fresh, "idx_deleted_issues_deleted_at") == _ddl(migrated, "idx_deleted_issues_deleted_at")
+        fresh.close()
+        migrated.close()
+
+    def test_migration_v19_to_v20_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v19_to_v20
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Re-running the migration over an already-present table is a no-op.
+        migrate_v19_to_v20(conn)
+        assert "deleted_issues" in _get_table_names(conn)
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # FiligreeDB integration tests
 # ---------------------------------------------------------------------------

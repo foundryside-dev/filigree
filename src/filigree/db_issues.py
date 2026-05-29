@@ -33,10 +33,12 @@ from filigree.types.api import (
     ClaimConflictError,
     ErrorCode,
     InvalidTransitionError,
+    IssueDeletionRefusedError,
     TransitionHint,
     classify_value_error,
 )
 from filigree.types.core import StatusCategory
+from filigree.types.files import DeleteIssueResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1267,6 +1269,151 @@ class IssuesMixin(DBMixinProtocol):
             ):
                 return cast(str, old_status)
         return self.templates.get_initial_state(issue.type)
+
+    @_retry_busy()
+    @_in_immediate_tx("delete_issue")
+    def delete_issue(self, issue_id: str, *, force: bool = False, actor: str = "") -> DeleteIssueResult:
+        """Hard-delete an issue and all of its dependent rows, leaving a tombstone.
+
+        This is a general-purpose, irreversible delete — not just an eval-cleanup
+        path. The events row is destroyed along with the issue, so ``undo_last``
+        cannot reverse it. A row is written to ``deleted_issues`` in the same
+        transaction so federation consumers reconciling off ``GET
+        /api/loom/changes`` learn of the deletion (they would otherwise keep a
+        stale reference forever — the changes feed INNER JOINs ``issues``).
+
+        Guards (each refuses with a ``ValueError`` unless ``force=True``):
+
+        1. **Terminal-only.** The issue must be in a ``done``-category status or
+           ``archived``. Reuses the same category check ``close_issue`` uses.
+        2. **No children.** Refuses if the issue has children. With ``force`` the
+           children orphan (their ``parent_id`` ``SET NULL`` fires on the final
+           delete).
+        3. **No inbound dependents.** Refuses if other issues are blocked by this
+           one. With ``force`` the inbound dependency rows cascade (silently
+           unblocking those dependents).
+
+        FK enforcement is ON, so a bare ``DELETE FROM issues`` is blocked by child
+        rows. Child rows are deleted explicitly in FK-safe order, the issues row
+        last. ``children.parent_id``, ``scan_findings.issue_id`` (both ``ON DELETE
+        SET NULL``) and ``entity_associations`` (``ON DELETE CASCADE``) resolve
+        automatically on the final delete. ``observations.source_issue_id`` and
+        ``observation_links.source_issue_id`` are text provenance breadcrumbs with
+        no FK — intentionally left untouched.
+
+        Raises:
+            KeyError: if the issue does not exist (-> NOT_FOUND at the surface).
+            IssueDeletionRefusedError: on a force-gated guard refusal (terminal-only,
+                has-children, has-inbound-dependents) (-> CONFLICT at the
+                surface). A ``ValueError`` subclass.
+            ValueError: on other validation failures, e.g. non-bool ``force``
+                (-> VALIDATION at the surface).
+        """
+        if not isinstance(force, bool):
+            msg = "force must be a boolean"
+            raise ValueError(msg)
+        self._check_id_prefix(issue_id)
+
+        current = self.get_issue(issue_id)  # raises KeyError if not found
+
+        if not force:
+            blockers: list[str] = []
+            is_done = self._resolve_status_category(current.type, current.status) == "done"
+            if not (is_done or current.status == "archived"):
+                blockers.append(f"status '{current.status}' is not terminal (must be a done-category state or 'archived')")
+            child_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM issues WHERE parent_id = ?",
+                    (issue_id,),
+                ).fetchone()[0]
+            )
+            if child_count:
+                blockers.append(f"{child_count} child issue{'s' if child_count != 1 else ''}")
+            inbound = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM dependencies WHERE depends_on_id = ?",
+                    (issue_id,),
+                ).fetchone()[0]
+            )
+            if inbound:
+                blockers.append(f"{inbound} issue{'s' if inbound != 1 else ''} blocked by it")
+            if blockers:
+                msg = (
+                    f"Cannot delete issue {issue_id}: " + "; ".join(blockers) + "; pass force=True to delete anyway (orphans children, "
+                    "cascades inbound dependencies)."
+                )
+                raise IssueDeletionRefusedError(issue_id, msg)
+
+        now = _now_iso()
+        # Tombstone first, in the same transaction, BEFORE the issue row is gone.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO deleted_issues (issue_id, title, type, deleted_at, deleted_by, reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (issue_id, current.title, current.type, now, actor, ""),
+        )
+
+        # Counts that the final DELETE auto-resolves via ON DELETE SET NULL /
+        # CASCADE — capture them before they vanish.
+        orphaned_children = int(self.conn.execute("SELECT COUNT(*) FROM issues WHERE parent_id = ?", (issue_id,)).fetchone()[0])
+        orphaned_findings = int(self.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE issue_id = ?", (issue_id,)).fetchone()[0])
+        deleted_entity_associations = int(
+            self.conn.execute("SELECT COUNT(*) FROM entity_associations WHERE issue_id = ?", (issue_id,)).fetchone()[0]
+        )
+
+        # Explicit cascade in FK-safe order; the issues row is deleted last.
+        deleted_events = self.conn.execute("DELETE FROM events WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_comments = self.conn.execute("DELETE FROM comments WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_labels = self.conn.execute("DELETE FROM labels WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_deps_out = self.conn.execute("DELETE FROM dependencies WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_deps_in = self.conn.execute("DELETE FROM dependencies WHERE depends_on_id = ?", (issue_id,)).rowcount
+        deleted_file_associations = self.conn.execute("DELETE FROM file_associations WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_observation_links = self.conn.execute("DELETE FROM observation_links WHERE issue_id = ?", (issue_id,)).rowcount
+        # ``attachments`` is a never-registered template table (migrations.py
+        # _template_new_table_migration) — no real DB has it. Guard the delete
+        # so this is correct whether or not the table exists.
+        deleted_attachments = 0
+        if self._table_exists("attachments"):
+            deleted_attachments = self.conn.execute("DELETE FROM attachments WHERE issue_id = ?", (issue_id,)).rowcount
+        # Non-FK polymorphic links keyed on (target_type, target_id).
+        deleted_annotation_links = self.conn.execute(
+            "DELETE FROM annotation_links WHERE target_type = 'issue' AND target_id = ?",
+            (issue_id,),
+        ).rowcount
+        deleted_annotation_closeout_acks = self.conn.execute(
+            "DELETE FROM annotation_closeout_acknowledgements WHERE target_type = 'issue' AND target_id = ?",
+            (issue_id,),
+        ).rowcount
+
+        deleted_issue_rows = self.conn.execute("DELETE FROM issues WHERE id = ?", (issue_id,)).rowcount
+        if deleted_issue_rows != 1:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+
+        return DeleteIssueResult(
+            status="deleted",
+            issue_id=issue_id,
+            deleted_events=deleted_events,
+            deleted_comments=deleted_comments,
+            deleted_labels=deleted_labels,
+            deleted_dependencies_out=deleted_deps_out,
+            deleted_dependencies_in=deleted_deps_in,
+            deleted_file_associations=deleted_file_associations,
+            deleted_observation_links=deleted_observation_links,
+            deleted_attachments=deleted_attachments,
+            deleted_annotation_links=deleted_annotation_links,
+            deleted_annotation_closeout_acks=deleted_annotation_closeout_acks,
+            deleted_entity_associations=deleted_entity_associations,
+            orphaned_children=orphaned_children,
+            orphaned_findings=orphaned_findings,
+            actor=actor,
+        )
+
+    def _table_exists(self, name: str) -> bool:
+        """Return True if a table with ``name`` exists in the schema."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     @_retry_busy()
     @_in_immediate_tx("claim_issue")

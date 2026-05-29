@@ -33,6 +33,7 @@ EventType = Literal[
     "entity_association_removed",
     "undone",
     "archived",
+    "issue_deleted",
 ]
 
 ReversibleEventType: TypeAlias = Literal[
@@ -99,6 +100,7 @@ def is_reversible_event_type(event_type: EventType) -> bool:
             | "entity_association_removed"
             | "undone"
             | "archived"
+            | "issue_deleted"
         ):
             return False
         case _:

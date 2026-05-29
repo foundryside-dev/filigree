@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 113 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 114 tools, 1 resource, and 1 prompt.
 
 ## Contents
 
@@ -84,6 +84,7 @@ Workflow guide with optional live project context. Agents use this to understand
 | `create_issue` | Create with type, priority, deps, labels, fields |
 | `update_issue` | Update status, priority, title, assignee, fields |
 | `close_issue` | Close with optional reason |
+| `delete_issue` | Hard-delete an issue + dependents (irreversible); writes a tombstone surfaced as `issue_deleted` on `/changes`. Refuses non-terminal/parented/depended-on issues unless `force` |
 | `reopen_issue` | Reopen a closed issue to the last non-done status before closure |
 | `undo_last` | Undo most recent reversible action |
 

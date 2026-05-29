@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,6 +36,7 @@ from filigree.types.api import (
     ErrorCode,
     ErrorResponse,
     InvalidTransitionError,
+    IssueDeletionRefusedError,
     IssueWithChangedFields,
     IssueWithTransitions,
     PublicIssue,
@@ -52,6 +54,7 @@ from filigree.types.inputs import (
     ClaimNextArgs,
     CloseIssueArgs,
     CreateIssueArgs,
+    DeleteIssueArgs,
     GetIssueArgs,
     GetStaleClaimsArgs,
     HeartbeatWorkArgs,
@@ -325,6 +328,35 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "transition_forced is recorded before status_changed."
                         ),
                     },
+                },
+                "required": ["issue_id"],
+            },
+        ),
+        Tool(
+            name="delete_issue",
+            description=(
+                "Hard-delete an issue and all of its dependent rows (events, comments, labels, "
+                "dependencies, file associations, observation links, annotation links). "
+                "IRREVERSIBLE — events are destroyed, so undo_last cannot reverse it. Writes a "
+                "deletion tombstone so federation consumers see an issue_deleted record on "
+                "/changes. Refuses by default unless the issue is in a done-category status or "
+                "'archived', has no children, and has no other issues blocked by it. force=true "
+                "deletes anyway: children orphan (parent_id set null) and inbound dependencies "
+                "cascade (silently unblocking dependents)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "string", "description": "Issue ID"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Delete a non-terminal issue, orphan its children, and cascade "
+                            "inbound dependencies. Use only for deliberate cleanup."
+                        ),
+                    },
+                    "actor": {"type": "string", "description": "Actor identity for audit/tombstone attribution"},
                 },
                 "required": ["issue_id"],
             },
@@ -777,6 +809,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "create_issue": _handle_create_issue,
         "update_issue": _handle_update_issue,
         "close_issue": _handle_close_issue,
+        "delete_issue": _handle_delete_issue,
         "reopen_issue": _handle_reopen_issue,
         "search_issues": _handle_search_issues,
         "claim_issue": _handle_claim_issue,
@@ -1023,6 +1056,34 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except ValueError as e:
         return _issue_value_error_response(tracker, args["issue_id"], e)
+
+
+async def _handle_delete_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    from filigree.mcp_server import _get_db, _refresh_summary
+
+    args = _parse_args(arguments, DeleteIssueArgs)
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
+    issue_id = args.get("issue_id", "")
+    if not isinstance(issue_id, str) or not issue_id.strip():
+        return _text(ErrorResponse(error="issue_id is required", code=ErrorCode.VALIDATION))
+    force = args.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+    tracker = _get_db()
+    try:
+        result = tracker.delete_issue(issue_id, force=force, actor=actor)
+        _refresh_summary()
+    except KeyError:
+        return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
+    except IssueDeletionRefusedError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT))
+    except ValueError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        return _text(ErrorResponse(error=f"Database error: {exc}", code=ErrorCode.IO))
+    return _text(result)
 
 
 async def _handle_reopen_issue(arguments: dict[str, Any]) -> list[TextContent]:

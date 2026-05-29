@@ -417,6 +417,35 @@ CREATE TABLE IF NOT EXISTS entity_associations (
 
 CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
   ON entity_associations(clarion_entity_id);
+
+-- ---- Deleted-issue tombstones (v20) --------------------------------------
+-- A hard-deleted issue leaves no events/issues row, so federation consumers
+-- (Clarion / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
+-- would otherwise keep a stale reference forever. ``delete_issue`` writes a
+-- tombstone here in the same transaction it deletes the issue; the changes
+-- feed surfaces it as a synthetic ``issue_deleted`` record cursored on
+-- ``deleted_at`` so incremental consumers see each deletion exactly once.
+--
+-- ``seq`` is an AUTOINCREMENT key, NOT an implicit rowid: VACUUM (``filigree
+-- compact``) renumbers implicit rowids across the whole file, which could drag
+-- an unseen same-``deleted_at`` tombstone below a federation consumer's frozen
+-- cursor and skip it permanently. AUTOINCREMENT keys are never renumbered by
+-- VACUUM and never reused (the high-water mark lives in ``sqlite_sequence``),
+-- so the synthetic ``issue_deleted`` event_id derived from ``seq`` is stable
+-- across compaction. ``issue_id`` is UNIQUE rather than the primary key so a
+-- re-deletion (``INSERT OR REPLACE`` on the same id) assigns a NEW, strictly
+-- higher ``seq`` and re-notifies consumers as a fresh deletion, monotonically.
+CREATE TABLE IF NOT EXISTS deleted_issues (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id   TEXT NOT NULL UNIQUE,
+    title      TEXT NOT NULL DEFAULT '',
+    type       TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT NOT NULL,
+    deleted_by TEXT DEFAULT '',
+    reason     TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq);
 """
 
 # V1 schema (without file tables) — kept for migration tests.
@@ -525,4 +554,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
