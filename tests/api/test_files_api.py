@@ -274,3 +274,47 @@ class TestErrorMessagesIncludeValidOptions:
         body = resp.json()
         assert body["code"] == "NOT_FOUND"
         assert "nonexistent-id-xyz" in body["error"]
+
+
+class TestScanResultsFingerprintAPI:
+    """Wardline-supplied fingerprint over the wire (Loom §3.B).
+
+    Exercises the native-emitter contract path — POST /api/loom/scan-results —
+    rather than only the in-process db call, so the body parser and dedup wire
+    end-to-end. The ``client`` fixture uses a local registry, so file_id
+    resolution works with no Clarion present (brief §3.C composability).
+    """
+
+    async def test_fingerprint_dedup_over_loom_endpoint(self, client: AsyncClient) -> None:
+        body = {
+            "scan_source": "wardline",
+            "findings": [
+                {"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "line_start": 10, "fingerprint": "fp-http"}
+            ],
+        }
+        first = await client.post("/api/loom/scan-results", json=body)
+        assert first.status_code == 200
+
+        # Re-emit the "same" finding shifted down — same fingerprint, new line.
+        body["findings"][0]["line_start"] = 40
+        second = await client.post("/api/loom/scan-results", json=body)
+        assert second.status_code == 200
+
+        listing = await client.get("/api/loom/findings?scan_source=wardline")
+        assert listing.status_code == 200
+        items = listing.json()["items"]
+        assert len(items) == 1
+        assert items[0]["seen_count"] == 2
+        assert items[0]["line_start"] == 40
+        assert items[0]["fingerprint"] == "fp-http"
+
+    async def test_non_string_fingerprint_rejected_over_endpoint(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "fingerprint": ["not", "a", "string"]}],
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"

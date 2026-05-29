@@ -784,6 +784,12 @@ class FilesMixin(DBMixinProtocol):
                 suggestion = f["suggestion"]
                 if not isinstance(suggestion, str):
                     raise ValueError(f"findings[{i}] suggestion must be a string, got {type(suggestion).__name__}")
+            if "fingerprint" in f:
+                fingerprint = f["fingerprint"]
+                if fingerprint is not None and not isinstance(fingerprint, str):
+                    # A non-string fingerprint would bind under the column's TEXT
+                    # affinity and silently break cross-run dedup; reject upfront.
+                    raise ValueError(f"findings[{i}] fingerprint must be a string, got {type(fingerprint).__name__}")
             if "language" in f:
                 language = f["language"]
                 if language is None:

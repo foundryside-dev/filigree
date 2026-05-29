@@ -10,6 +10,8 @@ The column is generic — any scanner may supply it; absent → legacy behaviour
 
 from __future__ import annotations
 
+import pytest
+
 from filigree.core import FiligreeDB
 
 
@@ -97,3 +99,12 @@ class TestFingerprintDedup:
         )
         finding = db.get_finding(res["new_finding_ids"][0])
         assert finding["fingerprint"] == ""
+
+    def test_non_string_fingerprint_rejected(self, db: FiligreeDB) -> None:
+        """A non-string fingerprint is a VALIDATION error, not a 500 / silent
+        TEXT-affinity coercion that would break the next scan's dedup."""
+        with pytest.raises(ValueError, match="fingerprint must be a string"):
+            db.process_scan_results(
+                scan_source="wardline",
+                findings=[_finding("src/a.py", "WLN-005", 1, fingerprint=123)],
+            )
