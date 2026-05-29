@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS scan_findings (
     scan_run_id   TEXT DEFAULT '',
     line_start    INTEGER,
     line_end      INTEGER,
+    fingerprint   TEXT NOT NULL DEFAULT '',
     seen_count    INTEGER DEFAULT 1,
     created_by    TEXT DEFAULT '',
     updated_by    TEXT DEFAULT '',
@@ -173,8 +174,18 @@ CREATE INDEX IF NOT EXISTS idx_scan_findings_issue ON scan_findings(issue_id);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_severity ON scan_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_status ON scan_findings(status);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_run ON scan_findings(scan_run_id);
+-- Fingerprint-less findings dedup on the (file, source, rule, line) heuristic.
+-- Partial so fingerprint-bearing rows (keyed below) are exempt — two findings
+-- at the same site with distinct fingerprints must be allowed to coexist.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_dedup
-  ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1));
+  ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1))
+  WHERE fingerprint = '';
+-- Fingerprint-bearing findings use the scanner-supplied fingerprint as their
+-- cross-run identity (Loom §3.B). Scoped by scan_source so two scanners may
+-- mint colliding fingerprints without interfering.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint
+  ON scan_findings(scan_source, fingerprint)
+  WHERE fingerprint <> '';
 
 CREATE TABLE IF NOT EXISTS file_associations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,4 +525,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19

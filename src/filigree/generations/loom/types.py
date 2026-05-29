@@ -245,6 +245,7 @@ class ScanFindingLoom(TypedDict):
     scan_run_id: str
     line_start: int | None
     line_end: int | None
+    fingerprint: str
     issue_id: str | None
     seen_count: int
     first_seen: ISOTimestamp

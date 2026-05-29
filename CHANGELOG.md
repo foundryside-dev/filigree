@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scan findings accept an optional `fingerprint` as cross-run identity.**
+  When a finding supplied to `process_scan_results` / `POST /api/v1/scan-results`
+  / `POST /api/loom/scan-results` carries a non-empty `fingerprint`, lifecycle
+  and `seen_count` are keyed on `(scan_source, fingerprint)` instead of the
+  `(file_id, scan_source, rule_id, line_start)` heuristic — so a finding that
+  moves lines keeps one stable identity, and two distinct findings at the same
+  site (e.g. two taint paths into one sink) no longer collapse. The field is
+  generic; any scanner may supply it, and findings without one keep the legacy
+  heuristic unchanged. Surfaced on the read projection (`ScanFindingDict`,
+  loom `GET /api/loom/findings`). Enables native Wardline emission per the
+  Loom integration brief §3.B. Schema **v18 → v19** (new `fingerprint` column;
+  the dedup unique index is rebuilt as a partial index over fingerprint-less
+  rows, with a new partial unique index over `(scan_source, fingerprint)`).
+
 ## [2.1.0] - 2026-05-19
 
 Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).

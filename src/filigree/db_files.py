@@ -244,6 +244,7 @@ class FilesMixin(DBMixinProtocol):
             scan_run_id=row["scan_run_id"] or "",
             line_start=row["line_start"],
             line_end=row["line_end"],
+            fingerprint=row["fingerprint"] or "",
             issue_id=row["issue_id"],
             seen_count=row["seen_count"] or 1,
             created_by=row["created_by"] or "",
@@ -1041,6 +1042,7 @@ class FilesMixin(DBMixinProtocol):
         rule_id = f.get("rule_id", "")
         line_start = f.get("line_start")
         dedup_line = line_start if line_start is not None else -1
+        fingerprint = f.get("fingerprint") or ""
 
         suggestion = f.get("suggestion", "")
         if len(suggestion) > 10_000:
@@ -1052,16 +1054,30 @@ class FilesMixin(DBMixinProtocol):
             )
             suggestion = suggestion[:10_000] + "\n[truncated]"
 
-        existing_finding = self.conn.execute(
-            "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings "
-            "WHERE file_id = ? AND scan_source = ? AND rule_id = ? AND coalesce(line_start, -1) = ?",
-            (file_id, scan_source, rule_id, dedup_line),
-        ).fetchone()
+        if fingerprint:
+            # Scanner-supplied fingerprint is the cross-run identity (Loom §3.B):
+            # it follows the finding across line moves, so identity is keyed on
+            # (scan_source, fingerprint) alone, not file/rule/line.
+            existing_finding = self.conn.execute(
+                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+                (scan_source, fingerprint),
+            ).fetchone()
+        else:
+            # Legacy heuristic — scoped to fingerprint-less rows so a re-scan
+            # without a fingerprint never collides with a fingerprint-bearing
+            # row that happens to share the same site (matches the partial index).
+            existing_finding = self.conn.execute(
+                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings "
+                "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
+                "AND coalesce(line_start, -1) = ? AND fingerprint = ''",
+                (file_id, scan_source, rule_id, dedup_line),
+            ).fetchone()
 
         if existing_finding is not None:
             self._update_existing_finding(
                 existing_finding=existing_finding,
                 f=f,
+                file_id=file_id,
                 severity=severity,
                 suggestion=suggestion,
                 scan_run_id=scan_run_id,
@@ -1076,8 +1092,8 @@ class FilesMixin(DBMixinProtocol):
                 "INSERT INTO scan_findings "
                 "(id, file_id, scan_source, rule_id, severity, status, message, "
                 "suggestion, scan_run_id, "
-                "line_start, line_end, created_by, updated_by, first_seen, updated_at, last_seen_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "line_start, line_end, fingerprint, created_by, updated_by, first_seen, updated_at, last_seen_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     finding_id,
                     file_id,
@@ -1089,6 +1105,7 @@ class FilesMixin(DBMixinProtocol):
                     scan_run_id,
                     line_start,
                     f.get("line_end"),
+                    fingerprint,
                     actor,
                     actor,
                     now,
@@ -1142,6 +1159,7 @@ class FilesMixin(DBMixinProtocol):
         *,
         existing_finding: Any,
         f: dict[str, Any],
+        file_id: str,
         severity: str,
         suggestion: str,
         scan_run_id: str,
@@ -1149,14 +1167,22 @@ class FilesMixin(DBMixinProtocol):
         stats: ScanIngestResult,
         actor: str,
     ) -> None:
-        """Update an already-existing finding with new scan data."""
+        """Update an already-existing finding with new scan data.
+
+        ``file_id`` and ``line_start`` are refreshed to the current scan's
+        position. For legacy (fingerprint-less) dedup these are identical to the
+        stored values by construction (they are part of the dedup key), so the
+        write is a no-op; for fingerprint dedup the finding's location follows it
+        across line/file moves while keeping its cross-run identity.
+        """
         existing_run_id = existing_finding["scan_run_id"] or ""
         run_id_update = existing_run_id
         if scan_run_id and not existing_run_id:  # first-attribution-wins
             run_id_update = scan_run_id
 
         self.conn.execute(
-            "UPDATE scan_findings SET message = ?, severity = ?, line_end = ?, "
+            "UPDATE scan_findings SET message = ?, severity = ?, file_id = ?, "
+            "line_start = ?, line_end = ?, "
             "suggestion = ?, scan_run_id = ?, metadata = ?, "
             "seen_count = seen_count + 1, updated_at = ?, last_seen_at = ?, "
             "updated_by = ?, "
@@ -1165,6 +1191,8 @@ class FilesMixin(DBMixinProtocol):
             (
                 f.get("message", ""),
                 severity,
+                file_id,
+                f.get("line_start"),
                 f.get("line_end"),
                 suggestion,
                 run_id_update,
@@ -1214,6 +1242,10 @@ class FilesMixin(DBMixinProtocol):
 
         Each finding dict must have at minimum: path, rule_id, message.
         Optional: severity (default: 'info'), language, line_start, line_end, suggestion, metadata.
+        Optional ``fingerprint``: a stable per-finding hash supplied by the scanner. When
+        non-empty it becomes the finding's cross-run identity (keyed with scan_source),
+        so seen_count/lifecycle track it across line moves instead of the
+        (file_id, scan_source, rule_id, line_start) heuristic; absent → legacy heuristic.
 
         When *mark_unseen* is ``True``, findings in the same (file, scan_source)
         that are NOT in this batch are set to ``unseen_in_latest`` status.

@@ -206,6 +206,7 @@ class ScanFindingDict(TypedDict):
     scan_run_id: str
     line_start: int | None
     line_end: int | None
+    fingerprint: str
     issue_id: str | None
     seen_count: int
     created_by: str

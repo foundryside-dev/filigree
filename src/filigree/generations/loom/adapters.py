@@ -190,6 +190,7 @@ def scan_finding_to_loom(record: ScanFindingDict) -> ScanFindingLoom:
         scan_run_id=record["scan_run_id"],
         line_start=record["line_start"],
         line_end=record["line_end"],
+        fingerprint=record["fingerprint"],
         issue_id=record["issue_id"],
         seen_count=record["seen_count"],
         first_seen=record["first_seen"],

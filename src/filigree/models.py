@@ -175,6 +175,7 @@ class ScanFinding:
     scan_run_id: str = ""
     line_start: int | None = None
     line_end: int | None = None
+    fingerprint: str = ""
     issue_id: str | None = None
     seen_count: int = 1
     created_by: str = ""
@@ -209,6 +210,7 @@ class ScanFinding:
             scan_run_id=self.scan_run_id,
             line_start=self.line_start,
             line_end=self.line_end,
+            fingerprint=self.fingerprint,
             issue_id=self.issue_id,
             seen_count=self.seen_count,
             created_by=self.created_by,

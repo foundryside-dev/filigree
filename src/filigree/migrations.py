@@ -672,6 +672,36 @@ def migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
 
 
+def migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Loom §3.B).
+
+    A scanner may supply a stable per-finding ``fingerprint`` as the finding's
+    cross-run identity. When present it keys lifecycle/``seen_count`` instead of
+    the ``(file_id, scan_source, rule_id, line_start)`` heuristic — which is
+    itself unstable, since line attribution is clamped/cleared against file
+    length on ingest. The column is generic (any scanner may use it); absent
+    (empty string) preserves the legacy heuristic.
+
+    The pre-v19 unique dedup index is **non-partial** and constrains every row,
+    so it would reject two distinct-fingerprint findings at the same
+    file/rule/line (e.g. two taint paths into one sink). It is rebuilt as a
+    partial index over fingerprint-less rows, and a second partial unique index
+    keys fingerprint-bearing rows on ``(scan_source, fingerprint)``. Because the
+    column is ``NOT NULL DEFAULT ''``, the empty-string sentinel partitions all
+    rows cleanly between the two indexes. Idempotent under re-run.
+    """
+    add_column(conn, "scan_findings", "fingerprint", "TEXT NOT NULL", "''")
+    conn.execute("DROP INDEX IF EXISTS idx_scan_findings_dedup")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_scan_findings_dedup ON scan_findings("
+        "file_id, scan_source, rule_id, coalesce(line_start, -1)) "
+        "WHERE fingerprint = ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint ON scan_findings(scan_source, fingerprint) WHERE fingerprint <> ''"
+    )
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -690,6 +720,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     15: migrate_v15_to_v16,
     16: migrate_v16_to_v17,
     17: migrate_v17_to_v18,
+    18: migrate_v18_to_v19,
 }
 
 

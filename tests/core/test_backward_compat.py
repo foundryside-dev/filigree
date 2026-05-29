@@ -214,6 +214,7 @@ class TestScanFindingToDictStability:
             "scan_run_id",
             "line_start",
             "line_end",
+            "fingerprint",
             "issue_id",
             "seen_count",
             "created_by",
