@@ -1,4 +1,4 @@
-<!-- filigree:instructions:v2.1.0:857eb216 -->
+<!-- filigree:instructions:v2.1.0:9dff6e6d -->
 ## Filigree Issue Tracker
 
 `filigree` tracks tasks for this project. Data lives in `.filigree/`. Prefer
@@ -70,6 +70,8 @@ either catalogue. The verbs you will reach for most:
 - **Find work:** `get_ready`, `get_blocked`, `list_issues`, `search_issues`
 - **Claim work:** `start_work`, `start_next_work`
 - **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
+- **Admin (irreversible):** `delete_issue` (MCP) / `delete-issue` (CLI) —
+  hard-deletes a terminal issue and its rows; `undo_last` cannot reverse it.
 - **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
 - **Cross-product entity bindings (ADR-029):** `add_entity_association`,
   `remove_entity_association`, `list_entity_associations`,
@@ -87,7 +89,10 @@ either catalogue. The verbs you will reach for most:
   and `GET /api/entity-associations?entity_id=…`.
 - **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
 
-Pass `--actor <name>` (CLI) so events attribute to your agent identity.
+Pass `--actor <name>` (CLI) so events attribute to your agent identity. It
+works in either position — before the verb (`filigree --actor X update …`) or
+after it (`filigree update … --actor X`); the post-verb value overrides the
+group-level one.
 
 ### Error handling
 
