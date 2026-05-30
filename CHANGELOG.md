@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **File-identity types now make illegal backend/identity combinations
+  unrepresentable.** The `(registry_backend, file_id, content_hash)` triple is a
+  correlated invariant — `local` files carry a `FileId` and the empty-hash
+  sentinel, `clarion` files carry an `EntityId` and a non-empty drift hash — but
+  `ResolvedFile` and `FileRecord` flattened it into one shape, so a local record
+  with a hash (or a clarion record without one) type-checked. `ResolvedFile` is
+  now a discriminated union (`LocalResolvedFile | ClarionResolvedFile`) keyed on
+  `registry_backend`, pinning `file_id`/`content_hash` to the backend at the
+  registry mint sites; all five keys remain shared, so consumers that read
+  common fields are unchanged. `FileRecord` gained a `__post_init__` validator
+  (mirroring `ScanFinding`'s enum guard) that rejects the two illegal cross
+  combinations at construction — closing the runtime hole on hydration paths
+  that reconstruct records from external payloads.
+
+- **`REVERSIBLE_EVENT_TYPES` is now derived from the `ReversibleEventType`
+  alias** (`get_args(...)`) instead of hand-re-listing the same eleven event
+  names, removing one of three drift-prone copies. The exhaustive `match` in
+  `is_reversible_event_type` is kept deliberately (it forces an `assert_never`
+  undo decision on every new `EventType`); a contract test now pins its True-set
+  directly against `get_args(ReversibleEventType)` so the alias, the tuple, and
+  the classifier cannot drift apart.
+
 ### Fixed
 
 - **Scanner pipeline now reports a non-zero exit on *any* ingest failure, not

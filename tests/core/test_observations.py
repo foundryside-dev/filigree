@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -25,13 +25,16 @@ class _CanonicalThenUnavailableRegistry:
         self.calls += 1
         if self.calls > 1:
             raise RegistryUnavailableError("registry down", path=path, cause_kind="network")
-        return {
-            "file_id": "clarion:file:canonical",
-            "content_hash": "hash:canonical",
-            "canonical_path": "src/canonical.py",
-            "language": language,
-            "registry_backend": "clarion",
-        }
+        return cast(
+            ResolvedFile,
+            {
+                "file_id": "clarion:file:canonical",
+                "content_hash": "hash:canonical",
+                "canonical_path": "src/canonical.py",
+                "language": language,
+                "registry_backend": "clarion",
+            },
+        )
 
     def is_displaced(self) -> bool:
         return True

@@ -39,13 +39,18 @@ class _InterceptingConn:
 class _CasefoldingRegistry:
     def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
         canonical_path = path.casefold()
-        return {
-            "file_id": make_file_id(f"core:file:{canonical_path.replace('/', ':')}"),
-            "content_hash": f"hash:{canonical_path}",
-            "canonical_path": canonical_path,
-            "language": language,
-            "registry_backend": "clarion",
-        }
+        # Test double with a deliberately hand-built identity; cast past the
+        # discriminated ResolvedFile union rather than committing to a member.
+        return cast(
+            ResolvedFile,
+            {
+                "file_id": make_file_id(f"core:file:{canonical_path.replace('/', ':')}"),
+                "content_hash": f"hash:{canonical_path}",
+                "canonical_path": canonical_path,
+                "language": language,
+                "registry_backend": "clarion",
+            },
+        )
 
     def is_displaced(self) -> bool:
         return False
@@ -347,13 +352,16 @@ class TestRegisterFile:
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 self.calls += 1
-                return {
-                    "file_id": make_entity_id("core:file:stable@src/refresh.py"),
-                    "content_hash": f"sha256:refresh-{self.calls}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id("core:file:stable@src/refresh.py"),
+                        "content_hash": f"sha256:refresh-{self.calls}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -706,13 +714,16 @@ class TestProcessScanResults:
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 self.calls += 1
-                return {
-                    "file_id": make_entity_id("core:file:stable@src/refresh.py"),
-                    "content_hash": f"sha256:scan-{self.calls}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id("core:file:stable@src/refresh.py"),
+                        "content_hash": f"sha256:scan-{self.calls}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
                 return resolve_files_batch_via_loop(self, queries, actor=actor)
@@ -769,13 +780,16 @@ class TestProcessScanResults:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 assert self.db is not None
                 transaction_states.append(self.db.conn.in_transaction)
-                return {
-                    "file_id": make_entity_id(f"core:file:{path.replace('/', ':')}"),
-                    "content_hash": f"hash:{path}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id(f"core:file:{path.replace('/', ':')}"),
+                        "content_hash": f"hash:{path}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True

@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import getdoc
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import Literal, cast, get_args, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -21,14 +21,16 @@ from filigree.registry import (
     CLARION_BATCH_MAX_QUERIES,
     BatchQuery,
     ClarionRegistry,
+    ClarionResolvedFile,
     LocalRegistry,
+    LocalResolvedFile,
     RegistryBriefingBlockedError,
     RegistryFileNotFoundError,
     RegistryResolutionError,
     RegistryUnavailableError,
     ResolvedFile,
 )
-from filigree.types.core import ClarionConfig, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
+from filigree.types.core import ClarionConfig, ContentHash, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
 
 
 def test_local_registry_resolves_file_with_local_identity() -> None:
@@ -183,9 +185,18 @@ def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> No
 
 
 def test_registry_resolved_file_uses_branded_file_identity_types() -> None:
-    hints = get_type_hints(ResolvedFile)
+    # ResolvedFile is a discriminated union (LocalResolvedFile | ClarionResolvedFile),
+    # so the branded identity types live on the members, pinned to the backend.
+    local_hints = get_type_hints(LocalResolvedFile)
+    clarion_hints = get_type_hints(ClarionResolvedFile)
 
-    assert hints["file_id"] == FileId | EntityId
+    assert local_hints["file_id"] is FileId
+    assert local_hints["content_hash"] == Literal[""]
+    assert local_hints["registry_backend"] == Literal["local"]
+
+    assert clarion_hints["file_id"] is EntityId
+    assert clarion_hints["content_hash"] is ContentHash
+    assert clarion_hints["registry_backend"] == Literal["clarion"]
 
 
 def test_filigree_db_composes_local_registry_by_default(tmp_path: Path) -> None:
@@ -1099,13 +1110,16 @@ def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, mo
 
         def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
             resolutions.append(path)
-            return {
-                "file_id": "core:file:clarion-first@src/fallback.py",
-                "content_hash": "sha256:clarion-first",
-                "canonical_path": path,
-                "language": language,
-                "registry_backend": "clarion",
-            }
+            return cast(
+                ResolvedFile,
+                {
+                    "file_id": "core:file:clarion-first@src/fallback.py",
+                    "content_hash": "sha256:clarion-first",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                },
+            )
 
         def is_displaced(self) -> bool:
             return True

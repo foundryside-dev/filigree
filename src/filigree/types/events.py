@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, NotRequired, TypeAlias, TypedDict, assert_never
+from typing import Literal, NotRequired, TypeAlias, TypedDict, assert_never, get_args
 
 from filigree.types.core import ISOTimestamp, IssueDict
 
@@ -50,19 +50,13 @@ ReversibleEventType: TypeAlias = Literal[
     "parent_changed",
 ]
 
-REVERSIBLE_EVENT_TYPES: tuple[ReversibleEventType, ...] = (
-    "status_changed",
-    "title_changed",
-    "priority_changed",
-    "assignee_changed",
-    "claimed",
-    "dependency_added",
-    "dependency_removed",
-    "description_changed",
-    "notes_changed",
-    "fields_changed",
-    "parent_changed",
-)
+# Single source of truth: derived from the ``ReversibleEventType`` alias rather
+# than re-listed, so the alias and the tuple cannot drift. The exhaustive
+# ``match`` in ``is_reversible_event_type`` is the *third* listing of these
+# names — it is kept deliberately (it forces a yes/no undo decision on every
+# new ``EventType`` via ``assert_never``), and a contract test pins its
+# True-set against ``get_args(ReversibleEventType)`` so all three stay in sync.
+REVERSIBLE_EVENT_TYPES: tuple[ReversibleEventType, ...] = get_args(ReversibleEventType)
 
 
 def is_reversible_event_type(event_type: EventType) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -20,13 +21,16 @@ class _DisplacedRegistry:
 
     def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
         self.calls.append((path, language, actor))
-        return {
-            "file_id": f"clarion:file:{path.replace('/', ':')}",
-            "content_hash": f"hash:{path}",
-            "canonical_path": path,
-            "language": language,
-            "registry_backend": "clarion",
-        }
+        return cast(
+            ResolvedFile,
+            {
+                "file_id": f"clarion:file:{path.replace('/', ':')}",
+                "content_hash": f"hash:{path}",
+                "canonical_path": path,
+                "language": language,
+                "registry_backend": "clarion",
+            },
+        )
 
     def is_displaced(self) -> bool:
         return True
