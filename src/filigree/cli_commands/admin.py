@@ -7,11 +7,13 @@ import logging
 import os
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_commands.files import finding_group
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     CONF_FILENAME,
     CONF_VERSION,
@@ -19,6 +21,7 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
+    ProjectConfig,
     ProjectNotInitialisedError,
     find_filigree_root,
     get_mode,
@@ -36,6 +39,14 @@ from filigree.install_support.version_marker import (
 )
 from filigree.summary import write_summary
 from filigree.types.api import SchemaVersionMismatchError
+
+
+def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
+    try:
+        return read_config(filigree_dir)
+    except ValueError as exc:
+        click.echo(f"Invalid project config: {exc}", err=True)
+        sys.exit(1)
 
 
 @click.command()
@@ -56,7 +67,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
         click.echo(f"{FILIGREE_DIR_NAME}/ already exists in {cwd}")
         previous_marker = read_install_version(filigree_dir)
         # Still ensure DB is initialized and migrated
-        config = read_config(filigree_dir)
+        config = _read_project_config_or_exit(filigree_dir)
         # filigree-fa6309d551: route DB open through the v2.0 anchor-aware
         # constructors so a custom .filigree.conf `db` path is honoured.
         # Without this, init silently migrates the legacy
@@ -185,6 +196,15 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     click.echo("\nNext: filigree install")
 
 
+def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> tuple[str, bool, str]:
+    try:
+        ok, msg = installer()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("Install step %s failed", name, exc_info=True)
+        return name, False, str(exc) or exc.__class__.__name__
+    return name, ok, msg
+
+
 @click.command()
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
@@ -237,7 +257,7 @@ def install(
 
     # Update mode in config if explicitly provided
     if mode is not None:
-        config = read_config(filigree_dir)
+        config = _read_project_config_or_exit(filigree_dir)
         config["mode"] = mode
         write_config(filigree_dir, config)
 
@@ -248,6 +268,8 @@ def install(
         except ValueError as exc:
             click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
             mode = "ethereal"
+    if mode is None:
+        mode = "ethereal"
 
     project_root = filigree_dir.parent
     install_all = not any([claude_code, codex, claude_md, agents_md, gitignore, hooks_only, skills_only, codex_skills_only])
@@ -262,37 +284,51 @@ def install(
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server config port; defaulting to 8377", exc_info=True)
 
-    if install_all or claude_code:
-        ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
-        results.append(("Claude Code MCP", ok, msg))
-
-    if install_all or codex:
-        ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
-        results.append(("Codex MCP", ok, msg))
-
-    if install_all or claude_md:
-        ok, msg = inject_instructions(project_root / "CLAUDE.md")
-        results.append(("CLAUDE.md", ok, msg))
-
-    if install_all or agents_md:
-        ok, msg = inject_instructions(project_root / "AGENTS.md")
-        results.append(("AGENTS.md", ok, msg))
-
-    if install_all or gitignore:
-        ok, msg = ensure_gitignore(project_root)
-        results.append((".gitignore", ok, msg))
-
-    if install_all or hooks_only:
-        ok, msg = install_claude_code_hooks(project_root)
-        results.append(("Claude Code hooks", ok, msg))
-
-    if install_all or skills_only:
-        ok, msg = install_skills(project_root)
-        results.append(("Claude Code skills", ok, msg))
-
-    if install_all or codex_skills_only:
-        ok, msg = install_codex_skills(project_root)
-        results.append(("Codex skills", ok, msg))
+    install_steps: list[tuple[bool, str, Callable[[], tuple[bool, str]]]] = [
+        (
+            install_all or claude_code,
+            "Claude Code MCP",
+            lambda: install_claude_code_mcp(project_root, mode=mode, server_port=server_port),
+        ),
+        (
+            install_all or codex,
+            "Codex MCP",
+            lambda: install_codex_mcp(project_root, mode=mode, server_port=server_port),
+        ),
+        (
+            install_all or claude_md,
+            "CLAUDE.md",
+            lambda: inject_instructions(project_root / "CLAUDE.md"),
+        ),
+        (
+            install_all or agents_md,
+            "AGENTS.md",
+            lambda: inject_instructions(project_root / "AGENTS.md"),
+        ),
+        (
+            install_all or gitignore,
+            ".gitignore",
+            lambda: ensure_gitignore(project_root),
+        ),
+        (
+            install_all or hooks_only,
+            "Claude Code hooks",
+            lambda: install_claude_code_hooks(project_root),
+        ),
+        (
+            install_all or skills_only,
+            "Claude Code skills",
+            lambda: install_skills(project_root),
+        ),
+        (
+            install_all or codex_skills_only,
+            "Codex skills",
+            lambda: install_codex_skills(project_root),
+        ),
+    ]
+    for selected, name, installer in install_steps:
+        if selected:
+            results.append(_run_install_step(name, installer))
 
     # Server mode: register project in server.json
     if mode == "server":
@@ -533,7 +569,27 @@ def migrate(from_beads: bool, beads_db: str | None) -> None:
 )
 @click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
 @click.option("--server-mode", is_flag=True, help="Multi-project server mode (reads server.json)")
-def dashboard(port: int | None, no_browser: bool, server_mode: bool) -> None:
+@click.option(
+    "--allow-http-force-close",
+    is_flag=True,
+    help=(
+        "Permit ``force=true`` on POST /api/batch/close and "
+        "POST /api/loom/batch/close. Off by default — HTTP callers cannot "
+        "use the workflow escape lane unless explicitly opted in."
+    ),
+)
+@click.option(
+    "--allow-local-fallback",
+    is_flag=True,
+    help="When registry_backend=clarion, route file auto-creates through the local registry for recovery.",
+)
+def dashboard(
+    port: int | None,
+    no_browser: bool,
+    server_mode: bool,
+    allow_http_force_close: bool,
+    allow_local_fallback: bool,
+) -> None:
     """Launch the web dashboard."""
     from filigree.dashboard import DEFAULT_PORT
     from filigree.dashboard import main as dashboard_main
@@ -559,7 +615,13 @@ def dashboard(port: int | None, no_browser: bool, server_mode: bool) -> None:
         effective_port = port if port is not None else DEFAULT_PORT
 
     try:
-        dashboard_main(port=effective_port, no_browser=no_browser, server_mode=server_mode)
+        dashboard_main(
+            port=effective_port,
+            no_browser=no_browser,
+            server_mode=server_mode,
+            allow_http_force_close=allow_http_force_close,
+            allow_local_fallback=allow_local_fallback,
+        )
     finally:
         if server_mode and pid_claimed:
             from filigree.server import release_daemon_pid_if_owned
@@ -684,6 +746,12 @@ def import_data(input_file: str, merge: bool, allow_foreign_ids: bool) -> None:
 @click.pass_context
 def archive(ctx: click.Context, days: int, label: str | None, as_json: bool) -> None:
     """Archive old closed issues to reduce active issue count."""
+    if days < 7 and not (label and label.strip()):
+        click.echo(
+            f"Error: --days {days} requires a non-empty --label scope to avoid archiving recent issues project-wide.",
+            err=True,
+        )
+        sys.exit(1)
     with get_db() as db:
         try:
             archived = db.archive_closed(days_old=days, actor=ctx.obj["actor"], label=label)
@@ -750,5 +818,8 @@ def register(cli: click.Group) -> None:
     cli.add_command(export_data)
     cli.add_command(import_data)
     cli.add_command(archive)
-    cli.add_command(clean_stale_findings)
     cli.add_command(compact)
+    # clean-stale-findings: canonical grouped form ``finding clean-stale``; the
+    # flat name stays as a hidden back-compat alias. (filigree-03303d6c5a)
+    finding_group.add_command(clean_stale_findings, "clean-stale")
+    add_hidden_flat_alias(cli, clean_stale_findings, "clean-stale-findings")

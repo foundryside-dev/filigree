@@ -7,9 +7,13 @@ federation §5 audit lives in ``test_entity_associations_federation.py``.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from filigree.core import FiligreeDB
+from tests._db_factory import make_db
 
 
 class TestAddEntityAssociation:
@@ -26,6 +30,18 @@ class TestAddEntityAssociation:
         assert row["content_hash_at_attach"] == "hash-a"
         assert row["attached_by"] == "alice"
         assert row["attached_at"]  # non-empty timestamp
+
+    def test_attach_records_audit_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+
+        db.add_entity_association(issue.id, "py:func:a", content_hash="h1", actor="alice")
+
+        events = db.get_issue_events(issue.id, limit=10)
+        added = [event for event in events if event["event_type"] == "entity_association_added"]
+        assert len(added) == 1
+        assert added[0]["actor"] == "alice"
+        assert added[0]["new_value"] == "py:func:a"
+        assert added[0]["comment"] == "h1"
 
     def test_attach_is_idempotent_and_refreshes_hash(self, db: FiligreeDB) -> None:
         """Re-attaching the same (issue, entity) updates the hash and timestamp
@@ -44,10 +60,24 @@ class TestAddEntityAssociation:
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
 
+    def test_reattach_records_refresh_audit_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, "py:func:a", content_hash="h1", actor="alice")
+
+        db.add_entity_association(issue.id, "py:func:a", content_hash="h2", actor="bob")
+
+        events = db.get_issue_events(issue.id, limit=10)
+        refreshed = [event for event in events if event["event_type"] == "entity_association_refreshed"]
+        assert len(refreshed) == 1
+        assert refreshed[0]["actor"] == "bob"
+        assert refreshed[0]["old_value"] == "h1"
+        assert refreshed[0]["new_value"] == "h2"
+        assert refreshed[0]["comment"] == "py:func:a"
+
     def test_attach_rejects_missing_issue(self, db: FiligreeDB) -> None:
         # Use the test fixture's project prefix so the prefix guard passes
         # and we exercise the actual "issue not found" path.
-        with pytest.raises(ValueError, match="Issue not found"):
+        with pytest.raises(KeyError, match="Issue not found"):
             db.add_entity_association("test-nonexistent", "py:func:foo", content_hash="hash")
 
     def test_attach_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
@@ -71,12 +101,64 @@ class TestAddEntityAssociation:
         with pytest.raises(ValueError, match="content_hash must not be blank"):
             db.add_entity_association(issue.id, "py:func:foo", content_hash="\t\n ")
 
+    @pytest.mark.parametrize(
+        "bad_hash",
+        [
+            " padded",
+            "padded ",
+            "has space",
+            "line\nbreak",
+            "null\x00byte",
+            "x" * 513,
+        ],
+    )
+    def test_attach_rejects_garbage_content_hash(self, db: FiligreeDB, bad_hash: str) -> None:
+        issue = db.create_issue("t", priority=2)
+        with pytest.raises(ValueError, match="content_hash"):
+            db.add_entity_association(issue.id, "py:func:foo", content_hash=bad_hash)
+
     def test_attach_rejects_foreign_prefix(self, db: FiligreeDB) -> None:
         """Prefix enforcement matches every other write-side mutation."""
         from filigree.core import WrongProjectError
 
         with pytest.raises(WrongProjectError):
             db.add_entity_association("other-1234567890", "py:func:foo", content_hash="hash")
+
+    def test_attach_retries_when_writer_lock_clears(self, tmp_path) -> None:
+        owner = make_db(tmp_path, check_same_thread=False)
+        issue = owner.create_issue("entity contention target", priority=2)
+        db_path = owner.db_path
+        owner.close()
+
+        holder = FiligreeDB(db_path, prefix="test", check_same_thread=False)
+        writer = FiligreeDB(db_path, prefix="test", check_same_thread=False)
+        try:
+            holder.conn.execute("BEGIN IMMEDIATE")
+            writer.conn.execute("PRAGMA busy_timeout=1")
+            rows: list[dict[str, object]] = []
+            errors: list[BaseException] = []
+
+            def attach() -> None:
+                try:
+                    rows.append(dict(writer.add_entity_association(issue.id, "py:func:locked", content_hash="h")))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=attach)
+            thread.start()
+            time.sleep(0.02)
+            holder.conn.commit()
+            thread.join(timeout=2)
+
+            assert not thread.is_alive()
+            assert errors == []
+            assert rows[0]["issue_id"] == issue.id
+            assert rows[0]["clarion_entity_id"] == "py:func:locked"
+        finally:
+            if holder.conn.in_transaction:
+                holder.conn.rollback()
+            holder.close()
+            writer.close()
 
 
 class TestRemoveEntityAssociation:
@@ -101,6 +183,18 @@ class TestRemoveEntityAssociation:
         assert len(rows) == 1
         assert rows[0]["clarion_entity_id"] == "py:func:b"
 
+    def test_remove_records_audit_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, "py:func:a", content_hash="h1")
+
+        assert db.remove_entity_association(issue.id, "py:func:a", actor="alice") is True
+
+        events = db.get_issue_events(issue.id, limit=10)
+        removed = [event for event in events if event["event_type"] == "entity_association_removed"]
+        assert len(removed) == 1
+        assert removed[0]["actor"] == "alice"
+        assert removed[0]["old_value"] == "py:func:a"
+
     def test_remove_rejects_empty_entity_id(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
         with pytest.raises(ValueError, match="entity_id must not be blank"):
@@ -110,6 +204,47 @@ class TestRemoveEntityAssociation:
         issue = db.create_issue("t", priority=2)
         with pytest.raises(ValueError, match="entity_id must not be blank"):
             db.remove_entity_association(issue.id, "  ")
+
+    def test_remove_retries_when_writer_lock_clears_and_records_event(self, tmp_path) -> None:
+        owner = make_db(tmp_path, check_same_thread=False)
+        issue = owner.create_issue("entity removal contention target", priority=2)
+        owner.add_entity_association(issue.id, "py:func:locked", content_hash="h")
+        db_path = owner.db_path
+        owner.close()
+
+        holder = FiligreeDB(db_path, prefix="test", check_same_thread=False)
+        writer = FiligreeDB(db_path, prefix="test", check_same_thread=False)
+        try:
+            holder.conn.execute("BEGIN IMMEDIATE")
+            writer.conn.execute("PRAGMA busy_timeout=1")
+            results: list[bool] = []
+            errors: list[BaseException] = []
+
+            def remove() -> None:
+                try:
+                    results.append(writer.remove_entity_association(issue.id, "py:func:locked", actor="alice"))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=remove)
+            thread.start()
+            time.sleep(0.02)
+            holder.conn.commit()
+            thread.join(timeout=2)
+
+            assert not thread.is_alive()
+            assert errors == []
+            assert results == [True]
+            assert writer.list_entity_associations(issue.id) == []
+            events = writer.get_issue_events(issue.id, limit=10)
+            removed = [event for event in events if event["event_type"] == "entity_association_removed"]
+            assert len(removed) == 1
+            assert removed[0]["actor"] == "alice"
+        finally:
+            if holder.conn.in_transaction:
+                holder.conn.rollback()
+            holder.close()
+            writer.close()
 
 
 class TestListEntityAssociations:

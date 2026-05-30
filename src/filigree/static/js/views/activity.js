@@ -84,8 +84,7 @@ export async function renderActivitySection(container, limit = 15) {
     return events.length;
   } catch (err) {
     console.error("[renderActivitySection] Failed:", err);
-    container.innerHTML =
-      '<div class="text-xs text-red-400">Failed to load activity.</div>';
+    container.innerHTML = '<div class="text-xs text-red-400">Failed to load activity.</div>';
     return 0;
   }
 }

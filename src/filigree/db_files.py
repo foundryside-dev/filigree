@@ -13,14 +13,24 @@ import logging
 import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
-from filigree.db_base import DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
+from filigree.db_base import DBMixinProtocol, _escape_like_chars, _now_iso, _safe_json_loads
 from filigree.models import FileRecord, ScanFinding
+from filigree.registry import (
+    BatchQuery,
+    BatchResolution,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    resolve_files_batch_via_loop,
+)
 from filigree.types.core import AssocType, FindingStatus, Severity
 from filigree.types.files import ScanIngestResult
 
 if TYPE_CHECKING:
+    from filigree.registry import ResolvedFile
     from filigree.types.core import ObservationDict, PaginatedResult, ScanFindingDict
     from filigree.types.files import (
         CleanStaleResult,
@@ -38,6 +48,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+INGESTED_FILE_ID_KEY = "_filigree_ingested_file_id"
+
 # ---------------------------------------------------------------------------
 # Constants for file-domain validation
 # ---------------------------------------------------------------------------
@@ -50,6 +62,21 @@ TERMINAL_FINDING_STATUSES: frozenset[str] = frozenset({"fixed", "false_positive"
 if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING_STATUSES):
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
+
+
+def _validate_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _validate_optional_string_list(value: object, field_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{field_name} must be a list of strings")
+    return value
+
 
 _LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".c": "c",
@@ -93,6 +120,53 @@ def _normalize_scan_path(path: str) -> str:
     """Normalize scanner-provided paths for stable file identity."""
     normalized = os.path.normpath(path.replace("\\", "/"))
     return "" if normalized == "." else normalized
+
+
+def _is_project_relative_scan_path(path: str) -> bool:
+    if Path(path).is_absolute():
+        return False
+    if len(path) >= 3 and path[1:3] == ":/":
+        return False
+    return path != ".." and not path.startswith("../")
+
+
+def _normalize_project_relative_scan_path(path: object, *, field_name: str) -> str:
+    if not isinstance(path, str):
+        raise ValueError(f"{field_name} must be a string, got {type(path).__name__}")
+    normalized = _normalize_scan_path(path)
+    if not normalized:
+        raise ValueError(f"{field_name} cannot be empty after normalization")
+    if not _is_project_relative_scan_path(normalized):
+        raise ValueError(f"{field_name} must be project-relative")
+    return normalized
+
+
+def _normalize_registry_canonical_path(path: object, *, requested_path: str) -> str:
+    return _normalize_project_relative_scan_path(
+        path,
+        field_name=f"Registry canonical_path for {requested_path!r}",
+    )
+
+
+def _normalize_file_path_prefix(path_prefix: str) -> str:
+    raw_prefix = path_prefix.replace("\\", "/")
+    normalized = _normalize_scan_path(raw_prefix)
+    if not normalized:
+        return ""
+    if not _is_project_relative_scan_path(normalized):
+        raise ValueError("path_prefix must be project-relative")
+    if raw_prefix.endswith("/") and not normalized.endswith("/"):
+        normalized += "/"
+    return normalized
+
+
+def _validate_file_metadata(metadata: object | None) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        msg = "metadata must be a JSON object"
+        raise ValueError(msg)
+    return metadata
 
 
 def _infer_language_from_path(path: str) -> str:
@@ -147,6 +221,8 @@ class FilesMixin(DBMixinProtocol):
             path=row["path"],
             language=row["language"] or "",
             file_type=row["file_type"] or "",
+            content_hash=row["content_hash"] or "",
+            registry_backend=row["registry_backend"] or "local",
             created_by=row["created_by"] or "",
             updated_by=row["updated_by"] or "",
             first_seen=row["first_seen"],
@@ -168,6 +244,7 @@ class FilesMixin(DBMixinProtocol):
             scan_run_id=row["scan_run_id"] or "",
             line_start=row["line_start"],
             line_end=row["line_end"],
+            fingerprint=row["fingerprint"] or "",
             issue_id=row["issue_id"],
             seen_count=row["seen_count"] or 1,
             created_by=row["created_by"] or "",
@@ -176,6 +253,20 @@ class FilesMixin(DBMixinProtocol):
             updated_at=row["updated_at"],
             last_seen_at=row["last_seen_at"],
             metadata=self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}"),
+        )
+
+    def _is_local_registry_fallback_row(self, registry_backend: str) -> bool:
+        # ``registry_backend`` and ``allow_local_fallback`` are always set on
+        # ``FiligreeDB.__init__`` before any DB call reaches a mixin method;
+        # attribute access is safe without a default.
+        return self.registry_backend == "clarion" and bool(self.allow_local_fallback) and registry_backend == "local"
+
+    def _record_registry_fallback_event(self, file_id: str, *, actor: str, now: str) -> None:
+        self.conn.execute(
+            "INSERT INTO file_events "
+            "(file_id, event_type, field, old_value, new_value, actor, created_at) "
+            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'clarion', 'local', ?, ?)",
+            (file_id, actor, now),
         )
 
     # -- File registration ---------------------------------------------------
@@ -188,6 +279,7 @@ class FilesMixin(DBMixinProtocol):
         file_type: str = "",
         metadata: dict[str, Any] | None = None,
         actor: str = "",
+        _commit: bool = True,
     ) -> FileRecord:
         """Register a file or update it if already registered (upsert by path).
 
@@ -195,92 +287,205 @@ class FilesMixin(DBMixinProtocol):
         identity regardless of caller (MCP tool, scan ingestion, etc.).
 
         Returns the FileRecord (created or updated).
+
+        Implementation note: a registry that canonicalises the requested path
+        (case-fold, whitespace, slash normalisation) may resolve a fresh-looking
+        call to the storage path of an already-registered row. The previous
+        version of this method handled that by recursing back into
+        ``register_file`` with the canonical path; this flat variant calls
+        :meth:`_update_existing_file_record` directly so there is exactly one
+        update code path (mirroring ``_upsert_file_record``'s pattern).
         """
-        path = _normalize_scan_path(path)
-        if not path:
-            raise ValueError("File path cannot be empty after normalization")
+        path = _normalize_project_relative_scan_path(path, field_name="File path")
+        metadata = _validate_file_metadata(metadata)
         now = _now_iso()
         existing = self.conn.execute("SELECT * FROM file_records WHERE path = ?", (path,)).fetchone()
         inferred_language = _infer_language_from_path(path)
 
         if existing is not None:
-            updates: list[str] = []
-            params: list[Any] = []
-            # Detect field changes and emit events
-            changes: list[tuple[str, str, str]] = []  # (field, old, new)
-            current_language = existing["language"] or ""
-            next_language = language or (inferred_language if not current_language else "")
-            if next_language and next_language != current_language:
-                updates.append("language = ?")
-                params.append(next_language)
-                changes.append(("language", current_language, next_language))
-            if file_type and file_type != (existing["file_type"] or ""):
-                updates.append("file_type = ?")
-                params.append(file_type)
-                changes.append(("file_type", existing["file_type"] or "", file_type))
-            # `is not None` (not truthy) so `metadata={}` can explicitly clear
-            # existing metadata; `metadata=None` means "leave unchanged".
-            if metadata is not None:
-                old_meta_raw = existing["metadata"] or "{}"
-                try:
-                    old_meta_parsed = json.loads(old_meta_raw)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(
-                        "Corrupt metadata for file %s (id=%s), treating as empty",
-                        existing["path"],
-                        existing["id"],
-                    )
-                    old_meta_parsed = {}
-                if old_meta_parsed != metadata:
-                    new_meta = json.dumps(metadata)
-                    updates.append("metadata = ?")
-                    params.append(new_meta)
-                    changes.append(("metadata", old_meta_raw, new_meta))
-            if not updates:
-                # No actual changes — return existing record without phantom update
-                return self.get_file(existing["id"])
-            updates.append("updated_at = ?")
-            params.append(now)
-            updates.append("updated_by = ?")
-            params.append(actor)
-            params.append(existing["id"])
-            try:
-                self.conn.execute(
-                    f"UPDATE file_records SET {', '.join(updates)} WHERE id = ?",
-                    params,
-                )
-                for field, old_val, new_val in changes:
-                    self.conn.execute(
-                        "INSERT INTO file_events "
-                        "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-                        "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
-                        (existing["id"], field, old_val, new_val, actor, now),
-                    )
-                self.conn.commit()
-            except Exception:
-                self.conn.rollback()
-                raise
-            return self.get_file(existing["id"])
+            return self._update_existing_file_record(
+                existing,
+                path=path,
+                language=language,
+                inferred_language=inferred_language,
+                file_type=file_type,
+                metadata=metadata,
+                actor=actor,
+                now=now,
+                _commit=_commit,
+            )
 
-        file_id = self._generate_unique_id("file_records", "f")
         stored_language = language or inferred_language
+        resolved = self.registry.resolve_file(
+            path,
+            language=stored_language,
+            actor=actor,
+        )
+        file_id = resolved["file_id"]
+        stored_path = _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
+        stored_language = resolved["language"] or stored_language
+        content_hash = resolved["content_hash"]
+        registry_backend = resolved["registry_backend"]
+        storage_existing = self.conn.execute(
+            "SELECT * FROM file_records WHERE path = ? OR id = ?",
+            (stored_path, file_id),
+        ).fetchone()
+        if storage_existing is not None:
+            return self._update_existing_file_record(
+                storage_existing,
+                path=storage_existing["path"],
+                language=language,
+                inferred_language=_infer_language_from_path(storage_existing["path"]),
+                file_type=file_type,
+                metadata=metadata,
+                actor=actor,
+                now=now,
+                _commit=_commit,
+            )
         try:
             self.conn.execute(
                 "INSERT INTO file_records "
-                "(id, path, language, file_type, created_by, updated_by, first_seen, updated_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, file_type, actor, actor, now, now, json.dumps(metadata or {})),
+                "(id, path, language, file_type, content_hash, registry_backend, created_by, updated_by, first_seen, updated_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    file_id,
+                    stored_path,
+                    stored_language,
+                    file_type,
+                    content_hash,
+                    registry_backend,
+                    actor,
+                    actor,
+                    now,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
             )
-            self.conn.commit()
+            if self._is_local_registry_fallback_row(registry_backend):
+                self._record_registry_fallback_event(file_id, actor=actor, now=now)
+            if _commit:
+                self.conn.commit()
         except sqlite3.IntegrityError:
             self.conn.rollback()
-            if self.conn.execute("SELECT id FROM file_records WHERE path = ?", (path,)).fetchone() is not None:
-                return self.register_file(path, language=language, file_type=file_type, metadata=metadata, actor=actor)
+            storage_existing = self.conn.execute(
+                "SELECT * FROM file_records WHERE path IN (?, ?) OR id = ?",
+                (path, stored_path, file_id),
+            ).fetchone()
+            if storage_existing is not None:
+                return self._update_existing_file_record(
+                    storage_existing,
+                    path=storage_existing["path"],
+                    language=language,
+                    inferred_language=_infer_language_from_path(storage_existing["path"]),
+                    file_type=file_type,
+                    metadata=metadata,
+                    actor=actor,
+                    now=now,
+                    _commit=_commit,
+                )
             raise
         except Exception:
             self.conn.rollback()
             raise
         return self.get_file(file_id)
+
+    def _update_existing_file_record(
+        self,
+        existing: sqlite3.Row,
+        *,
+        path: str,
+        language: str,
+        inferred_language: str,
+        file_type: str,
+        metadata: dict[str, Any] | None,
+        actor: str,
+        now: str,
+        _commit: bool = True,
+    ) -> FileRecord:
+        """Update an already-stored ``file_records`` row from a register call.
+
+        Centralises the diff-detect/emit-events/UPDATE path so both the
+        same-path-match branch and the canonical-collision recovery branch
+        of :meth:`register_file` go through the same code (mirrors the flat
+        ``update_existing_file`` pattern in :meth:`_upsert_file_record`).
+        """
+        updates: list[str] = []
+        params: list[Any] = []
+        changes: list[tuple[str, str, str]] = []  # (field, old, new)
+        current_language = existing["language"] or ""
+        next_language = language or (inferred_language if not current_language else "")
+        if self.registry.is_displaced():
+            resolved = self.registry.resolve_file(
+                path,
+                language=next_language or current_language,
+                actor=actor,
+            )
+            if resolved["file_id"] != existing["id"]:
+                msg = (
+                    f"Existing file {path!r} resolves to registry id {resolved['file_id']!r}, "
+                    f"but stored file id is {existing['id']!r}; run migrate-registry before re-registering"
+                )
+                raise ValueError(msg)
+            for field, next_value in (
+                ("content_hash", resolved["content_hash"]),
+                ("registry_backend", resolved["registry_backend"]),
+            ):
+                current_value = existing[field] or ""
+                if next_value != current_value:
+                    updates.append(f"{field} = ?")
+                    params.append(next_value)
+                    changes.append((field, current_value, next_value))
+        if next_language and next_language != current_language:
+            updates.append("language = ?")
+            params.append(next_language)
+            changes.append(("language", current_language, next_language))
+        if file_type and file_type != (existing["file_type"] or ""):
+            updates.append("file_type = ?")
+            params.append(file_type)
+            changes.append(("file_type", existing["file_type"] or "", file_type))
+        # ``is not None`` (not truthy) so ``metadata={}`` can explicitly clear
+        # existing metadata; ``metadata=None`` means "leave unchanged".
+        if metadata is not None:
+            old_meta_raw = existing["metadata"] or "{}"
+            try:
+                old_meta_parsed = json.loads(old_meta_raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "Corrupt metadata for file %s (id=%s), treating as empty",
+                    existing["path"],
+                    existing["id"],
+                )
+                old_meta_parsed = {}
+            if old_meta_parsed != metadata:
+                new_meta = json.dumps(metadata)
+                updates.append("metadata = ?")
+                params.append(new_meta)
+                changes.append(("metadata", old_meta_raw, new_meta))
+        if not updates:
+            return self.get_file(existing["id"])
+        updates.append("updated_at = ?")
+        params.append(now)
+        updates.append("updated_by = ?")
+        params.append(actor)
+        params.append(existing["id"])
+        try:
+            self.conn.execute(
+                f"UPDATE file_records SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            for field, old_val, new_val in changes:
+                self.conn.execute(
+                    "INSERT INTO file_events "
+                    "(file_id, event_type, field, old_value, new_value, actor, created_at) "
+                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
+                    (existing["id"], field, old_val, new_val, actor, now),
+                )
+            if _commit:
+                self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return self.get_file(existing["id"])
 
     def get_file(self, file_id: str) -> FileRecord:
         """Get a file record by ID. Raises KeyError if not found."""
@@ -330,6 +535,23 @@ class FilesMixin(DBMixinProtocol):
             raise ValueError(msg)
 
         try:
+            finding_ids = [
+                row["id"]
+                for row in self.conn.execute(
+                    "SELECT id FROM scan_findings WHERE file_id = ?",
+                    (file_id,),
+                ).fetchall()
+            ]
+            annotation_links = self.conn.execute(
+                "DELETE FROM annotation_links WHERE target_type = 'file' AND target_id = ?",
+                (file_id,),
+            ).rowcount
+            if finding_ids:
+                placeholders = ", ".join("?" for _ in finding_ids)
+                annotation_links += self.conn.execute(
+                    f"DELETE FROM annotation_links WHERE target_type = 'finding' AND target_id IN ({placeholders})",
+                    finding_ids,
+                ).rowcount
             observations = self.conn.execute(
                 "UPDATE observations SET file_id = NULL WHERE file_id = ?",
                 (file_id,),
@@ -352,6 +574,7 @@ class FilesMixin(DBMixinProtocol):
             "deleted_findings": deleted_findings,
             "deleted_associations": deleted_associations,
             "deleted_file_events": file_events,
+            "deleted_annotation_links": annotation_links,
             "unlinked_observations": observations,
             "actor": actor,
         }
@@ -374,7 +597,7 @@ class FilesMixin(DBMixinProtocol):
             params.append(language)
         if path_prefix is not None:
             clauses.append("path LIKE ? ESCAPE '\\'")
-            params.append(_escape_like(path_prefix))
+            params.append(f"{_escape_like_chars(_normalize_file_path_prefix(path_prefix))}%")
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         if sort not in self._VALID_FILE_SORTS:
@@ -420,9 +643,8 @@ class FilesMixin(DBMixinProtocol):
             clauses.append("fr.language = ?")
             params.append(language)
         if path_prefix is not None:
-            escaped = _escape_like_chars(path_prefix)
             clauses.append("fr.path LIKE ? ESCAPE '\\'")
-            params.append(f"%{escaped}%")
+            params.append(f"{_escape_like_chars(_normalize_file_path_prefix(path_prefix))}%")
         if min_findings is not None and min_findings > 0:
             clauses.append(f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {self._OPEN_FINDINGS_FILTER_SF}) >= ?")
             params.append(min_findings)
@@ -539,6 +761,8 @@ class FilesMixin(DBMixinProtocol):
             f["path"] = _normalize_scan_path(f["path"])
             if not f["path"]:
                 raise ValueError(f"findings[{i}] path is empty after normalization")
+            if not _is_project_relative_scan_path(f["path"]):
+                raise ValueError(f"findings[{i}] path must be project-relative")
             _req(f, "rule_id", i, non_empty=True)
             _req(f, "message", i, non_empty=True)
             severity = f.get("severity", "info")
@@ -548,14 +772,24 @@ class FilesMixin(DBMixinProtocol):
                 ln_val = f.get(ln_field)
                 if ln_val is not None and (isinstance(ln_val, bool) or not isinstance(ln_val, int)):
                     raise ValueError(f"findings[{i}] {ln_field} must be an integer or null, got {type(ln_val).__name__}")
-                # Reject negatives — `-1` is the dedup sentinel for missing line in
-                # the unique index `coalesce(line_start, -1)` (db_schema.py:159-160).
-                if isinstance(ln_val, int) and not isinstance(ln_val, bool) and ln_val < 0:
-                    raise ValueError(f"findings[{i}] {ln_field} must be >= 0, got {ln_val}")
+                # Scanner line numbers are 1-based; NULL remains the only
+                # representation for "line unknown".
+                if isinstance(ln_val, int) and not isinstance(ln_val, bool) and ln_val < 1:
+                    raise ValueError(f"findings[{i}] {ln_field} must be >= 1, got {ln_val}")
+            line_start = f.get("line_start")
+            line_end = f.get("line_end")
+            if isinstance(line_start, int) and isinstance(line_end, int) and line_end < line_start:
+                raise ValueError(f"findings[{i}] line_end must be >= line_start, got {line_end} < {line_start}")
             if "suggestion" in f:
                 suggestion = f["suggestion"]
                 if not isinstance(suggestion, str):
                     raise ValueError(f"findings[{i}] suggestion must be a string, got {type(suggestion).__name__}")
+            if "fingerprint" in f:
+                fingerprint = f["fingerprint"]
+                if fingerprint is not None and not isinstance(fingerprint, str):
+                    # A non-string fingerprint would bind under the column's TEXT
+                    # affinity and silently break cross-run dedup; reject upfront.
+                    raise ValueError(f"findings[{i}] fingerprint must be a string, got {type(fingerprint).__name__}")
             if "language" in f:
                 language = f["language"]
                 if language is None:
@@ -584,6 +818,59 @@ class FilesMixin(DBMixinProtocol):
                 f["severity"] = "info"
         return warnings
 
+    @staticmethod
+    def _count_file_lines(path: Path) -> int | None:
+        try:
+            with path.open("rb") as handle:
+                return sum(1 for _ in handle)
+        except OSError as exc:
+            logger.debug("Could not count lines for %s: %s", path, exc, exc_info=True)
+            return None
+
+    def _normalize_line_attribution_for_existing_files(self, findings: list[dict[str, Any]]) -> list[str]:
+        """Clear or clamp line ranges that cannot exist in the target file."""
+        if self.project_root is None:
+            return []
+
+        root = self.project_root.resolve()
+        line_count_cache: dict[Path, int | None] = {}
+        warnings: list[str] = []
+        for f in findings:
+            path = f["path"]
+            try:
+                target = (root / path).resolve()
+                target.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if not target.is_file():
+                continue
+            if target not in line_count_cache:
+                line_count_cache[target] = self._count_file_lines(target)
+            line_count = line_count_cache[target]
+            if line_count is None:
+                continue
+
+            line_label = "line" if line_count == 1 else "lines"
+            rule_id = f.get("rule_id", "")
+            line_start = f.get("line_start")
+            line_end = f.get("line_end")
+            if line_start is not None and line_start > line_count:
+                f["line_start"] = None
+                if line_end is not None:
+                    f["line_end"] = None
+                warnings.append(
+                    f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length "
+                    f"({path} has {line_count} {line_label}); line attribution cleared."
+                )
+                continue
+            if line_end is not None and line_end > line_count:
+                f["line_end"] = line_count if line_count > 0 else None
+                warnings.append(
+                    f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length "
+                    f"({path} has {line_count} {line_label}); line_end clamped."
+                )
+        return warnings
+
     def _upsert_file_record(
         self,
         *,
@@ -592,17 +879,41 @@ class FilesMixin(DBMixinProtocol):
         infer_language: bool,
         now: str,
         stats: ScanIngestResult,
+        counted_file_ids: set[str],
         actor: str,
+        resolved_file: ResolvedFile | None = None,
     ) -> str:
         """Create or update a file record, returning its id."""
         inferred_language = _infer_language_from_path(path) if infer_language else ""
-        existing_file = self.conn.execute("SELECT id, language FROM file_records WHERE path = ?", (path,)).fetchone()
-        if existing_file is not None:
+
+        def should_count_file(file_id: str) -> bool:
+            if file_id in counted_file_ids:
+                return False
+            counted_file_ids.add(file_id)
+            return True
+
+        def update_existing_file(existing_file: sqlite3.Row, resolved: ResolvedFile | None = None) -> str:
             file_id: str = existing_file["id"]
             update_parts = ["updated_at = ?", "updated_by = ?"]
             update_params: list[Any] = [now, actor]
             current_language = existing_file["language"] or ""
             next_language = language or (inferred_language if not current_language else "")
+            if resolved is not None:
+                _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
+                if resolved["file_id"] != file_id:
+                    msg = (
+                        f"Existing scan file {path!r} resolves to registry id {resolved['file_id']!r}, "
+                        f"but stored file id is {file_id!r}; run migrate-registry before ingesting scan results"
+                    )
+                    raise ValueError(msg)
+                for field, next_value in (
+                    ("content_hash", resolved["content_hash"]),
+                    ("registry_backend", resolved["registry_backend"]),
+                ):
+                    current_value = existing_file[field] or ""
+                    if next_value != current_value:
+                        update_parts.append(f"{field} = ?")
+                        update_params.append(next_value)
             if next_language:
                 update_parts.append("language = ?")
                 update_params.append(next_language)
@@ -611,17 +922,111 @@ class FilesMixin(DBMixinProtocol):
                 f"UPDATE file_records SET {', '.join(update_parts)} WHERE id = ?",
                 update_params,
             )
-            stats["files_updated"] += 1
+            if should_count_file(file_id):
+                stats["files_updated"] += 1
+            return file_id
+
+        existing_file = self.conn.execute(
+            "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path = ?",
+            (path,),
+        ).fetchone()
+        if existing_file is not None:
+            file_id = update_existing_file(existing_file, resolved_file)
         else:
-            file_id = self._generate_unique_id("file_records", "f")
             stored_language = language or inferred_language
-            self.conn.execute(
-                "INSERT INTO file_records (id, path, language, created_by, updated_by, first_seen, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (file_id, path, stored_language, actor, actor, now, now),
-            )
-            stats["files_created"] += 1
+            resolved = resolved_file or self.registry.resolve_file(path, language=stored_language, actor=actor)
+            file_id = resolved["file_id"]
+            stored_path = _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
+            stored_language = resolved["language"] or stored_language
+            content_hash = resolved["content_hash"]
+            registry_backend = resolved["registry_backend"]
+            storage_existing = self.conn.execute(
+                "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path = ? OR id = ?",
+                (stored_path, file_id),
+            ).fetchone()
+            if storage_existing is not None:
+                file_id = update_existing_file(storage_existing, resolved)
+            else:
+                try:
+                    self.conn.execute(
+                        "INSERT INTO file_records "
+                        "(id, path, language, content_hash, registry_backend, created_by, updated_by, first_seen, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (file_id, stored_path, stored_language, content_hash, registry_backend, actor, actor, now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    storage_existing = self.conn.execute(
+                        "SELECT id, path, language, content_hash, registry_backend FROM file_records WHERE path IN (?, ?) OR id = ?",
+                        (path, stored_path, file_id),
+                    ).fetchone()
+                    if storage_existing is None:
+                        raise
+                    file_id = update_existing_file(storage_existing, resolved)
+                else:
+                    if self._is_local_registry_fallback_row(registry_backend):
+                        self._record_registry_fallback_event(file_id, actor=actor, now=now)
+                    if should_count_file(file_id):
+                        stats["files_created"] += 1
         return file_id
+
+    def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
+        """Resolve new scan file identities before the write transaction opens.
+
+        CONTRACT-1 (Clarion 1.0): unfamiliar paths are batched into a single
+        ``resolve_files_batch`` call (chunked at 256 by the protocol). One HTTP
+        round-trip per chunk replaces the prior N-round-trip per-finding loop.
+        Briefing-blocked / not_found / structured-error per-item failures are
+        promoted back to the existing per-finding raise behaviour so the
+        scan-results POST keeps its fail-closed semantics.
+        """
+        # Deduplicate unfamiliar paths and capture the language to send.
+        seen_paths: set[str] = set()
+        queries: list[BatchQuery] = []
+        refresh_existing = self.registry.is_displaced()
+        for f in findings:
+            path = f["path"]
+            if path in seen_paths:
+                continue
+            existing_file = self.conn.execute("SELECT 1 FROM file_records WHERE path = ?", (path,)).fetchone()
+            if existing_file is not None and not refresh_existing:
+                seen_paths.add(path)
+                continue
+            inferred_language = _infer_language_from_path(path) if "language" not in f else ""
+            stored_language = f.get("language", "") or inferred_language
+            queries.append(BatchQuery(path=path, language=stored_language))
+            seen_paths.add(path)
+
+        if not queries:
+            return {}
+
+        # Use the registry's native batch when available; fall back to
+        # looping ``resolve_file`` for registries that only implement the
+        # single-item API (test fakes predating CONTRACT-1).
+        batch_method = getattr(self.registry, "resolve_files_batch", None)
+        batch: BatchResolution
+        if batch_method is not None:
+            batch = batch_method(queries, actor=actor)
+        else:
+            batch = resolve_files_batch_via_loop(self.registry, queries, actor=actor)
+        # Promote per-item failures to the same exceptions the per-finding
+        # loop used to raise (preserves caller / dashboard error mapping).
+        # Use ``batch["messages"]`` to preserve the original registry-side
+        # exception text when the loop-fallback adapter populated it (wire
+        # batch responses leave it empty, so we fall back to a derived msg).
+        messages = batch.get("messages", {})
+        if batch["briefing_blocked"]:
+            first = batch["briefing_blocked"][0]
+            msg = messages.get(first) or f"Clarion registry refuses briefing-blocked file at {first!r} (batch resolve)"
+            raise RegistryBriefingBlockedError(msg, status_code=403, url="")
+        if batch["not_found"]:
+            first = batch["not_found"][0]
+            msg = messages.get(first) or f"Clarion registry could not resolve file at {first!r} (batch resolve)"
+            raise RegistryFileNotFoundError(msg, status_code=404, url="")
+        if batch["errors"]:
+            err = batch["errors"][0]
+            msg = f"Clarion registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
+            raise RegistryResolutionError(msg, status_code=400, url="")
+        return batch["resolved"]
 
     def _upsert_finding(
         self,
@@ -643,6 +1048,7 @@ class FilesMixin(DBMixinProtocol):
         rule_id = f.get("rule_id", "")
         line_start = f.get("line_start")
         dedup_line = line_start if line_start is not None else -1
+        fingerprint = f.get("fingerprint") or ""
 
         suggestion = f.get("suggestion", "")
         if len(suggestion) > 10_000:
@@ -654,16 +1060,30 @@ class FilesMixin(DBMixinProtocol):
             )
             suggestion = suggestion[:10_000] + "\n[truncated]"
 
-        existing_finding = self.conn.execute(
-            "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings "
-            "WHERE file_id = ? AND scan_source = ? AND rule_id = ? AND coalesce(line_start, -1) = ?",
-            (file_id, scan_source, rule_id, dedup_line),
-        ).fetchone()
+        if fingerprint:
+            # Scanner-supplied fingerprint is the cross-run identity (Loom §3.B):
+            # it follows the finding across line moves, so identity is keyed on
+            # (scan_source, fingerprint) alone, not file/rule/line.
+            existing_finding = self.conn.execute(
+                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+                (scan_source, fingerprint),
+            ).fetchone()
+        else:
+            # Legacy heuristic — scoped to fingerprint-less rows so a re-scan
+            # without a fingerprint never collides with a fingerprint-bearing
+            # row that happens to share the same site (matches the partial index).
+            existing_finding = self.conn.execute(
+                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings "
+                "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
+                "AND coalesce(line_start, -1) = ? AND fingerprint = ''",
+                (file_id, scan_source, rule_id, dedup_line),
+            ).fetchone()
 
         if existing_finding is not None:
             self._update_existing_finding(
                 existing_finding=existing_finding,
                 f=f,
+                file_id=file_id,
                 severity=severity,
                 suggestion=suggestion,
                 scan_run_id=scan_run_id,
@@ -678,8 +1098,8 @@ class FilesMixin(DBMixinProtocol):
                 "INSERT INTO scan_findings "
                 "(id, file_id, scan_source, rule_id, severity, status, message, "
                 "suggestion, scan_run_id, "
-                "line_start, line_end, created_by, updated_by, first_seen, updated_at, last_seen_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "line_start, line_end, fingerprint, created_by, updated_by, first_seen, updated_at, last_seen_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     finding_id,
                     file_id,
@@ -691,6 +1111,7 @@ class FilesMixin(DBMixinProtocol):
                     scan_run_id,
                     line_start,
                     f.get("line_end"),
+                    fingerprint,
                     actor,
                     actor,
                     now,
@@ -744,6 +1165,7 @@ class FilesMixin(DBMixinProtocol):
         *,
         existing_finding: Any,
         f: dict[str, Any],
+        file_id: str,
         severity: str,
         suggestion: str,
         scan_run_id: str,
@@ -751,14 +1173,22 @@ class FilesMixin(DBMixinProtocol):
         stats: ScanIngestResult,
         actor: str,
     ) -> None:
-        """Update an already-existing finding with new scan data."""
+        """Update an already-existing finding with new scan data.
+
+        ``file_id`` and ``line_start`` are refreshed to the current scan's
+        position. For legacy (fingerprint-less) dedup these are identical to the
+        stored values by construction (they are part of the dedup key), so the
+        write is a no-op; for fingerprint dedup the finding's location follows it
+        across line/file moves while keeping its cross-run identity.
+        """
         existing_run_id = existing_finding["scan_run_id"] or ""
         run_id_update = existing_run_id
         if scan_run_id and not existing_run_id:  # first-attribution-wins
             run_id_update = scan_run_id
 
         self.conn.execute(
-            "UPDATE scan_findings SET message = ?, severity = ?, line_end = ?, "
+            "UPDATE scan_findings SET message = ?, severity = ?, file_id = ?, "
+            "line_start = ?, line_end = ?, "
             "suggestion = ?, scan_run_id = ?, metadata = ?, "
             "seen_count = seen_count + 1, updated_at = ?, last_seen_at = ?, "
             "updated_by = ?, "
@@ -767,6 +1197,8 @@ class FilesMixin(DBMixinProtocol):
             (
                 f.get("message", ""),
                 severity,
+                file_id,
+                f.get("line_start"),
                 f.get("line_end"),
                 suggestion,
                 run_id_update,
@@ -816,6 +1248,10 @@ class FilesMixin(DBMixinProtocol):
 
         Each finding dict must have at minimum: path, rule_id, message.
         Optional: severity (default: 'info'), language, line_start, line_end, suggestion, metadata.
+        Optional ``fingerprint``: a stable per-finding hash supplied by the scanner. When
+        non-empty it becomes the finding's cross-run identity (keyed with scan_source),
+        so seen_count/lifecycle track it across line moves instead of the
+        (file_id, scan_source, rule_id, line_start) heuristic; absent → legacy heuristic.
 
         When *mark_unseen* is ``True``, findings in the same (file, scan_source)
         that are NOT in this batch are set to ``unseen_in_latest`` status.
@@ -837,6 +1273,10 @@ class FilesMixin(DBMixinProtocol):
 
         Returns summary stats including ``new_finding_ids``.
         """
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            raise ValueError("scan_source must be a non-empty string")
+        if not isinstance(scan_run_id, str):
+            raise ValueError(f"scan_run_id must be a string, got {type(scan_run_id).__name__}")
         if mark_unseen and not findings:
             raise ValueError(
                 "mark_unseen=True requires at least one finding; an empty batch cannot identify which (file, scan_source) pairs to sweep"
@@ -851,6 +1291,7 @@ class FilesMixin(DBMixinProtocol):
                 raise ValueError(msg)
 
         warnings = self._validate_scan_findings(findings, scan_source)
+        warnings.extend(self._normalize_line_attribution_for_existing_files(findings))
 
         now = _now_iso()
         actor = observation_actor or f"scanner:{scan_source}"
@@ -866,6 +1307,8 @@ class FilesMixin(DBMixinProtocol):
         )
 
         seen_finding_ids: dict[str, list[str]] = {}
+        counted_file_ids: set[str] = set()
+        file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor)
 
         try:
             for f in findings:
@@ -875,8 +1318,11 @@ class FilesMixin(DBMixinProtocol):
                     infer_language="language" not in f,
                     now=now,
                     stats=stats,
+                    counted_file_ids=counted_file_ids,
                     actor=actor,
+                    resolved_file=file_resolutions.get(f["path"]),
                 )
+                f[INGESTED_FILE_ID_KEY] = file_id
                 self._upsert_finding(
                     f=f,
                     file_id=file_id,
@@ -1031,6 +1477,9 @@ class FilesMixin(DBMixinProtocol):
         params: list[Any] = []
 
         if status is not None:
+            if not isinstance(status, str):
+                msg = "status must be a string"
+                raise ValueError(msg)
             if status not in VALID_FINDING_STATUSES:
                 valid = ", ".join(sorted(VALID_FINDING_STATUSES))
                 msg = f'Invalid finding status "{status}". Must be one of: {valid}'
@@ -1098,10 +1547,10 @@ class FilesMixin(DBMixinProtocol):
             # finding reaches a terminal lifecycle state (dismissed, fixed,
             # promoted to issue) so the agent triage queue doesn't accumulate
             # zombie scratchpad notes for findings that have already been
-            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) status='open' or
-            # 'acknowledged' are not terminal — leave the observation alone.
-            terminal_statuses = {"false_positive", "fixed", "unseen_in_latest"}
-            should_cascade = (status is not None and status in terminal_statuses) or normalized_issue_id is not None
+            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) Non-terminal
+            # statuses such as 'open', 'acknowledged', and 'unseen_in_latest'
+            # leave the observation alive for continued triage.
+            should_cascade = (status is not None and status in TERMINAL_FINDING_STATUSES) or normalized_issue_id is not None
             if should_cascade:
                 self._cascade_dismiss_observations_for_finding(
                     finding_id,
@@ -1419,6 +1868,8 @@ class FilesMixin(DBMixinProtocol):
         promoted issue. The ``from-finding`` label is always added in
         addition. Senior-user MCP review run e P2.12.
         """
+        actor = _validate_string(actor, "actor")
+        labels = _validate_optional_string_list(labels, "labels")
         finding = self.get_finding(finding_id)
         if priority is None:
             priority = self._SEVERITY_TO_PRIORITY.get(finding["severity"], 3)

@@ -20,6 +20,7 @@ from filigree.hooks import (
     _extract_marker_hash,
     _is_port_listening,
     _sanitize_context_title,
+    _terminate_orphan_dashboard,
     ensure_dashboard_running,
     generate_session_context,
 )
@@ -454,6 +455,53 @@ class TestEnsureDashboardMetadataWriteFailure:
         mock_proc.kill.assert_called_once()
 
 
+class TestTerminateOrphanDashboard:
+    def test_non_positive_pid_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kill_calls: list[tuple[int, int]] = []
+
+        monkeypatch.setattr("filigree.hooks.os.kill", lambda pid, sig: kill_calls.append((pid, sig)))
+
+        _terminate_orphan_dashboard(0)
+
+        assert kill_calls == []
+
+    def test_returns_after_sigterm_when_process_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import signal
+
+        kill_calls: list[tuple[int, int]] = []
+        alive_results = iter([False])
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+
+        monkeypatch.setattr("filigree.hooks.os.kill", fake_kill)
+        monkeypatch.setattr("filigree.ephemeral.is_pid_alive", lambda _pid: next(alive_results))
+        monkeypatch.setattr("filigree.hooks.time.monotonic", iter([0.0, 0.1]).__next__)
+        monkeypatch.setattr("filigree.hooks.time.sleep", lambda _seconds: None)
+
+        _terminate_orphan_dashboard(1234, sigterm_grace=1.0)
+
+        assert kill_calls == [(1234, signal.SIGTERM)]
+
+    def test_escalates_to_sigkill_when_process_remains_alive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import signal
+
+        kill_calls: list[tuple[int, int]] = []
+        monotonic_values = iter([0.0, 0.1, 1.1])
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+
+        monkeypatch.setattr("filigree.hooks.os.kill", fake_kill)
+        monkeypatch.setattr("filigree.ephemeral.is_pid_alive", lambda _pid: True)
+        monkeypatch.setattr("filigree.hooks.time.monotonic", monotonic_values.__next__)
+        monkeypatch.setattr("filigree.hooks.time.sleep", lambda _seconds: None)
+
+        _terminate_orphan_dashboard(1234, sigterm_grace=1.0)
+
+        assert kill_calls == [(1234, signal.SIGTERM), (1234, signal.SIGKILL)]
+
+
 class TestExtractMarkerHash:
     def test_extracts_hash_from_versioned_marker(self) -> None:
         content = "before\n<!-- filigree:instructions:v1.2.0:abc12345 -->\nstuff\n<!-- /filigree:instructions -->"
@@ -619,6 +667,7 @@ class TestSessionContextDashboardUrl:
             raise PermissionError(1, "Operation not permitted")
 
         monkeypatch.setattr("filigree.hooks.socket.socket", _deny_socket)
+        monkeypatch.setattr("filigree.hooks.ensure_dashboard_running", MagicMock(side_effect=PermissionError(1, "Operation not permitted")))
         context = _build_context(db, filigree_dir)
         db.close()
 

@@ -10,16 +10,18 @@ tests/api/test_api.py are intentionally NOT duplicated here.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_conf, write_config
+from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, ForeignDatabaseError, write_conf, write_config
 from filigree.dashboard import (
     IDLE_TIMEOUT_SECONDS,
     ProjectStore,
@@ -370,6 +372,98 @@ class TestMainGlobalReset:
         assert "Run `filigree doctor`" in stderr
         assert "Traceback" not in stderr
 
+    def test_ethereal_main_enables_local_registry_fallback_without_startup_downgrade(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        write_config(
+            filigree_dir,
+            {
+                "prefix": "dash",
+                "version": 1,
+                "registry_backend": "clarion",
+                "clarion": {"base_url": "http://clarion.test"},
+            },
+        )
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {
+                "version": 1,
+                "project_name": "dash",
+                "prefix": "dash",
+                "db": ".filigree/filigree.db",
+                "registry_backend": "clarion",
+                "clarion": {"base_url": "http://clarion.test"},
+            },
+        )
+        db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="dash")
+        db.initialize()
+        db.close()
+        monkeypatch.chdir(tmp_path)
+        captured: dict[str, Any] = {}
+
+        def fake_run(*args: object, **kwargs: object) -> None:
+            captured["config"] = dict(dash_module._config)
+            captured["clarion_config"] = dict(dash_module._db.clarion_config) if dash_module._db is not None else {}
+            captured["allow_local_fallback"] = dash_module._db.allow_local_fallback if dash_module._db is not None else False
+            captured["registry_displaced"] = dash_module._db.registry.is_displaced() if dash_module._db is not None else False
+
+        monkeypatch.setattr("uvicorn.run", fake_run)
+
+        with caplog.at_level(logging.WARNING, logger="filigree.dashboard"):
+            dash_module.main(port=9999, no_browser=True, server_mode=False, allow_local_fallback=True)
+
+        assert "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
+        # The post-startup *write-path* WARN (``_ClarionLocalFallbackRegistry``
+        # logs this on every resolve_file fall-through) is still absent —
+        # only the startup-time probe-failure WARN is in caplog.
+        assert "Clarion registry backend unavailable; using local file registry fallback" not in caplog.text
+        assert captured["allow_local_fallback"] is True
+        assert captured["registry_displaced"] is True
+        assert captured["config"]["clarion"] == {"base_url": "http://clarion.test"}
+        # ADR-014: ``--allow-local-fallback`` overrides whatever the project
+        # config says about fallback *before* the capability probe runs, so
+        # the resulting in-memory ``clarion_config`` carries
+        # ``allow_local_fallback: True``.
+        assert captured["clarion_config"] == {"base_url": "http://clarion.test", "allow_local_fallback": True}
+
+    def test_dashboard_structured_log_does_not_leak_paths(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Structured startup logs use safe wording; stderr keeps the rich diagnostic."""
+        cwd = tmp_path / "inner"
+        cwd.mkdir()
+        found_anchor = tmp_path / CONF_FILENAME
+        write_conf(found_anchor, {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"})
+        exc = ForeignDatabaseError(cwd=cwd, found_anchor=found_anchor, git_boundary=cwd)
+
+        def raise_foreign_database_error() -> None:
+            raise exc
+
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", raise_foreign_database_error)
+        monkeypatch.setattr("uvicorn.run", lambda *a, **kw: pytest.fail("uvicorn should not start"))
+
+        with caplog.at_level(logging.WARNING, logger="filigree.dashboard"), pytest.raises(SystemExit) as excinfo:
+            dash_module.main(port=9999, no_browser=True, server_mode=False)
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert str(cwd) in stderr
+        records = [record for record in caplog.records if record.message == "dashboard_project_config_error"]
+        assert records
+        logged_error = records[-1].args_data["error"]
+        assert str(cwd) not in logged_error
+        assert str(found_anchor) not in logged_error
+        assert "filigree init" not in logged_error
+
 
 class TestGetDbErrorPaths:
     async def test_returns_500_when_db_is_none_in_ethereal_mode(self) -> None:
@@ -422,6 +516,51 @@ class TestGetDbErrorPaths:
             store.close_all()
             dash_module._project_store = None
 
+    async def test_server_mode_isolates_bad_project_config_from_good_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One malformed registered project must not prevent serving the rest."""
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        good_dir = _create_filigree_dir(tmp_path, "good-project", "good")
+
+        bad_root = tmp_path / "bad-project"
+        bad_dir = bad_root / FILIGREE_DIR_NAME
+        bad_dir.mkdir(parents=True)
+        write_config(
+            bad_dir,
+            {
+                "prefix": "bad",
+                "version": 1,
+                "registry_backend": "clarion",
+                "clarion": {"base_url": "file:///not-http"},
+            },
+        )
+        bad_db = FiligreeDB(bad_dir / DB_FILENAME, prefix="bad", check_same_thread=False)
+        bad_db.initialize()
+        bad_db.close()
+        _write_server_json(config_dir, {str(good_dir): {"prefix": "good"}, str(bad_dir): {"prefix": "bad"}})
+
+        store = ProjectStore()
+        store.load()
+        dash_module._project_store = store
+        try:
+            app = create_app(server_mode=True)
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                good_resp = await client.get("/api/p/good/stats")
+                bad_resp = await client.get("/api/p/bad/issues")
+
+            assert good_resp.status_code == 200
+            assert bad_resp.status_code == 400
+            bad_body = bad_resp.json()
+            assert bad_body["code"] == "VALIDATION"
+            assert "clarion.base_url" in bad_body["error"]
+        finally:
+            store.close_all()
+            dash_module._project_store = None
+
 
 # ---------------------------------------------------------------------------
 # ProjectStore.load() — corrupt / malformed configs
@@ -462,6 +601,26 @@ class TestProjectStoreLoadCorruption:
 
         store = ProjectStore()
         with pytest.raises(ValueError, match="'projects' must be an object"):
+            store.load()
+
+    def test_load_raises_when_project_entry_is_not_object(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed project entry must fail load() instead of disappearing."""
+        config_dir = self._setup_server_config(tmp_path, monkeypatch)
+        project_path = str(tmp_path / "proj" / ".filigree")
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {project_path: "oops"}}))
+
+        store = ProjectStore()
+        with pytest.raises(ValueError, match="project entry"):
+            store.load()
+
+    def test_load_raises_when_project_prefix_is_not_string(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed prefix must fail load() instead of dropping the project."""
+        config_dir = self._setup_server_config(tmp_path, monkeypatch)
+        project_path = str(tmp_path / "proj" / ".filigree")
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {project_path: {"prefix": ["bad"]}}}))
+
+        store = ProjectStore()
+        with pytest.raises(ValueError, match="project prefix"):
             store.load()
 
     def test_load_with_no_server_json_produces_empty_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -8,6 +8,69 @@ if TYPE_CHECKING:
     from filigree.models import Issue
 
 ISOTimestamp = NewType("ISOTimestamp", str)
+IssueId = NewType("IssueId", str)
+FileId = NewType("FileId", str)
+EntityId = NewType("EntityId", str)
+ClarionEntityId = EntityId
+ContentHash = NewType("ContentHash", str)
+
+_MAX_CONTENT_HASH_LEN = 512
+
+
+def make_issue_id(value: str) -> IssueId:
+    """Validate and brand an issue id crossing an untyped boundary."""
+    if not isinstance(value, str) or not value.strip():
+        msg = "issue_id must not be blank"
+        raise ValueError(msg)
+    return IssueId(value)
+
+
+def make_file_id(value: str) -> FileId:
+    """Validate and brand a Filigree-local file id crossing an untyped boundary."""
+    if not isinstance(value, str) or not value.strip():
+        msg = "file_id must not be blank"
+        raise ValueError(msg)
+    return FileId(value)
+
+
+def make_entity_id(value: str) -> EntityId:
+    """Validate and brand an opaque federated entity id.
+
+    Filigree deliberately does not parse Clarion's entity-id grammar; this only
+    rejects empty values at the local boundary.
+    """
+    if not isinstance(value, str) or not value.strip():
+        msg = "entity_id must not be blank"
+        raise ValueError(msg)
+    return EntityId(value)
+
+
+def make_clarion_entity_id(value: str) -> ClarionEntityId:
+    """Backward-compatible alias for Clarion-specific entity branding."""
+    return make_entity_id(value)
+
+
+def make_content_hash(value: str) -> ContentHash:
+    """Validate and brand a content-hash token.
+
+    The algorithm and length remain the producer's contract. Filigree only
+    rejects values that are unusable as stable comparison tokens: blank,
+    padded, whitespace/control-bearing, or implausibly large strings.
+    """
+    if not isinstance(value, str) or not value.strip():
+        msg = "content_hash must not be blank"
+        raise ValueError(msg)
+    if value != value.strip():
+        msg = "content_hash must not contain leading or trailing whitespace"
+        raise ValueError(msg)
+    if len(value) > _MAX_CONTENT_HASH_LEN:
+        msg = f"content_hash must be at most {_MAX_CONTENT_HASH_LEN} characters"
+        raise ValueError(msg)
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        msg = "content_hash must not contain whitespace or control characters"
+        raise ValueError(msg)
+    return ContentHash(value)
+
 
 # Constrained-string Literal types — canonical definitions.
 # core.py re-exports these; db_files.py derives frozensets via get_args().
@@ -22,6 +85,7 @@ AnnotationTargetType = Literal["issue", "file", "finding", "observation"]
 AnnotationRelationship = Literal["relevant_to", "must_consider", "evidence_for", "explains", "created_from", "promoted_to"]
 AnnotationAnchorState = Literal["current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing"]
 AnnotationProvenanceTrustLevel = Literal["complete", "partial", "minimal"]
+RegistryBackend = Literal["local", "clarion"]
 
 
 class _ProjectConfigRequired(TypedDict):
@@ -29,6 +93,22 @@ class _ProjectConfigRequired(TypedDict):
 
     prefix: str
     version: int
+
+
+class ClarionConfig(TypedDict, total=False):
+    """ADR-014 Clarion registry backend configuration.
+
+    ``token_env`` names the environment variable that carries the Bearer
+    token the Clarion read API expects (Authorization header). Defaults to
+    ``"CLARION_LOOM_TOKEN"``. Per the Clarion 1.0 cross-product contract,
+    Clarion accepts unauthenticated calls on loopback bind and rejects them
+    on non-loopback; if the env var is unset, Filigree sends no header.
+    """
+
+    base_url: str
+    timeout_seconds: int | float
+    allow_local_fallback: bool
+    token_env: str
 
 
 class ProjectConfig(_ProjectConfigRequired, total=False):
@@ -41,6 +121,8 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     name: str
     enabled_packs: list[str]
     mode: str
+    registry_backend: RegistryBackend
+    clarion: ClarionConfig
 
 
 _T = TypeVar("_T")
@@ -100,6 +182,8 @@ class FileRecordDict(TypedDict):
     path: str
     language: str
     file_type: str
+    content_hash: str
+    registry_backend: RegistryBackend
     created_by: str
     updated_by: str
     first_seen: ISOTimestamp
@@ -122,6 +206,7 @@ class ScanFindingDict(TypedDict):
     scan_run_id: str
     line_start: int | None
     line_end: int | None
+    fingerprint: str
     issue_id: str | None
     seen_count: int
     created_by: str
@@ -198,3 +283,5 @@ class ObservationStatsDict(TypedDict):
     stale_count: int
     oldest_hours: float | None
     expiring_soon_count: int
+    sweep_consecutive_failures: int
+    last_successful_sweep_at: ISOTimestamp | None

@@ -55,7 +55,14 @@ CREATE TABLE IF NOT EXISTS events (
     old_value  TEXT,
     new_value  TEXT,
     comment    TEXT DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- v16: same-second emissions get distinct event_seq values. This
+    -- per-issue event ordering key is part of the legacy-named unique event
+    -- index, so ordinary bursts persist as separate audit rows. _record_event
+    -- computes the next value inline under the caller-held writer transaction via
+    -- COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
+    -- -1) + 1; legacy rows default to 0.
+    event_seq  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
@@ -63,7 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_issue_time ON events(issue_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup
   ON events(issue_id, event_type, actor,
-    coalesce(old_value,''), coalesce(new_value,''), created_at);
+    coalesce(old_value,''), coalesce(new_value,''), created_at, event_seq);
 
 CREATE TABLE IF NOT EXISTS comments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +132,8 @@ CREATE TABLE IF NOT EXISTS file_records (
     path        TEXT NOT NULL UNIQUE,
     language    TEXT DEFAULT '',
     file_type   TEXT DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    registry_backend TEXT NOT NULL DEFAULT 'local',
     created_by  TEXT DEFAULT '',
     updated_by  TEXT DEFAULT '',
     first_seen  TEXT NOT NULL,
@@ -148,6 +157,7 @@ CREATE TABLE IF NOT EXISTS scan_findings (
     scan_run_id   TEXT DEFAULT '',
     line_start    INTEGER,
     line_end      INTEGER,
+    fingerprint   TEXT NOT NULL DEFAULT '',
     seen_count    INTEGER DEFAULT 1,
     created_by    TEXT DEFAULT '',
     updated_by    TEXT DEFAULT '',
@@ -164,8 +174,18 @@ CREATE INDEX IF NOT EXISTS idx_scan_findings_issue ON scan_findings(issue_id);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_severity ON scan_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_status ON scan_findings(status);
 CREATE INDEX IF NOT EXISTS idx_scan_findings_run ON scan_findings(scan_run_id);
+-- Fingerprint-less findings dedup on the (file, source, rule, line) heuristic.
+-- Partial so fingerprint-bearing rows (keyed below) are exempt — two findings
+-- at the same site with distinct fingerprints must be allowed to coexist.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_dedup
-  ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1));
+  ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1))
+  WHERE fingerprint = '';
+-- Fingerprint-bearing findings use the scanner-supplied fingerprint as their
+-- cross-run identity (Loom §3.B). Scoped by scan_source so two scanners may
+-- mint colliding fingerprints without interfering.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint
+  ON scan_findings(scan_source, fingerprint)
+  WHERE fingerprint <> '';
 
 CREATE TABLE IF NOT EXISTS file_associations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -397,6 +417,45 @@ CREATE TABLE IF NOT EXISTS entity_associations (
 
 CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
   ON entity_associations(clarion_entity_id);
+
+-- ---- Deleted-issue tombstones (v20) --------------------------------------
+-- A hard-deleted issue leaves no events/issues row, so federation consumers
+-- (Clarion / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
+-- would otherwise keep a stale reference forever. ``delete_issue`` writes a
+-- tombstone here in the same transaction it deletes the issue; the changes
+-- feed surfaces it as a synthetic ``issue_deleted`` record cursored on
+-- ``deleted_at`` so incremental consumers see each deletion exactly once.
+--
+-- ``seq`` is an AUTOINCREMENT key, NOT an implicit rowid: VACUUM (``filigree
+-- compact``) renumbers implicit rowids across the whole file, which could drag
+-- an unseen same-``deleted_at`` tombstone below a federation consumer's frozen
+-- cursor and skip it permanently. AUTOINCREMENT keys are never renumbered by
+-- VACUUM and never reused (the high-water mark lives in ``sqlite_sequence``),
+-- so the synthetic ``issue_deleted`` event_id derived from ``seq`` is stable
+-- across compaction. ``issue_id`` is UNIQUE rather than the primary key so a
+-- re-deletion (``INSERT OR REPLACE`` on the same id) assigns a NEW, strictly
+-- higher ``seq`` and re-notifies consumers as a fresh deletion, monotonically.
+--
+-- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``clarion_entity_id``s
+-- whose ``entity_associations`` rows the delete cascade removed. ``delete_issue``
+-- captures them BEFORE the cascade so the synthetic ``issue_deleted`` change record
+-- can name them as ``affected_entities`` — a consumer must purge its mirrored
+-- reverse lookup (Clarion ``list_associations_by_entity``) for those entities or it
+-- surfaces a phantom issue (filigree-f3bf56554c). Kept out of the column list as an
+-- inline comment on purpose: SQLite cannot re-parse a CREATE that carries comments,
+-- which would break any future ``ALTER TABLE … DROP/RENAME COLUMN`` on this table.
+CREATE TABLE IF NOT EXISTS deleted_issues (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id   TEXT NOT NULL UNIQUE,
+    title      TEXT NOT NULL DEFAULT '',
+    type       TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT NOT NULL,
+    deleted_by TEXT DEFAULT '',
+    reason     TEXT DEFAULT '',
+    entity_ids TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq);
 """
 
 # V1 schema (without file tables) — kept for migration tests.
@@ -505,4 +564,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 21

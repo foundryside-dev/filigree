@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, WrongProjectError
 from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
 # Mark the entire module as async — every test calls call_tool().
 pytestmark = pytest.mark.asyncio
+
+
+def _assert_wrong_project_payload(result: dict[str, object]) -> None:
+    assert result["code"] == ErrorCode.VALIDATION
+    assert result["error"] == WrongProjectError.SAFE_MESSAGE
+    assert "other" not in str(result["error"])
 
 
 class TestAddEntityAssociationMCP:
@@ -101,7 +107,7 @@ class TestAddEntityAssociationMCP:
                 },
             )
         )
-        assert result["code"] == ErrorCode.VALIDATION
+        _assert_wrong_project_payload(result)
 
 
 class TestRemoveEntityAssociationMCP:
@@ -140,7 +146,7 @@ class TestRemoveEntityAssociationMCP:
                 {"issue_id": "other-1234567890", "entity_id": "py:func:foo"},
             )
         )
-        assert result["code"] == ErrorCode.VALIDATION
+        _assert_wrong_project_payload(result)
 
 
 class TestListEntityAssociationsMCP:
@@ -182,7 +188,7 @@ class TestListEntityAssociationsMCP:
 
     async def test_list_foreign_prefix_validation(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_entity_associations", {"issue_id": "other-1234567890"}))
-        assert result["code"] == ErrorCode.VALIDATION
+        _assert_wrong_project_payload(result)
 
 
 class TestListAssociationsByEntityMCP:
@@ -214,6 +220,10 @@ class TestListAssociationsByEntityMCP:
     async def test_rejects_blank_entity_id(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "   "}))
         assert result["code"] == ErrorCode.VALIDATION
+
+    async def test_foreign_looking_entity_id_is_opaque_lookup_key(self, mcp_db: FiligreeDB) -> None:
+        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "other-1234567890"}))
+        assert result == {"associations": []}
 
 
 class TestRoundTrip:

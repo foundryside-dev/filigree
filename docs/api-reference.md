@@ -234,12 +234,15 @@ def close_issue(
     status: str | None = None,
     fields: dict[str, Any] | None = None,
     expected_assignee: str | None = None,
+    force: bool = False,
 ) -> Issue
 ```
 
 Closes an issue by moving it to a done-category state. Close uses the same
-transition validation as `update_issue()` unless `force=True`, including
-hard-enforcement field gates. Sets `closed_at` automatically.
+forward transition validation as `update_issue()` by default. With
+`force=True`, close validates against the template's `reverse_transitions`
+escape lane instead, emits `transition_forced`, and does not inherit normal
+target-state `required_at` gates. Sets `closed_at` automatically.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -248,12 +251,16 @@ hard-enforcement field gates. Sets `closed_at` automatically.
 | `actor` | `str` | `""` | Identity for the audit trail |
 | `status` | `str \| None` | `None` | Specific done-category state. `None` uses the first done state from the template |
 | `fields` | `dict[str, Any] \| None` | `None` | Additional fields to merge while closing |
+| `force` | `bool` | `False` | Use the declared reverse/escape edge for cleanup closes |
 
 The close `reason` is stored in `fields.close_reason`; a reason-only close also
 records the text on the status-change event comment so history readers can
 display it without reconstructing field deltas.
 
-**Raises:** `ValueError` if the issue is already closed or the specified status is not a done-category state.
+**Raises:** `InvalidTransitionError` (a `ValueError` subclass) with
+`valid_transitions` when the current status cannot reach the close target;
+`ValueError` if the issue is already closed or the specified status is not a
+done-category state.
 
 #### `reopen_issue`
 
@@ -357,11 +364,13 @@ def release_claim(
 
 Releases a claimed issue by clearing its assignee. Does **not** change status.
 By default this is strict and raises when the issue is already unassigned. With
-`if_held=True`, unassigned issues are returned unchanged, and assigned issues are
-only released when held by `expected_assignee` or, if omitted, `actor`.
+`if_held=True`, unassigned issues are returned unchanged, but assigned issues are
+only released when held by `expected_assignee` or, if omitted, `actor`;
+held-by-other mismatches raise `ClaimConflictError`.
 
-**Raises:** `ValueError` if strict mode sees no assignee, or if `if_held=True`
-would clear a claim held by someone other than the expected holder.
+**Raises:** `ValueError` if strict mode sees no assignee; `ClaimConflictError`
+if `if_held=True` would clear a claim held by someone other than the expected
+holder.
 
 #### `heartbeat_work`
 
@@ -835,9 +844,12 @@ Returns project statistics:
 }
 ```
 
-`status_name_counts` is the explicit alias for literal workflow status names.
-`status_category_counts` is the explicit alias for template-aware categories.
-`by_status` and `by_category` are retained for compatibility.
+`by_status` holds counts keyed by literal workflow status name; `by_category`
+holds template-aware category counts (`open`/`wip`/`done`). `status_name_counts`
+and `status_category_counts` are **deprecated** exact duplicates of `by_status`
+and `by_category` respectively (filigree-17694d2db8), retained as compatibility
+aliases per ADR-009 §7 and scheduled for removal in the next major. Read
+`by_status` / `by_category`.
 
 #### `get_recent_events`
 
@@ -898,8 +910,8 @@ def get_template(self, issue_type: str) -> dict[str, Any] | None
 
 Returns the canonical workflow definition for a type as a dict with `type`,
 `display_name`, `description`, `pack`, `states`, `initial_state`,
-`transitions`, and `fields_schema`. Returns `None` if the type is not
-registered.
+`transitions`, `reverse_transitions`, and `fields_schema`. Returns `None` if
+the type is not registered.
 
 #### `list_templates`
 
@@ -1137,7 +1149,8 @@ Returns field names that are required at the given state but not yet populated.
 TemplateRegistry.parse_type_template(raw: dict[str, Any]) -> TypeTemplate
 ```
 
-Parses a type template from a JSON-compatible dict. Enforces size limits (max 50 states, 200 transitions, 50 fields).
+Parses a type template from a JSON-compatible dict. Enforces size limits
+(max 50 states, 200 total forward + reverse transitions, 50 fields).
 
 **Raises:** `ValueError` for invalid data, `KeyError` for missing required keys.
 
@@ -1219,8 +1232,9 @@ Complete workflow definition for an issue type.
 | `pack` | `str` | *(required)* | Workflow pack this type belongs to |
 | `states` | `tuple[StateDefinition, ...]` | *(required)* | All states in the workflow |
 | `initial_state` | `str` | *(required)* | State for newly created issues |
-| `transitions` | `tuple[TransitionDefinition, ...]` | *(required)* | Valid state transitions |
+| `transitions` | `tuple[TransitionDefinition, ...]` | *(required)* | Valid forward state transitions |
 | `fields_schema` | `tuple[FieldSchema, ...]` | *(required)* | Custom fields for this type |
+| `reverse_transitions` | `tuple[TransitionDefinition, ...]` | `()` | Controlled escape transitions used by reopen, release revert, and forced close paths |
 | `suggested_children` | `tuple[str, ...]` | `()` | Suggested child issue types |
 | `suggested_labels` | `tuple[str, ...]` | `()` | Suggested labels |
 

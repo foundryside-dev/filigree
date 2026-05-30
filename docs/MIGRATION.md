@@ -2,6 +2,9 @@
 
 Step-by-step run sheet for migrating a project from [beads](https://github.com/steveyegge/beads) (`bd`) to filigree. Designed for both AI agents and humans.
 
+For Filigree version upgrades, including the 2.0.x to 2.1.0 in-place upgrade,
+see [UPGRADING.md](UPGRADING.md).
+
 ## Background
 
 Beads is a git-backed issue tracker that stores data in `.beads/` directories using a Dolt-powered SQLite database. It syncs issue data through git commits, which can cause merge conflicts and data loss when branches diverge.

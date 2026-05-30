@@ -216,6 +216,24 @@ class TestProjectStore:
         after_keys = {p["key"] for p in project_store.list_projects()}
         assert after_keys == before_keys
 
+    def test_reload_malformed_project_entry_retains_state(self, project_store: ProjectStore, tmp_path: Path) -> None:
+        import json
+
+        config_dir = tmp_path / ".config" / "filigree"
+        before_keys = {p["key"] for p in project_store.list_projects()}
+        existing = json.loads((config_dir / "server.json").read_text())
+        alpha_path = next(path for path, meta in existing["projects"].items() if meta["prefix"] == "alpha")
+        existing["projects"][alpha_path] = "oops"
+        (config_dir / "server.json").write_text(json.dumps(existing))
+
+        diff = project_store.reload()
+
+        assert diff["added"] == []
+        assert diff["removed"] == []
+        assert diff["error"]
+        after_keys = {p["key"] for p in project_store.list_projects()}
+        assert after_keys == before_keys
+
     def test_get_db_logs_and_reraises_open_failure(
         self,
         project_store: ProjectStore,
@@ -229,6 +247,21 @@ class TestProjectStore:
         with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="boom"):
             project_store.get_db("alpha")
         assert "Failed to open project DB" in caplog.text
+
+    def test_get_db_config_warning_includes_underlying_cause(
+        self,
+        project_store: ProjectStore,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def _bad_config(_filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
+            raise ValueError("clarion.base_url must use http(s)")
+
+        monkeypatch.setattr(dash_module, "_open_db_for_filigree_dir", _bad_config)
+        with caplog.at_level("WARNING", logger="filigree.dashboard"), pytest.raises(ValueError, match=r"clarion\.base_url"):
+            project_store.get_db("alpha")
+        assert "Invalid project configuration" in caplog.text
+        assert "clarion.base_url must use http(s)" in caplog.text
 
     def test_load_skips_missing_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import json
@@ -536,6 +569,109 @@ class TestMultiProjectRouting:
         body = resp.json()
         assert body["code"] == ErrorCode.VALIDATION
         assert body["code"] != ErrorCode.INTERNAL
+
+
+class TestServerModeCrossProjectReadBlocking:
+    """2.1.0 §1.3: in multi-project server mode, read endpoints reject
+    foreign-prefix IDs at the route boundary with 404/safe_message.
+
+    The data layer's ``db.get_issue`` deliberately *tolerates* foreign
+    IDs (returns KeyError) so jsonl import, migration, ``filigree
+    doctor``, and direct CLI/MCP read paths keep working cross-prefix.
+    The route layer is where cross-project probing becomes a meaningful
+    attack surface — only one process serves both projects — so the
+    route-level guard fires only when ``_project_store`` is set.
+    """
+
+    async def test_dashboard_server_mode_blocks_cross_project_read(self, multi_client: AsyncClient) -> None:
+        """A bravo-prefixed ID requested through the alpha scope returns
+        404/safe_message — indistinguishable from a same-project miss."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.get("/api/p/alpha/issue/bravo-deadbeef00")
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+        # safe_message must be returned verbatim; no prefix leaked.
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "bravo" not in body["error"]
+        assert "alpha" not in body["error"]
+
+    async def test_dashboard_server_mode_blocks_cross_project_loom_read(self, multi_client: AsyncClient) -> None:
+        """The loom mirror enforces the same guard."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.get("/api/p/alpha/loom/issues/bravo-deadbeef00")
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+
+    async def test_dashboard_server_mode_blocks_cross_project_plan_read(self, multi_client: AsyncClient) -> None:
+        """Plan reads are issue-backed and must use the same route boundary guard."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.get("/api/p/alpha/plan/bravo-deadbeef00")
+
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "bravo" not in body["error"]
+        assert "alpha" not in body["error"]
+
+    async def test_server_mode_same_project_miss_indistinguishable(self, multi_client: AsyncClient) -> None:
+        """Same-project miss and cross-project miss must return the same
+        status code so a probe cannot distinguish the two. Bodies differ
+        (one carries the offending ID, one is safe wording) but a caller
+        gating on ``status_code`` alone learns nothing about other projects.
+        """
+        cross = await multi_client.get("/api/p/alpha/issue/bravo-deadbeef00")
+        same = await multi_client.get("/api/p/alpha/issue/alpha-deadbeef00")
+        assert cross.status_code == 404
+        assert same.status_code == 404
+        assert cross.json()["code"] == "NOT_FOUND"
+        assert same.json()["code"] == "NOT_FOUND"
+
+    async def test_patch_foreign_prefix_uses_safe_message(self, multi_client: AsyncClient) -> None:
+        """Write-side WrongProjectError should not leak either project prefix."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.patch("/api/p/alpha/issue/bravo-deadbeef00", json={"title": "probe"})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "alpha" not in body["error"]
+        assert "bravo" not in body["error"]
+
+
+class TestGetIssueReadToleranceLocally:
+    """2.1.0 §1.3: db.get_issue keeps its documented read-tolerance for
+    cross-prefix IDs so jsonl import, migration, doctor, and direct
+    CLI / MCP read paths continue to work — the route-layer guard only
+    fires in server mode through the HTTP boundary, not on the data
+    layer itself.
+    """
+
+    def test_get_issue_cli_still_tolerates_foreign_id_locally(self, tmp_path: Path) -> None:
+        from filigree.core import FiligreeDB, WrongProjectError
+
+        db = FiligreeDB(tmp_path / "alpha.db", prefix="alpha")
+        db.initialize()
+        # Direct data-layer call must raise KeyError, NOT WrongProjectError,
+        # so cross-prefix reads stay tolerant for the data layer.
+        with pytest.raises(KeyError):
+            db.get_issue("bravo-deadbeef00")
+        # And the prefix-check helper still raises rich WrongProjectError
+        # for the CLI / doctor diagnostics path.
+        with pytest.raises(WrongProjectError) as excinfo:
+            db._check_id_prefix("bravo-deadbeef00")
+        rich = str(excinfo.value)
+        assert "alpha" in rich
+        assert "bravo" in rich
+        db.close()
 
 
 class TestMultiProjectManagement:

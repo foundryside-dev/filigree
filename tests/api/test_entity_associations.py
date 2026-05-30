@@ -7,9 +7,19 @@ tests live in ``tests/test_entity_associations_federation.py``.
 
 from __future__ import annotations
 
-from httpx import AsyncClient
+from httpx import AsyncClient, Response
 
+from filigree.core import WrongProjectError
+from filigree.types.api import ErrorCode
 from tests.conftest import PopulatedDB
+
+
+def _assert_wrong_project_response(resp: Response) -> None:
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["code"] == ErrorCode.VALIDATION
+    assert body["error"] == WrongProjectError.SAFE_MESSAGE
+    assert "other" not in body["error"]
 
 
 class TestListEntityAssociationsHTTP:
@@ -42,7 +52,7 @@ class TestListEntityAssociationsHTTP:
         """A foreign-prefix issue_id surfaces as VALIDATION via
         WrongProjectError, not a misleading NOT_FOUND."""
         resp = await client.get("/api/issue/other-1234567890/entity-associations")
-        assert resp.status_code == 400
+        _assert_wrong_project_response(resp)
 
 
 class TestAddEntityAssociationHTTP:
@@ -111,7 +121,7 @@ class TestAddEntityAssociationHTTP:
             "/api/issue/other-1234567890/entity-associations",
             json={"entity_id": "py:func:foo", "content_hash": "h"},
         )
-        assert resp.status_code == 400
+        _assert_wrong_project_response(resp)
 
     async def test_attach_rejects_whitespace_actor(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Match other write routes: actor goes through _validate_actor
@@ -160,6 +170,11 @@ class TestListAssociationsByEntityHTTP:
         assert {row["issue_id"] for row in body["associations"]} == {a_id, b_id}
         assert all(row["clarion_entity_id"] == target for row in body["associations"])
 
+    async def test_foreign_looking_entity_id_is_opaque_lookup_key(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/entity-associations", params={"entity_id": "other-1234567890"})
+        assert resp.status_code == 200
+        assert resp.json() == {"associations": []}
+
     async def test_missing_entity_id_returns_400(self, client: AsyncClient) -> None:
         resp = await client.get("/api/entity-associations")
         assert resp.status_code == 400
@@ -205,7 +220,7 @@ class TestRemoveEntityAssociationHTTP:
             "/api/issue/other-1234567890/entity-associations",
             params={"entity_id": "py:func:foo"},
         )
-        assert resp.status_code == 400
+        _assert_wrong_project_response(resp)
 
 
 class TestFullLifecycleViaHTTP:

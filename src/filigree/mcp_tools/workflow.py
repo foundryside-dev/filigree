@@ -384,6 +384,47 @@ async def _handle_validate_issue(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
 
 
+def _build_tool_catalog() -> dict[str, Any]:
+    """Build the curated tool catalogue, grouped by subsystem and tier.
+
+    Generated (not authored) from the same single source of truth used to tag
+    descriptions — ``_all_tools`` + ``_tool_subsystem`` (subsystem captured at
+    assembly) + ``tier_for`` — so the catalogue can never drift from the served
+    tier markers. Lazy-imported to avoid an import cycle (mcp_server imports the
+    tool modules).
+    """
+    from filigree.mcp_server import _all_tools, _tool_subsystem
+    from filigree.mcp_tools.tiers import tier_for
+
+    core: list[str] = []
+    by_subsystem: dict[str, dict[str, list[str]]] = {}
+    counts: dict[str, int] = {"core": 0, "common": 0, "niche": 0}
+
+    for tool in _all_tools:
+        tier = tier_for(tool.name)
+        counts[tier] += 1
+        if tier == "core":
+            core.append(tool.name)
+        subsystem = _tool_subsystem.get(tool.name, "unknown")
+        by_subsystem.setdefault(subsystem, {}).setdefault(tier, []).append(tool.name)
+
+    for tiers_for_subsystem in by_subsystem.values():
+        for names in tiers_for_subsystem.values():
+            names.sort()
+
+    return {
+        "description": (
+            "Tools grouped by tier and subsystem. 'core' is the small set used "
+            "constantly; 'common' is regular-but-secondary; 'niche' is rare / "
+            "admin / batch / federation / scanner / annotation internals. Tiers "
+            "also appear as a '[tier: <tier>]' marker on each tool's description."
+        ),
+        "tier_counts": counts,
+        "core": sorted(core),
+        "by_subsystem": dict(sorted(by_subsystem.items())),
+    }
+
+
 async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.mcp_server import _get_db
 
@@ -413,6 +454,7 @@ async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextCont
     result = WorkflowGuideResponse(pack=wf_pack.pack, guide=dict(wf_pack.guide))
     if note:
         result["note"] = note
+    result["tool_catalog"] = _build_tool_catalog()
     return _text(result)
 
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sqlite3
 from collections.abc import Callable
 from typing import Any, cast
 
 from mcp.types import TextContent, Tool
 
+from filigree.db_planning import NotAMilestoneError
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _list_response,
@@ -144,6 +146,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "title": {"type": "string"},
                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                             "description": {"type": "string", "default": ""},
+                            "fields": {"type": "object", "description": "Custom fields for the milestone issue"},
                             "labels": {
                                 "type": "array",
                                 "items": {"type": "string"},
@@ -160,6 +163,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                 "title": {"type": "string"},
                                 "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                 "description": {"type": "string", "default": ""},
+                                "fields": {"type": "object", "description": "Custom fields for this phase issue"},
                                 "labels": {
                                     "type": "array",
                                     "items": {"type": "string"},
@@ -173,6 +177,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                                             "title": {"type": "string"},
                                             "priority": {"type": "integer", "default": 2, "minimum": 0, "maximum": 4},
                                             "description": {"type": "string", "default": ""},
+                                            "fields": {"type": "object", "description": "Custom fields for this step issue"},
                                             "labels": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -382,7 +387,9 @@ async def _handle_remove_dependency(arguments: dict[str, Any]) -> list[TextConte
             args["to_issue_id"],
             actor=actor,
         )
-    except (ValueError, KeyError) as e:
+    except KeyError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
+    except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     _refresh_summary()
     status = "removed" if removed else "not_found"
@@ -404,7 +411,18 @@ async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
     tracker = _get_db()
     issues = tracker.get_ready()
     parent_titles = _parent_titles_by_id(tracker, issues) if include_context else {}
-    items = [_ready_issue(i, include_context=include_context, parent_title=parent_titles.get(i.parent_id or "")) for i in issues]
+    items = []
+    for i in issues:
+        startable, next_action = tracker.issue_startability(i)
+        items.append(
+            _ready_issue(
+                i,
+                include_context=include_context,
+                parent_title=parent_titles.get(i.parent_id or ""),
+                startable=startable,
+                next_action=next_action,
+            )
+        )
     return _text(_list_response(items, has_more=False))
 
 
@@ -415,15 +433,18 @@ async def _handle_get_blocked(arguments: dict[str, Any]) -> list[TextContent]:
     if not isinstance(include_blockers, bool):
         return _text(ErrorResponse(error="include_blockers must be a boolean", code=ErrorCode.VALIDATION))
     tracker = _get_db()
-    issues = tracker.get_blocked()
-    blockers_by_id = {}
-    if include_blockers:
-        blocker_ids = {blocker_id for issue in issues for blocker_id in issue.blocked_by}
-        for blocker_id in blocker_ids:
-            try:
-                blockers_by_id[blocker_id] = _slim_issue(tracker.get_issue(blocker_id))
-            except KeyError:
-                continue
+    try:
+        issues = tracker.get_blocked()
+        blockers_by_id = {}
+        if include_blockers:
+            blocker_ids = {blocker_id for issue in issues for blocker_id in issue.blocked_by}
+            for blocker_id in blocker_ids:
+                try:
+                    blockers_by_id[blocker_id] = _slim_issue(tracker.get_issue(blocker_id))
+                except KeyError:
+                    continue
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     items: list[dict[str, Any]] = []
     for issue in issues:
         slim = _slim_issue(issue)
@@ -464,6 +485,8 @@ async def _handle_get_plan(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(payload)
     except KeyError:
         return _text(ErrorResponse(error=f"Milestone not found: {args['milestone_id']}", code=ErrorCode.NOT_FOUND))
+    except NotAMilestoneError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
 
 
 def _validate_plan_deps(deps: Any, name: str) -> list[TextContent] | None:
@@ -591,8 +614,10 @@ async def _create_plan_from_payload(arguments: dict[str, Any]) -> list[TextConte
         )
         _refresh_summary()
         return _text(plan_tree_to_mcp(plan))
-    except (KeyError, IndexError, ValueError) as e:
+    except (KeyError, IndexError, TypeError, ValueError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
 
 
 async def _handle_create_plan(arguments: dict[str, Any]) -> list[TextContent]:
@@ -603,8 +628,16 @@ async def _handle_create_plan_from_file(arguments: dict[str, Any]) -> list[TextC
     from filigree.mcp_server import _safe_path
 
     args = _parse_args(arguments, CreatePlanFromFileArgs)
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str):
+        return _text(
+            ErrorResponse(
+                error="file_path is required" if file_path is None else "file_path must be a string",
+                code=ErrorCode.VALIDATION,
+            )
+        )
     try:
-        plan_path = _safe_path(args["file_path"])
+        plan_path = _safe_path(file_path)
         raw = plan_path.read_text()
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
@@ -721,28 +754,46 @@ async def _handle_label_plan_tree(arguments: dict[str, Any]) -> list[TextContent
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
+    milestone_id = args.get("milestone_id")
+    if not isinstance(milestone_id, str):
+        return _text(
+            ErrorResponse(
+                error="milestone_id is required" if milestone_id is None else "milestone_id must be a string",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+    label = args.get("label")
+    if not isinstance(label, str):
+        return _text(
+            ErrorResponse(
+                error="label is required" if label is None else "label must be a string",
+                code=ErrorCode.VALIDATION,
+            )
+        )
     tracker = _get_db()
     try:
-        milestone = tracker.get_issue(args["milestone_id"])
+        milestone = tracker.get_issue(milestone_id)
         if milestone.type != "milestone":
             return _text(
                 ErrorResponse(
-                    error=f"milestone_id must reference a milestone issue, got {milestone.type!r}: {args['milestone_id']}",
+                    error=f"milestone_id must reference a milestone issue, got {milestone.type!r}: {milestone_id}",
                     code=ErrorCode.VALIDATION,
                 )
             )
-        succeeded, failed = tracker.label_subtree(args["milestone_id"], label=args["label"])
+        succeeded, failed = tracker.label_subtree(milestone_id, label=label)
+        _refresh_summary()
+        if detail == "full":
+            full_result: BatchResponse[PublicIssue] = BatchResponse(
+                succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in succeeded],
+                failed=failed,
+            )
+            return _text(full_result)
     except KeyError:
-        return _text(ErrorResponse(error=f"Issue not found: {args['milestone_id']}", code=ErrorCode.NOT_FOUND))
+        return _text(ErrorResponse(error=f"Issue not found: {milestone_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
-    if detail == "full":
-        full_result: BatchResponse[PublicIssue] = BatchResponse(
-            succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in succeeded],
-            failed=failed,
-        )
-        return _text(full_result)
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     result: BatchResponse[str] = BatchResponse(
         succeeded=[row["id"] for row in succeeded],
         failed=failed,

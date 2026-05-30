@@ -350,11 +350,12 @@ wheels = [
 
 [[package]]
 name = "filigree"
-version = "2.0.3"
+version = "2.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "portalocker" },
     { name = "uvicorn" },
@@ -363,7 +364,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "coverage", extra = ["toml"] },
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -376,6 +376,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "mcp", specifier = ">=1.0,<2" },
     { name = "portalocker", specifier = ">=2.7,<4" },
     { name = "uvicorn", specifier = ">=0.34" },
@@ -384,7 +385,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "coverage", extras = ["toml"], specifier = ">=7.0" },
-    { name = "httpx", specifier = ">=0.28" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=8.0" },

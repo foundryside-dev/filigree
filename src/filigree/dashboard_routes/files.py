@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
+    from fastapi.responses import JSONResponse
+
+    from filigree.types.files import CleanStaleResult, ScanIngestResult
 
 from starlette.requests import Request
 
@@ -23,6 +27,14 @@ from filigree.dashboard_routes.common import (
     _parse_json_body,
     _parse_pagination,
     _safe_int,
+    _validate_actor,
+)
+from filigree.registry import (
+    REGISTRY_BACKEND_FEATURES,
+    RegistryBriefingBlockedError,
+    RegistryFileNotFoundError,
+    RegistryResolutionError,
+    RegistryUnavailableError,
 )
 from filigree.types.api import ErrorCode
 from filigree.types.core import AssocType, FindingStatus, Severity
@@ -30,6 +42,61 @@ from filigree.types.core import AssocType, FindingStatus, Severity
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
+
+# CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
+# router factories, and the findings/clean-stale sweep) run via
+# asyncio.to_thread so the event loop stays responsive during the Clarion HTTP
+# wait / bulk write. They do their DB work on a PRIVATE connection obtained from
+# FiligreeDB.borrow_for_worker_thread() — NOT the shared event-loop connection.
+# That closes the cross-thread shared-connection race for good: the connection
+# invariant is connection-scoped, not route-scoped —
+#
+#   * Handlers that touch the shared connection stay plain ``async def`` and do
+#     no ``await`` mid-transaction, so they run to completion on the event-loop
+#     thread and are cooperatively serialised against each other.
+#   * Any handler that goes off the event-loop thread (to_thread/executor) MUST
+#     use its own connection via ``borrow_for_worker_thread`` so it never shares
+#     a connection cross-thread.
+#
+# clean-stale conforms under this invariant despite using to_thread, because it
+# borrows a private connection. This module-level asyncio.Lock still serialises
+# the two worker WRITE paths against each other: WAL permits a single writer at
+# the file level, so two concurrent worker writers would otherwise contend for
+# the write lock (SQLITE_BUSY churn up to busy_timeout). Event-loop handlers do
+# not take this lock — they run on a different connection and SQLite's file
+# locking (WAL + busy_timeout) mediates writer/writer contention between them
+# and a worker.
+_SCAN_RESULTS_LOCK = asyncio.Lock()
+
+
+def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any]) -> ScanIngestResult:
+    """Run ``process_scan_results`` on a private worker-thread connection.
+
+    Handed to ``asyncio.to_thread``, so the borrowed connection is opened,
+    used, committed, and closed entirely on the worker thread (CONTRACT-E /
+    ``FiligreeDB.borrow_for_worker_thread``). Never touches the shared
+    event-loop connection.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        return worker_db.process_scan_results(**parsed)
+
+
+def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_source: str, actor: str) -> CleanStaleResult:
+    """Run ``clean_stale_findings`` on a private worker-thread connection.
+
+    Same CONTRACT-E rationale as ``_ingest_scan_results_on_private_conn``.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        return worker_db.clean_stale_findings(days=days, scan_source=scan_source, actor=actor)
+
+
+def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONResponse:
+    if isinstance(exc, RegistryBriefingBlockedError):
+        return _error_response(str(exc), ErrorCode.BRIEFING_BLOCKED, 403)
+    if isinstance(exc, RegistryFileNotFoundError):
+        return _error_response(str(exc), ErrorCode.NOT_FOUND, 404)
+    return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+
 
 # ---------------------------------------------------------------------------
 # Shared request parsing
@@ -142,7 +209,7 @@ def create_classic_router() -> APIRouter:
         return JSONResponse(db.get_global_findings_stats())
 
     @router.get("/files/_schema")
-    async def api_files_schema() -> JSONResponse:
+    async def api_files_schema(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """API discovery: valid enum values and endpoint catalog for file/scan features."""
         schema = {
             "valid_severities": sorted(VALID_SEVERITIES),
@@ -150,6 +217,14 @@ def create_classic_router() -> APIRouter:
             "valid_association_types": sorted(VALID_ASSOC_TYPES),
             "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
             "valid_finding_sort_fields": ["severity", "updated_at"],
+            "config_flags": {
+                "registry_backend": db.registry_backend,
+                "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
+                "allow_local_fallback": db.allow_local_fallback,
+                "clarion_instance_id": db.clarion_instance_id,
+                "clarion_api_version": db.clarion_api_version,
+                "clarion_instance_rotated": db.clarion_instance_rotated,
+            },
             "endpoints": [
                 {
                     "method": "POST",
@@ -352,8 +427,20 @@ def create_classic_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+        except RegistryResolutionError as e:
+            return _registry_resolution_error_response(e)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(result)
@@ -410,8 +497,20 @@ def create_loom_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+        except RegistryResolutionError as e:
+            return _registry_resolution_error_response(e)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(scan_ingest_result_to_loom(result))
@@ -479,6 +578,82 @@ def create_loom_router() -> APIRouter:
         items = [scan_finding_to_loom(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
+    @router.post("/findings/clean-stale")
+    async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Retention sweep — soft-archive stale ``unseen_in_latest`` findings.
+
+        Federation surface over the existing core ``clean_stale_findings``
+        (the same operation as CLI ``filigree finding clean-stale``). Moves
+        ``unseen_in_latest`` findings older than ``older_than_days`` (default
+        30) to ``fixed`` status, scoped to a single ``scan_source``. Soft, not
+        a delete: rows persist and a finding that reappears in a later scan
+        auto-reopens (``fixed`` → ``open``) with its ``seen_count`` intact.
+        See ADR-015 for the retention policy and the scan-run contract.
+
+        Enrich-only (loom.md sec 3-5, ADR-002 sec 7): pure local DB write,
+        fully functional with no federation peer present.
+
+        ``scan_source`` is REQUIRED here — it is an *accident-guard*, not an
+        auth boundary: the core method treats ``None`` as "all sources", which
+        we refuse to expose so a caller cannot accidentally sweep every tool's
+        findings. The actual trust boundary is loopback-only binding (there is
+        no inbound auth on any route; see ADR-015 §1). ``older_than_days=0`` is
+        permitted (sweep the whole current unseen backlog); blast radius is
+        bounded because the op is soft and only touches already-unseen rows.
+
+        No tombstone: findings are not federated through a changes feed, and
+        this is a soft transition anyway (cf. the issue-deletion tombstone,
+        which is for hard-deletes of federated entities).
+
+        Concurrency: this is a bulk write (``UPDATE scan_findings SET
+        status='fixed' ...``) that runs via ``asyncio.to_thread`` on a PRIVATE
+        worker-thread connection (see ``_clean_stale_findings_on_private_conn``
+        and ``FiligreeDB.borrow_for_worker_thread``) — the same idiom as the
+        scan-results handlers. Because it never touches the shared event-loop
+        connection, it cannot race the plain-async event-loop write handlers
+        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It still
+        acquires ``_SCAN_RESULTS_LOCK`` to serialise against the scan-results
+        worker WRITE path (WAL allows one writer at the file level; the lock
+        avoids SQLITE_BUSY churn between the two worker writers). See the lock's
+        CONTRACT-E note for the connection-scoped invariant.
+        """
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        if not isinstance(scan_source, str) or not scan_source:
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        older_than_days = body.get("older_than_days", 30)
+        # JSON booleans are ints in Python; reject them explicitly so
+        # {"older_than_days": true} does not silently become 1.
+        if isinstance(older_than_days, bool) or not isinstance(older_than_days, int) or older_than_days < 0:
+            return _error_response("older_than_days must be a non-negative integer", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        async with _SCAN_RESULTS_LOCK:
+            result = await asyncio.to_thread(
+                _clean_stale_findings_on_private_conn,
+                db,
+                days=older_than_days,
+                scan_source=scan_source,
+                actor=actor,
+            )
+        logger.info(
+            "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
+            result["findings_fixed"],
+            scan_source,
+            older_than_days,
+            actor,
+        )
+        return JSONResponse(
+            {
+                "findings_fixed": result["findings_fixed"],
+                "scan_source": scan_source,
+                "older_than_days": older_than_days,
+            }
+        )
+
     @router.get("/scanners")
     async def api_loom_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List registered scanner configs — ``ListResponse[ScannerLoom]``.
@@ -540,8 +715,20 @@ def create_living_surface_router() -> APIRouter:
         parsed = _parse_scan_results_body(body)
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
+        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='clarion'). It runs on a worker thread
+        # (asyncio.to_thread) using a PRIVATE connection (see
+        # _ingest_scan_results_on_private_conn) so it never shares the
+        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
+        # worker WRITE paths; see the lock's note for the connection invariant.
         try:
-            result = db.process_scan_results(**parsed)
+            async with _SCAN_RESULTS_LOCK:
+                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+        except RegistryResolutionError as e:
+            return _registry_resolution_error_response(e)
+        except RegistryUnavailableError as e:
+            return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         return JSONResponse(scan_ingest_result_to_loom(result))

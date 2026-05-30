@@ -6,16 +6,51 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
 from filigree.cli_common import get_db
+from filigree.core import FiligreeDB
+from filigree.registry import RegistryUnavailableError
 
 
 def _assert_validation_envelope(output: str) -> None:
     data = json.loads(output)
     assert data["code"] == "VALIDATION"
     assert data["error"]
+
+
+def test_annotate_file_registry_unavailable_returns_structured_code(
+    initialized_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
+        raise RegistryUnavailableError(
+            "Clarion registry unavailable for test",
+            url="http://clarion.test/api/v1/files?path=src%2Fcli_ann.py",
+            path=path,
+            cause_kind="network",
+        )
+
+    runner = CliRunner()
+    source = initialized_project / "src" / "cli_ann.py"
+    source.parent.mkdir()
+    source.write_text("alpha\n")
+    original = os.getcwd()
+    os.chdir(initialized_project)
+    try:
+        monkeypatch.setattr(FiligreeDB, "register_file", unavailable_register_file)
+        result = runner.invoke(cli, ["annotate-file", "src/cli_ann.py", "note", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "REGISTRY_UNAVAILABLE"
+        assert data["details"]["cause"] == "registry_unavailable"
+        assert data["details"]["cause_kind"] == "network"
+        assert data["details"]["path"] == "src/cli_ann.py"
+        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fcli_ann.py"
+    finally:
+        os.chdir(original)
 
 
 def test_annotate_list_get_and_resolve_json(initialized_project: Path) -> None:

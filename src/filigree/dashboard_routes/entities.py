@@ -1,6 +1,6 @@
 """Entity-association HTTP routes (ADR-029, Clarion B.7 / WP9-A).
 
-Mirrors the three MCP tools on the HTTP surface so cross-product
+Mirrors the four MCP tools on the HTTP surface so cross-product
 callers (notably Clarion's ``issues_for`` MCP tool, which runs on the
 Clarion side and reaches into Filigree via HTTP) can read and write
 the binding without going through MCP.
@@ -8,12 +8,19 @@ the binding without going through MCP.
 Routes:
 
 - ``GET    /api/issue/{issue_id}/entity-associations`` — list rows
+- ``GET    /api/entity-associations?entity_id=…`` — reverse lookup
 - ``POST   /api/issue/{issue_id}/entity-associations`` — attach (body)
 - ``DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`` — remove
 
 The ``entity_id`` contains colons (``py:func:foo``); to keep it out of
 URL path parameters it travels in request bodies (POST) and query
 strings (DELETE), URL-encoded by the client.
+
+CONNECTION INVARIANT (CONTRACT-E, see dashboard_routes/files.py): the write
+handlers here (``add_entity_association``, ``remove_entity_association``) do
+synchronous DB work on the shared event-loop connection and MUST stay plain
+``async def`` with no ``await`` mid-transaction. Do NOT move one onto a worker
+thread without its own connection via ``FiligreeDB.borrow_for_worker_thread``.
 """
 
 from __future__ import annotations
@@ -27,8 +34,14 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import FiligreeDB, WrongProjectError
-from filigree.dashboard_routes.common import _error_response, _parse_json_body, _validate_actor
+from filigree.dashboard_routes.common import (
+    _check_read_prefix_in_server_mode,
+    _error_response,
+    _parse_json_body,
+    _validate_actor,
+)
 from filigree.types.api import ErrorCode
+from filigree.types.core import make_clarion_entity_id, make_content_hash, make_issue_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +67,14 @@ def create_classic_router() -> APIRouter:
         Returns raw rows; drift detection is the caller's job per
         ADR-029 §"Decision 3".
         """
+        # 2.1.0 §1.3: server-mode reads are 404'd at the route boundary
+        # so cross-project probes can't distinguish "wrong project" from
+        # "no such issue". Ethereal mode falls through to the data-layer
+        # WrongProjectError (→ 400 VALIDATION) — preserves the documented
+        # error code for single-project CLI / MCP via the dashboard.
+        err = _check_read_prefix_in_server_mode(db, issue_id)
+        if err is not None:
+            return err
         # Mirror the MCP handler: list first (prefix-enforcing →
         # WrongProjectError → 400), then probe existence only when
         # empty so a typoed or deleted issue surfaces as 404 rather
@@ -61,8 +82,10 @@ def create_classic_router() -> APIRouter:
         # path and does not enforce prefix, so doing it first would
         # mask cross-project errors as 404.
         try:
-            rows = db.list_entity_associations(issue_id)
+            rows = db.list_entity_associations(make_issue_id(issue_id))
         except WrongProjectError as exc:
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
+        except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         if not rows:
             try:
@@ -85,7 +108,7 @@ def create_classic_router() -> APIRouter:
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
         try:
-            rows = db.list_associations_by_entity(entity_id)
+            rows = db.list_associations_by_entity(make_clarion_entity_id(entity_id))
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"associations": [dict(row) for row in rows]})
@@ -116,13 +139,18 @@ def create_classic_router() -> APIRouter:
         # pre-check via get_issue() would surface foreign-prefix IDs as
         # 404, contradicting the other write routes.
         try:
-            row = db.add_entity_association(issue_id, entity_id, content_hash, actor=actor)
+            row = db.add_entity_association(
+                make_issue_id(issue_id),
+                make_clarion_entity_id(entity_id),
+                make_content_hash(content_hash),
+                actor=actor,
+            )
         except WrongProjectError as exc:
-            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
+        except KeyError:
+            return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except ValueError as exc:
-            code = ErrorCode.NOT_FOUND if "Issue not found" in str(exc) else ErrorCode.VALIDATION
-            status = 404 if code == ErrorCode.NOT_FOUND else 400
-            return _error_response(str(exc), code, status)
+            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse(dict(row), status_code=201)
 
     @router.delete("/issue/{issue_id}/entity-associations")
@@ -136,10 +164,17 @@ def create_classic_router() -> APIRouter:
         entity_id = request.query_params.get("entity_id", "")
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(request.query_params.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
         try:
-            removed = db.remove_entity_association(issue_id, entity_id)
+            removed = db.remove_entity_association(
+                make_issue_id(issue_id),
+                make_clarion_entity_id(entity_id),
+                actor=actor,
+            )
         except WrongProjectError as exc:
-            return _error_response(str(exc), ErrorCode.VALIDATION, 400)
+            return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"removed": removed})

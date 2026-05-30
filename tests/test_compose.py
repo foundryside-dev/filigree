@@ -181,6 +181,18 @@ class TestStartWork:
             f"transition should have rolled back; got status={after.status!r}, expected {original_status!r}"
         )
 
+    def test_start_work_rollback_preserves_prior_claim(self, db: FiligreeDB) -> None:
+        """A failed same-agent start_work attempt must not erase a claim that predated it."""
+        issue = db.create_issue("d6-rollback-keeps-prior-claim", type="task")
+        claimed = db.claim_issue(issue.id, assignee="alice", actor="alice")
+
+        with pytest.raises(ValueError, match=r"status|transition"):
+            db.start_work(issue.id, assignee="alice", target_status="nonexistent_status", actor="alice")
+
+        after = db.get_issue(issue.id)
+        assert after.assignee == "alice"
+        assert after.status == claimed.status
+
     def test_failed_attempts_do_not_record_claim_handoffs(self, db: FiligreeDB) -> None:
         """Repeated invalid starts should not look like real claim/release handoffs."""
         issue = db.create_issue("d6-rollback-events", type="task")
@@ -254,3 +266,108 @@ class TestStartNextWork:
         changes = db.get_events_since("2000-01-01T00:00:00+00:00", issue_id=issue.id, limit=20)
         assert [e["event_type"] for e in changes if e["event_type"] == "claimed"] == ["claimed"]
         assert [e["event_type"] for e in changes if e["event_type"] == "released"] == []
+
+    def test_explicit_target_status_skips_incompatible_candidates(self, db: FiligreeDB) -> None:
+        """A heterogeneous ready queue should not abort on the first incompatible type."""
+        bug = db.create_issue("d6-next-incompatible-bug", type="bug", priority=0)
+        task = db.create_issue("d6-next-compatible-task", type="task", priority=1)
+
+        result = db.start_next_work(assignee="alice", target_status="in_progress", actor="alice")
+
+        assert result is not None
+        assert result.id == task.id
+        assert result.status == "in_progress"
+        assert result.assignee == "alice"
+        bug_after = db.get_issue(bug.id)
+        assert bug_after.status == "triage"
+        assert bug_after.assignee == ""
+        bug_events = db.get_issue_events(bug.id, limit=20)
+        assert [e["event_type"] for e in bug_events if e["event_type"] in {"claimed", "released"}] == []
+
+    def test_claim_phase_validation_bug_propagates(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """start_next_work must not turn arbitrary claim ValueError into no work."""
+        db.create_issue("d6-next-claim-bug", type="task", priority=0)
+
+        def fail_claim(*args: object, **kwargs: object) -> None:
+            raise ValueError("claim invariant exploded")
+
+        monkeypatch.setattr(db, "claim_issue", fail_claim)
+
+        with pytest.raises(ValueError, match="claim invariant exploded"):
+            db.start_next_work(assignee="alice", actor="alice")
+
+    def test_claim_phase_invalid_transition_propagates(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """InvalidTransitionError is a ValueError subclass, not a candidate race."""
+        db.create_issue("d6-next-claim-transition-bug", type="task", priority=0)
+
+        def fail_claim(*args: object, **kwargs: object) -> None:
+            raise InvalidTransitionError("task", "open")
+
+        monkeypatch.setattr(db, "claim_issue", fail_claim)
+
+        with pytest.raises(InvalidTransitionError):
+            db.start_next_work(assignee="alice", actor="alice")
+
+    def test_claim_status_mismatch_candidate_between_ready_and_claim_is_skipped(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A candidate that races out of claimable status should not abort iteration."""
+        stale = db.create_issue("d6-next-stale-status", type="task", priority=0)
+        survivor = db.create_issue("d6-next-status-survivor", type="task", priority=1)
+        real_claim_issue = db.claim_issue
+
+        def status_mismatch_once(issue_id: str, *args: object, **kwargs: object) -> object:
+            if issue_id == stale.id:
+                raise ValueError(f"Cannot claim {issue_id}: status is 'closed', expected open-category state or wip-category handoff state")
+            return real_claim_issue(issue_id, *args, **kwargs)
+
+        monkeypatch.setattr(db, "claim_issue", status_mismatch_once)
+
+        result = db.start_next_work(assignee="alice", actor="alice")
+
+        assert result is not None
+        assert result.id == survivor.id
+        assert result.status == "in_progress"
+        assert result.assignee == "alice"
+
+    def test_deleted_candidate_between_ready_and_claim_is_skipped(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A candidate deleted after get_ready() is a per-candidate race."""
+        doomed = db.create_issue("d6-next-deleted-candidate", type="task", priority=0)
+        survivor = db.create_issue("d6-next-survives", type="task", priority=1)
+        ready_snapshot = [doomed, survivor]
+        real_start_locked = db._start_work_locked
+        deleted = {"done": False}
+
+        def delete_first_candidate_then_start(
+            issue_id: str,
+            *,
+            assignee: str,
+            target_path: list[str],
+            actor: str,
+        ):
+            if issue_id == doomed.id and not deleted["done"]:
+                db.conn.execute("DELETE FROM events WHERE issue_id = ?", (doomed.id,))
+                db.conn.execute("DELETE FROM issues WHERE id = ?", (doomed.id,))
+                db.conn.commit()
+                deleted["done"] = True
+            return real_start_locked(
+                issue_id,
+                assignee=assignee,
+                target_path=target_path,
+                actor=actor,
+            )
+
+        monkeypatch.setattr(db, "get_ready", lambda: ready_snapshot)
+        monkeypatch.setattr(db, "_start_work_locked", delete_first_candidate_then_start)
+
+        result = db.start_next_work(assignee="alice", actor="alice")
+
+        assert result is not None
+        assert result.id == survivor.id
+        assert result.assignee == "alice"

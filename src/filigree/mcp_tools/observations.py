@@ -12,9 +12,11 @@ from mcp.types import TextContent, Tool
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _MAX_LIST_RESULTS,
+    _MAX_SQLITE_OFFSET,
     _apply_has_more,
     _list_response,
     _parse_args,
+    _registry_error_text,
     _resolve_pagination,
     _slim_issue,
     _text,
@@ -23,6 +25,7 @@ from filigree.mcp_tools.common import (
     _validate_str,
 )
 from filigree.mcp_tools.payloads import observation_link_to_mcp, observation_to_mcp
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
 from filigree.types.inputs import (
     BatchDismissObservationsArgs,
@@ -370,7 +373,7 @@ async def _handle_observe(arguments: dict[str, Any]) -> list[TextContent]:
         _validate_str(args.get("detail"), "detail"),
         _validate_str(args.get("file_path"), "file_path"),
         _validate_str(args.get("source_issue_id"), "source_issue_id"),
-        _validate_int_range(args.get("line"), "line", min_val=0),
+        _validate_int_range(args.get("line"), "line", min_val=0, max_val=_MAX_SQLITE_OFFSET),
         _validate_int_range(args.get("priority"), "priority", min_val=0, max_val=4),
     ):
         if err is not None:
@@ -387,6 +390,8 @@ async def _handle_observe(arguments: dict[str, Any]) -> list[TextContent]:
             priority=args.get("priority", 3),
             actor=actor,
         )
+    except (RegistryResolutionError, RegistryUnavailableError) as e:
+        return _registry_error_text(e, action="recording observation")
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except sqlite3.Error as e:
@@ -476,9 +481,9 @@ async def _handle_batch_dismiss_observations(arguments: dict[str, Any]) -> list[
     # Snapshot pre-dismissal records for full mode — the rows are deleted by
     # batch_dismiss_observations so the fetch must happen first.
     full_records: list[dict[str, Any]] = []
-    if detail == "full":
-        full_records = [observation_to_mcp(obs) for obs in tracker.get_observations_by_ids(raw_ids)]
     try:
+        if detail == "full":
+            full_records = [observation_to_mcp(obs) for obs in tracker.get_observations_by_ids(raw_ids)]
         result = tracker.batch_dismiss_observations(
             raw_ids,
             actor=actor,
@@ -539,12 +544,11 @@ async def _handle_batch_promote_observations(arguments: dict[str, Any]) -> list[
             priority=priority,
             actor=actor,
         )
+        _refresh_summary()
+        issues = [tracker.get_issue(result["issue"].id) for result in promoted]
     except sqlite3.Error as e:
         logger.error("batch_promote_observations database error", exc_info=True)
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
-    _refresh_summary()
-
-    issues = [tracker.get_issue(result["issue"].id) for result in promoted]
     if detail == "full":
         full_resp: BatchResponse[dict[str, Any]] = BatchResponse(
             succeeded=[dict(issue_to_public(issue)) for issue in issues],
@@ -600,14 +604,30 @@ async def _handle_batch_link_observations(arguments: dict[str, Any]) -> list[Tex
         return _text(ErrorResponse(error="'observation_ids' must be an array of strings", code=ErrorCode.VALIDATION))
     if not all(isinstance(x, str) for x in raw_ids):
         return _text(ErrorResponse(error="'observation_ids' must contain only string values", code=ErrorCode.VALIDATION))
+    issue_id = args.get("issue_id")
+    if not isinstance(issue_id, str):
+        return _text(
+            ErrorResponse(
+                error="issue_id is required" if issue_id is None else "issue_id must be a string",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+    disposition = args.get("disposition", "evidence")
+    disposition_err = _validate_str(disposition, "disposition")
+    if disposition_err is not None:
+        return disposition_err
+    reason = args.get("reason", "")
+    reason_err = _validate_str(reason, "reason")
+    if reason_err is not None:
+        return reason_err
 
     tracker = _get_db()
     try:
         linked, failed = tracker.batch_link_observations_to_issue(
             raw_ids,
-            args["issue_id"],
-            disposition=args.get("disposition", "evidence"),
-            reason=args.get("reason", ""),
+            issue_id,
+            disposition=disposition,
+            reason=reason,
             actor=actor,
         )
     except KeyError as e:
@@ -658,6 +678,7 @@ async def _handle_promote_observations_to_issue(arguments: dict[str, Any]) -> li
             actor=actor,
             labels=labels,
         )
+        issue = tracker.get_issue(result["issue"].id)
     except TypeError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except ValueError as e:
@@ -667,7 +688,6 @@ async def _handle_promote_observations_to_issue(arguments: dict[str, Any]) -> li
     except sqlite3.Error as e:
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     _refresh_summary()
-    issue = tracker.get_issue(result["issue"].id)
     resp: dict[str, object] = dict(issue_to_public(issue))
     if result.get("warnings"):
         resp["warnings"] = result["warnings"]
@@ -682,6 +702,23 @@ async def _handle_promote_observation(arguments: dict[str, Any]) -> list[TextCon
     if actor_err:
         return actor_err
 
+    observation_id = args.get("observation_id")
+    if not isinstance(observation_id, str):
+        return _text(
+            ErrorResponse(
+                error="observation_id is required" if observation_id is None else "observation_id must be a string",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+    issue_type = args.get("type", "task")
+    for err in (
+        _validate_str(issue_type, "type"),
+        _validate_str(args.get("title"), "title"),
+        _validate_str(args.get("description"), "description"),
+    ):
+        if err is not None:
+            return err
+
     priority = args.get("priority")
     if priority is not None:
         priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
@@ -695,14 +732,18 @@ async def _handle_promote_observation(arguments: dict[str, Any]) -> list[TextCon
     tracker = _get_db()
     try:
         result = tracker.promote_observation(
-            args["observation_id"],
-            issue_type=args.get("type", "task"),
+            observation_id,
+            issue_type=issue_type,
             priority=priority,
             title=args.get("title"),
-            extra_description=args.get("description", ""),
+            extra_description=args.get("description") or "",
             actor=actor,
             labels=labels,
         )
+        _refresh_summary()
+        issue = tracker.get_issue(result["issue"].id)
+    except TypeError as e:
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except ValueError as e:
         msg = str(e)
         err_code = ErrorCode.NOT_FOUND if "not found" in msg.lower() else ErrorCode.VALIDATION
@@ -710,8 +751,6 @@ async def _handle_promote_observation(arguments: dict[str, Any]) -> list[TextCon
     except sqlite3.Error as e:
         logger.error("promote_observation database error", exc_info=True)
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
-    _refresh_summary()
-    issue = tracker.get_issue(result["issue"].id)
     resp: dict[str, object] = dict(issue_to_public(issue))
     if result.get("warnings"):
         resp["warnings"] = result["warnings"]

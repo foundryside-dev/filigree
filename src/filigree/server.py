@@ -20,7 +20,7 @@ from typing import TypedDict
 
 import portalocker
 
-from filigree.core import DB_FILENAME, read_config, write_atomic
+from filigree.core import CONF_FILENAME, DB_FILENAME, read_conf, read_config, write_atomic
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.ephemeral import is_pid_alive, read_pid_file, verify_pid_ownership, write_pid_file
 
@@ -54,6 +54,15 @@ class ServerConfig:
             raise ValueError(f"port must be between 1 and 65535, got {self.port}")
 
 
+def _project_db_path(filigree_dir: Path) -> Path:
+    conf_path = filigree_dir.parent / CONF_FILENAME
+    if conf_path.is_file():
+        conf = read_conf(conf_path)
+        db_name: str = conf["db"]
+        return (conf_path.parent / db_name).resolve()
+    return filigree_dir / DB_FILENAME
+
+
 def _read_project_schema_version(filigree_dir: Path) -> int:
     """Return the SQLite schema version for a project, or 0 if no DB exists.
 
@@ -62,7 +71,7 @@ def _read_project_schema_version(filigree_dir: Path) -> int:
     Raises sqlite3.DatabaseError or OSError for genuine corruption or
     permission errors.
     """
-    db_path = filigree_dir / DB_FILENAME
+    db_path = _project_db_path(filigree_dir)
     if not db_path.exists():
         return 0
 
@@ -107,24 +116,37 @@ def read_server_config() -> ServerConfig:
 
     # Coerce port
     raw_port = data.get("port", DEFAULT_PORT)
-    try:
-        port = int(raw_port)
-    except (TypeError, ValueError):
+    if isinstance(raw_port, bool):
+        logger.warning("Invalid port value %r in server config; using default %d", raw_port, DEFAULT_PORT)
+        port = DEFAULT_PORT
+    elif isinstance(raw_port, int):
+        port = raw_port
+    elif isinstance(raw_port, str):
+        try:
+            port = int(raw_port)
+        except ValueError:
+            logger.warning("Invalid port value %r in server config; using default %d", raw_port, DEFAULT_PORT)
+            port = DEFAULT_PORT
+    else:
         logger.warning("Invalid port value %r in server config; using default %d", raw_port, DEFAULT_PORT)
         port = DEFAULT_PORT
     if not (1 <= port <= 65535):
         logger.warning("Port %d out of range (1-65535) in server config; using default %d", port, DEFAULT_PORT)
         port = DEFAULT_PORT
 
-    # Coerce projects — must be dict of dicts
+    # Coerce projects — must be dict of dicts with string prefixes.
     raw_projects = data.get("projects", {})
     if not isinstance(raw_projects, dict):
         raw_projects = {}
-    projects: dict[str, ProjectEntry] = {
-        str(k): v  # type: ignore[misc]
-        for k, v in raw_projects.items()
-        if isinstance(v, dict)
-    }
+    projects: dict[str, ProjectEntry] = {}
+    for key, value in raw_projects.items():
+        if not isinstance(value, dict):
+            continue
+        prefix = value.get("prefix")
+        if not isinstance(prefix, str):
+            logger.warning("Invalid project prefix %r in server config; dropping project %r", prefix, key)
+            continue
+        projects[str(key)] = {"prefix": prefix}
 
     return ServerConfig(port=port, projects=projects)
 
@@ -283,6 +305,15 @@ def start_daemon(port: int | None = None) -> DaemonResult:
 
 def stop_daemon() -> DaemonResult:
     """Stop the filigree server daemon."""
+    SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = SERVER_CONFIG_DIR / "server.lock"
+    with open(lock_path, "w") as lock_fd:
+        portalocker.lock(lock_fd, portalocker.LOCK_EX)
+        return _stop_daemon_locked()
+
+
+def _stop_daemon_locked() -> DaemonResult:
+    """Stop daemon while caller holds ``server.lock``."""
     info = read_pid_file(SERVER_PID_FILE)
     if info is None:
         return DaemonResult(False, "No PID file found — daemon may not be running")
@@ -409,6 +440,9 @@ def release_daemon_pid_if_owned(pid: int) -> None:
         tmp = SERVER_PID_FILE.with_suffix(".pid.removing")
         SERVER_PID_FILE.rename(tmp)
     except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Could not prepare PID file for release; leaving it in place", exc_info=True)
         return
     info = read_pid_file(tmp)
     if info is not None and info["pid"] == pid:

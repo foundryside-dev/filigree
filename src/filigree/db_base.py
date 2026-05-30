@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import sqlite3
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
 
 from filigree.models import FileRecord, Issue
-from filigree.types.core import AssocType, ISOTimestamp, ScanRunStatus, StatusCategory
+from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRunStatus, StatusCategory
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
+    from filigree.registry import RegistryProtocol
     from filigree.templates import TemplateRegistry, TransitionOption
     from filigree.types.api import BatchFailure
     from filigree.types.core import ObservationDict, ObservationLinkDict, ScanFindingDict
@@ -21,6 +26,7 @@ if TYPE_CHECKING:
     from filigree.types.planning import CommentRecord
 
 logger = logging.getLogger(__name__)
+_SQLITE_TRANSIENT_LOCK_CODES = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 # Shared internal API — used by DB mixins across modules.
 __all__ = [
@@ -30,10 +36,15 @@ __all__ = [
     "_begin_immediate",
     "_escape_like",
     "_escape_like_chars",
+    "_in_immediate_tx",
     "_normalize_iso_to_utc",
     "_now_iso",
+    "_retry_busy",
     "_safe_json_loads",
 ]
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 # Virtual label dispatch — explicit allowlist, no prefix matching
 AGE_BUCKETS: dict[str, tuple[int, int]] = {
@@ -54,6 +65,118 @@ def _begin_immediate(conn: sqlite3.Connection, operation: str) -> None:
     if conn.in_transaction:
         raise RuntimeError(f"{operation}: nested transaction not supported; commit or roll back the active transaction first")
     conn.execute("BEGIN IMMEDIATE")
+
+
+def _in_immediate_tx(operation: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Wrap a public write method in BEGIN IMMEDIATE + commit/rollback lifecycle.
+
+    The decorator consumes a ``_skip_begin=False`` kwarg from the caller — it
+    is NOT forwarded to the wrapped function. When ``_skip_begin=True``, the
+    decorator is a pass-through: no BEGIN, no COMMIT, no ROLLBACK. Use this
+    when the wrapped method is invoked inside an outer caller's transaction
+    (e.g. ``start_work`` → ``claim_issue``); the outer owner remains
+    responsible for tx lifecycle.
+
+    Catches ``Exception`` (not ``BaseException``) so SystemExit /
+    KeyboardInterrupt propagate without an interposed rollback round-trip
+    (filigree-2.1.0 §2.1).
+    """
+
+    def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(fn)
+        def wrapper(self: Any, *args: Any, _skip_begin: bool = False, **kwargs: Any) -> _R:
+            if _skip_begin:
+                return fn(self, *args, **kwargs)
+            _begin_immediate(self.conn, operation)
+            try:
+                result = fn(self, *args, **kwargs)
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            return result
+
+        # Expose ``_skip_begin`` in the wrapper's introspectable signature so
+        # ``inspect.signature`` (which follows ``__wrapped__`` by default) and
+        # the mixin-contract test see the kwarg the wrapper actually accepts.
+        wrapper.__signature__ = _augment_signature_with_skip_begin(fn)  # type: ignore[attr-defined]
+        return cast("Callable[_P, _R]", wrapper)
+
+    return decorate
+
+
+def _augment_signature_with_skip_begin(fn: Callable[..., Any]) -> inspect.Signature:
+    """Return ``fn``'s signature with ``_skip_begin: bool = False`` appended.
+
+    No-op if the parameter is already present.
+    """
+    sig = inspect.signature(fn)
+    if "_skip_begin" in sig.parameters:
+        return sig
+    params = list(sig.parameters.values())
+    params.append(
+        inspect.Parameter(
+            "_skip_begin",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=False,
+            annotation=bool,
+        )
+    )
+    return sig.replace(parameters=params)
+
+
+def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
+    """Return True for SQLITE_BUSY / SQLITE_LOCKED, including extended codes."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return False
+    return code in _SQLITE_TRANSIENT_LOCK_CODES or (code & 0xFF) in _SQLITE_TRANSIENT_LOCK_CODES
+
+
+def _retry_busy(
+    *,
+    attempts: int = 3,
+    base: float = 0.05,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Retry a wrapped op on transient ``SQLITE_BUSY`` / ``SQLITE_LOCKED``.
+
+    Catches ``sqlite3.OperationalError`` carrying a transient SQLite lock
+    error code, sleeps ``base * 2 ** attempt`` seconds, and retries up to
+    ``attempts`` times. Other ``OperationalError`` subclasses propagate.
+    After the budget is exhausted the original exception is re-raised so
+    call sites surface a real lock failure rather than a synthetic
+    RuntimeError.
+
+    Pass-through when ``_skip_begin=True``: the inner call is inside an
+    outer caller's open transaction, where retrying alone cannot recover
+    the lost lock — the BUSY error must propagate to the outer retry
+    decorator, which rolls back the whole composed op and retries from
+    scratch (filigree-2.1.0 §2.1).
+
+    The ``sleep`` parameter is injectable for tests that simulate
+    contention without burning wall time.
+    """
+
+    def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(fn)
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> _R:
+            if kwargs.get("_skip_begin"):
+                return fn(self, *args, **kwargs)
+            for attempt in range(attempts):
+                try:
+                    return fn(self, *args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if not _is_transient_sqlite_lock(exc):
+                        raise
+                    if attempt == attempts - 1:
+                        raise
+                    sleep(base * (2**attempt))
+            raise RuntimeError("unreachable")  # pragma: no cover
+
+        return cast("Callable[_P, _R]", wrapper)
+
+    return decorate
 
 
 def _normalize_iso_to_utc(raw: object) -> str | None:
@@ -153,6 +276,12 @@ class DBMixinProtocol(Protocol):
     # direct-path construction — consumers that need it must fall back.
     project_root: Path | None
     prefix: str
+    registry: RegistryProtocol
+    # ADR-014 — always populated by ``FiligreeDB.__init__`` (defaults to
+    # ``"local"`` / ``False``). Mixins read these directly without
+    # ``getattr(..., default)`` guards.
+    registry_backend: RegistryBackend
+    allow_local_fallback: bool
     _conn: sqlite3.Connection | None
     _template_registry: TemplateRegistry | None
     _enabled_packs_override: list[str] | None
@@ -172,7 +301,10 @@ class DBMixinProtocol(Protocol):
 
     def _validate_status(self, status: str, issue_type: str = "task") -> None: ...
     def _validate_parent_id(self, parent_id: str | None) -> None: ...
+    def _validate_field_values(self, issue_type: str, fields: dict[str, Any]) -> list[str]: ...
+    def _check_field_uniqueness(self, issue_type: str, fields: dict[str, Any], *, exclude_id: str | None = None) -> None: ...
     def _validate_label_name(self, label: str, *, allow_priority_like: bool = False) -> str: ...
+    def _would_create_cycle(self, issue_id: str, depends_on_id: str) -> bool: ...
     def _get_states_for_category(self, category: str) -> list[str]: ...
     def _get_type_states_for_category(self, category: str) -> list[tuple[str, str]]: ...
     def _category_predicate_sql(
@@ -223,6 +355,7 @@ class DBMixinProtocol(Protocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        _skip_begin: bool = False,
     ) -> Issue: ...
 
     def update_issue(
@@ -239,7 +372,9 @@ class DBMixinProtocol(Protocol):
         fields: dict[str, Any] | None = None,
         actor: str = "",
         expected_assignee: str | None = None,
-        _skip_transition_check: bool = False,
+        force_overwrite_corrupt: bool = False,
+        backward: bool = False,
+        _skip_begin: bool = False,
     ) -> Issue: ...
 
     def list_issues(
@@ -262,13 +397,35 @@ class DBMixinProtocol(Protocol):
     # -- MetaMixin -----------------------------------------------------------
 
     def add_label(
-        self, issue_id: str, label: str, *, actor: str = "", expected_assignee: str | None = None
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        actor: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str, list[str]]: ...
-    def remove_label(self, issue_id: str, label: str, *, actor: str = "", expected_assignee: str | None = None) -> tuple[bool, str]: ...
+    def remove_label(
+        self,
+        issue_id: str,
+        label: str,
+        *,
+        actor: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
+    ) -> tuple[bool, str]: ...
     def batch_remove_label(
         self, issue_ids: list[str], *, label: str, actor: str = "", expected_assignee: str | None = None
     ) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
-    def add_comment(self, issue_id: str, text: str, *, author: str = "", expected_assignee: str | None = None) -> int: ...
+    def add_comment(
+        self,
+        issue_id: str,
+        text: str,
+        *,
+        author: str = "",
+        expected_assignee: str | None = None,
+        _skip_begin: bool = False,
+    ) -> int: ...
     def get_comment(self, comment_id: int) -> CommentRecord: ...
 
     # -- PlanningMixin -------------------------------------------------------
@@ -289,6 +446,7 @@ class DBMixinProtocol(Protocol):
         file_type: str = "",
         metadata: dict[str, Any] | None = None,
         actor: str = "",
+        _commit: bool = True,
     ) -> FileRecord: ...
 
     def get_file(self, file_id: str) -> FileRecord: ...

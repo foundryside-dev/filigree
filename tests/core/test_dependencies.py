@@ -161,15 +161,15 @@ class TestInvalidDepValidation:
     def test_nonexistent_dep_raises_valueerror(self, db: FiligreeDB) -> None:
         """Creating an issue with deps referencing nonexistent IDs raises ValueError."""
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Bad deps", deps=["nonexistent-id"])
+            db.create_issue("Bad deps", deps=["test-missing"])
 
     def test_nonexistent_dep_not_integrity_error(self, db: FiligreeDB) -> None:
         """The error should be ValueError, not sqlite3.IntegrityError."""
         with pytest.raises(ValueError, match="Invalid dependency IDs"):
-            db.create_issue("Bad deps 2", deps=["ghost-abc123"])
+            db.create_issue("Bad deps 2", deps=["test-abc123"])
         # Explicitly ensure it's not an IntegrityError
         try:
-            db.create_issue("Bad deps 3", deps=["ghost-xyz789"])
+            db.create_issue("Bad deps 3", deps=["test-xyz789"])
         except ValueError:
             pass  # Expected
         except sqlite3.IntegrityError:
@@ -302,6 +302,17 @@ class TestDependencyEdgeCases:
         a = db.create_issue("A")
         b = db.create_issue("B")
         assert db.remove_dependency(a.id, b.id) is False
+
+    @pytest.mark.parametrize("missing_side", ["from", "to"])
+    def test_remove_dependency_missing_issue_raises_keyerror(self, db: FiligreeDB, missing_side: str) -> None:
+        """Missing issue IDs are not the same as a missing dependency edge."""
+        existing = db.create_issue("Existing")
+        missing_id = f"{db.prefix}-0000000000"
+        from_id = missing_id if missing_side == "from" else existing.id
+        to_id = existing.id if missing_side == "from" else missing_id
+
+        with pytest.raises(KeyError, match=missing_id):
+            db.remove_dependency(from_id, to_id)
 
     def test_remove_dependency_nonexistent_records_no_event(self, db: FiligreeDB) -> None:
         """Removing nonexistent dependency should not record an event."""

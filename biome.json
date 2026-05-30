@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.3/schema.json",
   "files": {
-    "includes": ["src/filigree/static/js/**/*.js"]
+    "includes": ["src/filigree/static/js/**/*.js", "!src/filigree/static/js/vendor/**"]
   },
   "javascript": {
     "globals": ["cytoscape", "dagre"]
@@ -15,7 +15,12 @@
         "noUnusedVariables": "warn"
       },
       "style": {
+        "useTemplate": "off",
         "useConst": "warn"
+      },
+      "suspicious": {
+        "noPrototypeBuiltins": "warn",
+        "useIterableCallbackReturn": "warn"
       }
     }
   },

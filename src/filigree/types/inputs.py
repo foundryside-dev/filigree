@@ -21,7 +21,16 @@ Safety note on cast():
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from filigree.types.core import AssocType, FindingStatus, ISOTimestamp, Severity, StatusCategory
+from filigree.types.core import (
+    AssocType,
+    ClarionEntityId,
+    ContentHash,
+    FindingStatus,
+    ISOTimestamp,
+    IssueId,
+    Severity,
+    StatusCategory,
+)
 
 # ---------------------------------------------------------------------------
 # issues.py handlers
@@ -76,6 +85,7 @@ class UpdateIssueArgs(TypedDict):
     notes: NotRequired[str]
     parent_issue_id: NotRequired[str]
     fields: NotRequired[dict[str, Any]]
+    force_overwrite_corrupt: NotRequired[bool]
     actor: NotRequired[str]
     expected_assignee: NotRequired[str]
 
@@ -88,6 +98,12 @@ class CloseIssueArgs(TypedDict):
     fields: NotRequired[dict[str, Any]]
     expected_assignee: NotRequired[str]
     force: NotRequired[bool]
+
+
+class DeleteIssueArgs(TypedDict):
+    issue_id: str
+    force: NotRequired[bool]
+    actor: NotRequired[str]
 
 
 class ReopenIssueArgs(TypedDict):
@@ -162,6 +178,7 @@ class StartWorkArgs(TypedDict):
     assignee: str
     target_status: NotRequired[str]
     actor: NotRequired[str]
+    advance: NotRequired[bool]
 
 
 class StartNextWorkArgs(TypedDict):
@@ -171,6 +188,7 @@ class StartNextWorkArgs(TypedDict):
     priority_max: NotRequired[int]
     target_status: NotRequired[str]
     actor: NotRequired[str]
+    advance: NotRequired[bool]
 
 
 class BatchCloseArgs(TypedDict):
@@ -459,6 +477,7 @@ class StepInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
     deps: NotRequired[list[int | str]]
 
@@ -467,6 +486,7 @@ class PhaseInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
     steps: NotRequired[list[StepInput]]
 
@@ -475,6 +495,7 @@ class MilestoneInput(TypedDict):
     title: str
     priority: NotRequired[int]
     description: NotRequired[str]
+    fields: NotRequired[dict[str, Any]]
     labels: NotRequired[list[str]]
 
 
@@ -615,23 +636,24 @@ class RegisterFileArgs(TypedDict):
 
 
 class AddEntityAssociationArgs(TypedDict):
-    issue_id: str
-    entity_id: str
-    content_hash: str
+    issue_id: IssueId
+    entity_id: ClarionEntityId
+    content_hash: ContentHash
     actor: NotRequired[str]
 
 
 class RemoveEntityAssociationArgs(TypedDict):
-    issue_id: str
-    entity_id: str
+    issue_id: IssueId
+    entity_id: ClarionEntityId
+    actor: NotRequired[str]
 
 
 class ListEntityAssociationsArgs(TypedDict):
-    issue_id: str
+    issue_id: IssueId
 
 
 class ListAssociationsByEntityArgs(TypedDict):
-    entity_id: str
+    entity_id: ClarionEntityId
 
 
 class TriggerScanArgs(TypedDict):
@@ -831,6 +853,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "create_issue": CreateIssueArgs,
     "update_issue": UpdateIssueArgs,
     "close_issue": CloseIssueArgs,
+    "delete_issue": DeleteIssueArgs,
     "reopen_issue": ReopenIssueArgs,
     "search_issues": SearchIssuesArgs,
     "claim_issue": ClaimIssueArgs,

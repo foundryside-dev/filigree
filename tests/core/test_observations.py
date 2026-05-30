@@ -11,11 +11,49 @@ import pytest
 
 from filigree.core import FiligreeDB
 from filigree.db_base import _now_iso
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 
 from .._db_factory import make_db
+from .._fakes.registry import FixedRegistry
+
+
+class _CanonicalThenUnavailableRegistry:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+        self.calls += 1
+        if self.calls > 1:
+            raise RegistryUnavailableError("registry down", path=path, cause_kind="network")
+        return {
+            "file_id": "clarion:file:canonical",
+            "content_hash": "hash:canonical",
+            "canonical_path": "src/canonical.py",
+            "language": language,
+            "registry_backend": "clarion",
+        }
+
+    def is_displaced(self) -> bool:
+        return True
 
 
 class TestCreateObservation:
+    def test_create_observation_file_path_uses_registry_resolved_file_id(self, tmp_path: Path) -> None:
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry=FixedRegistry(file_id="core:file:obs123@src/observed.py"),
+        )
+        try:
+            db.initialize()
+
+            obs = db.create_observation("file-level bug", file_path="src/observed.py")
+
+            assert obs["file_id"] == "core:file:obs123@src/observed.py"
+            assert db.get_file("core:file:obs123@src/observed.py").path == "src/observed.py"
+        finally:
+            db.close()
+
     def test_create_minimal(self, db: FiligreeDB) -> None:
         obs = db.create_observation("Something looks wrong here")
         assert obs["id"].startswith("test-")
@@ -43,6 +81,15 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="summary"):
             db.create_observation("")
 
+    def test_create_non_string_summary_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="summary must be a string"):
+            db.create_observation(123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["detail", "source_issue_id", "source_finding_id", "actor"])
+    def test_create_non_string_text_fields_raise(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.create_observation("bad text field", **{field: 123})  # type: ignore[arg-type]
+
     def test_create_with_source_issue_id(self, db: FiligreeDB) -> None:
         obs = db.create_observation("odd behavior", source_issue_id="test-abc123")
         assert obs["source_issue_id"] == "test-abc123"
@@ -60,6 +107,25 @@ class TestCreateObservation:
         result2 = db.create_observation("file-level bug", file_path="src/foo.py")
         assert db.observation_count() == 1
         assert result2["id"] == result1["id"]
+
+    def test_live_duplicate_returns_before_registry_refresh(self, tmp_path: Path) -> None:
+        registry = _CanonicalThenUnavailableRegistry()
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry=registry,
+            registry_backend="clarion",
+        )
+        try:
+            db.initialize()
+            result1 = db.create_observation("file-level bug", file_path="src/foo.py")
+
+            result2 = db.create_observation("file-level bug", file_path="src/foo.py")
+
+            assert result2["id"] == result1["id"]
+            assert registry.calls == 1
+        finally:
+            db.close()
 
     def test_create_duplicate_replaces_expired(self, db: FiligreeDB) -> None:
         """An expired duplicate is swept and replaced with a fresh observation."""
@@ -184,9 +250,22 @@ class TestCreateObservation:
         with pytest.raises(ValueError, match="priority"):
             db.create_observation("bad priority", priority=-1)
 
+    @pytest.mark.parametrize("priority", [True, "high"])
+    def test_create_non_integer_priority_raises(self, db: FiligreeDB, priority: object) -> None:
+        with pytest.raises(ValueError, match="priority must be an integer"):
+            db.create_observation("bad priority", priority=priority)  # type: ignore[arg-type]
+
     def test_create_negative_line_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="line"):
             db.create_observation("bad line", line=-1)
+
+    def test_create_bool_line_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="line must be an integer"):
+            db.create_observation("bad line", line=True)  # type: ignore[arg-type]
+
+    def test_create_huge_line_raises_before_sqlite_binding(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="line must be <="):
+            db.create_observation("line overflow", line=9_223_372_036_854_775_808)
 
     def test_create_whitespace_only_summary_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="summary"):
@@ -201,6 +280,24 @@ class TestCreateObservation:
         assert obs["file_id"] is not None
         f = db.get_file(obs["file_id"])
         assert f.path == "src/main.py"
+
+    def test_create_observation_rejects_non_string_file_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.create_observation("bad path", file_path=123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("file_path", [0, False, None], ids=["zero", "false", "none"])
+    def test_create_observation_rejects_falsey_non_string_file_path(self, db: FiligreeDB, file_path: object) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.create_observation("bad falsey path", file_path=file_path)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("auto_commit", [True, False])
+    def test_create_observation_rejects_non_project_relative_file_path(self, db: FiligreeDB, auto_commit: bool) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.create_observation("bad path", file_path="../outside.py", auto_commit=auto_commit)
+
+    def test_create_observation_rejects_absolute_file_path(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="project-relative"):
+            db.create_observation("rooted path", file_path="/etc/passwd")
 
     def test_create_observation_insert_failure_removes_newly_created_file_record(self, db: FiligreeDB) -> None:
         """filigree-8b285ec210: orphaned file_record must not linger when obs insert fails."""
@@ -270,6 +367,11 @@ class TestListObservations:
             db.create_observation(f"Obs {i}")
         assert len(db.list_observations(limit=2)) == 2
 
+    @pytest.mark.parametrize("limit", [0, -1, True], ids=["zero", "negative", "bool"])
+    def test_list_invalid_limit_raises(self, db: FiligreeDB, limit: object) -> None:
+        with pytest.raises(ValueError, match="limit"):
+            db.list_observations(limit=limit)  # type: ignore[arg-type]
+
     def test_list_with_offset(self, db: FiligreeDB) -> None:
         for i in range(5):
             db.create_observation(f"Obs {i}", priority=i % 5)
@@ -290,6 +392,11 @@ class TestListObservations:
     def test_list_offset_beyond_results(self, db: FiligreeDB) -> None:
         db.create_observation("Only one")
         assert db.list_observations(offset=10) == []
+
+    @pytest.mark.parametrize("offset", [-1, True], ids=["negative", "bool"])
+    def test_list_invalid_offset_raises(self, db: FiligreeDB, offset: object) -> None:
+        with pytest.raises(ValueError, match="offset"):
+            db.list_observations(offset=offset)  # type: ignore[arg-type]
 
     def test_list_filter_by_file_path(self, db: FiligreeDB) -> None:
         db.create_observation("api bug", file_path="src/api/routes.py")
@@ -350,6 +457,10 @@ class TestListObservations:
         assert len(result) == 1
         assert result[0]["summary"] == "p2"
 
+    def test_list_inverted_priority_range_raises(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="priority_min"):
+            db.list_observations(priority_min=3, priority_max=1)
+
     def test_list_filter_older_than_hours(self, db: FiligreeDB) -> None:
         old = db.create_observation("ancient")
         db.create_observation("fresh")
@@ -394,6 +505,29 @@ class TestListObservations:
         result = db.list_observations(actor="alpha", priority_max=1)
         assert len(result) == 1
         assert result[0]["summary"] == "alpha-p1"
+
+    def test_list_rejects_non_string_file_path_filter(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="file_path must be a string"):
+            db.list_observations(file_path=123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["file_id", "actor", "source_issue_id", "sort_by", "direction"])
+    def test_list_rejects_non_string_text_filters(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: 123})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["sort_by", "direction"])
+    def test_list_rejects_unhashable_sort_options(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: ["created_at"]})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["priority_min", "priority_max", "older_than_hours"])
+    def test_list_rejects_bool_numeric_filters(self, db: FiligreeDB, field: str) -> None:
+        with pytest.raises(ValueError, match=field):
+            db.list_observations(**{field: True})  # type: ignore[arg-type]
+
+    def test_list_rejects_older_than_hours_overflow(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="older_than_hours"):
+            db.list_observations(older_than_hours=10**100)
 
     def test_list_sweeps_expired(self, db: FiligreeDB) -> None:
         """Expired observations are auto-removed on list and logged to audit trail."""
@@ -483,8 +617,49 @@ class TestSweepExceptionSuppression:
         # Stats count must match the visible rows (not include the expired row)
         assert stats["count"] == 1
 
-    def test_sweep_suppresses_integrity_error(self, db: FiligreeDB) -> None:
-        """IntegrityError during sweep is suppressed — sweep is best-effort for all sqlite3.Error."""
+    def test_repeated_sweep_failures_are_visible_in_stats(self, db: FiligreeDB) -> None:
+        db.create_observation("survives repeated sweep failure")
+        real_conn = db._conn
+
+        def _fail_on_sweep_delete(real: Any, sql: str, params: Any = ()) -> Any:
+            if "DELETE FROM observations WHERE expires_at" in sql:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real.execute(sql, params)
+
+        db._conn = _InterceptingConn(real_conn, _fail_on_sweep_delete)  # type: ignore[assignment]
+        try:
+            db.list_observations()
+            db.list_observations()
+        finally:
+            db._conn = real_conn
+
+        stats = db.observation_stats(sweep=False)
+        assert stats["sweep_consecutive_failures"] == 2
+        assert stats["last_successful_sweep_at"] is None
+
+    def test_successful_sweep_resets_failure_count(self, db: FiligreeDB) -> None:
+        db.create_observation("survives transient sweep failure")
+        real_conn = db._conn
+
+        def _fail_on_sweep_delete(real: Any, sql: str, params: Any = ()) -> Any:
+            if "DELETE FROM observations WHERE expires_at" in sql:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real.execute(sql, params)
+
+        db._conn = _InterceptingConn(real_conn, _fail_on_sweep_delete)  # type: ignore[assignment]
+        try:
+            db.list_observations()
+        finally:
+            db._conn = real_conn
+
+        db.list_observations()
+
+        stats = db.observation_stats(sweep=False)
+        assert stats["sweep_consecutive_failures"] == 0
+        assert stats["last_successful_sweep_at"] is not None
+
+    def test_sweep_propagates_integrity_error(self, db: FiligreeDB) -> None:
+        """IntegrityError during sweep indicates a real invariant violation, not a transient lock."""
         import sqlite3
 
         db.create_observation("will survive sweep failure")
@@ -498,8 +673,8 @@ class TestSweepExceptionSuppression:
 
         db._conn = _InterceptingConn(real_conn, _fail_with_integrity)  # type: ignore[assignment]
         try:
-            result = db.list_observations()
-            assert len(result) == 1
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                db.list_observations()
         finally:
             db._conn = real_conn
 
@@ -582,6 +757,12 @@ class TestDismissObservation:
         with pytest.raises(ValueError, match="not found"):
             db.dismiss_observation("nope-123")
 
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_dismiss_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("To dismiss")
+        with pytest.raises(ValueError, match=field):
+            db.dismiss_observation(obs["id"], **{field: 123})  # type: ignore[arg-type]
+
     def test_batch_dismiss(self, db: FiligreeDB) -> None:
         o1 = db.create_observation("One")
         o2 = db.create_observation("Two")
@@ -599,6 +780,20 @@ class TestDismissObservation:
     def test_batch_dismiss_empty_list(self, db: FiligreeDB) -> None:
         result = db.batch_dismiss_observations([])
         assert result == {"dismissed": 0, "not_found": []}
+
+    def test_batch_dismiss_rejects_non_list_ids(self, db: FiligreeDB) -> None:
+        with pytest.raises(TypeError, match="obs_ids must be a list of strings"):
+            db.batch_dismiss_observations("obs-123")  # type: ignore[arg-type]
+
+    def test_batch_dismiss_rejects_non_string_id_items(self, db: FiligreeDB) -> None:
+        with pytest.raises(TypeError, match="obs_ids must be a list of strings"):
+            db.batch_dismiss_observations(["obs-123", 123])  # type: ignore[list-item]
+
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_batch_dismiss_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("To dismiss")
+        with pytest.raises(ValueError, match=field):
+            db.batch_dismiss_observations([obs["id"]], **{field: 123})  # type: ignore[arg-type]
 
     def test_batch_dismiss_duplicate_ids(self, db: FiligreeDB) -> None:
         o1 = db.create_observation("Only one")
@@ -656,6 +851,22 @@ class TestPromoteObservation:
         assert "from-observation" in labels
         assert "cluster:mcp-review-e" in labels
         assert "review:needed" in labels
+
+    @pytest.mark.parametrize("field", ["title", "extra_description", "actor"])
+    def test_promote_rejects_non_string_text_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("bad promote input")
+        with pytest.raises(ValueError, match=field):
+            db.promote_observation(obs["id"], **{field: 123})  # type: ignore[arg-type]
+
+    def test_promote_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observation(obs["id"], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_promote_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observation(obs["id"], labels=["cluster:test", 123])  # type: ignore[list-item]
 
     def test_promote_with_file_creates_association(self, db: FiligreeDB) -> None:
         obs = db.create_observation("bug", file_path="src/core.py")
@@ -847,6 +1058,36 @@ class TestPromoteObservation:
         result3 = db.promote_observation(obs["id"])
         assert result3["issue"].id == first_issue.id
 
+    def test_promote_idempotent_retry_records_missing_audit_trail(self, db: FiligreeDB) -> None:
+        """If first cleanup and audit both fail, retry must preserve the dismissal audit trail."""
+        obs = db.create_observation("audit retry after cleanup failure")
+        real_conn = db._conn
+
+        def _fail_cleanup_and_audit(real: Any, sql: str, params: Any = ()) -> Any:
+            if "DELETE FROM observations WHERE id" in sql and "expires_at" not in sql:
+                raise sqlite3.OperationalError("delete failed")
+            if "INSERT INTO dismissed_observations" in sql:
+                raise sqlite3.OperationalError("audit failed")
+            return real.execute(sql, params)
+
+        db._conn = _InterceptingConn(real_conn, _fail_cleanup_and_audit)  # type: ignore[assignment]
+        try:
+            first = db.promote_observation(obs["id"])
+        finally:
+            db._conn = real_conn
+
+        assert "warnings" in first
+        assert db.observation_count() == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM dismissed_observations WHERE obs_id = ?", (obs["id"],)).fetchone()[0] == 0
+
+        retry = db.promote_observation(obs["id"])
+
+        assert retry["issue"].id == first["issue"].id
+        assert db.observation_count() == 0
+        audit = db.conn.execute("SELECT reason FROM dismissed_observations WHERE obs_id = ?", (obs["id"],)).fetchone()
+        assert audit is not None
+        assert audit["reason"] == "promoted"
+
     def test_promote_warns_when_observation_already_swept(self, db: FiligreeDB) -> None:
         """If a concurrent sweep deletes the observation between SELECT and DELETE,
         promote succeeds but returns a warning about the race."""
@@ -910,6 +1151,31 @@ class TestPromoteObservation:
         assert audit is not None
         assert audit["reason"] == f"linked:duplicate:{issue.id}: covered by existing issue"
 
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_link_observation_rejects_non_string_audit_fields(self, db: FiligreeDB, field: str) -> None:
+        issue = db.create_issue("Existing tracked work")
+        obs = db.create_observation("Attach me")
+
+        with pytest.raises(ValueError, match=field):
+            db.link_observation_to_issue(obs["id"], issue.id, **{field: 123})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", ["obs_id", "issue_id", "disposition"])
+    def test_link_observation_rejects_non_string_identifiers(self, db: FiligreeDB, field: str) -> None:
+        issue = db.create_issue("Existing tracked work")
+        obs = db.create_observation("Attach me")
+        obs_id: object = obs["id"]
+        issue_id: object = issue.id
+        kwargs: dict[str, object] = {}
+        if field == "obs_id":
+            obs_id = ["obs-id"]
+        elif field == "issue_id":
+            issue_id = ["issue-id"]
+        else:
+            kwargs["disposition"] = ["evidence"]
+
+        with pytest.raises(ValueError, match=field):
+            db.link_observation_to_issue(obs_id, issue_id, **kwargs)  # type: ignore[arg-type]
+
     def test_batch_link_observations_reports_per_item_failures(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Existing tracked work")
         obs = db.create_observation("Attach me")
@@ -948,6 +1214,55 @@ class TestPromoteObservation:
         assert db.list_observations() == []
         linked = db.conn.execute("SELECT obs_id FROM observation_links WHERE issue_id = ? ORDER BY id", (issue.id,)).fetchall()
         assert [row["obs_id"] for row in linked] == [obs1["id"], obs2["id"]]
+
+    def test_promote_many_cleanup_failure_prevents_duplicate_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        obs1 = db.create_observation("First retry signal", detail="one", priority=3)
+        obs2 = db.create_observation("Second retry signal", detail="two", priority=1)
+        real_link = db.link_observation_to_issue
+
+        def fail_link_cleanup(*args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        issues_before = db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        monkeypatch.setattr(db, "link_observation_to_issue", fail_link_cleanup)
+        result1 = db.promote_observations_to_issue(
+            [obs1["id"], obs2["id"]],
+            title="Merged retry issue",
+            actor="triager",
+        )
+        first_issue = result1["issue"]
+        assert "warnings" in result1
+        assert db.observation_count() == 2
+        assert db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == issues_before + 1
+
+        monkeypatch.setattr(db, "link_observation_to_issue", real_link)
+        result2 = db.promote_observations_to_issue(
+            [obs1["id"], obs2["id"]],
+            title="Merged retry issue",
+            actor="triager",
+        )
+
+        assert result2["issue"].id == first_issue.id
+        assert db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == issues_before + 1
+        assert db.observation_count() == 0
+        assert "warnings" in result2
+        assert any("already promoted" in warning for warning in result2["warnings"])
+
+    @pytest.mark.parametrize("field", ["title", "extra_description", "actor"])
+    def test_promote_many_rejects_non_string_text_fields(self, db: FiligreeDB, field: str) -> None:
+        obs = db.create_observation("bad promote input")
+        with pytest.raises(ValueError, match=field):
+            db.promote_observations_to_issue([obs["id"]], **{field: 123})  # type: ignore[arg-type]
+
+    def test_promote_many_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observations_to_issue([obs["id"]], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_promote_many_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        obs = db.create_observation("bad promote labels")
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_observations_to_issue([obs["id"]], labels=["cluster:test", 123])  # type: ignore[list-item]
 
     def test_promote_expired_observation_raises(self, db: FiligreeDB) -> None:
         """Promoting an expired observation should fail, not create a stale issue."""
@@ -1450,15 +1765,18 @@ def _run_one_create_race(db_path: Path, n_threads: int) -> tuple[list[str], list
     barrier = threading.Barrier(n_threads)
 
     def worker() -> None:
+        d: FiligreeDB | None = None
         try:
             d = FiligreeDB(db_path, prefix="test")
             d.initialize()
             barrier.wait(timeout=5)
             obs = d.create_observation("dedup-race")
             ids.append(obs["id"])
-            d.close()
         except Exception as e:
             errors.append(e)
+        finally:
+            if d is not None:
+                d.close()
 
     threads = [threading.Thread(target=worker) for _ in range(n_threads)]
     for t in threads:
@@ -1487,18 +1805,21 @@ def _run_one_dismiss_race(db_path: Path, n_threads: int) -> tuple[str, list[str]
     barrier = threading.Barrier(n_threads)
 
     def worker(name: str) -> None:
+        d: FiligreeDB | None = None
         try:
             d = FiligreeDB(db_path, prefix="test")
             d.initialize()
             barrier.wait(timeout=5)
             d.dismiss_observation(obs_id, actor=name)
             successes.append(name)
-            d.close()
         except ValueError:
             # Expected: races that lose see "Observation not found".
             pass
         except Exception as e:
             errors.append(e)
+        finally:
+            if d is not None:
+                d.close()
 
     threads = [threading.Thread(target=worker, args=(f"t{i}",)) for i in range(n_threads)]
     for t in threads:

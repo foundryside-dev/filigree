@@ -71,6 +71,80 @@ class TestDataclasses:
         assert tpl.type == "task"
         assert tpl.initial_state == "open"
 
+    def test_template_backward_edge_declaration_validates(self) -> None:
+        """reverse_transitions are validated but not suggested as normal next steps."""
+        raw = {
+            "type": "demo",
+            "display_name": "Demo",
+            "description": "A demo workflow",
+            "pack": "custom",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "in_progress", "category": "wip"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [
+                {"from": "open", "to": "in_progress", "enforcement": "soft"},
+                {"from": "in_progress", "to": "closed", "enforcement": "soft"},
+            ],
+            "reverse_transitions": [
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+                {"from": "in_progress", "to": "open", "enforcement": "hard", "requires_fields": ["reason"]},
+            ],
+            "fields_schema": [
+                {"name": "reason", "type": "text"},
+            ],
+        }
+
+        tpl = TemplateRegistry.parse_type_template(raw)
+        assert TemplateRegistry.validate_type_template(tpl) == []
+        assert tpl.reverse_transitions == (
+            TransitionDefinition("closed", "open", "soft"),
+            TransitionDefinition("in_progress", "open", "hard", requires_fields=("reason",)),
+        )
+
+        registry = TemplateRegistry()
+        registry._register_type(tpl)
+
+        result = registry.validate_transition("demo", "closed", "open", {}, backward=True)
+        assert result.allowed is True
+        assert result.enforcement == "soft"
+        assert registry.get_valid_transitions("demo", "closed", {}) == []
+
+        gated = registry.validate_transition("demo", "in_progress", "open", {}, backward=True)
+        assert gated.allowed is False
+        assert gated.missing_fields == ("reason",)
+
+    def test_template_rejects_duplicate_reverse_edges(self) -> None:
+        raw = {
+            "type": "demo",
+            "display_name": "Demo",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [
+                {"from": "open", "to": "closed", "enforcement": "soft"},
+            ],
+            "reverse_transitions": [
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+                {"from": "closed", "to": "open", "enforcement": "soft"},
+            ],
+            "fields_schema": [],
+        }
+
+        with pytest.raises(ValueError, match="duplicate reverse_transition 'closed' -> 'open'"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_built_in_templates_validate_with_reverse_transitions(self) -> None:
+        for pack in BUILT_IN_PACKS.values():
+            for raw in pack["types"].values():
+                tpl = TemplateRegistry.parse_type_template(raw)
+                assert TemplateRegistry.validate_type_template(tpl) == []
+                assert tpl.reverse_transitions, f"{tpl.type} must declare workflow escape edges"
+
     def test_transition_result(self) -> None:
         tr = TransitionResult(allowed=True, enforcement="soft", missing_fields=(), warnings=("Watch out",))
         assert tr.allowed is True
@@ -399,6 +473,24 @@ class TestTemplateRegistry:
         errors = TemplateRegistry.validate_type_template(tpl)
         assert any("ghost_field" in e for e in errors)
 
+    def test_validate_type_template_duplicate_field_names(self) -> None:
+        tpl = TypeTemplate(
+            type="bad",
+            display_name="Bad",
+            description="Bad",
+            pack="test",
+            states=(StateDefinition("open", "open"), StateDefinition("closed", "done")),
+            initial_state="open",
+            transitions=(TransitionDefinition("open", "closed", "soft", requires_fields=("details",)),),
+            fields_schema=(
+                FieldSchema("details", "text"),
+                FieldSchema("details", "text"),
+            ),
+        )
+
+        errors = TemplateRegistry.validate_type_template(tpl)
+        assert any("duplicate field name 'details'" in e for e in errors)
+
 
 class TestStateCategoryValidation:
     """Bug fix: filigree-fe2078 — invalid categories silently accepted."""
@@ -528,6 +620,38 @@ class TestEnabledPacksValidation:
         reg.load(filigree_dir, enabled_packs="core")  # type: ignore[arg-type]
         # Should load core pack, not ['c','o','r','e']
         assert reg.get_type("task") is not None
+
+    def test_installed_pack_root_array_is_skipped(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Installed pack files must have object roots; malformed roots are skipped."""
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "bad"]}))
+        (packs_dir / "bad.json").write_text(json.dumps([]))
+
+        reg = TemplateRegistry()
+        caplog.set_level(logging.WARNING)
+        reg.load(filigree_dir)
+
+        assert reg.get_type("task") is not None
+        assert reg.get_pack("bad") is None
+        assert any("Skipping invalid pack file bad.json" in record.message for record in caplog.records)
+
+    def test_installed_pack_types_array_is_skipped(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Installed pack types must be a mapping; malformed packs are skipped."""
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "bad"]}))
+        (packs_dir / "bad.json").write_text(json.dumps({"pack": "bad", "types": []}))
+
+        reg = TemplateRegistry()
+        caplog.set_level(logging.WARNING)
+        reg.load(filigree_dir)
+
+        assert reg.get_type("task") is not None
+        assert reg.get_pack("bad") is None
+        assert any("Skipping invalid pack file bad.json" in record.message for record in caplog.records)
 
 
 class TestParseTemplateMalformedTransitionsFields:
@@ -1349,6 +1473,10 @@ class TestTemplateLoading:
         assert task is not None
         assert task.display_name == "Custom Task"
         assert task.initial_state == "todo"
+        core_pack = reg.get_pack("core")
+        assert core_pack is not None
+        assert core_pack.types["task"].display_name == "Custom Task"
+        assert core_pack.types["task"].initial_state == "todo"
 
     def test_load_skips_invalid_json(self, filigree_dir: Path) -> None:
         """Invalid JSON files in templates/ should be skipped, not crash."""
@@ -1649,6 +1777,22 @@ class TestTemplateEnforcementValidation:
 
 
 class TestTemplateMalformedShape:
+    def _base_template(self, **overrides: Any) -> dict[str, Any]:
+        raw: dict[str, Any] = {
+            "type": "badshape",
+            "display_name": "Bad",
+            "description": "Bad shape",
+            "states": [
+                {"name": "open", "category": "open"},
+                {"name": "closed", "category": "done"},
+            ],
+            "initial_state": "open",
+            "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+            "fields_schema": [],
+        }
+        raw.update(overrides)
+        return raw
+
     def test_states_none_raises_value_error(self) -> None:
         """Template with states=None should raise ValueError, not TypeError."""
         raw: dict[str, Any] = {
@@ -1703,6 +1847,70 @@ class TestTemplateMalformedShape:
             "fields_schema": [],
         }
         with pytest.raises(ValueError, match="must be a dict with 'name' and 'category'"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_non_string_type_raises_value_error(self) -> None:
+        raw = self._base_template(type=123)
+
+        with pytest.raises(ValueError, match="'type' must be a string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_non_string_state_name_raises_value_error(self) -> None:
+        raw = self._base_template(states=[{"name": None, "category": "open"}])
+
+        with pytest.raises(ValueError, match=r"state at index 0.*name.*string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_transition_missing_required_key_raises_value_error(self) -> None:
+        raw = self._base_template(transitions=[{"to": "closed", "enforcement": "soft"}])
+
+        with pytest.raises(ValueError, match=r"transition at index 0.*from"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_missing_required_key_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"type": "text"}])
+
+        with pytest.raises(ValueError, match=r"field at index 0.*name"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_transition_requires_fields_string_raises_value_error(self) -> None:
+        raw = self._base_template(
+            transitions=[
+                {"from": "open", "to": "closed", "enforcement": "soft", "requires_fields": "fix_verification"},
+            ],
+        )
+
+        with pytest.raises(ValueError, match=r"requires_fields.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_options_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "severity", "type": "enum", "options": "major"}])
+
+        with pytest.raises(ValueError, match=r"options.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_required_at_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "severity", "type": "text", "required_at": "closed"}])
+
+        with pytest.raises(ValueError, match=r"required_at.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_field_pattern_non_string_raises_value_error(self) -> None:
+        raw = self._base_template(fields_schema=[{"name": "code", "type": "text", "pattern": 123}])
+
+        with pytest.raises(ValueError, match=r"pattern.*string"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_suggested_children_string_raises_value_error(self) -> None:
+        raw = self._base_template(suggested_children="task")
+
+        with pytest.raises(ValueError, match=r"suggested_children.*list of strings"):
+            TemplateRegistry.parse_type_template(raw)
+
+    def test_suggested_labels_string_raises_value_error(self) -> None:
+        raw = self._base_template(suggested_labels="bug")
+
+        with pytest.raises(ValueError, match=r"suggested_labels.*list of strings"):
             TemplateRegistry.parse_type_template(raw)
 
     def test_malformed_template_in_pack_loading_does_not_crash(self, tmp_path: object) -> None:
@@ -1884,6 +2092,12 @@ class TestGetTemplateEnriched:
         assert tpl is not None
         assert "transitions" in tpl
         assert any(t["from"] == "triage" and t["to"] == "confirmed" for t in tpl["transitions"])
+
+    def test_get_template_includes_reverse_transitions(self, db: FiligreeDB) -> None:
+        tpl = db.get_template("bug")
+        assert tpl is not None
+        assert "reverse_transitions" in tpl
+        assert any(t["from"] == "wont_fix" and t["to"] == "triage" for t in tpl["reverse_transitions"])
 
     def test_get_template_includes_initial_state(self, db: FiligreeDB) -> None:
         tpl = db.get_template("bug")
@@ -2098,6 +2312,68 @@ class TestLoadPackDataAtomicity:
         for type_name, tpl in reg._types.items():
             if tpl.pack == "testpack":
                 assert type_name in registered_pack.types, f"Registry has {type_name} from testpack but pack.types doesn't"
+
+    def test_invalid_pack_metadata_does_not_leak_types(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / ".filigree"
+        packs_dir = filigree_dir / "packs"
+        packs_dir.mkdir(parents=True)
+        (filigree_dir / "config.json").write_text(json.dumps({"enabled_packs": ["core", "badmeta"]}))
+        (packs_dir / "badmeta.json").write_text(
+            json.dumps(
+                {
+                    "pack": "badmeta",
+                    "requires_packs": 123,
+                    "types": {
+                        "leaked": {
+                            "type": "leaked",
+                            "display_name": "Leaked",
+                            "states": [
+                                {"name": "open", "category": "open"},
+                                {"name": "closed", "category": "done"},
+                            ],
+                            "initial_state": "open",
+                            "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                            "fields_schema": [],
+                        },
+                    },
+                }
+            )
+        )
+
+        reg = TemplateRegistry()
+        reg.load(filigree_dir)
+
+        assert reg.get_pack("badmeta") is None
+        assert reg.get_type("leaked") is None
+        assert "leaked" not in reg._category_cache
+
+    def test_pack_type_mapping_uses_parsed_type_name(self) -> None:
+        reg = TemplateRegistry()
+        pack_data: dict[str, Any] = {
+            "pack": "aliaspack",
+            "version": "1.0",
+            "types": {
+                "alias": {
+                    "type": "actual",
+                    "display_name": "Actual",
+                    "states": [
+                        {"name": "open", "category": "open"},
+                        {"name": "closed", "category": "done"},
+                    ],
+                    "initial_state": "open",
+                    "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                    "fields_schema": [],
+                },
+            },
+        }
+
+        reg._load_pack_data(pack_data)
+
+        pack = reg.get_pack("aliaspack")
+        assert pack is not None
+        assert list(pack.types) == ["actual"]
+        assert reg.get_type("actual") is pack.types["actual"]
+        assert reg.get_type("alias") is None
 
 
 class TestSpikeWorkflowDesign:

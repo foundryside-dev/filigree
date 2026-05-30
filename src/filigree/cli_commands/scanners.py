@@ -7,7 +7,6 @@ Mirrors the MCP scanner-domain tools:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json as json_mod
 import logging
@@ -16,21 +15,31 @@ import shlex
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import click
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
-from filigree.cli_common import get_db
+from filigree.cli_commands.files import finding_group
+from filigree.cli_common import add_hidden_flat_alias, get_db
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
-from filigree.mcp_tools.scanners import _load_scanner_or_error, _report_finding_observation_ids, _validate_localhost_url
+from filigree.db_files import INGESTED_FILE_ID_KEY
+from filigree.mcp_tools.scanners import (
+    _load_scanner_or_error,
+    _report_finding_observation_ids,
+    _reported_finding_record,
+    _validate_localhost_url,
+)
 from filigree.paths import safe_path
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
+from filigree.registry_errors import registry_error_response
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import validate_scanner_command
+from filigree.scanners import validate_scanner_command, validate_scanner_name
 from filigree.types.api import ErrorCode
 
 _logger = logging.getLogger(__name__)
@@ -76,10 +85,48 @@ def _emit_error(msg: str, code: Any, *, as_json: bool, details: dict[str, Any] |
     sys.exit(1)
 
 
-def _mark_reserved_scan_failed(tracker: Any, scan_run_id: str, error_message: str) -> None:
+def _emit_registry_error(exc: RegistryResolutionError | RegistryUnavailableError, *, action: str, as_json: bool) -> None:
+    response = registry_error_response(exc, action=action)
+    _emit_error(response["error"], response["code"], as_json=as_json, details=response.get("details"))
+
+
+def _mark_reserved_scan_failed(
+    tracker: Any,
+    scan_run_id: str,
+    error_message: str,
+    *,
+    context: str,
+    exit_code: int | None = None,
+) -> str | None:
     """Best-effort terminalization for a reserved run after post-spawn tracking fails."""
-    with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-        tracker.update_scan_run_status(scan_run_id, "failed", error_message=error_message)
+    kwargs: dict[str, Any] = {"error_message": error_message}
+    if exit_code is not None:
+        kwargs["exit_code"] = exit_code
+    try:
+        tracker.update_scan_run_status(scan_run_id, "failed", **kwargs)
+    except (sqlite3.Error, KeyError, ValueError) as exc:
+        _logger.error(
+            "Failed to mark scan run %s failed during %s: %s",
+            scan_run_id,
+            context,
+            exc,
+            exc_info=True,
+        )
+        return str(exc)
+    return None
+
+
+def _resolve_scanner_api_url_or_die(
+    filigree_dir: Path,
+    *,
+    explicit_api_url: str | None = None,
+    as_json: bool,
+) -> Any:
+    try:
+        return resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=explicit_api_url)
+    except ValueError as exc:
+        _emit_error(str(exc), ErrorCode.VALIDATION, as_json=as_json)
+        raise AssertionError("unreachable: _emit_error calls sys.exit(1)") from None  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +335,9 @@ def scanner_enable_cmd(scanner: str, force: bool, as_json: bool) -> None:
 def scanner_disable_cmd(scanner: str, force: bool, as_json: bool) -> None:
     """Disable a project scanner by removing its TOML registration."""
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
+    if name_error := validate_scanner_name(scanner):
+        _emit_error(name_error, ErrorCode.VALIDATION, as_json=as_json, details={"scanner": scanner})
+        return
     path = _scanner_path(filigree_dir, scanner)
     if not path.exists():
         _emit_error(f"Scanner {scanner!r} is not enabled", ErrorCode.NOT_FOUND, as_json=as_json, details={"path": str(path)})
@@ -331,7 +381,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
     _validate_prompt_or_die(prompt, as_json=as_json)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, explicit_api_url=api_url, as_json=as_json)
     api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
@@ -366,7 +416,11 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
     canonical_path = str(target.relative_to(project_root.resolve()))
 
     with get_db() as tracker:
-        file_record = tracker.register_file(canonical_path)
+        try:
+            file_record = tracker.register_file(canonical_path)
+        except (RegistryResolutionError, RegistryUnavailableError) as exc:
+            _emit_registry_error(exc, action="triggering scan", as_json=as_json)
+            return
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         scan_run_id = f"{scanner}-{ts}-{secrets.token_hex(3)}"
 
@@ -405,9 +459,16 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 prompt=prompt,
             )
         except ScannerSpawnError as exc:
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(scan_run_id, "failed", error_message="Scanner process failed to spawn")
-            _emit_error(str(exc), exc.code, as_json=as_json, details=exc.details or None)
+            status_update_error = _mark_reserved_scan_failed(
+                tracker,
+                scan_run_id,
+                "Scanner process failed to spawn",
+                context="single spawn failure",
+            )
+            details = dict(exc.details)
+            if status_update_error:
+                details["status_update_error"] = status_update_error
+            _emit_error(str(exc), exc.code, as_json=as_json, details=details or None)
             return
 
         proc = spawn_result["proc"]
@@ -420,44 +481,51 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
         except (sqlite3.Error, KeyError, ValueError) as exc:
             with contextlib.suppress(OSError):
                 proc.kill()
-            _mark_reserved_scan_failed(
+            status_update_error = _mark_reserved_scan_failed(
                 tracker,
                 scan_run_id,
                 f"Scanner process terminated after DB tracking failed: {exc}",
+                context="single DB tracking failure",
             )
+            tracking_details = {"status_update_error": status_update_error} if status_update_error else None
             _emit_error(
                 f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
                 ErrorCode.IO,
                 as_json=as_json,
+                details=tracking_details,
             )
             return
 
         # Quick poll: did the process exit immediately?
-        asyncio.run(asyncio.sleep(0.2))
+        time.sleep(0.2)
         exit_code = proc.poll()
         if exit_code is not None and exit_code != 0:
-            tracker.update_scan_run_status(
+            status_update_error = _mark_reserved_scan_failed(
+                tracker,
                 scan_run_id,
-                "failed",
+                f"Scanner exited immediately with code {exit_code}",
+                context="single immediate exit",
                 exit_code=exit_code,
-                error_message=f"Scanner exited immediately with code {exit_code}",
             )
             log_hint = ""
             if scan_log_path.exists() and scan_log_path.stat().st_size > 0:
                 log_hint = f" Check log: {log_rel}"
             elif spawn_result.get("log_warning"):
                 log_hint = f" Note: {spawn_result['log_warning']}"
+            exit_details: dict[str, Any] = {
+                "scanner": scanner,
+                "file_id": file_record.id,
+                "scan_run_id": scan_run_id,
+                "exit_code": exit_code,
+                "log_path": log_rel,
+            }
+            if status_update_error:
+                exit_details["status_update_error"] = status_update_error
             _emit_error(
                 f"Scanner process exited immediately with code {exit_code}.{log_hint}",
                 ErrorCode.IO,
                 as_json=as_json,
-                details={
-                    "scanner": scanner,
-                    "file_id": file_record.id,
-                    "scan_run_id": scan_run_id,
-                    "exit_code": exit_code,
-                    "log_path": log_rel,
-                },
+                details=exit_details,
             )
             return
 
@@ -513,7 +581,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
 
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
     _validate_prompt_or_die(prompt, as_json=as_json)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=api_url)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, explicit_api_url=api_url, as_json=as_json)
     api_url = api_resolution.url
 
     fp_list = list(file_paths)
@@ -563,7 +631,11 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 skipped.append({"file_path": fp, "reason": "duplicate"})
                 continue
             seen_canonical.add(cp)
-            file_record = tracker.register_file(cp)
+            try:
+                file_record = tracker.register_file(cp)
+            except (RegistryResolutionError, RegistryUnavailableError) as exc:
+                _emit_registry_error(exc, action="triggering batch scan", as_json=as_json)
+                return
             canonical_paths.append(cp)
             file_ids.append(file_record.id)
 
@@ -596,12 +668,21 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 skipped.append({"file_path": cp, "reason": f"reservation_failed: {exc}"})
                 continue
             if blocking is not None:
-                skipped.append({"file_path": cp, "reason": "rate_limited"})
+                skipped.append({"file_path": cp, "reason": "rate_limited", "blocking_run_id": blocking["id"]})
                 continue
             assert created is not None  # noqa: S101
             reserved.append({"scan_run_id": child_run_id, "canonical_path": cp, "file_id": fid, "index": i})
 
         if not reserved:
+            if skipped and all(item["reason"] == "rate_limited" for item in skipped):
+                blocking_run_ids = [item["blocking_run_id"] for item in skipped if "blocking_run_id" in item]
+                _emit_error(
+                    "All files are blocked by recent scanner runs. Retry after the blocking run(s) complete.",
+                    ErrorCode.CONFLICT,
+                    as_json=as_json,
+                    details={"skipped": skipped, "blocking_run_ids": blocking_run_ids},
+                )
+                return
             _emit_error(
                 "No files eligible for scanning",
                 ErrorCode.VALIDATION,
@@ -628,13 +709,16 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 )
             except ScannerSpawnError as exc:
                 reason = str(exc)
-                spawn_errors.append({"file_path": cp, "reason": reason})
-                with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                    tracker.update_scan_run_status(
-                        child_run_id,
-                        "failed",
-                        error_message=f"Scanner process failed to spawn: {reason}",
-                    )
+                error_item = {"file_path": cp, "reason": reason}
+                status_update_error = _mark_reserved_scan_failed(
+                    tracker,
+                    child_run_id,
+                    f"Scanner process failed to spawn: {reason}",
+                    context="batch spawn failure",
+                )
+                if status_update_error:
+                    error_item["status_update_error"] = status_update_error
+                spawn_errors.append(error_item)
                 continue
             entry["spawn_result"] = spawn_result
             spawned.append(entry)
@@ -660,12 +744,16 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             except (sqlite3.Error, KeyError, ValueError) as exc:
                 with contextlib.suppress(OSError):
                     proc.kill()
-                _mark_reserved_scan_failed(
+                status_update_error = _mark_reserved_scan_failed(
                     tracker,
                     entry["scan_run_id"],
                     f"Scanner process terminated after DB tracking failed: {exc}",
+                    context="batch DB tracking failure",
                 )
-                spawn_errors.append({"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"})
+                error_item = {"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"}
+                if status_update_error:
+                    error_item["status_update_error"] = status_update_error
+                spawn_errors.append(error_item)
                 continue
             entry["log_rel"] = log_rel
             entry["pid"] = proc.pid
@@ -680,19 +768,28 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             )
             return
 
-        asyncio.run(asyncio.sleep(0.2))
+        time.sleep(0.2)
         immediate_failures = 0
+        status_update_errors: list[dict[str, str]] = []
         for entry in finalized:
             proc = entry["spawn_result"]["proc"]
             ec = proc.poll()
             if ec is not None and ec != 0:
                 immediate_failures += 1
-                with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                    tracker.update_scan_run_status(
-                        entry["scan_run_id"],
-                        "failed",
-                        exit_code=ec,
-                        error_message="Scanner exited immediately",
+                status_update_error = _mark_reserved_scan_failed(
+                    tracker,
+                    entry["scan_run_id"],
+                    "Scanner exited immediately",
+                    context="batch immediate exit",
+                    exit_code=ec,
+                )
+                if status_update_error:
+                    status_update_errors.append(
+                        {
+                            "scan_run_id": entry["scan_run_id"],
+                            "file_path": entry["canonical_path"],
+                            "error": status_update_error,
+                        }
                     )
 
         scan_run_ids = [entry["scan_run_id"] for entry in finalized]
@@ -712,7 +809,14 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 f"All {len(finalized)} scanner processes exited immediately.",
                 ErrorCode.IO,
                 as_json=as_json,
-                details={"batch_id": batch_id, "scan_run_ids": scan_run_ids, "per_file": per_file},
+                details={
+                    "batch_id": batch_id,
+                    "scan_run_ids": scan_run_ids,
+                    "per_file": per_file,
+                    **({"spawn_errors": spawn_errors} if spawn_errors else {}),
+                    **({"skipped": skipped} if skipped else {}),
+                    **({"status_update_errors": status_update_errors} if status_update_errors else {}),
+                },
             )
             return
 
@@ -736,6 +840,8 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
             result["skipped"] = skipped
         if immediate_failures:
             result["immediate_failures"] = immediate_failures
+        if status_update_errors:
+            result["status_update_errors"] = status_update_errors
         log_warnings = [entry["spawn_result"]["log_warning"] for entry in finalized if entry["spawn_result"].get("log_warning")]
         if log_warnings:
             result["warnings"] = log_warnings
@@ -816,7 +922,7 @@ def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -
     _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
     canonical_path = str(target.relative_to(project_root.resolve()))
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
+    api_resolution = _resolve_scanner_api_url_or_die(filigree_dir, as_json=as_json)
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,
@@ -1024,6 +1130,14 @@ def report_finding_cmd(
                 create_observations=create_paired_observation,
                 observation_actor=actor.strip(),
             )
+        except RegistryResolutionError as exc:
+            _logger.warning("report_finding registry resolution failed: %s", exc)
+            _emit_registry_error(exc, action="reporting finding", as_json=as_json)
+            return
+        except RegistryUnavailableError as exc:
+            _logger.warning("report_finding registry unavailable: %s", exc)
+            _emit_registry_error(exc, action="reporting finding", as_json=as_json)
+            return
         except ValueError as exc:
             # Mirrors the HTTP route at dashboard_routes/files.py: a ValueError
             # from process_scan_results is caller-side malformed-input, not a
@@ -1035,19 +1149,34 @@ def report_finding_cmd(
             _logger.error("report_finding storage failure: %s", exc)
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
-        file_record = tracker.register_file(finding_record["path"])
-        if create_paired_observation and result["new_finding_ids"]:
+        reported_file_id = finding_record.get(INGESTED_FILE_ID_KEY)
+        reported_line_start = finding_record.get("line_start")
+        lookup_line_start = (
+            reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
+        )
+        ingested_finding = _reported_finding_record(
+            tracker,
+            result,
+            file_id=reported_file_id if isinstance(reported_file_id, str) else None,
+            rule_id=rule_id,
+            line_start=lookup_line_start,
+            message=message,
+            severity=severity,
+        )
+        if ingested_finding is None:
+            _emit_error("Reported finding was not found after ingestion", ErrorCode.IO, as_json=as_json)
+            return
+        if create_paired_observation:
             observation_ids = _report_finding_observation_ids(
                 tracker,
-                file_id=file_record.id,
-                finding_id=result["new_finding_ids"][0],
+                file_id=ingested_finding["file_id"],
+                finding_id=ingested_finding["id"],
             )
 
     response: dict[str, Any] = {
         "status": "created" if result["findings_created"] else "updated",
     }
-    if result["new_finding_ids"]:
-        response["finding_id"] = result["new_finding_ids"][0]
+    response["finding_id"] = ingested_finding["id"]
     if observation_ids:
         response["observation_id"] = observation_ids[0]
     if response_detail == "full":
@@ -1077,21 +1206,45 @@ def report_finding_cmd(
 
 
 def register(cli: click.Group) -> None:
-    """Register scanner commands with the CLI group."""
+    """Register scanner commands with the CLI group.
+
+    Canonical visible surface is ``filigree scanner <subverb>`` (plus ``finding
+    report`` for the finding-reporting verb). Every pre-existing flat verb
+    (``list-scanners``, ``trigger-scan``, ...) stays resolvable as a hidden
+    back-compat alias. Two scanner subverbs are renamed for consistency
+    (``available``->``list-available``, ``prompts``->``prompt-packs``); the old
+    in-group spellings are kept as hidden in-group aliases so the already-shipped
+    ``scanner available`` / ``scanner prompts`` surface does not break.
+    (filigree-03303d6c5a)
+    """
+    # Canonical group subverbs. (``enable``/``disable`` are decorator-registered
+    # on scanner_group at definition time.)
     scanner_group.add_command(list_scanners_cmd, "list")
+    scanner_group.add_command(scanner_available_cmd, "list-available")
+    scanner_group.add_command(scanner_prompts_cmd, "prompt-packs")
     scanner_group.add_command(trigger_scan_cmd, "trigger")
     scanner_group.add_command(trigger_scan_batch_cmd, "trigger-batch")
     scanner_group.add_command(get_scan_status_cmd, "status")
     scanner_group.add_command(preview_scan_cmd, "preview")
-    scanner_group.add_command(report_finding_cmd, "report-finding")
     cli.add_command(scanner_group)
-    cli.add_command(scanner_available_cmd, "list-available-scanners")
-    cli.add_command(scanner_enable_cmd, "enable-scanner")
-    cli.add_command(scanner_disable_cmd, "disable-scanner")
-    cli.add_command(scanner_prompts_cmd, "list-prompt-packs")
-    cli.add_command(list_scanners_cmd)
-    cli.add_command(trigger_scan_cmd)
-    cli.add_command(trigger_scan_batch_cmd)
-    cli.add_command(get_scan_status_cmd)
-    cli.add_command(preview_scan_cmd)
-    cli.add_command(report_finding_cmd)
+
+    # report-finding moves to the finding group as ``finding report``; keep
+    # ``scanner report-finding`` as a hidden in-group alias for back-compat.
+    finding_group.add_command(report_finding_cmd, "report")
+    add_hidden_flat_alias(scanner_group, report_finding_cmd, "report-finding")
+
+    # Preserve previously-shipped in-group spellings as hidden aliases.
+    add_hidden_flat_alias(scanner_group, scanner_available_cmd, "available")
+    add_hidden_flat_alias(scanner_group, scanner_prompts_cmd, "prompts")
+
+    # Hidden flat back-compat aliases for every pre-existing top-level verb.
+    add_hidden_flat_alias(cli, scanner_enable_cmd, "enable-scanner")
+    add_hidden_flat_alias(cli, scanner_disable_cmd, "disable-scanner")
+    add_hidden_flat_alias(cli, get_scan_status_cmd, "get-scan-status")
+    add_hidden_flat_alias(cli, list_scanners_cmd, "list-scanners")
+    add_hidden_flat_alias(cli, scanner_available_cmd, "list-available-scanners")
+    add_hidden_flat_alias(cli, preview_scan_cmd, "preview-scan")
+    add_hidden_flat_alias(cli, trigger_scan_cmd, "trigger-scan")
+    add_hidden_flat_alias(cli, trigger_scan_batch_cmd, "trigger-scan-batch")
+    add_hidden_flat_alias(cli, scanner_prompts_cmd, "list-prompt-packs")
+    add_hidden_flat_alias(cli, report_finding_cmd, "report-finding")

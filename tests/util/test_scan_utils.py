@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from filigree.core import FILIGREE_DIR_NAME, write_config
 from filigree.scanner_scripts.scan_utils import (
     PROMPT_TEMPLATE,
     _analyse_files,
@@ -172,6 +174,47 @@ class TestRunScannerPipeline:
         assert rc == 0
         assert "src/target.py" in capsys.readouterr().out
 
+    async def test_default_api_url_uses_active_ephemeral_dashboard_port(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        filigree_dir = project_root / FILIGREE_DIR_NAME
+        src.mkdir(parents=True)
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "tst", "version": 1})
+        (filigree_dir / "ephemeral.port").write_text("9444\n")
+        (src / "target.py").write_text("x = 1\n")
+        post_calls: list[dict[str, Any]] = []
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--file", "src/target.py", "--scan-run-id", "run-1"],
+        )
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **kwargs: post_calls.append(kwargs) or (True, ""),
+        )
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 0
+        assert post_calls
+        assert {call["api_url"] for call in post_calls} == {"http://localhost:9444"}
+
     async def test_rejects_invalid_prompt_pack(
         self,
         tmp_path: Path,
@@ -272,8 +315,167 @@ class TestRunScannerPipeline:
         assert "Defects found:  1" in out
         assert "P1: 1" in out
 
+    async def test_unreadable_optional_context_file_does_not_abort_scan(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        (tmp_path / "CLAUDE.md").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+        executor_ran = False
+
+        async def fake_executor(**kwargs: object) -> None:
+            nonlocal executor_ran
+            executor_ran = True
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 0
+        assert executor_ran is True
+        assert "Skipping unreadable context file CLAUDE.md" in capsys.readouterr().err
+
+    async def test_executor_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise RuntimeError("scanner exploded")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL target.py: scanner exploded" in captured.err
+
+    async def test_blank_api_url_returns_cli_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--api-url", "   "])
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        assert "--api-url must be a non-empty URL" in capsys.readouterr().err
+
+    async def test_missing_generated_report_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**_kwargs: object) -> None:
+            return None
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL target.py: scanner did not generate report" in captured.err
+
+    async def test_unreadable_generated_report_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        target = tmp_path / "target.py"
+        target.write_text("x = 1\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", ".", "--file", "target.py", "--no-ingest"])
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"\xff")
+
+        rc = await run_scanner_pipeline(executor=fake_executor, scan_source="test", prompt_template=PROMPT_TEMPLATE)
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "Failed:         1" in captured.out
+        assert "FAIL reading report for target.py" in captured.err
+
 
 class TestAnalyseFiles:
+    async def test_cache_warmup_runs_first_file_before_parallel_batch(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        targets = [root / "a.py", root / "b.py", root / "c.py"]
+        for target in targets:
+            target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        first_finished = asyncio.Event()
+        non_first_started = False
+        started: list[str] = []
+
+        async def fake_executor(**kwargs: object) -> None:
+            nonlocal non_first_started
+            output_path = Path(kwargs["output_path"])
+            started.append(output_path.name)
+            if output_path.name == "a.py.md":
+                await asyncio.sleep(0)
+                first_finished.set()
+            else:
+                non_first_started = True
+                assert first_finished.is_set()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(NO_BUG_MD, encoding="utf-8")
+
+        stats = await _analyse_files(
+            files=targets,
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=3,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=True,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+            cache_warmup=True,
+        )
+
+        assert stats["clean"] == 3
+        assert non_first_started is True
+        assert started == ["a.py.md", "b.py.md", "c.py.md"]
+
     async def test_ingests_findings_and_completes_scan_run(
         self,
         tmp_path: Path,
@@ -325,6 +527,60 @@ class TestAnalyseFiles:
         assert post_calls[1]["findings"] == []
         assert post_calls[1]["complete_scan_run"] is True
         assert "[1/1] target.py" in capsys.readouterr().err
+
+    async def test_skip_existing_report_ingests_findings_before_completion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        report = output_dir / "target.py.md"
+        report.parent.mkdir(parents=True)
+        report.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+        post_calls: list[dict[str, Any]] = []
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise AssertionError("skip-existing must not execute scanner")
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            post_calls.append(kwargs)
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=True,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["P1"] == 1
+        assert stats["api_files_posted"] == 1
+        assert stats["api_files_failed"] == 0
+        assert len(post_calls) == 2
+        assert post_calls[0]["complete_scan_run"] is False
+        assert post_calls[0]["create_observations"] is True
+        assert post_calls[0]["findings"][0]["path"] == "target.py"
+        assert post_calls[1]["findings"] == []
+        assert post_calls[1]["complete_scan_run"] is True
+        assert "[skip] target.py" in capsys.readouterr().err
 
     async def test_records_api_failures_for_finding_and_completion_posts(
         self,

@@ -496,8 +496,13 @@ class TestPidLifecycle:
         # concurrent writer's payload must remain on disk afterwards.
         orig_verify = _eph.verify_pid_ownership
 
-        def _verify_with_concurrent_write(*args: object, **kwargs: object) -> bool:
-            result = orig_verify(*args, **kwargs)
+        def _verify_with_concurrent_write(
+            path: Path,
+            *,
+            expected_cmd: str = "filigree",
+            required_args: tuple[str, ...] = (),
+        ) -> bool:
+            result = orig_verify(path, expected_cmd=expected_cmd, required_args=required_args)
             # Concurrent writer
             pid_file.write_text(fresh_payload)
             return result
@@ -531,8 +536,13 @@ class TestPidLifecycle:
         orig_verify = _eph.verify_pid_ownership
         calls = {"n": 0}
 
-        def patched_verify(path: Path, **kwargs: object) -> bool:
-            result = orig_verify(path, **kwargs)
+        def patched_verify(
+            path: Path,
+            *,
+            expected_cmd: str = "filigree",
+            required_args: tuple[str, ...] = (),
+        ) -> bool:
+            result = orig_verify(path, expected_cmd=expected_cmd, required_args=required_args)
             calls["n"] += 1
             if calls["n"] == 1:
                 # Writer A races between our first verify and the rename.

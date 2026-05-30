@@ -10,6 +10,13 @@ import pytest
 from filigree.core import FiligreeDB
 
 
+def _sqlite_operational_error(message: str, code: int | None = None) -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError(message)
+    if code is not None:
+        exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+    return exc
+
+
 class TestListAndSearch:
     def test_list_all(self, db: FiligreeDB) -> None:
         baseline = len(db.list_issues())  # Future release singleton
@@ -174,6 +181,22 @@ class TestListIssuesBoundaries:
         results = db.list_issues(offset=9999)
         assert results == []
 
+    def test_list_issues_chunks_hydration_above_sqlite_variable_limit(self, db: FiligreeDB) -> None:
+        expected_ids = [db.create_issue(f"Bulk list {i}", labels=["bulk-page"]).id for i in range(101)]
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+
+        results = db.list_issues(label="bulk-page", sort_by="created_at", direction="asc", limit=101)
+
+        assert [issue.id for issue in results] == expected_ids
+
+    def test_build_issues_batch_chunks_above_sqlite_variable_limit(self, db: FiligreeDB) -> None:
+        expected_ids = [db.create_issue(f"Bulk hydrate {i}").id for i in range(101)]
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+
+        issues = db._build_issues_batch(expected_ids)
+
+        assert [issue.id for issue in issues] == expected_ids
+
 
 class TestSanitizeFtsQuery:
     """Unit tests for _sanitize_fts_query — primary defense against FTS5 injection."""
@@ -272,6 +295,56 @@ class TestSearchFTSFallback:
                 return original_execute(sql, params)
 
         with patch.object(db, "_conn", _SpyConn()), pytest.raises(sqlite3.OperationalError, match="malformed"):
+            db.search_issues("Searchable")
+
+    def test_sqlite_error_without_missing_fts_message_propagates(self, db: FiligreeDB) -> None:
+        db.create_issue("Searchable notification item")
+
+        original_execute = db.conn.execute
+
+        class _NoFTS:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db._conn, name)
+
+            def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+                if "issues_fts" in sql and "MATCH" in sql:
+                    raise _sqlite_operational_error("custom extension loader failed", sqlite3.SQLITE_ERROR)
+                return original_execute(sql, params)
+
+        with patch.object(db, "_conn", _NoFTS()), pytest.raises(sqlite3.OperationalError, match="custom extension loader failed"):
+            db.search_issues("notification")
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("no such table: issues_fts", True),
+            ("no such module: fts5", True),
+            ("table issues has no column named status_rank", False),
+            ("custom extension loader failed", False),
+        ],
+    )
+    def test_fts_unavailable_discriminates_sqlite_error_messages(self, message: str, expected: bool) -> None:
+        from filigree.db_issues import _is_fts_unavailable_error
+
+        exc = _sqlite_operational_error(message, sqlite3.SQLITE_ERROR)
+
+        assert _is_fts_unavailable_error(exc) is expected
+
+    def test_non_fts_error_code_propagates_even_with_legacy_message(self, db: FiligreeDB) -> None:
+        db.create_issue("Searchable item")
+
+        original_execute = db.conn.execute
+
+        class _CorruptFTS:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db._conn, name)
+
+            def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+                if "issues_fts" in sql and "MATCH" in sql:
+                    raise _sqlite_operational_error("no such table: issues_fts", sqlite3.SQLITE_CORRUPT)
+                return original_execute(sql, params)
+
+        with patch.object(db, "_conn", _CorruptFTS()), pytest.raises(sqlite3.OperationalError, match="no such table"):
             db.search_issues("Searchable")
 
 
@@ -592,6 +665,42 @@ class TestCountSearchResults:
         with patch.object(db, "_conn", _NoFTS()):
             count = db.count_search_results("notification")
         assert count == 2
+
+    def test_count_sqlite_error_without_missing_fts_message_propagates(self, db: FiligreeDB) -> None:
+        db.create_issue("Fix notification system")
+        db.create_issue("Another notification task")
+        db.create_issue("Unrelated task")
+
+        original_execute = db.conn.execute
+
+        class _NoFTS:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db._conn, name)
+
+            def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+                if "issues_fts" in sql and "MATCH" in sql:
+                    raise _sqlite_operational_error("custom extension loader failed", sqlite3.SQLITE_ERROR)
+                return original_execute(sql, params)
+
+        with patch.object(db, "_conn", _NoFTS()), pytest.raises(sqlite3.OperationalError, match="custom extension loader failed"):
+            db.count_search_results("notification")
+
+    def test_non_fts_error_code_propagates_even_with_legacy_message(self, db: FiligreeDB) -> None:
+        db.create_issue("Fix notification system")
+
+        original_execute = db.conn.execute
+
+        class _CorruptFTS:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db._conn, name)
+
+            def execute(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Cursor:
+                if "issues_fts" in sql and "MATCH" in sql:
+                    raise _sqlite_operational_error("no such table: issues_fts", sqlite3.SQLITE_CORRUPT)
+                return original_execute(sql, params)
+
+        with patch.object(db, "_conn", _CorruptFTS()), pytest.raises(sqlite3.OperationalError, match="no such table"):
+            db.count_search_results("notification")
 
     def test_special_character_sanitization(self, db: FiligreeDB) -> None:
         """Special chars in query don't cause errors and valid tokens still match."""

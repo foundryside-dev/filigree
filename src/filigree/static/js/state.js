@@ -44,10 +44,25 @@ export const TYPE_COLORS = {
 
 export const SEVERITY_COLORS = {
   critical: { bg: "bg-red-900/50", text: "text-red-400", border: "border-red-800", hex: "#EF4444" },
-  high: { bg: "bg-orange-900/50", text: "text-orange-400", border: "border-orange-800", hex: "#F97316" },
-  medium: { bg: "bg-yellow-900/50", text: "text-yellow-400", border: "border-yellow-800", hex: "#EAB308" },
+  high: {
+    bg: "bg-orange-900/50",
+    text: "text-orange-400",
+    border: "border-orange-800",
+    hex: "#F97316",
+  },
+  medium: {
+    bg: "bg-yellow-900/50",
+    text: "text-yellow-400",
+    border: "border-yellow-800",
+    hex: "#EAB308",
+  },
   low: { bg: "bg-blue-900/50", text: "text-blue-400", border: "border-blue-800", hex: "#3B82F6" },
-  info: { bg: "bg-slate-800/50", text: "text-slate-400", border: "border-slate-700", hex: "#64748B" },
+  info: {
+    bg: "bg-slate-800/50",
+    text: "text-slate-400",
+    border: "border-slate-700",
+    hex: "#64748B",
+  },
 };
 
 export const TOUR_STEPS = [
@@ -125,8 +140,8 @@ export const state = {
   graphPathEdges: new Set(),
 
   // Graph sidebar (scoped subtree explorer)
-  graphSidebarSelections: new Map(),   // Map<issueId, {state, causedBy}>
-  graphSidebarTypeFilter: new Set(),   // active type filters (empty = all)
+  graphSidebarSelections: new Map(), // Map<issueId, {state, causedBy}>
+  graphSidebarTypeFilter: new Set(), // active type filters (empty = all)
 
   // Filters
   readyFilter: true,
@@ -150,6 +165,7 @@ export const state = {
 
   // Health & critical path
   criticalPathIds: new Set(),
+  criticalPathEdgeIds: new Set(),
   criticalPathActive: false,
   impactScores: {},
   healthScore: null,

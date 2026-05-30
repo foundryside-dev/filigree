@@ -12,6 +12,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.types.api import AmbiguousTransitionError
 from tests.cli.conftest import _extract_id
 
 
@@ -34,6 +35,31 @@ class TestStartWorkCli:
         assert "title" in data
         assert "type" in data
         assert "priority" in data
+
+    def test_start_work_returns_conflict_for_already_claimed_issue(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """start-work --json must emit ErrorCode.CONFLICT (not VALIDATION) for a claim race.
+
+        The optimistic-lock check raises ``ClaimConflictError`` (a ``ValueError``
+        subclass). Catching it as a generic ValueError previously misclassified
+        the race as VALIDATION; JSON consumers branching on ``code`` could no
+        longer distinguish "another agent holds this" from "bad input."
+        """
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Race for ownership"])
+        assert created.exit_code == 0
+        issue_id = _extract_id(created.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "agent-challenger", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {
+            "issue_id": issue_id,
+            "observed": "agent-holder",
+            "expected": "agent-challenger",
+        }
 
     def test_happy_path_with_target_status(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """--target-status lets caller override the canonical wip status."""
@@ -77,12 +103,29 @@ class TestStartWorkCli:
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["code"] == "INVALID_TRANSITION"
-        assert "No wip-category transition from 'triage'" in data["error"]
+        # filigree-406e6b7ee0: the error names the source state and the
+        # intermediate status the agent must move through first.
+        assert "triage" in data["error"]
+        assert "not directly startable" in data["error"]
+        assert "confirmed" in data["error"]
         show = runner.invoke(cli, ["show", issue_id, "--json"])
         assert show.exit_code == 0, show.output
         current = json.loads(show.output)
         assert current["assignee"] == ""
         assert current["status"] == "triage"
+
+    def test_fresh_bug_advance_walks_to_wip(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """filigree-406e6b7ee0 Part 2: --advance walks triage->confirmed->fixing."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Fresh bug to advance", "--type", "bug"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "bug-bot", "--advance", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "fixing"
+        assert data["assignee"] == "bug-bot"
 
     def test_plain_text_output(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """Without --json, emits 'Started work on ...' message on stdout."""
@@ -126,6 +169,44 @@ class TestStartWorkCli:
         data = json.loads(result.output)
         assert data["code"] == "INVALID_TRANSITION"
         assert "error" in data
+
+    def test_invalid_target_status_includes_valid_transitions(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Typed InvalidTransitionError still carries transition hints."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Fresh bug", "--type", "bug", "--field", "severity=major"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(
+            cli,
+            ["start-work", issue_id, "--assignee", "erin", "--target-status", "fixing", "--json"],
+        )
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert {t["to"] for t in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
+        assert data["hint"] == "Use get_valid_transitions to see allowed state changes"
+
+    def test_ambiguous_transition_includes_candidate_details(self, monkeypatch) -> None:
+        class FakeDB:
+            def __enter__(self) -> FakeDB:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                pass
+
+            def start_work(self, *_args: object, **_kwargs: object) -> object:
+                raise AmbiguousTransitionError("custom", ["review", "revise"], current_status="open")
+
+        monkeypatch.setattr("filigree.cli_commands.issues.get_db", lambda: FakeDB())
+        runner = CliRunner()
+
+        result = runner.invoke(cli, ["start-work", "test-1234567890", "--assignee", "erin", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert data["details"] == {"candidates": ["review", "revise"], "current_status": "open", "type": "custom"}
 
     def test_actor_defaults_to_assignee(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """When --actor is omitted, the audit-trail actor should be the assignee.

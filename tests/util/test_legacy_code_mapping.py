@@ -8,7 +8,8 @@ forgets to add the mapping entry.
 
 This test pins the dict by:
 1. Asserting every value is an actual ErrorCode member.
-2. Asserting every key is lowercase snake_case (the legacy wire shape).
+2. Asserting every key is lowercase snake_case (the legacy wire shape), except
+   the documented ADR-014 product-prefixed compatibility alias.
 3. Asserting no legacy-style code strings remain in src/ outside the
    mapping dict itself.
 """
@@ -23,6 +24,7 @@ import pytest
 from filigree.types.api import LEGACY_CODE_TO_ERRORCODE, ErrorCode
 
 SRC_ROOT = Path(__file__).parents[2] / "src" / "filigree"
+_DOCUMENTED_NON_SNAKE_LEGACY_CODES = {"FILIGREE_FILE_REGISTRY_DISPLACED"}
 
 
 def test_all_values_are_real_errorcode_members() -> None:
@@ -36,6 +38,8 @@ def test_all_keys_are_snake_case() -> None:
     """Legacy keys should match the pre-2.0 lowercase wire shape."""
     pattern = re.compile(r"^[a-z][a-z0-9_]*$")
     for legacy in LEGACY_CODE_TO_ERRORCODE:
+        if legacy in _DOCUMENTED_NON_SNAKE_LEGACY_CODES:
+            continue
         assert pattern.fullmatch(legacy), (
             f"Legacy key {legacy!r} is not snake_case — this dict documents the pre-2.0 wire shape, which was all lowercase."
         )

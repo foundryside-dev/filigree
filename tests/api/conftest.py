@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import AsyncIterator, Generator
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import filigree.dashboard as dash_module
 from filigree.core import DB_FILENAME, FiligreeDB, Issue, write_config
 from filigree.dashboard import ProjectStore, create_app
 from tests._db_factory import make_db
+from tests._fakes.clarion_http import clarion_stub
 from tests.conftest import PopulatedDB
 
 
@@ -40,10 +42,98 @@ async def client(dashboard_db: PopulatedDB) -> AsyncIterator[AsyncClient]:
     dash_module._db = None
 
 
+def _unused_localhost_url() -> str:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        host, port = sock.getsockname()
+    return f"http://{host}:{port}"
+
+
 @pytest.fixture
-def release_dashboard_db(tmp_path: Path) -> FiligreeDB:
+def clarion_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
+    """Dashboard DB configured through the real Clarion fallback constructor path.
+
+    Uses ``http://clarion.test`` (unresolvable) plus ``allow_local_fallback=True``
+    so the startup capability probe fails with ``RegistryUnavailableError`` and
+    is downgraded to a WARN — exercising the same fallback wiring an operator
+    would hit with Clarion offline.
+    """
+    db = FiligreeDB(
+        tmp_path / "filigree.db",
+        prefix="test",
+        check_same_thread=False,
+        registry_backend="clarion",
+        clarion_config={
+            "base_url": "http://clarion.test",
+            "allow_local_fallback": True,
+        },
+    )
+    db.initialize()
+    yield db
+    db.close()
+
+
+@pytest.fixture
+async def clarion_fallback_client(clarion_fallback_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
+    """Dashboard client backed by a constructor-validated Clarion fallback DB."""
+    dash_module._db = clarion_fallback_dashboard_db
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    dash_module._db = None
+
+
+@pytest.fixture
+def unavailable_clarion_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
+    """Dashboard DB configured for Clarion that became unreachable mid-session.
+
+    Stands up a Clarion stub long enough for the startup capability probe to
+    succeed, then shuts it down so subsequent ``resolve_file`` calls (e.g.
+    from a scan-results POST) fail with ``RegistryUnavailableError``. This
+    mirrors the real production failure mode (Filigree starts, Clarion crashes
+    later) — the older variant that pointed at an unused port at construction
+    time can no longer build a DB because ADR-014 fail-closed startup rejects
+    a Clarion that was never reachable.
+    """
+    with clarion_stub() as (base_url, _state):
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            check_same_thread=False,
+            registry_backend="clarion",
+            clarion_config={
+                "base_url": base_url,
+                "timeout_seconds": 0.1,
+            },
+        )
+        db.initialize()
+    # Stub has shut down — Clarion is now unreachable for the test's writes.
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
+async def unavailable_clarion_client(unavailable_clarion_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
+    """Dashboard client backed by a constructor-validated unreachable Clarion DB."""
+    dash_module._db = unavailable_clarion_dashboard_db
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    dash_module._db = None
+
+
+@pytest.fixture
+def release_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
     """FiligreeDB initialized with the release workflow pack enabled."""
-    return make_db(tmp_path, packs=["core", "planning", "release"], check_same_thread=False)
+    db = make_db(tmp_path, packs=["core", "planning", "release"], check_same_thread=False)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -52,9 +142,11 @@ async def release_client(release_dashboard_db: FiligreeDB) -> AsyncIterator[Asyn
     dash_module._db = release_dashboard_db
     app = create_app()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    dash_module._db = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        dash_module._db = None
 
 
 def make_release_hierarchy(db: FiligreeDB, *, include_done: bool = False) -> tuple[Issue, Issue, Issue]:

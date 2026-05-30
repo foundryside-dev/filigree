@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,13 @@ from tests._db_factory import make_db
 
 
 @pytest.fixture
-def bug_db(tmp_path: Path) -> FiligreeDB:
+def bug_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
     """FiligreeDB for bug cluster tests."""
-    return make_db(tmp_path, check_same_thread=False)
+    db = make_db(tmp_path, check_same_thread=False)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -36,9 +41,11 @@ async def client(bug_db: FiligreeDB) -> AsyncClient:
     dash_module._db = bug_db
     app = create_app()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    dash_module._db = None
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        dash_module._db = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +217,34 @@ class TestRemoveDependencyForeignPrefix:
         assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
         body = resp.json()
         assert body["code"] == "VALIDATION", body
+
+    async def test_classic_remove_dependency_same_prefix_missing_source_returns_404(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        target = bug_db.create_issue("Target")
+        resp = await client.request(
+            "DELETE",
+            f"/api/issue/{bug_db.prefix}-0000000000/dependencies/{target.id}",
+        )
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+
+    async def test_loom_remove_dependency_same_prefix_missing_source_returns_200_idempotent(
+        self, bug_db: FiligreeDB, client: AsyncClient
+    ) -> None:
+        """Loom DELETE is idempotent at the wire layer per
+        tests/fixtures/contracts/loom/issues-dep-remove.json: a missing
+        issue between two valid-prefix IDs returns 200 ``{"removed": false}``
+        so a retried DELETE after a network glitch stays safe. Classic
+        keeps the 404 behaviour above — no classic fixture pins that
+        contract, and CLI/MCP surfaces still surface NOT_FOUND.
+        """
+        target = bug_db.create_issue("Target")
+        resp = await client.request(
+            "DELETE",
+            f"/api/loom/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"removed": False}
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +564,24 @@ class TestPatchStatusTypeValidation:
         assert body["code"] == "VALIDATION", body
 
 
+class TestBatchUpdateBodyValidation:
+    async def test_classic_batch_update_fields_must_be_object_even_with_empty_ids(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/batch/update", json={"issue_ids": [], "fields": []})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "fields" in body["error"]
+
+    async def test_loom_batch_update_assignee_must_be_string_even_with_empty_ids(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/batch/update", json={"issue_ids": [], "assignee": 42})
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "assignee" in body["error"]
+
+
 class TestPatchParentIdNullValidation:
     async def test_classic_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         parent = bug_db.create_issue("Classic parent")
@@ -702,3 +755,90 @@ class TestWriteRoutesWrongProjectError:
         assert resp.status_code == 404, resp.text
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body
+
+    async def test_http_400_for_foreign_id_does_not_leak_prefix(self, client: AsyncClient) -> None:
+        """2.1.0 §1.2: untrusted HTTP responses must use ``safe_message``.
+
+        Probing for "is project X open?" by trying ``X-something/claim``
+        and pattern-matching the error body must not work — the
+        envelope's ``error`` field is a generic string, neither the open
+        DB's prefix (``test``) nor the offending id's prefix
+        (``foreignproj``) appears.
+
+        Renamed from the design's ``test_http_404_for_foreign_id_…`` because
+        write routes return 400/VALIDATION (read-route 404 enforcement
+        lands in §1.3 with its own pinning test).
+        """
+        resp = await client.post(
+            f"/api/issue/{self._FOREIGN_A}/claim",
+            json={"assignee": "alice"},
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        # safe_message contains generic wording, not project prefixes.
+        assert "foreignproj" not in body["error"], body
+        assert "test" not in body["error"].lower() or "this project" in body["error"].lower()
+        # Concretely: the canonical safe wording must be present.
+        from filigree.core import WrongProjectError
+
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+
+    @pytest.mark.parametrize(
+        ("method", "path", "json_body", "foreign_fragments"),
+        [
+            ("post", "/api/issue/foreignproj-aaaaaaaa00/reopen", {}, ("foreignproj", "test")),
+            ("post", "/api/loom/issues/foreignproj-aaaaaaaa00/reopen", {}, ("foreignproj", "test")),
+            (
+                "post",
+                "/api/issues",
+                {"title": "bad parent", "parent_id": "foreignproj-aaaaaaaa00"},
+                ("foreignproj", "test"),
+            ),
+            (
+                "post",
+                "/api/loom/issues",
+                {"title": "bad parent", "parent_id": "foreignproj-aaaaaaaa00"},
+                ("foreignproj", "test"),
+            ),
+        ],
+    )
+    async def test_create_and_reopen_wrong_project_errors_use_safe_message(
+        self,
+        client: AsyncClient,
+        method: str,
+        path: str,
+        json_body: dict[str, str],
+        foreign_fragments: tuple[str, ...],
+    ) -> None:
+        from filigree.core import WrongProjectError
+
+        resp = await getattr(client, method)(path, json=json_body)
+
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "VALIDATION", body
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        for fragment in foreign_fragments:
+            assert fragment not in body["error"], body
+
+
+class TestReleaseClaimErrorRouting:
+    async def test_residual_value_error_is_validation_for_classic_and_loom_release(
+        self,
+        bug_db: FiligreeDB,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        issue = bug_db.create_issue("Release validation route", priority=2)
+
+        def raise_validation(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("synthetic validation failure")
+
+        monkeypatch.setattr(bug_db, "release_claim", raise_validation)
+
+        for path in (f"/api/issue/{issue.id}/release", f"/api/loom/issues/{issue.id}/release"):
+            resp = await client.post(path, json={"actor": "agent"})
+            body = resp.json()
+            assert resp.status_code == 400
+            assert body["code"] == "VALIDATION"
+            assert body["error"] == "synthetic validation failure"

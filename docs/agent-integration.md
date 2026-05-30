@@ -41,9 +41,9 @@ The atomic primitives `claim_issue` / `claim_next` still exist for niche use (re
 
 All MCP tools and CLI `--json` output use the unified 2.0 envelopes:
 
-- **Batch ops** return `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`. `failed` is always present (empty list if none); `newly_unblocked` is omitted when the op cannot unblock. Pass `response_detail="full"` (MCP) or `--detail=full` (CLI) to get full records back instead of slim summaries.
+- **Batch ops** return `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`. `failed` is always present (empty list if none); `newly_unblocked` is present only when non-empty (omitted when the op unblocked nothing). Pass `response_detail="full"` (MCP) or `--detail=full` (CLI) to get full records back instead of slim summaries.
 - **List ops** return `{items: [...], has_more: bool, next_offset?: int}`. `has_more` is always present; `next_offset` appears only when there is a next page.
-- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
+- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`, `CLARION_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
 
 The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, and CLI JSON). Status is always `status`; "state" was retired as a user-facing word in 2.0.
 
@@ -91,7 +91,7 @@ start_work(issue_id="...", assignee="agent-1")            # Claim + transition a
 start_next_work(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
 claim_issue(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
 release_claim(issue_id="...")                             # Clear assignee without changing status
-release_claim(issue_id="...", actor="agent-1", if_held=True)  # No-op unless agent-1 holds the claim
+release_claim(issue_id="...", actor="agent-1", if_held=True)  # Unassigned no-op; held-by-other returns CONFLICT
 heartbeat_work(issue_id="...", actor="agent-1")           # Refresh claim liveness
 get_stale_claims(stale_after_hours=48, expires_within_hours=2)  # Find abandoned, expired, or soon-expiring claims
 reclaim_issue(issue_id="...", assignee="agent-2", expected_assignee="agent-1", reason="missed heartbeat")
@@ -121,11 +121,11 @@ filigree --actor critical-agent start-next-work --assignee critical-agent --prio
 
 ## Audit Trail
 
-Every mutation records an **actor**. The `--actor` flag (CLI) or `actor` parameter (MCP) sets who performed the action:
+Every mutation records an **actor**. The `--actor` flag (CLI) or `actor` parameter (MCP) sets who performed the action. The CLI flag works in either position — before the verb (group-level) or after it (per-verb); the post-verb value overrides the group-level one:
 
 ```bash
-filigree --actor agent-alpha create "Fix auth"
-filigree --actor agent-beta close proj-a3f9b2e1c0
+filigree --actor agent-alpha create "Fix auth"        # before the verb
+filigree close proj-a3f9b2e1c0 --actor agent-beta     # after the verb (overrides group-level)
 ```
 
 Via MCP, every write tool accepts an `actor` parameter:

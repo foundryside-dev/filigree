@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json as json_mod
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,12 +13,15 @@ from typing import Any, NoReturn, get_args
 import click
 
 from filigree.cli_common import get_db, refresh_summary
+from filigree.db_planning import NotAMilestoneError
 from filigree.issue_payloads import issue_to_ready
 from filigree.mcp_tools.payloads import plan_tree_to_mcp, slim_plan_tree_to_mcp
 from filigree.types.api import ErrorCode
 from filigree.types.events import EventType
 
 _PLAN_DETAIL_CHOICES = ("slim", "full")
+_MAX_SQLITE_INTEGER = 9223372036854775807
+_MAX_CHANGES_OVERFETCH_LIMIT = _MAX_SQLITE_INTEGER - 1
 
 
 def _emit_error(message: str, code: ErrorCode, as_json: bool) -> NoReturn:
@@ -96,27 +100,29 @@ def _parent_titles_by_id(db: Any, issues: list[Any]) -> dict[str, str]:
 
 def _ready_impl(as_json: bool, include_context: bool) -> None:
     with get_db() as db:
-        issues = db.get_ready()
+        try:
+            issues = db.get_ready()
+        except sqlite3.Error as e:
+            _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
 
         if as_json:
-            parent_titles = _parent_titles_by_id(db, issues) if include_context else {}
-            click.echo(
-                json_mod.dumps(
-                    {
-                        "items": [
-                            issue_to_ready(
-                                i,
-                                include_context=include_context,
-                                parent_title=parent_titles.get(i.parent_id or ""),
-                            )
-                            for i in issues
-                        ],
-                        "has_more": False,
-                    },
-                    indent=2,
-                    default=str,
+            try:
+                parent_titles = _parent_titles_by_id(db, issues) if include_context else {}
+            except sqlite3.Error as e:
+                _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
+            items = []
+            for i in issues:
+                startable, next_action = db.issue_startability(i)
+                items.append(
+                    issue_to_ready(
+                        i,
+                        include_context=include_context,
+                        parent_title=parent_titles.get(i.parent_id or ""),
+                        startable=startable,
+                        next_action=next_action,
+                    )
                 )
-            )
+            click.echo(json_mod.dumps({"items": items, "has_more": False}, indent=2, default=str))
             return
 
         for issue in issues:
@@ -125,9 +131,16 @@ def _ready_impl(as_json: bool, include_context: bool) -> None:
                 try:
                     parent = db.get_issue(issue.parent_id)
                     parent_ctx = f" ({parent.title})"
+                except sqlite3.Error as e:
+                    _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
                 except KeyError:
                     pass
-            click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}"{parent_ctx}')
+            # Flag ready-but-not-startable items (e.g. triage bugs) so the
+            # human-facing list does not advertise work that start-work will
+            # reject (filigree-406e6b7ee0).
+            startable, next_action = db.issue_startability(issue)
+            start_hint = "" if startable else (f" — not startable; move to '{next_action}' first" if next_action else " — not startable")
+            click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}"{parent_ctx}{start_hint}')
         click.echo(f"\n{len(issues)} ready")
 
 
@@ -222,6 +235,10 @@ def _plan_impl(milestone_id: str, as_json: bool, detail: str = "slim") -> None:
             p = db.get_plan(milestone_id)
         except KeyError:
             _emit_error(f"Not found: {milestone_id}", ErrorCode.NOT_FOUND, as_json)
+        except NotAMilestoneError as e:
+            _emit_error(str(e), ErrorCode.VALIDATION, as_json)
+        except sqlite3.Error as e:
+            _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
 
         if as_json:
             payload = plan_tree_to_mcp(p) if detail == "full" else slim_plan_tree_to_mcp(p)
@@ -318,6 +335,12 @@ def remove_dep(ctx: click.Context, issue_id: str, depends_on_id: str, as_json: b
     with get_db() as db:
         try:
             removed = db.remove_dependency(issue_id, depends_on_id, actor=ctx.obj["actor"])
+        except KeyError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Not found: {e}", "code": ErrorCode.NOT_FOUND}))
+            else:
+                click.echo(f"Not found: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
@@ -480,6 +503,25 @@ def _validate_changes_filters(label: str | None, event_type: str | None, as_json
         _emit_error(f"Invalid event type: {event_type}", ErrorCode.VALIDATION, as_json)
 
 
+def _validate_changes_pagination(limit: int, after_event_id: int | None, as_json: bool) -> None:
+    if limit < 1:
+        _emit_error("limit must be at least 1", ErrorCode.VALIDATION, as_json)
+    if limit > _MAX_CHANGES_OVERFETCH_LIMIT:
+        _emit_error(
+            f"limit must be at most {_MAX_CHANGES_OVERFETCH_LIMIT}",
+            ErrorCode.VALIDATION,
+            as_json,
+        )
+    if after_event_id is not None and after_event_id < 0:
+        _emit_error("after-event-id must be at least 0", ErrorCode.VALIDATION, as_json)
+    if after_event_id is not None and after_event_id > _MAX_SQLITE_INTEGER:
+        _emit_error(
+            f"after-event-id must be at most {_MAX_SQLITE_INTEGER}",
+            ErrorCode.VALIDATION,
+            as_json,
+        )
+
+
 def _changes_impl(
     since: str,
     limit: int,
@@ -494,22 +536,26 @@ def _changes_impl(
 ) -> None:
     since = _normalize_iso_timestamp(since, as_json)
     _validate_changes_filters(label, event_type, as_json)
+    _validate_changes_pagination(limit, after_event_id, as_json)
     label_filter = label.strip() if label is not None else None
     exclude_types: list[str] = []
     if not include_heartbeats and event_type != "heartbeat":
         exclude_types.append("heartbeat")
     with get_db() as db:
         # Overfetch by 1 to detect has_more without an offset param.
-        raw = db.get_events_since(
-            since,
-            after_event_id=after_event_id,
-            limit=limit + 1 if limit > 0 else limit,
-            actor=actor,
-            issue_id=issue_id,
-            label=label_filter,
-            event_type=event_type,
-            exclude_types=exclude_types or None,
-        )
+        try:
+            raw = db.get_events_since(
+                since,
+                after_event_id=after_event_id,
+                limit=limit + 1,
+                actor=actor,
+                issue_id=issue_id,
+                label=label_filter,
+                event_type=event_type,
+                exclude_types=exclude_types or None,
+            )
+        except sqlite3.Error as e:
+            _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
         has_more = limit > 0 and len(raw) > limit
         events = raw[:limit] if has_more else raw
 
@@ -539,10 +585,10 @@ def _changes_impl(
 @click.option(
     "--limit",
     default=100,
-    type=click.IntRange(min=1),
+    type=int,
     help="Max events (default 100, must be >= 1)",
 )
-@click.option("--after-event-id", default=None, type=click.IntRange(min=0), help="Resume after this event id when --since ties")
+@click.option("--after-event-id", default=None, type=int, help="Resume after this event id when --since ties")
 @click.option("--actor", default=None, help="Only include events written by this actor")
 @click.option("--issue-id", default=None, help="Only include events for this issue")
 @click.option("--label", default=None, help="Only include events for issues currently carrying this label")
@@ -579,10 +625,10 @@ def changes(
 @click.option(
     "--limit",
     default=100,
-    type=click.IntRange(min=1),
+    type=int,
     help="Max events (default 100, must be >= 1)",
 )
-@click.option("--after-event-id", default=None, type=click.IntRange(min=0), help="Resume after this event id when --since ties")
+@click.option("--after-event-id", default=None, type=int, help="Resume after this event id when --since ties")
 @click.option("--actor", default=None, help="Only include events written by this actor")
 @click.option("--issue-id", default=None, help="Only include events for this issue")
 @click.option("--label", default=None, help="Only include events for issues currently carrying this label")

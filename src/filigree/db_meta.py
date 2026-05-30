@@ -12,13 +12,15 @@ import sqlite3
 from pathlib import Path
 from typing import Any, ClassVar
 
-from filigree.db_base import DBMixinProtocol, _normalize_iso_to_utc, _now_iso
-from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES
-from filigree.db_issues import _check_expected_assignee
+from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
+from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES, _normalize_project_relative_scan_path
+from filigree.db_issues import _check_expected_assignee, _validate_fields_payload, _validate_priority_value
 from filigree.db_observations import _expires_iso
 from filigree.types.planning import CommentRecord, StatsResult
 
 logger = logging.getLogger(__name__)
+
+_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "clarion"})
 
 
 class MetaMixin(DBMixinProtocol):
@@ -32,6 +34,8 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Comments ------------------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("add_comment")
     def add_comment(
         self,
         issue_id: str,
@@ -39,6 +43,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         author: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> int:
         if not text or not text.strip():
             msg = "Comment text cannot be empty"
@@ -50,15 +55,10 @@ class MetaMixin(DBMixinProtocol):
             raise KeyError(msg)
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=author)
         now = _now_iso()
-        try:
-            cursor = self.conn.execute(
-                "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-                (issue_id, author, text, now),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+            (issue_id, author, text, now),
+        )
         rowid = cursor.lastrowid
         if rowid is None:  # pragma: no cover — INSERT always sets lastrowid
             msg = "INSERT did not produce a lastrowid"
@@ -84,6 +84,8 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Labels --------------------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("add_label")
     def add_label(
         self,
         issue_id: str,
@@ -91,6 +93,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         actor: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str, list[str]]:
         """Add label to issue. Returns (added, canonical_label, replaced_labels).
 
@@ -132,23 +135,20 @@ class MetaMixin(DBMixinProtocol):
             # Capture the set of labels we're about to displace so callers can
             # report the silent removal (P2.7).
             replaced = sorted(lbl for lbl in existing_review if lbl != normalized)
-        try:
-            # Mutual exclusivity for review: namespace
-            if normalized.startswith("review:"):
-                self.conn.execute(
-                    "DELETE FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
-                    (issue_id,),
-                )
-            cursor = self.conn.execute(
-                "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
-                (issue_id, normalized),
+        # Mutual exclusivity for review: namespace
+        if normalized.startswith("review:"):
+            self.conn.execute(
+                "DELETE FROM labels WHERE issue_id = ? AND label LIKE 'review:%'",
+                (issue_id,),
             )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "INSERT OR IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+            (issue_id, normalized),
+        )
         return cursor.rowcount > 0, normalized, replaced
 
+    @_retry_busy()
+    @_in_immediate_tx("remove_label")
     def remove_label(
         self,
         issue_id: str,
@@ -156,6 +156,7 @@ class MetaMixin(DBMixinProtocol):
         *,
         actor: str = "",
         expected_assignee: str | None = None,
+        _skip_begin: bool = False,
     ) -> tuple[bool, str]:
         """Remove label from issue. Returns (removed, canonical_label).
 
@@ -170,15 +171,10 @@ class MetaMixin(DBMixinProtocol):
             raise KeyError(msg)
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=actor)
         normalized = self._validate_label_name(label, allow_priority_like=True)
-        try:
-            cursor = self.conn.execute(
-                "DELETE FROM labels WHERE issue_id = ? AND label = ?",
-                (issue_id, normalized),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "DELETE FROM labels WHERE issue_id = ? AND label = ?",
+            (issue_id, normalized),
+        )
         return cursor.rowcount > 0, normalized
 
     def list_labels(
@@ -415,6 +411,11 @@ class MetaMixin(DBMixinProtocol):
         return {
             "by_status": by_status,
             "by_category": by_category,
+            # DEPRECATED (filigree-17694d2db8): exact duplicates of by_status /
+            # by_category. Retained as compatibility aliases on a wire surface
+            # (MCP get_stats / get_summary, HTTP StatsWithPrefix) per ADR-009 §7.
+            # Remove in the next major; consumers should read by_status /
+            # by_category.
             "status_name_counts": dict(by_status),
             "status_category_counts": dict(by_category),
             "by_type": by_type,
@@ -425,13 +426,98 @@ class MetaMixin(DBMixinProtocol):
 
     # -- Bulk import (for migration) -----------------------------------------
 
+    def _validate_bulk_issue_data(
+        self,
+        issue_data: dict[str, Any],
+        *,
+        validate_parent_exists: bool = True,
+        validate_prefix: bool = True,
+    ) -> None:
+        issue_id = issue_data["id"]
+        if not isinstance(issue_id, str) or not issue_id.strip():
+            msg = "Issue id cannot be empty"
+            raise ValueError(msg)
+        if validate_prefix:
+            self._check_id_prefix(issue_id)
+
+        title = issue_data["title"]
+        if not isinstance(title, str) or not title.strip():
+            msg = "Title cannot be empty"
+            raise ValueError(msg)
+
+        priority = issue_data.get("priority", 2)
+        _validate_priority_value(priority)
+
+        issue_type = issue_data.get("type", "task")
+        if not isinstance(issue_type, str) or self.templates.get_type(issue_type) is None:
+            valid_types = [t.type for t in self.templates.list_types()]
+            msg = f"Unknown type '{issue_type}'. Valid types: {', '.join(valid_types)}"
+            raise ValueError(msg)
+
+        status = issue_data.get("status", self.templates.get_initial_state(issue_type))
+        if not isinstance(status, str) or not status.strip():
+            msg = "Invalid status"
+            raise ValueError(msg)
+        self._validate_status(status, issue_type)
+
+        parent_id = issue_data.get("parent_id")
+        if parent_id is not None and not isinstance(parent_id, str):
+            msg = "parent_id must be a string"
+            raise TypeError(msg)
+        if parent_id and validate_prefix:
+            self._check_id_prefix(parent_id)
+        if validate_parent_exists:
+            self._validate_parent_id(parent_id)
+
+        assignee = issue_data.get("assignee", "")
+        if not isinstance(assignee, str):
+            msg = "assignee must be a string"
+            raise TypeError(msg)
+
+        fields = issue_data.get("fields")
+        _validate_fields_payload(fields)
+        field_values = {} if fields is None else fields
+        if field_values:
+            pattern_errors = self._validate_field_values(issue_type, field_values)
+            if pattern_errors:
+                msg = "Field validation failed: " + "; ".join(pattern_errors)
+                raise ValueError(msg)
+            self._check_field_uniqueness(issue_type, field_values, exclude_id=issue_id)
+
+    def _validate_dependency_edge(
+        self,
+        issue_id: str,
+        depends_on_id: str,
+        *,
+        validate_existence: bool = True,
+        validate_prefix: bool = True,
+    ) -> None:
+        if not isinstance(issue_id, str) or not isinstance(depends_on_id, str):
+            msg = "dependency issue IDs must be strings"
+            raise TypeError(msg)
+        if validate_prefix:
+            self._check_id_prefix(issue_id)
+            self._check_id_prefix(depends_on_id)
+        if validate_existence:
+            self.get_issue(issue_id)
+            self.get_issue(depends_on_id)
+        if issue_id == depends_on_id:
+            msg = f"Cannot add self-dependency: {issue_id}"
+            raise ValueError(msg)
+        if self._would_create_cycle(issue_id, depends_on_id):
+            msg = f"Dependency {issue_id} -> {depends_on_id} would create a cycle"
+            raise ValueError(msg)
+
     def bulk_insert_issue(self, issue_data: dict[str, Any], *, validate: bool = True) -> bool:
         """Insert a pre-formed issue dict directly. For migration use only.
 
         Returns True if the row was inserted, False if skipped (duplicate).
         """
+        fields = issue_data.get("fields", {})
         if validate:
-            self._validate_parent_id(issue_data.get("parent_id"))
+            self._validate_bulk_issue_data(issue_data)
+            if fields is None:
+                fields = {}
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO issues "
             "(id, title, status, priority, type, parent_id, assignee, "
@@ -450,7 +536,7 @@ class MetaMixin(DBMixinProtocol):
                 issue_data.get("closed_at"),
                 issue_data.get("description", ""),
                 issue_data.get("notes", ""),
-                json.dumps(issue_data.get("fields", {})),
+                json.dumps(fields),
             ),
         )
         inserted = cursor.rowcount > 0
@@ -458,8 +544,10 @@ class MetaMixin(DBMixinProtocol):
             logger.debug("bulk_insert_issue: skipped duplicate id=%s", issue_data.get("id"))
         return inserted
 
-    def bulk_insert_dependency(self, issue_id: str, depends_on_id: str, dep_type: str = "blocks") -> bool:
+    def bulk_insert_dependency(self, issue_id: str, depends_on_id: str, dep_type: str = "blocks", *, validate: bool = True) -> bool:
         """Insert a dependency. Returns True if inserted, False if skipped (duplicate)."""
+        if validate:
+            self._validate_dependency_edge(issue_id, depends_on_id)
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
             (issue_id, depends_on_id, dep_type, _now_iso()),
@@ -470,10 +558,18 @@ class MetaMixin(DBMixinProtocol):
         return inserted
 
     def bulk_insert_event(self, event_data: dict[str, Any]) -> bool:
-        """Insert an event. Returns True if inserted, False if skipped (duplicate)."""
+        """Insert an event. Returns True if inserted, False if skipped (duplicate).
+
+        v16: ``event_seq`` is forwarded from ``event_data`` when present so
+        JSONL round-trips preserve per-issue sequence numbers; legacy
+        callers that omit it default to 0 (matching the migration's
+        backfill of pre-v16 rows). ``INSERT OR IGNORE`` is retained on
+        purpose for this path — imports re-applied against the same DB
+        should be idempotent on the full composite key, not raise.
+        """
         cursor = self.conn.execute(
-            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_data["issue_id"],
                 event_data["event_type"],
@@ -482,6 +578,7 @@ class MetaMixin(DBMixinProtocol):
                 event_data.get("new_value"),
                 event_data.get("comment", ""),
                 event_data.get("created_at", _now_iso()),
+                int(event_data.get("event_seq", 0)),
             ),
         )
         inserted = cursor.rowcount > 0
@@ -605,15 +702,50 @@ class MetaMixin(DBMixinProtocol):
         file_id_map: dict[str, str],
     ) -> int:
         src_id = record["id"]
-        path = record["path"]
+        path = _normalize_project_relative_scan_path(
+            record["path"],
+            field_name=f"file_record {src_id!r} path",
+        )
+        registry_backend = record.get("registry_backend", "local") or "local"
+        if not isinstance(registry_backend, str) or registry_backend not in _VALID_FILE_REGISTRY_BACKENDS:
+            msg = f"Invalid registry_backend {registry_backend!r} for imported file_record {src_id!r}"
+            raise ValueError(msg)
+        content_hash = record.get("content_hash", "") or ""
+        if not isinstance(content_hash, str):
+            msg = f"Invalid content_hash for imported file_record {src_id!r}: expected string"
+            raise ValueError(msg)
+        existing_by_id = self.conn.execute("SELECT id, path FROM file_records WHERE id = ?", (src_id,)).fetchone()
+        existing_by_path = self.conn.execute("SELECT id, path FROM file_records WHERE path = ?", (path,)).fetchone()
+
+        if existing_by_id is not None and existing_by_id["path"] != path:
+            msg = f"Import conflict for file id {src_id}: existing path {existing_by_id['path']!r} != imported path {path!r}"
+            raise ValueError(msg)
+
+        if existing_by_path is not None:
+            if merge:
+                file_id_map[src_id] = existing_by_path["id"]
+                return 0
+            msg = f"Import conflict for file {path!r}"
+            raise sqlite3.IntegrityError(msg)
+
+        if existing_by_id is not None:
+            if merge:
+                file_id_map[src_id] = existing_by_id["id"]
+                return 0
+            msg = f"Import conflict for file id {src_id!r}"
+            raise sqlite3.IntegrityError(msg)
+
         cursor = self.conn.execute(
-            f"INSERT {conflict} INTO file_records (id, path, language, file_type, first_seen, updated_at, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT {conflict} INTO file_records "
+            "(id, path, language, file_type, content_hash, registry_backend, first_seen, updated_at, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 src_id,
                 path,
                 record.get("language", ""),
                 record.get("file_type", ""),
+                content_hash,
+                registry_backend,
                 _normalize_iso_to_utc(record.get("first_seen")) or _now_iso(),
                 _normalize_iso_to_utc(record.get("updated_at")) or _now_iso(),
                 self._json_text(record.get("metadata", {})),
@@ -622,13 +754,6 @@ class MetaMixin(DBMixinProtocol):
         if cursor.rowcount > 0:
             file_id_map[src_id] = src_id
             return cursor.rowcount
-
-        existing_by_id = self.conn.execute("SELECT id, path FROM file_records WHERE id = ?", (src_id,)).fetchone()
-        existing_by_path = self.conn.execute("SELECT id, path FROM file_records WHERE path = ?", (path,)).fetchone()
-
-        if existing_by_id is not None and existing_by_id["path"] != path:
-            msg = f"Import conflict for file id {src_id}: existing path {existing_by_id['path']!r} != imported path {path!r}"
-            raise ValueError(msg)
 
         if not merge:
             msg = f"Import conflict for file {path!r}"
@@ -653,6 +778,86 @@ class MetaMixin(DBMixinProtocol):
             msg = f"Import references unknown file_id {source_file_id!r}"
             raise ValueError(msg) from exc
 
+    def _remap_file_id_list_text(self, value: Any, file_id_map: dict[str, str]) -> str:
+        file_ids = json.loads(self._json_list_text(value))
+        remapped = [file_id_map.get(file_id, file_id) if isinstance(file_id, str) else file_id for file_id in file_ids]
+        return json.dumps(remapped)
+
+    def _resolve_imported_scan_finding_id(self, record: dict[str, Any], *, file_id: str) -> str:
+        rec_id = record["id"]
+        existing = self.conn.execute("SELECT id FROM scan_findings WHERE id = ?", (rec_id,)).fetchone()
+        if existing is not None:
+            return str(existing["id"])
+        existing = self.conn.execute(
+            "SELECT id FROM scan_findings "
+            "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
+            "AND COALESCE(line_start, -1) = COALESCE(?, -1)",
+            (file_id, record.get("scan_source", ""), record.get("rule_id", ""), record.get("line_start")),
+        ).fetchone()
+        if existing is not None:
+            return str(existing["id"])
+        msg = f"Could not reconcile imported scan_finding {rec_id!r}"
+        raise sqlite3.IntegrityError(msg)
+
+    def _validate_imported_closeout_acknowledgement(self, *, index: int, record: dict[str, Any]) -> None:
+        target_type = record.get("target_type", "issue")
+        if target_type != "issue":
+            msg = f"closeout acknowledgement record #{index} has invalid target_type {target_type!r}"
+            raise ValueError(msg)
+
+        target_id = record["target_id"]
+        if self.conn.execute("SELECT 1 FROM issues WHERE id = ?", (target_id,)).fetchone() is None:
+            msg = f"closeout acknowledgement record #{index} has missing issue target: {target_id}"
+            raise ValueError(msg)
+
+        carried_to_target_id = record.get("carried_to_target_id", "")
+        if carried_to_target_id and self.conn.execute("SELECT 1 FROM issues WHERE id = ?", (carried_to_target_id,)).fetchone() is None:
+            msg = f"closeout acknowledgement record #{index} has missing carried issue target: {carried_to_target_id}"
+            raise ValueError(msg)
+
+        source_link = self.conn.execute(
+            """
+            SELECT 1
+            FROM annotation_links
+            WHERE annotation_id = ?
+              AND target_type = 'issue'
+              AND target_id = ?
+              AND relationship = 'must_consider'
+            LIMIT 1
+            """,
+            (record["annotation_id"], target_id),
+        ).fetchone()
+        if source_link is None:
+            msg = f"closeout acknowledgement record #{index} has no must_consider issue link for target {target_id}"
+            raise ValueError(msg)
+
+    def _validate_imported_annotation_link_target(
+        self,
+        *,
+        index: int,
+        target_type: str,
+        target_id: str,
+    ) -> None:
+        if target_type == "issue":
+            table = "issues"
+            description = "issue target"
+        elif target_type == "file":
+            table = "file_records"
+            description = "file target"
+        elif target_type == "finding":
+            table = "scan_findings"
+            description = "finding target"
+        elif target_type == "observation":
+            table = "observations"
+            description = "observation target"
+        else:
+            msg = f"annotation_link record #{index} has invalid target_type {target_type!r}"
+            raise ValueError(msg)
+        row = self.conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (target_id,)).fetchone()
+        if row is None:
+            msg = f"annotation_link record #{index} has missing {description}: {target_id}"
+            raise ValueError(msg)
+
     # Table export definitions: (record_type_tag, SQL query)
     _EXPORT_TABLES: ClassVar[list[tuple[str, str]]] = [
         ("issue", "SELECT * FROM issues ORDER BY created_at"),
@@ -664,6 +869,7 @@ class MetaMixin(DBMixinProtocol):
         ("comment", "SELECT * FROM comments ORDER BY created_at"),
         ("event", "SELECT * FROM events ORDER BY created_at"),
         ("file_association", "SELECT * FROM file_associations ORDER BY created_at, file_id, issue_id"),
+        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, clarion_entity_id"),
         ("file_event", "SELECT * FROM file_events ORDER BY created_at, file_id"),
         ("observation", "SELECT * FROM observations ORDER BY created_at"),
         ("dismissed_observation", "SELECT * FROM dismissed_observations ORDER BY dismissed_at"),
@@ -703,6 +909,7 @@ class MetaMixin(DBMixinProtocol):
         comments: list[dict[str, Any]],
         events: list[dict[str, Any]],
         file_associations: list[dict[str, Any]],
+        entity_associations: list[dict[str, Any]],
         scan_findings: list[dict[str, Any]],
         observations: list[dict[str, Any]],
         observation_links: list[dict[str, Any]],
@@ -725,11 +932,10 @@ class MetaMixin(DBMixinProtocol):
         def check(issue_id: Any) -> None:
             if not isinstance(issue_id, str) or not issue_id:
                 return
-            if "-" not in issue_id:
-                return
-            if issue_id.startswith(self.prefix + "-"):
-                return
-            foreign.add(issue_id)
+            try:
+                self._check_id_prefix(issue_id)
+            except WrongProjectError:
+                foreign.add(issue_id)
 
         for rec in issues:
             check(rec.get("id"))
@@ -744,6 +950,8 @@ class MetaMixin(DBMixinProtocol):
         for rec in events:
             check(rec.get("issue_id"))
         for rec in file_associations:
+            check(rec.get("issue_id"))
+        for rec in entity_associations:
             check(rec.get("issue_id"))
         for rec in scan_findings:
             check(rec.get("issue_id"))
@@ -816,6 +1024,7 @@ class MetaMixin(DBMixinProtocol):
         comments: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
         file_associations: list[dict[str, Any]] = []
+        entity_associations: list[dict[str, Any]] = []
         file_events: list[dict[str, Any]] = []
         observations: list[dict[str, Any]] = []
         dismissed_observations: list[dict[str, Any]] = []
@@ -836,6 +1045,7 @@ class MetaMixin(DBMixinProtocol):
             "comment": comments,
             "event": events,
             "file_association": file_associations,
+            "entity_association": entity_associations,
             "file_event": file_events,
             "observation": observations,
             "dismissed_observation": dismissed_observations,
@@ -875,6 +1085,7 @@ class MetaMixin(DBMixinProtocol):
                 comments=comments,
                 events=events,
                 file_associations=file_associations,
+                entity_associations=entity_associations,
                 scan_findings=scan_findings,
                 observations=observations,
                 observation_links=observation_links,
@@ -886,6 +1097,7 @@ class MetaMixin(DBMixinProtocol):
         inserted_issue_ids: set[str] = set()
         parent_map: dict[str, str] = {}
         file_id_map: dict[str, str] = {}
+        finding_id_map: dict[str, str] = {}
         _import_stage = "setup"
         _import_index = 0
         try:
@@ -895,6 +1107,12 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(issues):
                 parent_id = record.get("parent_id")
                 fields = self._issue_fields_json(record.get("fields", "{}"))
+                issue_data = {**record, "fields": json.loads(fields)}
+                self._validate_bulk_issue_data(
+                    issue_data,
+                    validate_parent_exists=False,
+                    validate_prefix=not allow_foreign_ids,
+                )
                 # Normalize timestamps at the import boundary so SQLite TEXT
                 # comparisons (used by archive_closed for closed_at, etc.) work
                 # chronologically regardless of the source's offset. Internal
@@ -934,6 +1152,12 @@ class MetaMixin(DBMixinProtocol):
                         if not exists:
                             msg = f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} references non-existent issue"
                             raise ValueError(msg)
+                    if parent_id == issue_id:
+                        msg = f"import_jsonl: issue {issue_id!r} cannot be its own parent"
+                        raise ValueError(msg)
+                    if self._would_create_parent_cycle(issue_id, parent_id):
+                        msg = f"import_jsonl: parent_id {parent_id!r} for issue {issue_id!r} would create a circular parent chain"
+                        raise ValueError(msg)
                     self.conn.execute("UPDATE issues SET parent_id = ? WHERE id = ?", (parent_id, issue_id))
 
             _import_stage = "file_record"
@@ -959,7 +1183,7 @@ class MetaMixin(DBMixinProtocol):
                         record.get("scan_source", ""),
                         status,
                         record.get("file_paths", "[]"),
-                        record.get("file_ids", "[]"),
+                        self._remap_file_id_list_text(record.get("file_ids", "[]"), file_id_map),
                         record.get("pid"),
                         record.get("api_url", ""),
                         record.get("log_path", ""),
@@ -1012,9 +1236,19 @@ class MetaMixin(DBMixinProtocol):
                     ),
                 )
                 count += cursor.rowcount
+                if cursor.rowcount > 0:
+                    finding_id_map[record["id"]] = record["id"]
+                elif merge:
+                    finding_id_map[record["id"]] = self._resolve_imported_scan_finding_id(record, file_id=file_id)
 
             _import_stage = "dependency"
             for _import_index, record in enumerate(dependencies):
+                self._validate_dependency_edge(
+                    record["issue_id"],
+                    record["depends_on_id"],
+                    validate_existence=False,
+                    validate_prefix=not allow_foreign_ids,
+                )
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                     (
@@ -1091,8 +1325,8 @@ class MetaMixin(DBMixinProtocol):
                 # (filigree-20911dfe6d)
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO events "
-                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.get("issue_id", ""),
                         record.get("event_type", ""),
@@ -1101,6 +1335,7 @@ class MetaMixin(DBMixinProtocol):
                         record.get("new_value"),
                         record.get("comment", ""),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
+                        int(record.get("event_seq", 0)),
                     ),
                 )
                 count += cursor.rowcount
@@ -1115,6 +1350,22 @@ class MetaMixin(DBMixinProtocol):
                         record["issue_id"],
                         record.get("assoc_type", "bug_in"),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
+                    ),
+                )
+                count += cursor.rowcount
+
+            _import_stage = "entity_association"
+            for _import_index, record in enumerate(entity_associations):
+                cursor = self.conn.execute(
+                    f"INSERT {conflict} INTO entity_associations "
+                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        record["issue_id"],
+                        record["clarion_entity_id"],
+                        record["content_hash_at_attach"],
+                        _normalize_iso_to_utc(record.get("attached_at")) or _now_iso(),
+                        record.get("attached_by", ""),
                     ),
                 )
                 count += cursor.rowcount
@@ -1165,6 +1416,9 @@ class MetaMixin(DBMixinProtocol):
                 obs_file_id: str | None = record.get("file_id")
                 if obs_file_id and obs_file_id in file_id_map:
                     obs_file_id = file_id_map[obs_file_id]
+                source_finding_id = record.get("source_finding_id", "")
+                if source_finding_id in finding_id_map:
+                    source_finding_id = finding_id_map[source_finding_id]
                 # Default expires_at to _expires_iso() (now + TTL) when missing.
                 # _now_iso() would make every imported observation already expired
                 # and swept on the next read.
@@ -1181,7 +1435,7 @@ class MetaMixin(DBMixinProtocol):
                         record.get("file_path", ""),
                         record.get("line"),
                         record.get("source_issue_id", ""),
-                        record.get("source_finding_id", ""),
+                        source_finding_id,
                         record.get("priority", 3),
                         record.get("actor", ""),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
@@ -1218,6 +1472,9 @@ class MetaMixin(DBMixinProtocol):
                 link_file_id: str | None = record.get("file_id")
                 if link_file_id:
                     link_file_id = self._remap_file_id(link_file_id, file_id_map)
+                source_finding_id = record.get("source_finding_id", "")
+                if source_finding_id in finding_id_map:
+                    source_finding_id = finding_id_map[source_finding_id]
                 if merge:
                     linked_at = _normalize_iso_to_utc(record.get("linked_at")) or _now_iso()
                     exists = self.conn.execute(
@@ -1243,7 +1500,7 @@ class MetaMixin(DBMixinProtocol):
                         record.get("file_path", ""),
                         record.get("line"),
                         record.get("source_issue_id", ""),
-                        record.get("source_finding_id", ""),
+                        source_finding_id,
                         record.get("priority", 3),
                         record.get("observation_actor", ""),
                         record.get("actor", ""),
@@ -1322,6 +1579,13 @@ class MetaMixin(DBMixinProtocol):
                 target_id = record["target_id"]
                 if record.get("target_type") == "file":
                     target_id = self._remap_file_id(target_id, file_id_map)
+                elif record.get("target_type") == "finding" and target_id in finding_id_map:
+                    target_id = finding_id_map[target_id]
+                self._validate_imported_annotation_link_target(
+                    index=_import_index,
+                    target_type=record["target_type"],
+                    target_id=target_id,
+                )
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO annotation_links "
                     "(id, annotation_id, target_type, target_id, relationship, actor, created_at) "
@@ -1361,6 +1625,7 @@ class MetaMixin(DBMixinProtocol):
 
             _import_stage = "annotation_closeout_acknowledgement"
             for _import_index, record in enumerate(annotation_closeout_acknowledgements):
+                self._validate_imported_closeout_acknowledgement(index=_import_index, record=record)
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO annotation_closeout_acknowledgements "
                     "(annotation_id, target_type, target_id, carried_to_target_id, actor, reason, acknowledged_at) "

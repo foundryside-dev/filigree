@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "filigree"
-version = "2.0.3"
+version = "2.1.1"
 description = "Agent-native issue tracker with convention-based project discovery"
 requires-python = ">=3.11"
 license = "MIT"
@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "click>=8.0",
     "fastapi>=0.115",
+    "httpx>=0.28",
     "mcp>=1.0,<2",
     "portalocker>=2.7,<4",
     "uvicorn>=0.34",
@@ -78,7 +79,6 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "coverage[toml]>=7.0",
-    "httpx>=0.28",
     "pre-commit>=4.0",
 ]
 
@@ -163,6 +163,10 @@ asyncio_mode = "auto"
 markers = [
     "slow: tests that take >0.3s (subprocess, file locks, large data)",
     "integration: tests spanning multiple modules",
+]
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
 ]
 
 # ---------------------------------------------------------------------------

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import FiligreeDB, WrongProjectError
 
 
 class TestBatchOperations:
@@ -15,6 +17,36 @@ class TestBatchOperations:
         assert len(results) == 2
         assert len(errors) == 0
         assert all(r.status == "closed" for r in results)
+
+    def test_batch_close_mixed_types_task_and_bug(self, db: FiligreeDB) -> None:
+        """Mixed task/bug closes use each issue's own workflow template."""
+        task = db.create_issue("Task")
+        bug = db.create_issue("Bug", type="bug", fields={"severity": "major"})
+        db.update_issue(bug.id, status="confirmed")
+        db.update_issue(bug.id, status="fixing", fields={"root_cause": "bad assumption"})
+        db.update_issue(bug.id, status="verifying", fields={"fix_verification": "regression passes"})
+
+        results, errors = db.batch_close([task.id, bug.id], reason="done")
+
+        assert errors == []
+        assert {issue.id for issue in results} == {task.id, bug.id}
+        assert db.get_issue(task.id).status == "closed"
+        assert db.get_issue(bug.id).status == "closed"
+
+    def test_batch_close_middle_failure_is_durable(self, db: FiligreeDB) -> None:
+        """A per-item failure in the middle does not roll back neighboring successes."""
+        first = db.create_issue("First task")
+        failing_bug = db.create_issue("Bug still in triage", type="bug")
+        last = db.create_issue("Last task")
+
+        results, errors = db.batch_close([first.id, failing_bug.id, last.id], reason="done")
+
+        assert {issue.id for issue in results} == {first.id, last.id}
+        assert len(errors) == 1
+        assert errors[0]["id"] == failing_bug.id
+        assert db.get_issue(first.id).status == "closed"
+        assert db.get_issue(failing_bug.id).status == "triage"
+        assert db.get_issue(last.id).status == "closed"
 
     def test_batch_update_status(self, db: FiligreeDB) -> None:
         a = db.create_issue("A")
@@ -33,16 +65,16 @@ class TestBatchOperations:
 
     def test_batch_update_not_found(self, db: FiligreeDB) -> None:
         a = db.create_issue("A")
-        results, errors = db.batch_update([a.id, "nonexistent-xyz"], priority=0)
+        results, errors = db.batch_update([a.id, "test-deadbeef00"], priority=0)
         assert len(results) == 1
         assert len(errors) == 1
-        assert errors[0]["id"] == "nonexistent-xyz"
+        assert errors[0]["id"] == "test-deadbeef00"
 
     def test_batch_close_not_found(self, db: FiligreeDB) -> None:
-        results, errors = db.batch_close(["nonexistent-xyz"])
+        results, errors = db.batch_close(["test-deadbeef00"])
         assert len(results) == 0
         assert len(errors) == 1
-        assert errors[0]["id"] == "nonexistent-xyz"
+        assert errors[0]["id"] == "test-deadbeef00"
 
     def test_batch_add_label(self, db: FiligreeDB) -> None:
         a = db.create_issue("A")
@@ -53,7 +85,7 @@ class TestBatchOperations:
         assert all(row["status"] == "added" for row in labeled)
 
     def test_batch_add_label_not_found(self, db: FiligreeDB) -> None:
-        labeled, errors = db.batch_add_label(["nonexistent-xyz"], label="security")
+        labeled, errors = db.batch_add_label(["test-deadbeef00"], label="security")
         assert labeled == []
         assert len(errors) == 1
         assert errors[0]["code"] == "NOT_FOUND"
@@ -87,7 +119,7 @@ class TestBatchOperations:
         assert "security" not in db.get_issue(b.id).labels
 
     def test_batch_remove_label_not_found(self, db: FiligreeDB) -> None:
-        removed, errors = db.batch_remove_label(["nonexistent-xyz"], label="security")
+        removed, errors = db.batch_remove_label(["test-deadbeef00"], label="security")
         assert removed == []
         assert len(errors) == 1
         assert errors[0]["code"] == "NOT_FOUND"
@@ -108,7 +140,7 @@ class TestBatchOperations:
         assert all(isinstance(row["comment_id"], int) for row in commented)
 
     def test_batch_add_comment_not_found(self, db: FiligreeDB) -> None:
-        commented, errors = db.batch_add_comment(["nonexistent-xyz"], text="triage complete")
+        commented, errors = db.batch_add_comment(["test-deadbeef00"], text="triage complete")
         assert commented == []
         assert len(errors) == 1
         assert errors[0]["code"] == "NOT_FOUND"
@@ -119,6 +151,44 @@ class TestBatchOperations:
         assert commented == []
         assert len(errors) == 1
         assert errors[0]["code"] == "VALIDATION"
+
+
+class TestBatchForeignPrefixAborts:
+    """2.1.0 §0.4: every batch handler aborts envelope-level when an id
+    has a foreign project prefix, rather than producing N misleading
+    per-item NOT_FOUND/VALIDATION failures. The preflight check fires
+    before any per-item write commits, so no partial mutation lands."""
+
+    def test_batch_close_foreign_prefix_aborts_batch_not_per_item(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A")
+        with pytest.raises(WrongProjectError):
+            db.batch_close([a.id, "foreign-deadbeef01"])
+        # Pre-flight aborts before close: the local issue must NOT be closed.
+        assert db.get_issue(a.id).status != "closed"
+
+    def test_batch_update_foreign_prefix_aborts_batch_not_per_item(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A")
+        with pytest.raises(WrongProjectError):
+            db.batch_update([a.id, "foreign-deadbeef01"], priority=0)
+        assert db.get_issue(a.id).priority != 0
+
+    def test_batch_add_label_foreign_prefix_aborts_batch(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A")
+        with pytest.raises(WrongProjectError):
+            db.batch_add_label([a.id, "foreign-deadbeef01"], label="security")
+        assert "security" not in db.get_issue(a.id).labels
+
+    def test_batch_remove_label_foreign_prefix_aborts_batch(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A", labels=["security"])
+        with pytest.raises(WrongProjectError):
+            db.batch_remove_label([a.id, "foreign-deadbeef01"], label="security")
+        assert "security" in db.get_issue(a.id).labels
+
+    def test_batch_add_comment_foreign_prefix_aborts_batch(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A")
+        with pytest.raises(WrongProjectError):
+            db.batch_add_comment([a.id, "foreign-deadbeef01"], text="note")
+        assert db.get_comments(a.id) == []
 
 
 class TestBatchInputValidation:
@@ -212,6 +282,30 @@ class TestBatchTransitionEnrichmentRace:
         assert errors[0]["code"] == "INVALID_TRANSITION"
         # Should NOT have valid_transitions key since the lookup failed
         assert "valid_transitions" not in errors[0]
+
+    def test_batch_close_transition_enrichment_failure_warns_and_preserves_error(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unexpected enrichment failures are warning-level, but best-effort."""
+
+        issue = db.create_issue("Test")
+        db.close_issue(issue.id)
+
+        def fail_transition_lookup(issue_id: str) -> list[object]:
+            raise RuntimeError(f"transition cache unavailable for {issue_id}")
+
+        monkeypatch.setattr(db, "get_valid_transitions", fail_transition_lookup)
+
+        with caplog.at_level(logging.WARNING, logger="filigree.db_issues"):
+            _results, errors = db.batch_close([issue.id])
+
+        assert len(errors) == 1
+        assert errors[0]["code"] == "INVALID_TRANSITION"
+        assert "valid_transitions" not in errors[0]
+        assert "failed to enrich invalid-transition error" in caplog.text
 
     def test_batch_update_validation_valueerror_classified_as_validation(self, db: FiligreeDB) -> None:
         """Non-transition ValueErrors (e.g. field validation) must be VALIDATION, not INVALID_TRANSITION.

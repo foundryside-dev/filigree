@@ -8,11 +8,11 @@ import { callbacks } from "../router.js";
 
 const PRIORITY_LABELS = ["P0", "P1", "P2", "P3", "P4"];
 const PRIORITY_COLORS = [
-  "color: var(--status-done); font-weight: bold",  // P0
-  "color: var(--accent); font-weight: bold",        // P1
-  "",                                                // P2
-  "color: var(--text-secondary)",                    // P3
-  "color: var(--text-secondary); opacity: 0.6",     // P4
+  "color: var(--status-done); font-weight: bold", // P0
+  "color: var(--accent); font-weight: bold", // P1
+  "", // P2
+  "color: var(--text-secondary)", // P3
+  "color: var(--text-secondary); opacity: 0.6", // P4
 ];
 
 export async function loadReady() {
@@ -20,18 +20,21 @@ export async function loadReady() {
   const countEl = document.getElementById("readyCount");
   if (!tbody) return;
 
-  tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-secondary">Loading...</td></tr>';
+  tbody.innerHTML =
+    '<tr><td colspan="6" class="py-4 text-center text-secondary">Loading...</td></tr>';
 
   const issues = await fetchReady();
   if (!issues) {
-    tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-secondary">Failed to load ready issues</td></tr>';
+    tbody.innerHTML =
+      '<tr><td colspan="6" class="py-4 text-center text-secondary">Failed to load ready issues</td></tr>';
     return;
   }
 
   if (countEl) countEl.textContent = `${issues.length} issue${issues.length !== 1 ? "s" : ""}`;
 
   if (issues.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-secondary">No ready issues — all blocked or done</td></tr>';
+    tbody.innerHTML =
+      '<tr><td colspan="6" class="py-4 text-center text-secondary">No ready issues — all blocked or done</td></tr>';
     return;
   }
 

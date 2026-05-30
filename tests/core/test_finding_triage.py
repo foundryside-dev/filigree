@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from filigree.core import FiligreeDB
@@ -107,6 +109,11 @@ class TestUpdateFinding:
         ids = _seed_findings(db)
         with pytest.raises(ValueError, match="Invalid finding status"):
             db.update_finding(ids["obo"], status="bogus")
+
+    def test_non_string_status_raises_value_error(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(ValueError, match="status must be a string"):
+            db.update_finding(ids["obo"], status=cast(Any, ["fixed"]))
 
     def test_not_found_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(KeyError):
@@ -225,6 +232,21 @@ class TestPromoteFindingToIssue:
         assert second["issue"].id == first["issue"].id
         assert "warnings" in second
         assert any("already linked" in warning for warning in second["warnings"])
+
+    def test_rejects_non_list_labels(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_finding_to_issue(ids["sqli"], labels="cluster:test")  # type: ignore[arg-type]
+
+    def test_rejects_non_string_label_items(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(TypeError, match="labels must be a list of strings"):
+            db.promote_finding_to_issue(ids["sqli"], labels=["cluster:test", 123])  # type: ignore[list-item]
+
+    def test_rejects_non_string_actor(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        with pytest.raises(ValueError, match="actor must be a string"):
+            db.promote_finding_to_issue(ids["sqli"], actor=123)  # type: ignore[arg-type]
 
 
 class TestProcessScanResultsBreakingChange:

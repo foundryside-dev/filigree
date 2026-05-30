@@ -17,7 +17,8 @@ import { renderHealthOverview } from "./health.js";
 
 function formatLineRange(f, prefix = "L") {
   if (!f.line_start) return "";
-  if (f.line_end && f.line_end !== f.line_start) return `${prefix}${f.line_start}\u2013${f.line_end}`;
+  if (f.line_end && f.line_end !== f.line_start)
+    return `${prefix}${f.line_start}\u2013${f.line_end}`;
   return `${prefix}${f.line_start}`;
 }
 
@@ -31,6 +32,10 @@ let _selectedFinding = null;
 
 // --- Sort direction state ---
 let _filesSortDir = "DESC";
+
+export function shouldRecreateFilesOverview(overview, projectKey) {
+  return Boolean(overview && overview.dataset?.projectKey !== projectKey);
+}
 
 // --- Severity helpers ---
 
@@ -65,14 +70,19 @@ export async function loadFiles() {
   if (!container) return;
 
   // --- Code Quality Overview (collapsible) ---
+  const projectKey = state.currentProjectKey || "__default__";
   let overview = document.getElementById("filesOverview");
+  if (shouldRecreateFilesOverview(overview, projectKey)) {
+    overview.remove();
+    overview = null;
+  }
   if (!overview) {
-    const projectKey = state.currentProjectKey || "__default__";
     const storageKey = `filigree_files_overview_collapsed.${projectKey}`;
     const collapsed = localStorage.getItem(storageKey) === "1";
 
     overview = document.createElement("details");
     overview.id = "filesOverview";
+    overview.dataset.projectKey = projectKey;
     overview.className = "mb-4 rounded";
     overview.style.cssText =
       "background:var(--surface-raised);border:1px solid var(--border-default)";
@@ -163,13 +173,16 @@ export async function loadFiles() {
     const scanChip = state.filesScanSource
       ? '<div class="flex items-center gap-2 mb-3 px-3 py-1.5 rounded text-xs" style="background:var(--surface-overlay);border:1px solid var(--border-default)">' +
         '<span style="color:var(--text-secondary)">Filtered by source:</span>' +
-        '<span class="font-medium" style="color:var(--text-primary)">' + escHtml(state.filesScanSource) + "</span>" +
+        '<span class="font-medium" style="color:var(--text-primary)">' +
+        escHtml(state.filesScanSource) +
+        "</span>" +
         '<button onclick="clearScanSourceFilter()" class="ml-1 rounded-full px-1.5" style="color:var(--text-muted)" title="Clear filter">&times;</button>' +
         "</div>"
       : "";
 
     if (!data.results.length) {
-      container.innerHTML = scanChip +
+      container.innerHTML =
+        scanChip +
         '<div class="p-6 text-center" style="color:var(--text-muted)">' +
         '<div class="font-medium mb-2" style="color:var(--text-primary)">No files found</div>' +
         "<div>No files match the current filters.</div></div>";
@@ -209,9 +222,7 @@ export async function loadFiles() {
         const border = healthBorderClass(s);
         const assocCount = f.associations_count || 0;
         const safeFileId = escJsSingle(f.id);
-        const updated = f.updated_at
-          ? new Date(f.updated_at).toLocaleDateString()
-          : "\u2014";
+        const updated = f.updated_at ? new Date(f.updated_at).toLocaleDateString() : "\u2014";
         const closedCount = (s.total_findings || 0) - (s.open_findings || 0);
         return (
           `<tr class="bg-overlay-hover cursor-pointer ${border}" onclick="openFileDetail('${safeFileId}')" role="button" tabindex="0">` +
@@ -232,7 +243,8 @@ export async function loadFiles() {
 
     const paginationHtml = buildPagination(data);
 
-    container.innerHTML = scanChip +
+    container.innerHTML =
+      scanChip +
       '<div class="rounded overflow-hidden" style="background:var(--surface-raised);border:1px solid var(--border-default)">' +
       '<table class="text-xs w-full">' +
       "<thead><tr>" +
@@ -278,10 +290,7 @@ export function sortFiles(column) {
 }
 
 export function filesPagePrev() {
-  state.filesPage.offset = Math.max(
-    0,
-    state.filesPage.offset - state.filesPage.limit,
-  );
+  state.filesPage.offset = Math.max(0, state.filesPage.offset - state.filesPage.limit);
   loadFiles();
 }
 
@@ -304,8 +313,7 @@ export async function openFileDetail(fileId) {
   const panel = document.getElementById("detailPanel");
   const content = document.getElementById("detailContent");
 
-  content.innerHTML =
-    '<div class="text-xs" style="color:var(--text-muted)">Loading...</div>';
+  content.innerHTML = '<div class="text-xs" style="color:var(--text-muted)">Loading...</div>';
   panel.classList.remove("translate-x-full");
 
   try {
@@ -348,9 +356,7 @@ function renderFileDetail(data) {
     (f.first_seen
       ? `<span>First seen: ${new Date(f.first_seen).toLocaleDateString()}</span>`
       : "") +
-    (f.updated_at
-      ? `<span>Updated: ${new Date(f.updated_at).toLocaleDateString()}</span>`
-      : "") +
+    (f.updated_at ? `<span>Updated: ${new Date(f.updated_at).toLocaleDateString()}</span>` : "") +
     "</div>";
 
   // Summary bar
@@ -369,13 +375,12 @@ function renderFileDetail(data) {
       '<div class="flex items-center gap-2 mb-4 px-3 py-2 rounded" style="background:var(--surface-overlay);border:1px dashed var(--border-strong)">' +
       `<span class="text-xs" style="color:var(--text-secondary)">${data.observation_count} pending observation(s)</span>` +
       '<span class="text-xs" style="color:var(--text-muted)">\u2014 use <code>list_observations</code> to triage</span>' +
-      '</div>';
+      "</div>";
   }
 
   // Tab buttons
   const findingsActive = state.fileDetailTab === "findings";
-  const tabActive =
-    "px-3 py-1 rounded text-xs font-medium bg-accent text-primary";
+  const tabActive = "px-3 py-1 rounded text-xs font-medium bg-accent text-primary";
   const tabInactive =
     "px-3 py-1 rounded text-xs font-medium bg-overlay text-secondary bg-overlay-hover";
 
@@ -457,8 +462,14 @@ function renderFindingDetail(f) {
     (lines ? `<span>${lines}</span>` : "") +
     `<span>Seen: ${f.seen_count || 1}×</span>` +
     "</div>" +
-    (f.first_seen ? `<div style="color:var(--text-muted)">First seen: ${new Date(f.first_seen).toLocaleDateString()}</div>` : "") +
-    (f.suggestion ? '<div class="mt-2 rounded p-2" style="background:var(--surface-base);border:1px solid var(--border-default)"><div class="font-medium mb-1" style="color:var(--text-secondary)">Suggestion</div><div style="color:var(--text-primary);white-space:pre-wrap">' + escHtml(f.suggestion) + "</div></div>" : "") +
+    (f.first_seen
+      ? `<div style="color:var(--text-muted)">First seen: ${new Date(f.first_seen).toLocaleDateString()}</div>`
+      : "") +
+    (f.suggestion
+      ? '<div class="mt-2 rounded p-2" style="background:var(--surface-base);border:1px solid var(--border-default)"><div class="font-medium mb-1" style="color:var(--text-secondary)">Suggestion</div><div style="color:var(--text-primary);white-space:pre-wrap">' +
+        escHtml(f.suggestion) +
+        "</div></div>"
+      : "") +
     '<div class="pt-2" style="border-top:1px solid var(--border-default)">' +
     '<div class="flex gap-2">' +
     `<button onclick="createIssueFromFinding()" class="text-xs px-3 py-1 rounded bg-accent-hover" style="background:var(--accent);color:var(--surface-base)">Create Ticket</button>` +
@@ -518,7 +529,9 @@ async function loadFindingsTab(fileId, offset) {
     _findingsAccum = _findingsAccum.concat(data.results);
 
     if (!_findingsAccum.length) {
-      container.innerHTML = renderFindingsFilterBar() + '<div style="color:var(--text-muted)">No findings match the current filters.</div>';
+      container.innerHTML =
+        renderFindingsFilterBar() +
+        '<div style="color:var(--text-muted)">No findings match the current filters.</div>';
       return;
     }
 
@@ -552,7 +565,7 @@ export function selectFinding(findingId) {
   // Update left-panel selection highlight
   const container = document.getElementById("fileTabContent");
   if (container) {
-    container.querySelectorAll("[onclick^=\"selectFinding\"]").forEach((el) => {
+    container.querySelectorAll('[onclick^="selectFinding"]').forEach((el) => {
       const elId = el.getAttribute("onclick").match(/selectFinding\('([^']+)'\)/)?.[1];
       el.classList.toggle("border-l-2", elId === findingId);
       el.classList.toggle("border-l-sky-400", elId === findingId);
@@ -578,7 +591,9 @@ export async function createIssueFromFinding() {
   await showCreateForm();
   const modalEl = document.getElementById("createModal");
   if (modalEl) {
-    modalEl.dataset.findingFileId = String(state.fileDetailData?.file?.id || state.selectedFile || "");
+    modalEl.dataset.findingFileId = String(
+      state.fileDetailData?.file?.id || state.selectedFile || "",
+    );
     modalEl.dataset.findingId = String(f.id);
   }
   const titleEl = document.getElementById("createTitle");
@@ -657,7 +672,8 @@ async function loadTimelineTab(fileId, offset) {
       "</div>";
 
     if (!_timelineAccum.length) {
-      container.innerHTML = html + '<div style="color:var(--text-muted)">No events for this filter yet.</div>';
+      container.innerHTML =
+        html + '<div style="color:var(--text-muted)">No events for this filter yet.</div>';
       return;
     }
 
@@ -687,11 +703,13 @@ const EVENT_TYPE_LABELS = {
 function renderTimelineEvents(events) {
   let html = "";
   for (const ev of events) {
-    const DOT_COLORS = { finding_created: "#EF4444", finding_updated: "#3B82F6", file_metadata_update: "#A855F7" };
+    const DOT_COLORS = {
+      finding_created: "#EF4444",
+      finding_updated: "#3B82F6",
+      file_metadata_update: "#A855F7",
+    };
     const dotColor = DOT_COLORS[ev.type] || "#10B981";
-    const time = ev.timestamp
-      ? new Date(ev.timestamp).toLocaleString()
-      : "";
+    const time = ev.timestamp ? new Date(ev.timestamp).toLocaleString() : "";
     const evData = ev.data || {};
     const label = EVENT_TYPE_LABELS[ev.type] || ev.type;
 
@@ -794,8 +812,7 @@ export function clearScanSourceFilter() {
 export function showLinkIssueModal(fileId) {
   const modal = document.createElement("div");
   modal.id = "linkIssueModal";
-  modal.className =
-    "fixed inset-0 bg-black/50 flex items-center justify-center z-50";
+  modal.className = "fixed inset-0 bg-black/50 flex items-center justify-center z-50";
   modal.onclick = (ev) => {
     if (ev.target === modal) modal.remove();
   };

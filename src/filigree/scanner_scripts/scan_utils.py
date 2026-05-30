@@ -25,11 +25,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from filigree.core import ForeignDatabaseError, ProjectNotInitialisedError, find_filigree_root
+from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, expand_prompt_pack_names
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────
+
+DEFAULT_SCANNER_API_URL = "http://localhost:8377"
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -198,8 +202,14 @@ def load_context(repo_root: Path) -> str:
     parts: list[str] = []
     for name in ("CLAUDE.md", "ARCHITECTURE.md"):
         path = repo_root / name
-        if path.exists():
-            parts.append(f"--- {name} ---\n{path.read_text(encoding='utf-8')}")
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"Warning: Skipping unreadable context file {name}: {exc}", file=sys.stderr)
+            continue
+        parts.append(f"--- {name} ---\n{text}")
     return "\n\n".join(parts)
 
 
@@ -512,6 +522,15 @@ def _resolve_target_file(*, repo_root: Path, root_dir: Path, file_arg: str) -> P
     return target
 
 
+def _default_api_url_for_repo(repo_root: Path) -> str:
+    """Resolve the active local dashboard URL for direct scanner entrypoints."""
+    try:
+        filigree_dir = find_filigree_root(repo_root)
+    except (ProjectNotInitialisedError, ForeignDatabaseError):
+        return DEFAULT_SCANNER_API_URL
+    return resolve_scanner_api_url_with_source(filigree_dir).url
+
+
 async def _analyse_files(
     *,
     files: list[Path],
@@ -529,6 +548,7 @@ async def _analyse_files(
     scan_source: str,
     executor: Any,
     prompt_template: str,
+    cache_warmup: bool = True,
 ) -> dict[str, int]:
     """Run analysis on all files in batches. Returns summary stats."""
     import asyncio
@@ -536,14 +556,58 @@ async def _analyse_files(
     from collections import Counter
 
     failed: list[tuple[Path, Exception]] = []
-    report_paths: list[Path] = []
+    report_paths: list[tuple[Path, Path]] = []
+    bad_report_paths: set[Path] = set()
     done = 0
     total = len(files)
     api_successes = 0
     api_failures = 0
 
-    for batch_start in range(0, total, batch_size):
-        batch = files[batch_start : batch_start + batch_size]
+    def record_report_failure(fpath: Path, out: Path, detail: str) -> None:
+        failed.append((fpath, RuntimeError(detail)))
+        bad_report_paths.add(out)
+        print(f"  FAIL {_display_path(fpath, repo_root)}: {detail}", file=sys.stderr)
+
+    def read_report_text(fpath: Path, out: Path) -> str | None:
+        try:
+            return out.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as read_exc:
+            if out not in bad_report_paths:
+                failed.append((fpath, read_exc))
+                bad_report_paths.add(out)
+            print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
+            return None
+
+    def ingest_report(fpath: Path, out: Path) -> None:
+        nonlocal api_successes, api_failures
+        if no_ingest or not out.is_file():
+            return
+        text = read_report_text(fpath, out)
+        if text is None:
+            return
+        rel_path = str(_display_path(fpath, repo_root))
+        findings = parse_findings(text, file_path=rel_path)
+        if not findings:
+            return
+
+        # Ingest findings but defer scan run completion to the final POST after
+        # all files are processed.
+        ok, err_detail = post_to_api(
+            api_url=api_url,
+            scan_source=scan_source,
+            scan_run_id=scan_run_id,
+            findings=findings,
+            create_observations=True,
+            complete_scan_run=False,
+        )
+        if ok:
+            api_successes += 1
+        else:
+            api_failures += 1
+            print(f"  API error for {rel_path}: {err_detail}", file=sys.stderr)
+
+    async def run_batch(batch: list[Path]) -> None:
+        nonlocal done
         tasks: list[tuple[Path, Path, asyncio.Task[None]]] = []
 
         for fpath in batch:
@@ -552,8 +616,12 @@ async def _analyse_files(
 
             if skip_existing and out.exists():
                 done += 1
-                report_paths.append(out)
+                if not out.is_file():
+                    record_report_failure(fpath, out, "existing report path is not a file")
+                    continue
+                report_paths.append((fpath, out))
                 print(f"  [skip] {_display_path(fpath, repo_root)}", file=sys.stderr)
+                ingest_report(fpath, out)
                 continue
 
             prompt = prompt_template.format(file_path=fpath, context=context)
@@ -575,34 +643,32 @@ async def _analyse_files(
                 failed.append((fpath, result))
                 print(f"  FAIL {_display_path(fpath, repo_root)}: {result}", file=sys.stderr)
             else:
-                report_paths.append(out)
+                if not out.exists():
+                    record_report_failure(fpath, out, "scanner did not generate report")
+                    continue
+                if not out.is_file():
+                    record_report_failure(fpath, out, "generated report path is not a file")
+                    continue
+                report_paths.append((fpath, out))
                 print(f"  [{done}/{total}] {_display_path(fpath, repo_root)}", file=sys.stderr)
+                ingest_report(fpath, out)
 
-                if not no_ingest and out.exists():
-                    try:
-                        text = out.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError) as read_exc:
-                        failed.append((fpath, read_exc))
-                        print(f"  FAIL reading report for {_display_path(fpath, repo_root)}: {read_exc}", file=sys.stderr)
-                        continue
-                    rel_path = str(_display_path(fpath, repo_root))
-                    findings = parse_findings(text, file_path=rel_path)
-                    if findings:
-                        # Ingest findings but defer scan run completion to the
-                        # final POST after all files are processed (Bug #4 fix).
-                        ok, err_detail = post_to_api(
-                            api_url=api_url,
-                            scan_source=scan_source,
-                            scan_run_id=scan_run_id,
-                            findings=findings,
-                            create_observations=True,
-                            complete_scan_run=False,
-                        )
-                        if ok:
-                            api_successes += 1
-                        else:
-                            api_failures += 1
-                            print(f"  API error for {rel_path}: {err_detail}", file=sys.stderr)
+    remaining_files = files
+    if cache_warmup and batch_size > 1 and total > 1:
+        warmup_index: int | None = None
+        for index, fpath in enumerate(files):
+            rel = fpath.relative_to(root_dir)
+            out = (output_dir / rel).with_suffix(rel.suffix + ".md")
+            if skip_existing and out.exists():
+                continue
+            warmup_index = index
+            break
+        if warmup_index is not None:
+            await run_batch(files[: warmup_index + 1])
+            remaining_files = files[warmup_index + 1 :]
+
+    for batch_start in range(0, len(remaining_files), batch_size):
+        await run_batch(remaining_files[batch_start : batch_start + batch_size])
 
     # Send a final completion POST with empty findings to mark the scan run
     # as completed.  Per-file POSTs above used complete_scan_run=False to
@@ -620,10 +686,15 @@ async def _analyse_files(
             api_failures += 1
 
     stats: Counter[str] = Counter()
-    for md in report_paths:
-        if not md.exists():
+    for fpath, md in report_paths:
+        if md in bad_report_paths:
             continue
-        text = md.read_text(encoding="utf-8")
+        if not md.exists():
+            record_report_failure(fpath, md, "scanner did not generate report")
+            continue
+        text = read_report_text(fpath, md)
+        if text is None:
+            continue
         if "No concrete bug found" in text:
             stats["clean"] += 1
         else:
@@ -683,10 +754,15 @@ async def run_scanner_pipeline(
     parser.add_argument("--timeout", type=int, default=300, help="Per-file timeout in seconds (default: 300)")
     parser.add_argument("--dry-run", action="store_true", help="List files with count and token estimate")
     parser.add_argument("--max-files", type=int, default=50, help="Maximum files to scan (default: 50)")
-    parser.add_argument("--api-url", default="http://localhost:8377", help="Filigree dashboard URL")
+    parser.add_argument("--api-url", default=None, help="Filigree dashboard URL")
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
     parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
+    parser.add_argument(
+        "--no-cache-warmup",
+        action="store_true",
+        help="Skip the serial first-file warm-up before parallel scanner runs",
+    )
 
     args = parser.parse_args()
 
@@ -742,11 +818,24 @@ async def run_scanner_pipeline(
 
     context = load_context(repo_root)
     scan_run_id = args.scan_run_id or f"{scan_source}-{datetime.now(UTC).isoformat()}"
+    try:
+        if args.api_url is not None:
+            api_url = args.api_url.strip().rstrip("/")
+            if not api_url:
+                print("Error: --api-url must be a non-empty URL", file=sys.stderr)
+                return 1
+        else:
+            api_url = _default_api_url_for_repo(repo_root)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     model_display = f", model={args.model}" if args.model else ""
     print(f"Analysing {len(files)} files (batch={args.batch_size}{model_display}) ...", file=sys.stderr)
+    if not args.no_cache_warmup and args.batch_size > 1 and len(files) > 1:
+        print("  Cache warm-up: first file runs before parallel batches.", file=sys.stderr)
     if not args.no_ingest:
-        print(f"  API: {args.api_url}  run_id: {scan_run_id}", file=sys.stderr)
+        print(f"  API: {api_url}  run_id: {scan_run_id}", file=sys.stderr)
 
     stats = await _analyse_files(
         files=files,
@@ -758,12 +847,13 @@ async def run_scanner_pipeline(
         context=context,
         skip_existing=args.skip_existing,
         timeout=args.timeout,
-        api_url=args.api_url,
+        api_url=api_url,
         no_ingest=args.no_ingest,
         scan_run_id=scan_run_id,
         scan_source=scan_source,
         executor=executor,
         prompt_template=template,
+        cache_warmup=not args.no_cache_warmup,
     )
 
     print("\n" + "=" * 50)
@@ -785,6 +875,9 @@ async def run_scanner_pipeline(
     print("=" * 50)
 
     if not args.no_ingest and stats.get("api_files_posted", 0) == 0 and stats.get("api_files_failed", 0) > 0:
+        return 1
+
+    if stats.get("failed", 0) > 0:
         return 1
 
     return 0

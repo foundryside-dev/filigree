@@ -6,7 +6,7 @@
       "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
-    "updated": "2026-04-26",
+    "updated": "2026-05-30",
     "endpoint": "GET /api/loom/changes",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic /api/activity (analytics) returns events; loom /api/changes mirrors MCP's get_changes semantics. event_id replaces id at the entity primary-key level. Cursor is the 'since' timestamp plus optional after_event_id tie-breaker; offset is not exposed."
@@ -14,7 +14,7 @@
   "shape_decl": {
     "request_type": "GET; query params: since (required ISO timestamp), after_event_id (optional integer tie-breaker), limit (default 100)",
     "response_type": "ListResponse[ChangeRecordLoom]",
-    "rationale": "ChangeRecordLoom = IssueEventLoom + issue_title (matches EventRecordWithTitle)."
+    "rationale": "ChangeRecordLoom = IssueEventLoom + issue_title (matches EventRecordWithTitle) + affected_entities (list[str]; sorted clarion_entity_ids on issue_deleted records, [] otherwise — F5 amplifier, schema v21, see docs/federation/contracts.md §F5)."
   },
   "examples": [
     {

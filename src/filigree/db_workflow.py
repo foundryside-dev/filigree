@@ -10,6 +10,7 @@ Python's MRO when composed into ``FiligreeDB``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from filigree.db_base import DBMixinProtocol, StatusCategory, _now_iso
@@ -23,6 +24,8 @@ from filigree.types.workflow import (
 
 if TYPE_CHECKING:
     from filigree.templates import FieldSchema, TemplateRegistry, TransitionOption, ValidationResult
+
+_FILIGREE_DIR_NAME = ".filigree"
 
 
 def _is_priority_like_label(label: str) -> bool:
@@ -77,6 +80,12 @@ class WorkflowMixin(DBMixinProtocol):
 
     _template_registry: TemplateRegistry | None  # narrowing needed by templates property
 
+    def _filigree_metadata_dir(self) -> Path:
+        """Return the project metadata directory even when the DB is relocated."""
+        if self.project_root is not None:
+            return self.project_root / _FILIGREE_DIR_NAME
+        return self.db_path.parent
+
     @property
     def templates(self) -> TemplateRegistry:
         """Lazy-loaded TemplateRegistry — created on first access.
@@ -88,7 +97,7 @@ class WorkflowMixin(DBMixinProtocol):
             from filigree.templates import TemplateRegistry
 
             self._template_registry = TemplateRegistry()
-            filigree_dir = self.db_path.parent
+            filigree_dir = self._filigree_metadata_dir()
             self._template_registry.load(filigree_dir, enabled_packs=self._enabled_packs_override)
         return self._template_registry
 
@@ -132,7 +141,7 @@ class WorkflowMixin(DBMixinProtocol):
         import json as _json
 
         _default_packs = ["core", "planning", "release"]
-        config_path = self.db_path.parent / "config.json"
+        config_path = self._filigree_metadata_dir() / "config.json"
         if not config_path.exists():
             self.enabled_packs = _default_packs
             return
@@ -171,6 +180,17 @@ class WorkflowMixin(DBMixinProtocol):
                     }
                 )
                 for t in tpl.transitions
+            ],
+            reverse_transitions=[
+                TransitionInfo(
+                    **{
+                        "from": t.from_state,
+                        "to": t.to_state,
+                        "enforcement": t.enforcement,
+                        "requires_fields": list(t.requires_fields),
+                    }
+                )
+                for t in tpl.reverse_transitions
             ],
             fields_schema=fields_schema,
         )

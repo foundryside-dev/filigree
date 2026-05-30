@@ -9,12 +9,47 @@ from typing import Any
 import pytest
 
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, SUMMARY_FILENAME, FiligreeDB, write_config
+from filigree.types.core import ClarionConfig, RegistryBackend
 from tests._seeds import SeededMCPClient, seed_observations, seed_open_bug
 
 # Re-export _parse so existing ``from tests.mcp.conftest import _parse``
 # imports continue to work during migration.  New code should import from
 # ``tests.mcp._helpers`` instead.
 from tests.mcp._helpers import _parse as _parse
+
+
+def _make_mcp_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    registry_backend: RegistryBackend = "local",
+    clarion_config: ClarionConfig | None = None,
+) -> FiligreeDB:
+    filigree_dir = tmp_path / FILIGREE_DIR_NAME
+    filigree_dir.mkdir()
+    config: dict[str, Any] = {"prefix": "mcp", "version": 1}
+    if registry_backend != "local":
+        config["registry_backend"] = registry_backend
+        config["clarion"] = dict(clarion_config or {})
+    write_config(filigree_dir, config)
+    (filigree_dir / SUMMARY_FILENAME).write_text("# test\n")
+
+    d = FiligreeDB(
+        filigree_dir / DB_FILENAME,
+        prefix="mcp",
+        registry_backend=registry_backend,
+        clarion_config=clarion_config,
+        # MCP fixtures stub Clarion absence; skip the startup capability
+        # probe so the placeholder base_url doesn't abort __init__.
+        skip_clarion_capability_probe=True,
+    )
+    d.initialize()
+
+    import filigree.mcp_server as mcp_mod
+
+    monkeypatch.setattr(mcp_mod, "db", d)
+    monkeypatch.setattr(mcp_mod, "_filigree_dir", filigree_dir)
+    return d
 
 
 @pytest.fixture
@@ -25,22 +60,33 @@ def mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Filigre
     test raises between the patch and the ``yield`` — a manual
     save/restore pattern leaks state in that window.
     """
-    filigree_dir = tmp_path / FILIGREE_DIR_NAME
-    filigree_dir.mkdir()
-    write_config(filigree_dir, {"prefix": "mcp", "version": 1})
-    (filigree_dir / SUMMARY_FILENAME).write_text("# test\n")
-
-    d = FiligreeDB(filigree_dir / DB_FILENAME, prefix="mcp")
-    d.initialize()
-
-    import filigree.mcp_server as mcp_mod
-
-    monkeypatch.setattr(mcp_mod, "db", d)
-    monkeypatch.setattr(mcp_mod, "_filigree_dir", filigree_dir)
+    d = _make_mcp_db(tmp_path, monkeypatch)
 
     try:
         yield d
     finally:
+        import filigree.mcp_server as mcp_mod
+
+        mcp_mod._tool_locks.pop(d, None)
+        d.close()
+
+
+@pytest.fixture
+def clarion_mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[FiligreeDB, None, None]:
+    """Set up MCP globals with a constructor-validated Clarion registry DB."""
+    d = _make_mcp_db(
+        tmp_path,
+        monkeypatch,
+        registry_backend="clarion",
+        clarion_config={"base_url": "http://localhost:9111"},
+    )
+
+    try:
+        yield d
+    finally:
+        import filigree.mcp_server as mcp_mod
+
+        mcp_mod._tool_locks.pop(d, None)
         d.close()
 
 

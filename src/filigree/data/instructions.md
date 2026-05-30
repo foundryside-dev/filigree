@@ -10,7 +10,7 @@ CLI otherwise.
 # At session start
 filigree session-context                            # ready / in-progress / critical path
 
-# Pick up the next ready issue (atomic claim + transition to in_progress)
+# Pick up the next startable issue (atomic claim + transition into its working status)
 filigree start-next-work --assignee <name>
 # ...or claim a specific issue
 filigree start-work <id> --assignee <name>
@@ -24,6 +24,15 @@ Use the atomic claim+transition verbs — `start_work` / `start_next_work`
 `claim_issue` (MCP) or `filigree claim` (CLI) with a subsequent status
 update — the two-step form races against other agents; the combined verb is
 atomic.
+
+**Ready ≠ startable.** The working status is type-specific (tasks →
+`in_progress`, features → `building`). Bugs start at `triage`, which has no
+single-hop transition into work (`triage → confirmed → fixing`), so a triage
+bug is *ready* but not directly *startable*: `start_work` on one returns
+`INVALID_TRANSITION` naming the next status, and `start_next_work` skips it.
+`get_ready` items carry a `startable` flag (plus a `next_action` hint when
+false). Pass `advance=true` (MCP) / `--advance` (CLI) to walk the soft
+transitions to the nearest working status automatically.
 
 ### Observations: when (and when not) to use them
 
@@ -60,6 +69,8 @@ either catalogue. The verbs you will reach for most:
 - **Find work:** `get_ready`, `get_blocked`, `list_issues`, `search_issues`
 - **Claim work:** `start_work`, `start_next_work`
 - **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
+- **Admin (irreversible):** `delete_issue` (MCP) / `delete-issue` (CLI) —
+  hard-deletes a terminal issue and its rows; `undo_last` cannot reverse it.
 - **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
 - **Cross-product entity bindings (ADR-029):** `add_entity_association`,
   `remove_entity_association`, `list_entity_associations`,
@@ -77,14 +88,19 @@ either catalogue. The verbs you will reach for most:
   and `GET /api/entity-associations?entity_id=…`.
 - **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
 
-Pass `--actor <name>` (CLI) so events attribute to your agent identity.
+Pass `--actor <name>` (CLI) so events attribute to your agent identity. It
+works in either position — before the verb (`filigree --actor X update …`) or
+after it (`filigree update … --actor X`); the post-verb value overrides the
+group-level one.
 
 ### Error handling
 
 Errors return `{error: str, code: ErrorCode, details?: dict}`. Switch on
 `code`, not on message text. Codes: `VALIDATION`, `NOT_FOUND`, `CONFLICT`,
 `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`,
-`INVALID_API_URL`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
+`INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`,
+`CLARION_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`,
+`SCHEMA_MISMATCH`, `INTERNAL`.
 
 On `INVALID_TRANSITION`, call `get_valid_transitions` (MCP) or
 `filigree transitions <id>` to see what the workflow allows from here.

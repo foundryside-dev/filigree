@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast, get_args
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _begin_immediate, _now_iso
 from filigree.db_files import _normalize_scan_path
 from filigree.types.api import ErrorCode
 from filigree.types.core import (
@@ -114,6 +114,20 @@ class AnnotationsMixin(DBMixinProtocol):
             msg = f"File not found: {normalized}"
             raise ValueError(msg)
         return normalized, resolved
+
+    def _resolve_stored_annotation_file_path(self, file_path: Any) -> Path | None:
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+        normalized = _normalize_scan_path(file_path.strip())
+        if not normalized or Path(normalized).is_absolute():
+            return None
+        root = self._project_root_for_annotations()
+        resolved = (root / normalized).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved
 
     @staticmethod
     def _validate_annotation_line_range(line_start: int | None, line_end: int | None) -> tuple[int | None, int | None]:
@@ -268,8 +282,15 @@ class AnnotationsMixin(DBMixinProtocol):
                 git_state = "clean"
 
             if not is_binary and tracked_ok:
+                diff_parts: list[str] = []
                 diff_ok, diff_out = self._run_git(["diff", "--", file_path], cwd=root)
                 if diff_ok and diff_out:
+                    diff_parts.append(diff_out)
+                cached_diff_ok, cached_diff_out = self._run_git(["diff", "--cached", "--", file_path], cwd=root)
+                if cached_diff_ok and cached_diff_out:
+                    diff_parts.append(cached_diff_out)
+                if diff_parts:
+                    diff_out = "\n".join(diff_parts)
                     dirty_diff_hash = hashlib.sha256(diff_out.encode("utf-8")).hexdigest()
                     file_diff, redacted = _redact_secrets(diff_out)
                     if redacted:
@@ -355,8 +376,6 @@ class AnnotationsMixin(DBMixinProtocol):
         provenance: sqlite3.Row | None,
     ) -> dict[str, Any]:
         file_path = annotation["file_path"]
-        root = self._project_root_for_annotations()
-        absolute_path = (root / file_path).resolve()
         commit_ref = provenance["commit_ref"] if provenance is not None else ""
         base = {
             "anchor_state": "file_missing",
@@ -366,6 +385,9 @@ class AnnotationsMixin(DBMixinProtocol):
             "current_line_end": None,
             "commit_available": self._annotation_commit_available(commit_ref),
         }
+        absolute_path = self._resolve_stored_annotation_file_path(file_path)
+        if absolute_path is None:
+            return base
         if not absolute_path.exists() or not absolute_path.is_file():
             return base
         data = absolute_path.read_bytes()
@@ -652,7 +674,7 @@ class AnnotationsMixin(DBMixinProtocol):
             line_start=line_start,
             line_end=line_end,
         )
-        file_record = self.register_file(normalized)
+        file_record = self.register_file(normalized, _commit=False)
         try:
             self.conn.execute(
                 "INSERT INTO annotations "
@@ -810,12 +832,12 @@ class AnnotationsMixin(DBMixinProtocol):
             params.append(target_type)
             clauses.append("l.target_id = ?")
             params.append(target_id)
-            if relationship is not None:
-                clauses.append("l.relationship = ?")
-                params.append(relationship)
+        if relationship is not None:
+            join = "JOIN annotation_links l ON l.annotation_id = a.id"
+            clauses.append("l.relationship = ?")
+            params.append(relationship)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self.conn.execute(
-            f"""
+        query = f"""
             SELECT DISTINCT a.* FROM annotations a
             {join}
             {where}
@@ -823,14 +845,20 @@ class AnnotationsMixin(DBMixinProtocol):
                      CASE a.status WHEN 'active' THEN 0 ELSE 1 END,
                      a.created_at DESC,
                      a.id ASC
-            """,
-            params,
-        ).fetchall()
+            """
+        query_params = list(params)
+        if anchor_state is None:
+            query += " LIMIT ? OFFSET ?"
+            query_params.extend([limit + 1, offset])
+        rows = self.conn.execute(query, query_params).fetchall()
         payloads = [self._build_annotation_payload(row, response_detail=response_detail) for row in rows]
         if anchor_state is not None:
             payloads = [item for item in payloads if item["anchor_state"] == anchor_state]
-        page = payloads[offset : offset + limit]
-        has_more = offset + limit < len(payloads)
+            page = payloads[offset : offset + limit]
+            has_more = offset + limit < len(payloads)
+        else:
+            page = payloads[:limit]
+            has_more = len(payloads) > limit
         result: dict[str, Any] = {"items": page, "has_more": has_more}
         if has_more:
             result["next_offset"] = offset + len(page)
@@ -1017,25 +1045,28 @@ class AnnotationsMixin(DBMixinProtocol):
             msg = "target_type must be 'issue' or 'observation'"
             raise ValueError(msg)
         default_title = (title or annotation["note"].splitlines()[0]).strip()[:120] or "Promoted annotation"
-        if target_type == "issue":
-            issue = self.create_issue(
-                default_title,
-                description=annotation["note"],
-                notes=reason,
-                labels=["from-annotation"],
-                actor=actor,
-            )
-            target_id = issue.id
-        else:
-            obs = self.create_observation(
-                default_title,
-                detail=annotation["note"],
-                file_path=annotation["file_path"],
-                line=annotation["line_start"],
-                actor=actor,
-            )
-            target_id = obs["id"]
+        _begin_immediate(self.conn, "promote_annotation")
         try:
+            if target_type == "issue":
+                issue = self.create_issue(
+                    default_title,
+                    description=annotation["note"],
+                    notes=reason,
+                    labels=["from-annotation"],
+                    actor=actor,
+                    _skip_begin=True,
+                )
+                target_id = issue.id
+            else:
+                obs = self.create_observation(
+                    default_title,
+                    detail=annotation["note"],
+                    file_path=annotation["file_path"],
+                    line=annotation["line_start"],
+                    actor=actor,
+                    auto_commit=False,
+                )
+                target_id = obs["id"]
             link = self._insert_annotation_link(
                 annotation_id,
                 target_type=target_type,
@@ -1059,7 +1090,8 @@ class AnnotationsMixin(DBMixinProtocol):
             )
             self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if self.conn.in_transaction:
+                self.conn.rollback()
             raise
         return {
             "annotation": self.get_annotation(annotation_id),

@@ -6,10 +6,10 @@ Filigree uses a lightweight, hand-rolled migration framework built on SQLite's `
 
 ```
 src/filigree/
-  core.py          # SCHEMA_SQL constant + CURRENT_SCHEMA_VERSION
+  db_schema.py     # SCHEMA_SQL constant + CURRENT_SCHEMA_VERSION
   migrations.py    # Migration registry, runner, and SQLite helpers
 tests/
-  test_migrations.py  # Framework tests + per-migration test templates
+  core/test_schema.py  # Framework tests + per-migration test templates
 ```
 
 **How it works:**
@@ -23,20 +23,37 @@ tests/
 4. Migrations run one at a time, each committed and version-bumped individually
 5. If a migration fails, it rolls back and the database stays at the last successful version
 
+## Release Schema Registry
+
+Use this table to answer "what `PRAGMA user_version` ships in this release?"
+without grepping source. The source of truth remains
+`src/filigree/db_schema.py::CURRENT_SCHEMA_VERSION`.
+
+| Release | Ships `user_version` | Notes |
+|---------|----------------------|-------|
+| 2.1.1 | 21 | Migration 20 to 21: `deleted_issues.entity_ids`, surfaced as `affected_entities` on the `issue_deleted` deletion-signal record (F5 amplifier) |
+| 2.1.0 | 20 | Migrations 14 to 20: entity associations (v15), event sequencing (v16), file registry metadata (v17), `application_id` stamp (v18), scan-finding fingerprints (v19), and the `deleted_issues` tombstone (v20) |
+| 2.0.0 to 2.0.3 | 14 | Loom/API generation and 2.0 surface releases |
+| 1.6.0 to 1.6.1 | 8 | Autodiscovery MCP install line |
+
+For the operator upgrade path from 2.0.x to 2.1.0, see
+[UPGRADING.md](UPGRADING.md#upgrading-from-20x-to-210); for 2.1.0 to 2.1.1, see
+[UPGRADING.md](UPGRADING.md#upgrading-from-210-to-211).
+
 ## Adding a Migration
 
 ### Step 1: Snapshot the current schema
 
-Before making any changes, copy the current `SCHEMA_SQL` from `core.py` into your test file as `V<N>_SCHEMA_SQL`. This is your "before" snapshot for equivalence testing.
+Before making any changes, copy the current `SCHEMA_SQL` from `db_schema.py` into your test file as `V<N>_SCHEMA_SQL`. This is your "before" snapshot for equivalence testing.
 
-### Step 2: Update `SCHEMA_SQL` in `core.py`
+### Step 2: Update `SCHEMA_SQL` in `db_schema.py`
 
 Modify `SCHEMA_SQL` to reflect the **final** state of the schema. This is what fresh databases will get. Keep it as the single source of truth.
 
 ### Step 3: Bump `CURRENT_SCHEMA_VERSION`
 
 ```python
-# core.py
+# db_schema.py
 CURRENT_SCHEMA_VERSION = 2  # was 1
 ```
 
@@ -105,7 +122,7 @@ class TestMigrateV1ToV2:
 ### Step 7: Run tests
 
 ```bash
-python -m pytest tests/test_migrations.py -v
+python -m pytest tests/core/test_schema.py -v
 python -m pytest tests/ -x  # full suite
 ```
 

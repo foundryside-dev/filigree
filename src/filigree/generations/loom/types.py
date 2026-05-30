@@ -245,6 +245,7 @@ class ScanFindingLoom(TypedDict):
     scan_run_id: str
     line_start: int | None
     line_end: int | None
+    fingerprint: str
     issue_id: str | None
     seen_count: int
     first_seen: ISOTimestamp
@@ -359,6 +360,13 @@ class ChangeRecordLoom(IssueEventLoom):
     """
 
     issue_title: str
+    # Always present, uniform across the feed: ``[]`` for live-issue change
+    # records, and on a synthetic ``issue_deleted`` record the sorted
+    # ``clarion_entity_id``s whose entity_associations the delete cascade removed
+    # (schema v21, F5 amplifier). A consumer reconciling a deletion must purge any
+    # mirrored reverse-lookup binding (``list_associations_by_entity``) for these
+    # entities or it surfaces a phantom issue. (filigree-f3bf56554c)
+    affected_entities: list[str]
 
 
 class ScanIngestResponseLoom(TypedDict):

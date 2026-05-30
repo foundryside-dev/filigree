@@ -96,7 +96,36 @@ class DeleteFileRecordResult(TypedDict):
     deleted_findings: int
     deleted_associations: int
     deleted_file_events: int
+    deleted_annotation_links: int
     unlinked_observations: int
+    actor: str
+
+
+class DeleteIssueResult(TypedDict):
+    """Shape returned by ``delete_issue()`` (hard-delete + tombstone).
+
+    Counts the child rows removed in FK-safe order plus the rows the final
+    issue delete auto-orphaned via ``ON DELETE SET NULL`` (children's
+    ``parent_id`` and ``scan_findings.issue_id``). ``status`` is always
+    ``"deleted"``. The delete is irreversible — events are destroyed, so
+    ``undo_last`` cannot reverse it.
+    """
+
+    status: str
+    issue_id: str
+    deleted_events: int
+    deleted_comments: int
+    deleted_labels: int
+    deleted_dependencies_out: int
+    deleted_dependencies_in: int
+    deleted_file_associations: int
+    deleted_observation_links: int
+    deleted_attachments: int
+    deleted_annotation_links: int
+    deleted_annotation_closeout_acks: int
+    deleted_entity_associations: int
+    orphaned_children: int
+    orphaned_findings: int
     actor: str
 
 

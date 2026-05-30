@@ -11,20 +11,23 @@ import shutil
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mcp.types import TextContent, Tool
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.core import VALID_SEVERITIES
-from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_int_range
+from filigree.db_files import INGESTED_FILE_ID_KEY
+from filigree.mcp_tools.common import _list_response, _parse_args, _registry_error_text, _text, _validate_int_range
 from filigree.mcp_tools.payloads import finding_to_mcp
-from filigree.scanner_callback import resolve_scanner_api_url_with_source
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
+from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import load_scanner, validate_scanner_command
+from filigree.scanners import load_scanner, validate_scanner_command, validate_scanner_name
 from filigree.types.api import ErrorCode, ErrorResponse
+from filigree.types.files import ScanIngestResult
 from filigree.types.inputs import (
     DisableScannerArgs,
     EnableScannerArgs,
@@ -40,6 +43,32 @@ _LOCALHOST_HOSTS = frozenset(("localhost", "127.0.0.1", "::1"))
 _ALLOWED_URL_SCHEMES = frozenset(("http", "https"))
 
 _logger = logging.getLogger(__name__)
+_SCAN_RUN_LIFECYCLE_ERRORS = (sqlite3.Error, KeyError, ValueError)
+
+
+def _mark_scan_run_failed(
+    tracker: Any,
+    scan_run_id: str,
+    *,
+    error_message: str,
+    context: str,
+    exit_code: int | None = None,
+) -> str | None:
+    kwargs: dict[str, Any] = {"error_message": error_message}
+    if exit_code is not None:
+        kwargs["exit_code"] = exit_code
+    try:
+        tracker.update_scan_run_status(scan_run_id, "failed", **kwargs)
+    except _SCAN_RUN_LIFECYCLE_ERRORS as exc:
+        _logger.error(
+            "Failed to mark scan run %s failed during %s: %s",
+            scan_run_id,
+            context,
+            exc,
+            exc_info=True,
+        )
+        return str(exc)
+    return None
 
 
 def _prompt_pack_schema() -> dict[str, Any]:
@@ -124,6 +153,39 @@ def _report_finding_observation_ids(
     """
     observations = tracker.list_observations(file_id=file_id, limit=10000)
     return [observation["id"] for observation in observations if observation.get("source_finding_id") == finding_id]
+
+
+def _reported_finding_record(
+    tracker: Any,
+    result: ScanIngestResult,
+    *,
+    file_id: str | None,
+    rule_id: str,
+    line_start: int | None,
+    message: str,
+    severity: str,
+) -> dict[str, Any] | None:
+    for finding_id in result.get("new_finding_ids", []):
+        try:
+            return cast(dict[str, Any], tracker.get_finding(finding_id))
+        except KeyError:
+            continue
+
+    matching_findings = cast(
+        list[dict[str, Any]],
+        tracker.list_findings_global(scan_source="agent", file_id=file_id, limit=10000)["findings"],
+    )
+    return next(
+        (
+            item
+            for item in matching_findings
+            if item["rule_id"] == rule_id
+            and item.get("line_start") == line_start
+            and item.get("message") == message
+            and item.get("severity") == severity
+        ),
+        None,
+    )
 
 
 def register(
@@ -421,6 +483,17 @@ def _validate_localhost_url(api_url: str) -> ErrorResponse | None:
     return None
 
 
+def _resolve_scanner_api_url_or_error(
+    filigree_dir: Path,
+    *,
+    explicit_api_url: str | None = None,
+) -> tuple[ScannerApiUrlResolution | None, ErrorResponse | None]:
+    try:
+        return resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=explicit_api_url), None
+    except ValueError as exc:
+        return None, ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION)
+
+
 def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any | None, ErrorResponse | None]:
     """Load scanner config or return an ErrorResponse."""
     scanners_dir = filigree_dir / "scanners"
@@ -552,6 +625,8 @@ async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent
 
     args = _parse_args(arguments, DisableScannerArgs)
     scanner_name = args["scanner"]
+    if name_error := validate_scanner_name(scanner_name):
+        return _text(ErrorResponse(error=name_error, code=ErrorCode.VALIDATION, details={"scanner": scanner_name}))
     force = args.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="'force' must be a boolean", code=ErrorCode.VALIDATION))
@@ -638,27 +713,38 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
             create_observations=create_observation,
             observation_actor=actor,
         )
-    except (ValueError, sqlite3.Error) as exc:
-        _logger.error("report_finding failed: %s", exc)
+    except RegistryResolutionError as exc:
+        _logger.error("report_finding registry resolution failed: %s", exc)
+        return _registry_error_text(exc, action="reporting finding")
+    except RegistryUnavailableError as exc:
+        _logger.error("report_finding registry unavailable: %s", exc)
+        return _registry_error_text(exc, action="reporting finding")
+    except ValueError as exc:
+        _logger.warning("report_finding validation failed: %s", exc)
+        return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        _logger.error("report_finding storage failure: %s", exc)
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))
 
-    normalized_path = finding["path"]
-    file_record = tracker.register_file(normalized_path)
-    matching_findings = tracker.list_findings_global(
-        file_id=file_record.id,
-        scan_source="agent",
-        limit=10000,
-    )["findings"]
-    line_start = args.get("line_start")
-    finding_record = next(
-        (item for item in matching_findings if item["rule_id"] == rule_id and item.get("line_start") == line_start),
-        None,
+    reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
+    reported_line_start = finding.get("line_start")
+    lookup_line_start = reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
+    finding_record = _reported_finding_record(
+        tracker,
+        result,
+        file_id=reported_file_id if isinstance(reported_file_id, str) else None,
+        rule_id=rule_id,
+        line_start=lookup_line_start,
+        message=message,
+        severity=severity,
     )
     if finding_record is None:
         return _text(ErrorResponse(error="Reported finding was not found after ingestion", code=ErrorCode.IO))
 
     observation_ids = (
-        _report_finding_observation_ids(tracker, file_id=file_record.id, finding_id=finding_record["id"]) if create_observation else []
+        _report_finding_observation_ids(tracker, file_id=finding_record["file_id"], finding_id=finding_record["id"])
+        if create_observation
+        else []
     )
     response: dict[str, Any] = {
         **finding_to_mcp(finding_record),
@@ -692,13 +778,25 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     args = _parse_args(arguments, TriggerScanArgs)
     tracker = _get_db()
-    scanner_name = args["scanner"]
-    file_path = args["file_path"]
+    scanner_name = args.get("scanner")
+    if not isinstance(scanner_name, str):
+        return _text(ErrorResponse(error="scanner must be a string", code=ErrorCode.VALIDATION))
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str):
+        return _text(ErrorResponse(error="file_path must be a string", code=ErrorCode.VALIDATION))
     prompt = args.get("prompt", "bug-hunt")
+    if not isinstance(prompt, str):
+        return _text(ErrorResponse(error="prompt must be a string", code=ErrorCode.VALIDATION))
+    api_url_arg = args.get("api_url")
+    if api_url_arg is not None and not isinstance(api_url_arg, str):
+        return _text(ErrorResponse(error="api_url must be a string", code=ErrorCode.VALIDATION))
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=api_url_arg)
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     api_url = api_resolution.url
 
     url_err = _validate_localhost_url(api_url)
@@ -729,7 +827,10 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
 
-    file_record = tracker.register_file(canonical_path)
+    try:
+        file_record = tracker.register_file(canonical_path)
+    except (RegistryResolutionError, RegistryUnavailableError) as exc:
+        return _registry_error_text(exc, action="triggering scan")
     project_root = filigree_dir.parent
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     scan_run_id = f"{scanner_name}-{ts}-{secrets.token_hex(3)}"
@@ -782,11 +883,19 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             prompt=prompt,
         )
     except ScannerSpawnError as exc:
-        with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-            tracker.update_scan_run_status(scan_run_id, "failed", error_message="Scanner process failed to spawn")
+        status_update_error = _mark_scan_run_failed(
+            tracker,
+            scan_run_id,
+            error_message="Scanner process failed to spawn",
+            context="single spawn failure",
+        )
         err_resp = ErrorResponse(error=str(exc), code=exc.code)
         if exc.details:
             err_resp["details"] = exc.details
+        if status_update_error:
+            spawn_failure_details = dict(err_resp.get("details", {}))
+            spawn_failure_details["status_update_error"] = status_update_error
+            err_resp["details"] = spawn_failure_details
         return _text(err_resp)
 
     proc = spawn_result["proc"]
@@ -800,25 +909,33 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     except (sqlite3.Error, KeyError, ValueError) as exc:
         with contextlib.suppress(OSError):
             proc.kill()
+        status_update_error = _mark_scan_run_failed(
+            tracker,
+            scan_run_id,
+            error_message=f"Scanner process terminated after DB tracking failed: {exc}",
+            context="single DB tracking failure",
+        )
         _logger.error(
             "Failed to finalize scan run %s (pid %d killed): %s",
             scan_run_id,
             proc.pid,
             exc,
         )
-        return _text(
-            ErrorResponse(
-                error=f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
-                code=ErrorCode.IO,
-            )
+        err_resp = ErrorResponse(
+            error=f"Scan process spawned but DB tracking failed: {exc}. Process (pid={proc.pid}) terminated.",
+            code=ErrorCode.IO,
         )
+        if status_update_error:
+            err_resp["details"] = {"status_update_error": status_update_error}
+        return _text(err_resp)
 
     await asyncio.sleep(0.2)
     exit_code = proc.poll()
     if exit_code is not None and exit_code != 0:
-        tracker.update_scan_run_status(
+        status_update_error = _mark_scan_run_failed(
+            tracker,
             scan_run_id,
-            "failed",
+            context="single immediate exit",
             exit_code=exit_code,
             error_message=f"Scanner exited immediately with code {exit_code}",
         )
@@ -827,17 +944,20 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             log_hint = f" Check log: {log_rel}"
         elif spawn_result.get("log_warning"):
             log_hint = f" Note: {spawn_result['log_warning']}"
+        details: dict[str, Any] = {
+            "scanner": scanner_name,
+            "file_id": file_record.id,
+            "scan_run_id": scan_run_id,
+            "exit_code": exit_code,
+            "log_path": log_rel,
+        }
+        if status_update_error:
+            details["status_update_error"] = status_update_error
         return _text(
             ErrorResponse(
                 error=f"Scanner process exited immediately with code {exit_code}.{log_hint}",
                 code=ErrorCode.IO,
-                details={
-                    "scanner": scanner_name,
-                    "file_id": file_record.id,
-                    "scan_run_id": scan_run_id,
-                    "exit_code": exit_code,
-                    "log_path": log_rel,
-                },
+                details=details,
             )
         )
 
@@ -890,17 +1010,29 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
 
     args = _parse_args(arguments, TriggerScanBatchArgs)
     tracker = _get_db()
-    scanner_name = args["scanner"]
+    scanner_name = args.get("scanner")
+    if not isinstance(scanner_name, str):
+        return _text(ErrorResponse(error="scanner must be a string", code=ErrorCode.VALIDATION))
     file_paths = args.get("file_paths", [])
     prompt = args.get("prompt", "bug-hunt")
+    if not isinstance(prompt, str):
+        return _text(ErrorResponse(error="prompt must be a string", code=ErrorCode.VALIDATION))
+    api_url_arg = args.get("api_url")
+    if api_url_arg is not None and not isinstance(api_url_arg, str):
+        return _text(ErrorResponse(error="api_url must be a string", code=ErrorCode.VALIDATION))
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir, explicit_api_url=args.get("api_url"))
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir, explicit_api_url=api_url_arg)
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     api_url = api_resolution.url
 
     if not isinstance(file_paths, list) or not file_paths:
         return _text(ErrorResponse(error="file_paths must be a non-empty list", code=ErrorCode.VALIDATION))
+    if any(not isinstance(fp, str) for fp in file_paths):
+        return _text(ErrorResponse(error="file_paths entries must be strings", code=ErrorCode.VALIDATION))
 
     max_batch_size = 500
     if len(file_paths) > max_batch_size:
@@ -944,7 +1076,10 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             skipped.append({"file_path": fp, "reason": "duplicate"})
             continue
         seen_canonical.add(cp)
-        file_record = tracker.register_file(cp)
+        try:
+            file_record = tracker.register_file(cp)
+        except (RegistryResolutionError, RegistryUnavailableError) as exc:
+            return _registry_error_text(exc, action="triggering batch scan")
         canonical_paths.append(cp)
         file_ids.append(file_record.id)
 
@@ -985,7 +1120,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             skipped.append({"file_path": cp, "reason": f"reservation_failed: {exc}"})
             continue
         if blocking is not None:
-            skipped.append({"file_path": cp, "reason": "rate_limited"})
+            skipped.append({"file_path": cp, "reason": "rate_limited", "blocking_run_id": blocking["id"]})
             continue
         assert created is not None  # noqa: S101
         reserved.append(
@@ -998,6 +1133,18 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         )
 
     if not reserved:
+        if skipped and all(item["reason"] == "rate_limited" for item in skipped):
+            blocking_run_ids = [item["blocking_run_id"] for item in skipped if "blocking_run_id" in item]
+            return _text(
+                ErrorResponse(
+                    error="All files are blocked by recent scanner runs. Retry after the blocking run(s) complete.",
+                    code=ErrorCode.CONFLICT,
+                    details={
+                        "skipped": skipped,
+                        "blocking_run_ids": blocking_run_ids,
+                    },
+                )
+            )
         return _text(
             ErrorResponse(
                 error="No files eligible for scanning",
@@ -1026,13 +1173,16 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             )
         except ScannerSpawnError as exc:
             reason = str(exc)
-            spawn_errors.append({"file_path": cp, "reason": reason})
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(
-                    child_run_id,
-                    "failed",
-                    error_message=f"Scanner process failed to spawn: {reason}",
-                )
+            error_item = {"file_path": cp, "reason": reason}
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                child_run_id,
+                error_message=f"Scanner process failed to spawn: {reason}",
+                context="batch spawn failure",
+            )
+            if status_update_error:
+                error_item["status_update_error"] = status_update_error
+            spawn_errors.append(error_item)
             continue
         entry["spawn_result"] = spawn_result
         spawned.append(entry)
@@ -1065,13 +1215,22 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         except (sqlite3.Error, KeyError, ValueError) as exc:
             with contextlib.suppress(OSError):
                 proc.kill()
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                entry["scan_run_id"],
+                error_message=f"Scanner process terminated after DB tracking failed: {exc}",
+                context="batch DB tracking failure",
+            )
             _logger.error(
                 "Failed to finalize scan run %s (pid %d killed): %s",
                 entry["scan_run_id"],
                 proc.pid,
                 exc,
             )
-            spawn_errors.append({"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"})
+            error_item = {"file_path": entry["canonical_path"], "reason": f"db_tracking_failed: {exc}"}
+            if status_update_error:
+                error_item["status_update_error"] = status_update_error
+            spawn_errors.append(error_item)
             continue
         entry["log_rel"] = log_rel
         entry["pid"] = proc.pid
@@ -1093,17 +1252,26 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     # Quick check: did any process exit immediately with error?
     await asyncio.sleep(0.2)
     immediate_failures = 0
+    status_update_errors: list[dict[str, str]] = []
     for entry in finalized:
         proc = entry["spawn_result"]["proc"]
         ec = proc.poll()
         if ec is not None and ec != 0:
             immediate_failures += 1
-            with contextlib.suppress(sqlite3.Error, KeyError, ValueError):
-                tracker.update_scan_run_status(
-                    entry["scan_run_id"],
-                    "failed",
-                    exit_code=ec,
-                    error_message="Scanner exited immediately",
+            status_update_error = _mark_scan_run_failed(
+                tracker,
+                entry["scan_run_id"],
+                exit_code=ec,
+                error_message="Scanner exited immediately",
+                context="batch immediate exit",
+            )
+            if status_update_error:
+                status_update_errors.append(
+                    {
+                        "scan_run_id": entry["scan_run_id"],
+                        "file_path": entry["canonical_path"],
+                        "error": status_update_error,
+                    }
                 )
 
     scan_run_ids = [entry["scan_run_id"] for entry in finalized]
@@ -1127,6 +1295,9 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                     "batch_id": batch_id,
                     "scan_run_ids": scan_run_ids,
                     "per_file": per_file,
+                    **({"spawn_errors": spawn_errors} if spawn_errors else {}),
+                    **({"skipped": skipped} if skipped else {}),
+                    **({"status_update_errors": status_update_errors} if status_update_errors else {}),
                 },
             )
         )
@@ -1151,6 +1322,8 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         result["skipped"] = skipped
     if immediate_failures:
         result["immediate_failures"] = immediate_failures
+    if status_update_errors:
+        result["status_update_errors"] = status_update_errors
     log_warnings = [entry["spawn_result"]["log_warning"] for entry in finalized if entry["spawn_result"].get("log_warning")]
     if log_warnings:
         result["warnings"] = log_warnings
@@ -1211,7 +1384,10 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
     project_root = filigree_dir.parent
-    api_resolution = resolve_scanner_api_url_with_source(filigree_dir)
+    api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir)
+    if api_resolution_err is not None:
+        return _text(api_resolution_err)
+    assert api_resolution is not None  # noqa: S101
     try:
         cmd = cfg.build_command(
             file_path=canonical_path,

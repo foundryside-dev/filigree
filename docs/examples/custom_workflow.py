@@ -158,9 +158,7 @@ def main() -> None:
         # Summary
         print("--- Summary ---")
         for issue in db.list_issues():
-            print(
-                f"  [{issue.id}] {issue.type:<5} {issue.status:<10} P{issue.priority}  {issue.title}"
-            )
+            print(f"  [{issue.id}] {issue.type:<5} {issue.status:<10} P{issue.priority}  {issue.title}")
 
         db.close()
 

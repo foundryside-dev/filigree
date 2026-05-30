@@ -5,9 +5,164 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.1] - 2026-05-30
+
+Upgrade guide: [Upgrading from 2.1.0 to 2.1.1](docs/UPGRADING.md#upgrading-from-210-to-211).
 
 ### Added
+
+- **`issue_deleted` now carries `affected_entities` — the entity bindings a
+  delete cascade removed (F5 amplifier).** A hard `delete_issue` cascades the
+  issue's `entity_associations` (`ON DELETE CASCADE`), silently dropping
+  Filigree's side of every Clarion entity binding. The 2.1.0 `issue_deleted`
+  signal named only the issue, so a consumer mirroring the reverse lookup
+  (`list_associations_by_entity`) could not tell which bindings the cascade
+  dropped and would surface a user-facing phantom issue. The tombstone now
+  captures the bound `clarion_entity_id`s (sorted) **before** the cascade and
+  surfaces them as **`affected_entities`** on the `/api/loom/changes`
+  `issue_deleted` record — always present (`[]` for live-issue records);
+  consumers purge the listed bindings on reconcile. Schema **v20 → v21** (new
+  `deleted_issues.entity_ids` column, `NOT NULL DEFAULT '[]'`, backfilled for
+  existing tombstones; the migration is automatic on first open). Wire
+  contract: `docs/federation/contracts.md` §F5. Consumer tracking:
+  `filigree-f3bf56554c`.
+
+## [2.1.0] - 2026-05-30
+
+Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).
+
+### Breaking Changes / Migration Notes
+
+- **Custom workflow packs must declare reverse escape paths.**
+  Workflow operations that reopen, release/revert, or force-close issues now
+  validate against template `reverse_transitions`. Custom packs that relied on
+  the previous internal bypass must add the corresponding reverse edge or
+  callers will receive `InvalidTransitionError`.
+
+- **HTTP batch-close no longer accepts `force=true` by default.**
+  `POST /api/batch/close` and `POST /api/loom/batch/close` reject forced HTTP
+  closes unless the dashboard starts with `--allow-http-force-close`. CLI
+  `filigree close --force` and MCP `batch_close(force=true)` are unchanged.
+
+- **Corrupt `issues.fields` rows are no longer merged over silently.**
+  `update_issue(fields=...)` now refuses to merge into unparsable stored JSON.
+  Operators or embedders that intentionally replace a corrupt value must pass
+  `force_overwrite_corrupt=True`, which records a
+  `corrupt_fields_overwritten` event with the raw old value.
+
+- **Duplicate audit-event writes now raise instead of disappearing.**
+  `_record_event` uses `event_seq` to preserve same-second event bursts and
+  uses a normal `INSERT`; true duplicate rows now raise `sqlite3.IntegrityError`
+  so the caller's transaction can roll back instead of losing audit history.
+
+- **The internal `_commit=` keyword was removed.**
+  `claim_issue` and `_claim_next_with_prior` no longer accept `_commit=`.
+  Embedders composing lower-level DB operations inside an existing transaction
+  should use the public `start_work` / `start_next_work` APIs where possible,
+  or the internal `_skip_begin=True` path only when they own the transaction
+  boundary.
+
+### Added
+
+- **`POST /api/loom/findings/clean-stale` — findings retention over HTTP, for
+  federation consumers (ADR-015).** Exposes the existing
+  `clean_stale_findings` core method (already reachable via CLI `filigree
+  finding clean-stale`) on the loom generation so a federation consumer like
+  Clarion — which cannot drive a CLI — can trigger retention. Soft-archives
+  `unseen_in_latest` findings older than `older_than_days` (default 30) to
+  `fixed`, scoped to a required `scan_source`; rows persist and a finding that
+  reappears in a later scan auto-reopens (`fixed` → `open`) with `seen_count`
+  intact. Request `{scan_source, older_than_days?, actor?}` → response
+  `{findings_fixed, scan_source, older_than_days}`; no auth (loopback-only,
+  `actor` from body, mirroring scan-results); `scan_source` is required as an
+  accident-guard (not an authorization boundary). Wire shape pinned at
+  `tests/fixtures/contracts/loom/findings-clean-stale.json`. *Enables*
+  federation cooperation (ADR-002 §7); Filigree's finding lifecycle is correct
+  whether or not a consumer ever calls it. No schema change; no MCP/CLI change
+  (the CLI verb already exists). ADR-015 also records the REQ-FINDING-05
+  scan-run-create contract: Filigree tolerates an unknown client-supplied
+  `scan_run_id` and proceeds — no create endpoint — and a consumer not managing
+  run lifecycle should send `complete_scan_run: false` so the path stays
+  warning-free.
+
+- **`delete_issue` — general-purpose hard-delete with a federation tombstone (F5).**
+  New MCP tool `delete_issue` and CLI verb `delete-issue` (`--force`, `--json`)
+  permanently remove an issue and all of its dependent rows (events, comments,
+  labels, dependencies in/out, file associations, observation links, annotation
+  links + close-out acks) in one IMMEDIATE transaction; children and
+  `scan_findings` orphan via `ON DELETE SET NULL`, entity associations cascade.
+  The delete is **irreversible** — events are destroyed, so `undo_last` cannot
+  reverse it. Force-gated guards refuse by default unless the issue is terminal
+  (a done-category status or `archived`), has no children, and has no other
+  issues blocked by it; `force=true` deletes anyway (orphaning children,
+  cascading inbound dependencies). Guard refusals raise the typed
+  `IssueDeletionRefusedError` (a `ValueError` subclass) and surface as
+  `ErrorCode.CONFLICT` via `isinstance`, not message-text matching. Because a
+  hard-deleted issue leaves no row for the `GET /api/loom/changes` feed to
+  join, `delete_issue` writes a row to a new `deleted_issues` tombstone table,
+  surfaced on `/changes` as an `issue_deleted` change record cursored on
+  `deleted_at` so federation consumers (Clarion / Wardline / Shuttle) learn of
+  each deletion exactly once. Schema **v19 → v20** (new `deleted_issues` table,
+  keyed on a VACUUM-stable `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a
+  `UNIQUE` `issue_id`).
+
+- **Scan findings accept an optional `fingerprint` as cross-run identity.**
+  When a finding supplied to `process_scan_results` / `POST /api/v1/scan-results`
+  / `POST /api/loom/scan-results` carries a non-empty `fingerprint`, lifecycle
+  and `seen_count` are keyed on `(scan_source, fingerprint)` instead of the
+  `(file_id, scan_source, rule_id, line_start)` heuristic — so a finding that
+  moves lines keeps one stable identity, and two distinct findings at the same
+  site (e.g. two taint paths into one sink) no longer collapse. The field is
+  generic; any scanner may supply it, and findings without one keep the legacy
+  heuristic unchanged. Surfaced on the read projection (`ScanFindingDict`,
+  loom `GET /api/loom/findings`). Enables native Wardline emission per the
+  Loom integration brief §3.B. Schema **v18 → v19** (new `fingerprint` column;
+  the dedup unique index is rebuilt as a partial index over fingerprint-less
+  rows, with a new partial unique index over `(scan_source, fingerprint)`).
+
+- **`get_ready` items carry a `startable` flag (and `next_action` hint).**
+  Ready surfaces (MCP `get_ready`, CLI `ready` / `get-ready --json`) now mark
+  each item `startable: true/false`. `false` means the issue is ready (open,
+  unblocked) but cannot be transitioned into work in a single hop — notably
+  `triage` bugs, which walk `triage → confirmed → fixing`. Non-startable items
+  also carry `next_action`, the intermediate status to move through first. The
+  CLI human-readable `ready` list flags non-startable rows inline.
+
+- **Opt-in multi-hop `advance` for `start_work` / `start_next_work`.**
+  New `advance` parameter (MCP `start_work` / `start_next_work`; CLI
+  `--advance`) walks the shortest **soft**-edge path to the nearest working
+  status when no single-hop wip target exists — e.g.
+  `start-work <bug> --advance` walks `triage → confirmed → fixing` in one atomic
+  claim+walk. Missing required fields surface as warnings rather than blocking;
+  hard edges are never auto-walked (the confirm gate stays intact by default).
+  Default off.
+
+- **`transition_forced` audit event (2.1.0 §1.1).** Every
+  `_skip_transition_check=True` status change in `update_issue` now
+  emits a `transition_forced` event alongside `status_changed`.
+  Reviewers reading the audit trail can identify every workflow
+  shortcut directly instead of inferring it from the absence of a
+  `transition_warning`. Internal callers (`reopen_issue`, force
+  `close_issue`, `release_claim` revert, `start_work` rollback) all
+  emit it automatically.
+
+- **`--allow-http-force-close` opt-in startup flag (2.1.0 §1.1).**
+  `filigree dashboard --allow-http-force-close` enables `force=true`
+  on the HTTP batch-close routes. Default-off; CLI / MCP unchanged.
+
+- **Typed `ClaimConflictError` for optimistic-lock CAS failures (2.1.0
+  §0.3).** `filigree.types.api.ClaimConflictError(ValueError)` carries
+  the failing issue id and the observed/expected assignee pair. Every
+  CAS-failure path in `db_issues.py` (`_check_expected_assignee`,
+  `release_claim`, `heartbeat_work`, `reclaim_issue`) raises the typed
+  class; every dispatch site (5 in `db_issues.py`, plus the dashboard
+  routes, MCP tools, and CLI surfaces) now routes via `isinstance`
+  rather than message-text matching. The class still subclasses
+  `ValueError`, so pre-existing `except ValueError` callers continue
+  to work — only the routing mechanism changed. Closes the project's
+  own CLAUDE.md contract violation ("switch on `code`, not message
+  text") and removes a class of silent CONFLICT→VALIDATION downgrades
+  triggered by future message rewording.
 
 - **Cross-product entity-association binding (ADR-029, Clarion B.7 /
   WP9-A).** New `entity_associations` table (schema v15) binds Filigree
@@ -20,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface (`GET /api/entity-associations?entity_id=…`,
   `list_associations_by_entity`) answers "what issues are about this
   code I'm reading?" in one round trip and uses the
-  `idx_entity_associations_entity` index. The binding is idempotent
+  `ix_entity_assoc_entity` index. The binding is idempotent
   on the composite key: re-attaching refreshes `content_hash_at_attach`
   and `attached_at` while preserving the original `attached_by`, so
   drift refreshes don't overwrite the audit signal of who first
@@ -32,6 +187,403 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the initialisation-coupling test exercising the reverse
   lookup under blocked sockets so the §5 invariant covers Clarion's
   primary call path.
+
+- **ADR-014 file-identity displacement to Clarion (`registry_backend`
+  flag).** Filigree now treats Clarion as the federation file-identity
+  authority when configured. A new `RegistryProtocol` abstraction with
+  `LocalRegistry` (default, in-process SQLite) and `ClarionRegistry`
+  (HTTP) implementations sits behind every `file_id` resolution path,
+  selected by the `registry_backend` setting (`local` | `clarion`).
+  `_ClarionLocalFallbackRegistry` wraps the Clarion backend so transient
+  HTTP failures fall back to local resolution under
+  `RegistryUnavailableError` only — semantic refusals (briefing-blocked,
+  see Security) deliberately bypass the wrapper. The single-file path is
+  `GET /api/v1/files`; see Phase D additions below for the batch and
+  capabilities surfaces.
+
+- **Clarion 1.0 wire CONTRACT-1 — batched file resolution
+  (`resolve_files_batch` / `POST /api/v1/files/batch`).**
+  `RegistryProtocol.resolve_files_batch` returns a `BatchResolution`
+  TypedDict with four channels — `resolved`, `not_found`,
+  `briefing_blocked`, `errors` — and a `messages` sidecar that the
+  loop-fallback adapter populates from single-item exceptions so call
+  sites can promote channel entries back into per-item exceptions
+  without losing the original context. `ClarionRegistry` chunks
+  requests at `CLARION_BATCH_MAX_QUERIES = 256` (Clarion's hard cap,
+  returning 400/`BATCH_TOO_LARGE` on overflow). The scan-results
+  pre-resolve path (`db_files._pre_resolve_scan_file_records`) and the
+  migration-planning path (`cli_commands._registry_migration_plan`)
+  were refactored to one batch call instead of N per-finding HTTP
+  round-trips; a regression test asserts 300 scan-result findings
+  produce exactly two batch HTTP POSTs
+  (`tests/api/test_registry_backend_integration.py`).
+  `_ClarionLocalFallbackRegistry.resolve_files_batch_via_loop`
+  gracefully services primaries that only implement `resolve_file`
+  (legacy fakes) so the abstraction is back-compatible.
+
+- **Clarion 1.0 wire CONTRACT-2 — Bearer auth via env-var-named
+  token.** `ClarionConfig` gains an optional `token_env` field
+  (default `CLARION_LOOM_TOKEN`); `_resolve_clarion_auth_token` reads
+  it at construction and threads `Authorization: Bearer <token>` onto
+  every outbound request via `Request` objects (replacing the prior
+  bare `urllib.urlopen` calls). 401 responses map to
+  `RegistryUnavailableError(cause_kind="auth")` so the standard
+  fallback policy applies uniformly. When `token_env` is configured
+  but the named env var resolves to empty, startup emits a WARN so
+  operators can spot silent loopback-only fallback. Opt-in: when
+  `token_env` is unset, no `Authorization` header is sent and Clarion
+  serves loopback-bound deployments unauthenticated per the 1.0
+  cross-product contract.
+
+- **Phase D federation handshake — `GET /api/v1/_capabilities` probe
+  and dashboard rotation banner.** ClarionRegistry now performs a
+  capabilities handshake on first use and surfaces `clarion_instance_id`,
+  `clarion_api_version`, and `clarion_instance_rotated` on the
+  dashboard's schema endpoint. The dashboard frontend
+  (`static/dashboard.html`, `static/js/app.js`) renders a rotation
+  banner when Clarion's `instance_id` changes between handshakes,
+  alerting operators to a Clarion restart that may invalidate
+  cached file identities. `EXPECTED_CLARION_API_VERSION = 1` pins the
+  resolver protocol version; mismatches refuse startup under
+  `clarion` mode because no in-process fallback can mask a wire-
+  contract change. Test coverage in
+  `tests/unit/test_clarion_capabilities_probe.py` and the
+  cross-process scaffolding in `tests/integration/` (live-Clarion
+  end-to-end runs). The federation launch runbook
+  (`docs/federation/registry-backend-launch-runbook.md`) was updated
+  with the Phase D handshake checklist.
+
+### Changed
+
+- **Workflow templates now declare `reverse_transitions` for controlled
+  escape paths (2.1.0 §4.1).** Built-in packs ship explicit reverse edges
+  for reopen, release-claim revert, and forced close behavior, and
+  `update_issue(..., backward=True)` validates against that reverse table
+  instead of accepting the old internal transition-check bypass. Backward
+  transitions still emit `transition_forced` before `status_changed`, while
+  normal `get_valid_transitions` suggestions remain forward-only. Custom
+  workflow packs that rely on reopen, release revert, or forced close must
+  declare the corresponding `reverse_transitions` edge; missing edges now
+  raise `InvalidTransitionError` instead of silently bypassing workflow
+  validation.
+
+- **Invalid transition failures now carry structured `valid_transitions`
+  details (2.1.0 §4.2).** `InvalidTransitionError` includes a
+  `valid_transitions` attribute, `close_issue` populates it from the failing
+  issue's current workflow state, batch close unwraps the attribute into
+  per-item failures, and HTTP/MCP/CLI error envelopes include the same
+  structured hints without requiring callers to parse message text or make a
+  second transition lookup.
+
+- **`create_issue` now prefix-checks caller-supplied parent and dependency
+  IDs before local existence validation (2.1.0 §3.4).** Foreign-prefix
+  `parent_id` and `deps` now raise `WrongProjectError` at the same structural
+  boundary as other write surfaces instead of being masked as local
+  not-found validation failures.
+
+- **`update_issue(fields=...)` now refuses to merge over corrupt stored
+  fields unless explicitly forced (2.1.0 §3.3).** When the current
+  `issues.fields` value cannot be parsed, the default update path raises
+  instead of laundering the corrupt bytes into a clean JSON object. Callers
+  can pass `force_overwrite_corrupt=True` to replace the corrupt value; that
+  path records a `corrupt_fields_overwritten` event whose `old_value` is the
+  raw stored column value and whose `new_value` is the replacement JSON.
+
+- **`release_claim` now clears ownership and performs its wip→open revert in
+  one IMMEDIATE transaction (2.1.0 §3.2).** The revert target is resolved
+  before the release update, then a single guarded `UPDATE` clears claim
+  metadata and, when a template reverse target exists, rewrites `status`.
+  The audit trail records `released`, `transition_forced`, and
+  `status_changed` in the same transaction, so failures during forced
+  transition event recording roll back both the status revert and assignee
+  clear.
+
+- **`reopen_issue` now records its status change, close-field cleanup, and
+  `reopened` event in one IMMEDIATE transaction (2.1.0 §3.1).** The method
+  now uses the shared busy-retry / transaction decorator stack and passes
+  `_skip_begin=True` to the inner `update_issue` call, so a failure while
+  recording the terminal `reopened` event rolls back the status and fields
+  writes instead of leaving a reopened issue with no audit signal for
+  `undo_last`.
+
+- **`get_stale_claims` pushes the modern lease-expiry check into SQL
+  (2.1.0 §2.3).** Rows with `claim_expires_at IS NOT NULL` are now
+  filtered via `datetime(claim_expires_at) <= datetime(?)` in the
+  WHERE clause, so a polling agent calling `get_stale_claims` every N
+  seconds no longer scans every assigned non-done row through Python's
+  `_parse_issue_timestamp`. The Python fallback path is preserved for
+  legacy rows (`claim_expires_at IS NULL`) that predate 2.0's lease
+  columns — those still use the `last_heartbeat_at` / `claimed_at` /
+  `updated_at` comparison against `stale_after_hours`. Closes
+  embedded-db H4 from the 2.1.0 panel review.
+
+- **`start_work` / `start_next_work` hold the writer lock only across the
+  claim+update composite (2.1.0 §2.2).** Candidate discovery
+  (`get_ready`) and per-candidate template lookups
+  (`tpl.reachable_working_status`) now run lock-free in the public
+  wrappers; the new private `_start_work_locked` is the only piece
+  decorated with `@_in_immediate_tx`. Public signatures unchanged. A
+  new `_StartCandidateUnclaimableError` internal sentinel wraps
+  claim-phase race failures so the `start_next_work` iterator can
+  distinguish "try a different candidate" from a user-supplied error
+  in the transition phase (e.g. an explicit bogus `target_status`),
+  which propagates unchanged. `start_work` unwraps the sentinel to
+  preserve its public API contract. Closes embedded-db M2 from the
+  2.1.0 panel review.
+
+- **Every write method on `IssuesMixin` now begins `BEGIN IMMEDIATE`
+  before the first SQL statement and retries transient `SQLITE_BUSY` /
+  `SQLITE_LOCKED` (2.1.0 §2.1).** New `@_in_immediate_tx("op_name")` and
+  `@_retry_busy(attempts=3, base=0.05)` decorators in `db_base.py` own
+  the BEGIN/COMMIT/ROLLBACK lifecycle plus exponential backoff. Applied
+  to `create_issue`, `update_issue`, `claim_issue`, `heartbeat_work`,
+  `reclaim_issue`, `start_work`, and `start_next_work`. Composed callers
+  pass `_skip_begin=True` to inner methods so the outer caller's
+  IMMEDIATE transaction is preserved. Removes the prior reliance on
+  Python's implicit DEFERRED-then-write upgrade, which could surface
+  raw `OperationalError` past `busy_timeout=5000` under multi-agent
+  contention. The Phase 0 §0.1 CAS guard inside `update_issue` runs
+  inside the IMMEDIATE transaction unchanged. Closes embedded-db H1 /
+  H2 from the 2.1.0 panel review. Internal API: `claim_issue` and
+  `_claim_next_with_prior` no longer accept a `_commit=` kwarg —
+  composed callers now pass `_skip_begin=True` instead.
+  `_rollback_uncommitted_start_claim` deleted as orphaned (the
+  decorator owns rollback for `start_work` / `start_next_work`).
+
+- **`_record_event` no longer silently dedups same-second collisions
+  (2.1.0 §0.2).** The events table grew a new ``event_seq INTEGER NOT
+  NULL DEFAULT 0`` column (schema v15 → v16) and the dedup UNIQUE
+  index was rebuilt to include it. ``_record_event`` now uses plain
+  ``INSERT`` (not ``INSERT OR IGNORE``) and computes ``event_seq``
+  inline as ``COALESCE((SELECT MAX(event_seq) FROM events WHERE
+  issue_id = ?), -1) + 1`` so same-actor same-second emissions
+  (heartbeat bursts, batch ops sharing one ``_now_iso()``) land
+  distinct rows. True duplicates (every column including
+  ``event_seq`` identical) now raise ``IntegrityError`` so the
+  caller's transaction can roll back rather than silently dropping
+  the event. Backward-compat: previously suppressed events were
+  never observed by callers anyway; the migration only catches
+  the events that were always meant to be recorded. JSONL
+  ``export_jsonl`` automatically includes the new column via
+  ``SELECT *``; the ``bulk_insert_event`` and import paths now
+  forward ``event_seq`` (default 0) so round-trips preserve
+  per-issue sequence numbers. Forward-only migration; historical
+  rows backfill to ``event_seq=0``. Closes silent-failure C3 from
+  the 2.1.0 panel review.
+
+- **Scan-results handlers no longer block the event loop on Clarion
+  HTTP waits.** All three `POST /api/.../scan-results` routes (classic,
+  loom, living-surface) in `dashboard_routes/files.py` now wrap
+  `db.process_scan_results` in `asyncio.to_thread`, so the event loop
+  stays responsive for other handlers while Clarion is being awaited.
+  A module-level `_SCAN_RESULTS_LOCK` (`asyncio.Lock`) serialises
+  concurrent scan-results POSTs to protect the shared
+  `sqlite3.Connection` from the race the move-off-event-loop would
+  otherwise enable. True parallelism of scan-results awaits a
+  per-thread connection pool, filed as a 2.2 follow-up
+  (filigree-d4237f486f).
+
+- **Clarion path-normalisation contract documented (CONTRACT-4).**
+  Both single-file (`GET /api/v1/files`) and batch
+  (`POST /api/v1/files/batch`) lookups send *lexical*, forward-slash,
+  project-relative paths normalised at the boundary by
+  `db_files._normalize_scan_path`; disk presence is not required
+  because Clarion resolves by its `source_file_path` catalog key, not
+  by filesystem probe. The `registry.py` module docstring and the
+  ADR-014 Phase D section now record this invariant so future
+  consumers don't add disk-existence guards that would break valid
+  catalog-only lookups.
+
+### Deprecated
+
+- **`get_stats` keys `status_name_counts` / `status_category_counts` are
+  deprecated (filigree-17694d2db8).** They have always been exact duplicates of
+  `by_status` / `by_category` respectively, doubling the payload with no added
+  information. They remain emitted as compatibility aliases on every wire
+  surface (MCP `get_stats`, the `get_summary` `stats` envelope, and the HTTP
+  `StatsWithPrefix` projection) per ADR-009 §7 and will be **removed in the next
+  major**. Read `by_status` / `by_category` instead.
+
+### Fixed
+
+- **"ready" no longer falsely implies "startable" (filigree-406e6b7ee0).**
+  `get_ready` listed open-category `triage` bugs as ready, but
+  `start_work` / `start_next_work` then raised `InvalidTransitionError` because
+  `triage` has no single-hop transition to a wip state. `start_next_work` now
+  **skips** non-startable (and ambiguous, and template-less) candidates instead
+  of throwing on the queue, returning the next startable issue or a clean empty
+  result. A *named* `start_work` on such an issue still raises
+  `INVALID_TRANSITION`, but with an actionable message naming the intermediate
+  status to move through first (or to pass `advance`), rather than the bare
+  "no wip-category transition" text. The explicit-`target_status` error contract
+  is unchanged. The multi-hop `advance` walk now also aggregates every hop's
+  soft-enforcement `data_warnings` onto the result, so an earlier hop's advisory
+  (e.g. a missing-`severity` warning on `triage → confirmed`) is no longer
+  hidden by the final hop.
+
+- **`ForeignDatabaseError` now points out malformed `.git` files in its
+  remediation text (2.1.0 §6.1).** Discovery classifies `.git` boundaries as
+  directories, valid worktree-pointer files, ordinary gitdir files, or
+  malformed files; when the boundary is malformed, the diagnostic tells the
+  operator to fix or remove that `.git` file before running `filigree init`.
+
+- **Simultaneous claim contention now surfaces `ClaimConflictError` (2.1.0
+  §5.1).** When two agents race to claim the same issue, the losing writer
+  now raises the typed conflict error instead of a plain `ValueError`, keeping
+  CLI/MCP/HTTP/batch routing on `ErrorCode.CONFLICT`. Phase 5 also adds
+  guardrails for reclaim-vs-heartbeat contention, busy retry behavior,
+  mixed-type `batch_close`, durable middle failures, `start_work` rollback
+  over a prior same-agent claim, local `get_issue` read-tolerance for
+  imported foreign-prefix rows, enum validation through `close_issue`,
+  idempotent current-status updates, and submodule/worktree discovery
+  boundaries.
+
+- **`update_issue` is now atomic on assignee under multi-agent contention
+  (2.1.0 §0.1).** When `update_issue` (and everything that routes through
+  it — `close_issue`, `batch_close`, `batch_update`) observes a non-empty
+  assignee at SELECT time, the subsequent UPDATE adds an
+  ``AND assignee = ?`` compare-and-swap clause; a concurrent
+  reassignment between read and write now fails the UPDATE atomically
+  and surfaces as `ClaimConflictError` (ErrorCode.CONFLICT). Previously
+  the read-then-write window silently let the second writer overwrite
+  audit-trail attribution. Closes silent-failure C1 / solution-architect
+  C1 / threat T-001 / embedded-db H1 from the 2.1.0 panel review.
+  Matches the CAS pattern already used by ``claim_issue``,
+  ``heartbeat_work``, and ``reclaim_issue``. Unassigned issues do not
+  trigger the guard — ADR-008 read-tolerance for unheld writes is
+  preserved.
+
+- **Registry error envelopes no longer leak transport exceptions
+  across surfaces.** Scanner-lifecycle and observation/annotation
+  paths that touch `registry_errors` now classify
+  `RegistryUnavailableError`, `RegistryResolutionError`, and the new
+  `RegistryBriefingBlockedError` into structured envelopes at the CLI,
+  HTTP, and MCP boundaries instead of returning a `urllib`/`socket`
+  exception text. Regression coverage spans
+  `tests/cli/test_scanners_commands.py`,
+  `tests/cli/test_annotations_commands.py`,
+  `tests/cli/test_observations_commands.py`,
+  `tests/mcp/test_scanner_lifecycle_tools.py`,
+  `tests/mcp/test_annotations.py`, `tests/mcp/test_observations.py`,
+  and `tests/api/test_files_api.py`.
+
+- **JSONL import preserves registry metadata across round-trip.**
+  `import_jsonl` was dropping `registry_backend` and the resolved
+  `file_id` provenance fields when re-hydrating file rows, so a
+  Clarion-backed project that exported and re-imported through JSONL
+  silently lost its federation identity. The importer now forwards
+  the full registry-metadata block; pin in `tests/core/test_crud.py`.
+
+- **`start_next_work` skips incompatible candidates instead of
+  failing the whole iteration.** When the candidate set contained
+  rows in states the caller's actor was not permitted to claim
+  (priority filter, type filter, or workflow-state filter), the
+  iterator previously raised on the first incompatible row and
+  abandoned the remaining ready queue. The iterator now skips
+  incompatible candidates and continues, matching `claim_next`'s
+  documented "next eligible" semantics and the CLI contract that the
+  call resolves to either a claim or `nothing_ready`. Closes the
+  PR #43 release-blocker race where two agents requesting `start-next`
+  could both receive `nothing_ready` while ready work existed.
+
+- **`report_finding` no longer leaks fallback scoping when the
+  scanner registry is partially unavailable.** The finding-triage
+  fallback path scoped the registry lookup to the wrong session when
+  a registered scanner's lifecycle row was missing, so subsequent
+  triage operations in the same call could see an empty registry view.
+  The fallback now re-resolves against the live scanner registry per
+  call; pin in `tests/mcp/test_finding_triage_tools.py`.
+
+### Security
+
+- **Dashboard startup structured logs now redact path-rich project discovery
+  failures (2.1.0 §6.2).** Structured log payloads use `exc.safe_message`
+  when available, while stderr still prints the rich `str(exc)` form for
+  human diagnostics and `filigree doctor` follow-up.
+
+- **HTTP batch-close rejects `force=true` by default (2.1.0 §1.1).**
+  `POST /api/batch/close` and `POST /api/loom/batch/close` now return
+  400/VALIDATION when `force=true` is set unless the dashboard was
+  started with `--allow-http-force-close`. CLI (`filigree close
+  --force`) and MCP (`batch_close(force=true)`) are unchanged — those
+  surfaces sit inside a trust boundary that the unauthenticated HTTP
+  endpoint does not. The new `transition_forced` event fires in
+  `update_issue` whenever `_skip_transition_check=True` triggers a
+  status change, so the audit trail records every workflow shortcut
+  even when the validator was bypassed by an internal call site
+  (reopen, release-revert, force-close, rollback). Schema unchanged
+  (event type is a string column). Closes the privilege-escalation
+  surface flagged as threat-analysis T-002 in the 2.1.0 panel review.
+
+- **`WrongProjectError` no longer leaks project prefixes via HTTP /
+  MCP (2.1.0 §1.2).** `WrongProjectError.safe_message` returns the
+  generic `"Issue ID does not belong to this project"`. HTTP and MCP
+  error envelopes use that string; CLI / stderr / `filigree doctor`
+  keep the rich `str(exc)` form with the offending and open prefixes
+  intact for diagnostics. Untrusted callers can no longer probe for
+  project membership by pattern-matching foreign-ID error bodies.
+
+- **Server-mode read endpoints block cross-project IDs at the route
+  boundary (2.1.0 §1.3).** A new `_check_read_prefix_in_server_mode`
+  helper short-circuits every read endpoint that accepts an
+  `issue_id` path parameter (`GET /api/issue/{id}` and family,
+  classic + loom; `GET /api/issue/{id}/entity-associations`) with
+  404/safe_message when the dashboard is running in multi-project
+  server mode and the requested ID has a foreign prefix. Ethereal
+  (single-project) mode preserves the documented read-tolerance of
+  `db.get_issue` for foreign IDs so jsonl import, migration, and
+  `filigree doctor` keep working. The data-layer `db.get_issue` is
+  unchanged — enforcement lives at the HTTP boundary where
+  cross-project probing is the meaningful attack surface.
+
+- **`sanitize_actor` length cap pinned at every entry point (2.1.0
+  §1.4 / ADR-012).** New `docs/architecture/decisions/ADR-012-actor-identity-threat-model.md`
+  documents what actor strings are (claims, not proofs) and what
+  the 2.1.0 hardening pass enforces (128-char cap, control-char
+  rejection, non-empty after strip) at every entry point: CLI
+  (`tests/cli/test_compose_commands.py`), MCP
+  (`tests/mcp/test_boundary_validation.py`), and HTTP
+  (`tests/api/test_api.py::TestActorLengthCapAtHTTPBoundary`).
+  Transport-bound identity verification — the "verified actor"
+  enhancement — is tracked as a 2.2+ work package in the filigree
+  tracker.
+
+- **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0
+  §0.4).** Every batch handler in the data layer (`batch_close`,
+  `batch_update`, `batch_add_label`, `batch_remove_label`,
+  `batch_add_comment`) now pre-flights every `issue_ids[i]` through
+  `_check_id_prefix` before any per-item write commits; a foreign
+  prefix raises `WrongProjectError` envelope-level instead of being
+  silently re-classified as N per-item validation failures. CLI batch
+  commands (`filigree batch-update`, `batch-close`, `batch-add-label`,
+  `batch-remove-label`, `batch-add-comment`), the dashboard's
+  `POST /api/batch/{update,close}` (classic + loom envelopes), and
+  the MCP `batch_*` tools all translate this to a single envelope-
+  level VALIDATION error rather than crashing or emitting per-item
+  noise. Closes the silent foreign-DB-mutation surface flagged as
+  silent-failure H7 in the 2.1.0 panel review — the same class of
+  cross-project confusion that PR #41's `core.py` anchor-discovery
+  hardening addressed on the read side.
+
+- **Briefing-blocked files bypass the Clarion fallback wrapper
+  (Clarion 1.0 CONTRACT-3).** Clarion 1.0 returns HTTP 403 with body
+  `{"code": "BRIEFING_BLOCKED", ...}` for files it intentionally
+  withholds (secret-bearing, owner-locked). `ClarionRegistry` maps
+  that response to the new `RegistryBriefingBlockedError`, which
+  subclasses `RegistryResolutionError` — deliberately *not*
+  `RegistryUnavailableError` — so the `_ClarionLocalFallbackRegistry`
+  wrapper does not engage. Without this distinction, a briefing-blocked
+  secret-bearing file would be silently re-attached under a local
+  `file_id` and re-enter Filigree's index outside Clarion's access
+  controls. A new `ErrorCode.BRIEFING_BLOCKED` maps to HTTP 403 in
+  `errorcode_to_http_status`, and the batch resolver exposes a
+  dedicated `briefing_blocked` channel so call sites distinguish
+  refusal from absence (`not_found`) and transport failure
+  (`errors` / `RegistryUnavailableError`). The end-to-end audit is
+  pinned in `tests/api/test_registry_backend_integration.py`
+  (briefing-blocked via `POST /api/loom/scan-results`: no row
+  created, no fallback event emitted) and the wire-shape tests in
+  `tests/unit/test_registry.py`.
 
 ## [2.0.3] - 2026-05-17
 
@@ -2408,7 +2960,13 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
-[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/tachyon-beep/filigree/compare/v2.0.3...v2.1.0
+[2.0.3]: https://github.com/tachyon-beep/filigree/compare/v2.0.2...v2.0.3
+[2.0.2]: https://github.com/tachyon-beep/filigree/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/tachyon-beep/filigree/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/tachyon-beep/filigree/compare/v1.6.1...v2.0.0
+[1.6.1]: https://github.com/tachyon-beep/filigree/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/tachyon-beep/filigree/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/tachyon-beep/filigree/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tachyon-beep/filigree/compare/v1.5.0...v1.5.1

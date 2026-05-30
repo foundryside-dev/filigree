@@ -33,6 +33,7 @@ from mcp.types import (
     Resource,
     TextContent,
     Tool,
+    ToolAnnotations,
 )
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -49,8 +50,10 @@ from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backw
     _MAX_LIST_RESULTS,
     _text,
 )
+from filigree.registry import RegistryVersionMismatchError
+from filigree.registry_errors import registry_error_response
 from filigree.summary import generate_summary, write_summary
-from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchError
+from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchError, errorcode_to_http_status
 
 # ---------------------------------------------------------------------------
 # Module globals (state accessors depend on these)
@@ -68,6 +71,11 @@ _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_di
 # still works for introspection — but every call_tool short-circuits to a
 # structured ErrorResponse(code=SCHEMA_MISMATCH). Cleared on successful init.
 _schema_mismatch: SchemaVersionMismatchError | None = None
+
+# Set when Clarion advertises an incompatible registry API version at startup.
+# Mirrors schema-mismatch degraded mode: list_tools stays available, while
+# call_tool surfaces a structured CLARION_REGISTRY_VERSION_MISMATCH envelope.
+_registry_startup_error: RegistryVersionMismatchError | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing
 # file, permission denied, on-disk corruption). The server cannot run without
@@ -219,6 +227,22 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "runtime": _runtime_diagnostics(),
         }
 
+    if _registry_startup_error is not None:
+        response = registry_error_response(_registry_startup_error, action="opening project database")
+        return {
+            "status": "registry_version_mismatch",
+            "db_initialized": False,
+            "schema_compatible": True,
+            "installed_schema_version": installed,
+            "database_schema_version": None,
+            "code": response["code"],
+            "error": response["error"],
+            "details": response.get("details"),
+            "guidance": "Upgrade Filigree or Clarion so their registry API versions match.",
+            "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
+            "runtime": _runtime_diagnostics(),
+        }
+
     if _db_open_error is not None:
         return {
             "status": "db_open_error",
@@ -293,9 +317,23 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
+from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
 _all_handlers: dict[str, Callable[..., Any]] = {}
+
+# Subsystem (= owning tool module's short name) per tool, captured during
+# assembly so it is complete-by-construction: a new tool registered by a
+# module can never be missing a subsystem. Consumed by the curated tool
+# catalogue surfaced from get_workflow_guide.
+_tool_subsystem: dict[str, str] = {}
+
+
+def _record_subsystem(tools: list[Tool], module: Any) -> None:
+    subsystem = module.__name__.rsplit(".", 1)[-1]
+    for _tool in tools:
+        _tool_subsystem[_tool.name] = subsystem
+
 
 for _mod in (
     _issues_mod,
@@ -308,13 +346,66 @@ for _mod in (
     _entities_mod,
 ):
     _tools, _handlers = _mod.register()
+    _record_subsystem(_tools, _mod)
     _all_tools.extend(_tools)
     _all_handlers.update(_handlers)
 
 # Scanner module uses include_legacy=True to own list_scanners + trigger_scan
 _tools, _handlers = _scanners_mod.register(include_legacy=True)
+_record_subsystem(_tools, _scanners_mod)
 _all_tools.extend(_tools)
 _all_handlers.update(_handlers)
+
+
+# ---------------------------------------------------------------------------
+# Tier tagging (MCP tool discoverability)
+# ---------------------------------------------------------------------------
+# Post-process the assembled tool list ONCE, at import, before anything reads
+# descriptions or input schemas. This is the single central seam: list_tools()
+# returns _all_tools verbatim (in both normal and schema-mismatch degraded
+# mode), so tagging here covers every served path without per-call work and
+# without risk of double-appending the marker. inputSchema is untouched, so
+# _tool_argument_names (below) and arg validation are unaffected.
+
+# Pure getters get readOnlyHint; the one hard-destructive tool gets
+# destructiveHint. Anything ambiguous is left without an annotation on
+# purpose — a wrong hint is worse than none.
+_READ_ONLY_PREFIXES: tuple[str, ...] = ("get_", "list_", "search_", "explain_", "preview_")
+_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"delete_issue", "delete_file_record"})
+
+
+def _is_read_only(name: str) -> bool:
+    # session_context is deliberately NOT here: it can opportunistically
+    # restart the dashboard process (_build_context -> ensure_dashboard_running),
+    # so it is not unambiguously side-effect free. Skip-if-uncertain.
+    return name.startswith(_READ_ONLY_PREFIXES) or name in {
+        "get_critical_path",
+        "validate_issue",
+    }
+
+
+def _apply_tier_metadata(tools: list[Tool]) -> None:
+    for tool in tools:
+        tier = tier_for(tool.name)
+        base = tool.description or ""
+        marker = f" [tier: {tier}]"
+        if not base.endswith(marker):
+            tool.description = f"{base}{marker}"
+
+        # Only set MCP ToolAnnotations where cheap and clearly correct.
+        read_only = _is_read_only(tool.name)
+        destructive = tool.name in _DESTRUCTIVE_TOOLS
+        if not (read_only or destructive):
+            continue
+        existing = tool.annotations or ToolAnnotations()
+        if read_only:
+            existing.readOnlyHint = True
+        if destructive:
+            existing.destructiveHint = True
+        tool.annotations = existing
+
+
+_apply_tier_metadata(_all_tools)
 
 
 def _allowed_tool_arguments(tool: Tool) -> set[str]:
@@ -543,6 +634,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         )
 
+    if _registry_startup_error is not None and name != "get_mcp_status":
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text(registry_error_response(_registry_startup_error, action="opening project database"))
+
     # Runtime drift gate: a long-running MCP session can have its DB
     # forward-migrated under it (sibling MCP at a newer version, manual
     # migration, etc.). Initialization succeeded with version N, but
@@ -678,6 +774,14 @@ def create_mcp_app(
                 )
                 await resp(scope, receive, send)
                 return
+            except RegistryVersionMismatchError as exc:
+                response = registry_error_response(exc, action="opening project database")
+                resp = JSONResponse(
+                    response,
+                    status_code=errorcode_to_http_status(response["code"]),
+                )
+                await resp(scope, receive, send)
+                return
             except ValueError as exc:
                 resp = JSONResponse(
                     {
@@ -778,20 +882,28 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
     instead of connection drop" was one bug-class wide before this fix.
     ``_run`` consults the sentinel after calling us and exits cleanly.
     """
-    global db, _filigree_dir, _schema_mismatch, _db_open_error
+    global db, _filigree_dir, _schema_mismatch, _registry_startup_error, _db_open_error
 
     _filigree_dir = filigree_dir
     try:
         db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
         _schema_mismatch = None
+        _registry_startup_error = None
         _db_open_error = None
     except SchemaVersionMismatchError as exc:
         db = None
         _schema_mismatch = exc
+        _registry_startup_error = None
+        _db_open_error = None
+    except RegistryVersionMismatchError as exc:
+        db = None
+        _schema_mismatch = None
+        _registry_startup_error = exc
         _db_open_error = None
     except (OSError, sqlite3.Error, ValueError) as exc:
         db = None
         _schema_mismatch = None
+        _registry_startup_error = None
         _db_open_error = exc
 
 
@@ -859,6 +971,18 @@ def _log_startup_status(logger: logging.Logger) -> None:
                 "args_data": {
                     "installed": _schema_mismatch.installed,
                     "database": _schema_mismatch.database,
+                },
+            },
+        )
+    elif _registry_startup_error is not None:
+        logger.warning(
+            "mcp_server_registry_version_mismatch",
+            extra={
+                "tool": "server",
+                "args_data": {
+                    "expected": _registry_startup_error.expected,
+                    "advertised": _registry_startup_error.advertised,
+                    "url": _registry_startup_error.url,
                 },
             },
         )

@@ -154,6 +154,37 @@ function graphStyles() {
   ];
 }
 
+export function criticalPathEdgeIds(path) {
+  const edgeIds = new Set();
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const source = path[i]?.id;
+    const target = path[i + 1]?.id;
+    if (source && target) edgeIds.add(`e-${source}-${target}`);
+  }
+  return edgeIds;
+}
+
+export function setCriticalPathStateFromPath(path, graphState = state) {
+  graphState.criticalPathIds = new Set(path.map((p) => p.id));
+  graphState.criticalPathEdgeIds = criticalPathEdgeIds(path);
+}
+
+export async function refreshCriticalPathState() {
+  const data = await fetchCriticalPath();
+  setCriticalPathStateFromPath(data?.path || []);
+}
+
+export function clearGraphForNoIssues(container, graphState = state) {
+  if (graphState.cy) {
+    graphState.cy.destroy();
+    graphState.cy = null;
+  }
+  if (container) {
+    container.innerHTML =
+      '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">No issues to display for this project.</div>';
+  }
+}
+
 function applyCriticalPathStyles() {
   if (!state.cy) return;
   if (state.criticalPathActive && state.criticalPathIds.size) {
@@ -161,10 +192,7 @@ function applyCriticalPathStyles() {
       if (!state.criticalPathIds.has(n.id())) n.style("opacity", 0.2);
     });
     state.cy.edges().forEach((e) => {
-      if (
-        state.criticalPathIds.has(e.source().id()) &&
-        state.criticalPathIds.has(e.target().id())
-      ) {
+      if (state.criticalPathEdgeIds.has(e.id())) {
         e.style({
           width: 3,
           "line-color": "#EF4444",
@@ -246,17 +274,25 @@ function bindGraphEvents() {
 
 export function renderGraph() {
   const renderStarted = performance.now();
-  if (!state.allIssues.length) return;
-
   const container = document.getElementById("cy");
+  if (!state.allIssues.length) {
+    clearGraphForNoIssues(container);
+    setGraphNotice("");
+    updateGraphPerfState();
+    return;
+  }
 
   // --- Scoped subtree rendering ---
   const { nodes: scopeNodes, edges: scopeEdges, ghostIds } = resolveGraphScope();
 
   if (scopeNodes.length === 0 && state.graphSidebarSelections.size === 0) {
     // Blank state — no selections
-    if (state.cy) { state.cy.destroy(); state.cy = null; }
-    container.innerHTML = '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">Select items from the sidebar to explore their dependency graph.</div>';
+    if (state.cy) {
+      state.cy.destroy();
+      state.cy = null;
+    }
+    container.innerHTML =
+      '<div data-graph-blank class="flex items-center justify-center h-full text-secondary text-sm">Select items from the sidebar to explore their dependency graph.</div>';
     setGraphNotice("");
     updateGraphPerfState();
     return;
@@ -286,7 +322,8 @@ export function renderGraph() {
   let cyNodes = filteredNodes.map((n) => {
     const title = n.title || n.id;
     const isGhost = ghostIds.has(n.id);
-    const matchesSearch = !search || title.toLowerCase().includes(search) || n.id.toLowerCase().includes(search);
+    const matchesSearch =
+      !search || title.toLowerCase().includes(search) || n.id.toLowerCase().includes(search);
     return {
       data: {
         id: n.id,
@@ -298,7 +335,7 @@ export function renderGraph() {
         isReady: !!n.is_ready,
         childCount: (n.children || []).length,
         isGhost: isGhost,
-        opacity: isGhost ? 0.45 : (matchesSearch ? 1 : 0.2),
+        opacity: isGhost ? 0.45 : matchesSearch ? 1 : 0.2,
       },
     };
   });
@@ -436,11 +473,10 @@ export async function toggleCriticalPath() {
   const btn = document.getElementById("btnCritPath");
   if (state.criticalPathActive) {
     btn.className = "px-2 py-0.5 rounded bg-red-600 text-white";
-    const data = await fetchCriticalPath();
-    state.criticalPathIds = new Set(data?.path ? data.path.map((p) => p.id) : []);
+    await refreshCriticalPathState();
   } else {
     btn.className = "px-2 py-0.5 rounded bg-overlay bg-overlay-hover";
-    state.criticalPathIds.clear();
+    setCriticalPathStateFromPath([]);
   }
   renderGraph();
 }

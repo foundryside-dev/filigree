@@ -1,6 +1,6 @@
 # CLI Reference
 
-Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The global `--actor` flag sets identity for the audit trail (default: `cli`).
+Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
 
 ## Contents
 
@@ -241,12 +241,17 @@ Close one or more issues. Accepts multiple IDs.
 |-----------|------|-------------|
 | `ids` | string... | One or more issue IDs (positional, variadic) |
 | `--reason` | string | Close reason |
+| `--status` | string | Explicit done-category target |
+| `--force` | flag | Use the declared reverse/escape edge for cleanup closes |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
-When using `--json`, the output includes `succeeded`, `failed`, and
-`newly_unblocked`. Closed issues with active critical `must_consider`
+When using `--json`, the output includes `succeeded` and `failed` (always
+present), plus `newly_unblocked` only when the close unblocked something
+(omitted when empty). Closed issues with active critical `must_consider`
 annotations include an `annotation_warnings` array. Plain-text close prints the
 same warning after the close; V1 warnings are advisory and do not block closure.
+`--force` validates through template `reverse_transitions` and records
+`transition_forced` before `status_changed`.
 
 ### `reopen`
 
@@ -452,7 +457,8 @@ Claim the highest-priority ready issue.
 Release a claimed issue by clearing its assignee without changing status. By default this is strict: releasing an
 unassigned issue returns a conflict. Use `--if-held` for idempotent cleanup flows; it no-ops when the issue is
 already unassigned and only clears a live claim held by `--expected-assignee`, or by the global `--actor` when no
-expected assignee is provided.
+expected assignee is provided. If another actor holds the claim, the command returns `CONFLICT`; do not treat that
+as a cleanup no-op.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -516,16 +522,21 @@ holder. The reason is required and is recorded on the reclaim event.
 
 Atomically claim an issue AND transition it to its working status in a single call. Backs `FiligreeDB.start_work` with compensating-action rollback — if the transition fails, the claim is released. Returns the full updated issue dict.
 
+The working status is type-specific (the unique wip-category status reachable in one hop): tasks → `in_progress`, features → `building`. Types whose initial state has **no** single-hop wip transition — notably bugs, which start at `triage` and walk `triage → confirmed → fixing` — are *ready* but not *startable*. Calling `start-work` on such an issue returns `INVALID_TRANSITION` naming the intermediate status to move through first; pass `--advance` to walk the soft transitions automatically (see below).
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `--assignee` | string | Who is claiming (required) |
 | `--target-status` | string | Target wip status (default: unique reachable wip target) |
+| `--advance` | flag | Walk soft transitions to the nearest wip state (e.g. `triage → confirmed → fixing`) when no single-hop wip target exists. Missing required fields surface as warnings, not blocks; hard edges are never auto-walked. Ignored when `--target-status` is given. |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ### `start-next-work`
 
 Claim AND transition the highest-priority ready issue. Returns `{status: "empty", reason: ...}` when no matching issue exists.
+
+Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are **skipped**, so the command returns the next startable issue rather than failing. Pass `--advance` to make such candidates startable via the multi-hop soft walk instead of skipping them.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -534,6 +545,7 @@ Claim AND transition the highest-priority ready issue. Returns `{status: "empty"
 | `--priority-min` | 0-4 | Minimum priority filter |
 | `--priority-max` | 0-4 | Maximum priority filter |
 | `--target-status` | string | Target wip status (default: unique reachable wip target) |
+| `--advance` | flag | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. |
 | `--actor` | string | Audit trail actor (default: assignee) |
 
 ## Batch Operations
@@ -566,6 +578,7 @@ Close multiple issues.
 |-----------|------|-------------|
 | `ids` | string... | Issue IDs (positional, multiple) |
 | `--reason` | string | Close reason |
+| `--force` | flag | Use declared reverse/escape edges for cleanup closes |
 | `--expected-assignee` | string | Expected current holder for coordinator writes |
 
 ### `batch-add-label`
@@ -669,7 +682,7 @@ List all registered issue types with their pack and status flow.
 ### `type-info`
 
 Compatibility alias for `get-template`. Shows the same full workflow definition for an issue type:
-pack, statuses, transitions, fields, and enforcement rules.
+pack, statuses, forward transitions, reverse transitions, fields, and enforcement rules.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -729,10 +742,12 @@ filigree events <id>                        # Event history for one issue
 
 ### `stats`
 
-Project statistics: counts by literal status name, template status category,
-type, ready, and blocked. JSON includes explicit `status_name_counts` and
-`status_category_counts` maps; `by_status` and `by_category` remain for
-compatibility.
+Project statistics: counts by literal status name (`by_status`), template
+status category (`by_category`), type, ready, and blocked. JSON also includes
+the **deprecated** `status_name_counts` and `status_category_counts` maps —
+exact duplicates of `by_status` and `by_category` (filigree-17694d2db8), kept as
+compatibility aliases per ADR-009 §7 and scheduled for removal in the next
+major. Read `by_status` / `by_category`.
 
 ### `metrics`
 
@@ -1230,9 +1245,14 @@ filigree-scanner-codex --root <project-root> --file <path> --max-files 1 \
 
 Runners execute with the project as their current working directory and post
 results to the living scan-results endpoint, `/api/scan-results`, which aliases
-the recommended Loom generation. If a future runner flag changes, refresh
-managed project registrations with `filigree scanner enable <name> --force`;
-`filigree doctor` reports bundled registrations that look stale.
+the recommended Loom generation. When `--api-url` is omitted during a direct
+runner invocation, the runner resolves the same active local dashboard target
+used by `trigger-scan`: `.filigree/ephemeral.port` in ethereal mode, the
+configured daemon port in server mode, and `http://localhost:8377` only as a
+legacy fallback outside an initialized Filigree project. If a future runner flag
+changes, refresh managed project registrations with `filigree scanner enable
+<name> --force`; `filigree doctor` reports bundled registrations that look
+stale.
 
 ### `trigger-scan`
 
@@ -1324,6 +1344,8 @@ but they are too broad for final cleanup by themselves.
 2. Preview live claim cleanup:
    `filigree --actor <agent> release-my-claims --label <session-label> --dry-run`.
    If the preview is correct, repeat without `--dry-run` and include `--reason`.
+   A held-by-other mismatch is a conflict and should be investigated or retried
+   with an explicit coordinator override, not ignored as an idempotent no-op.
 3. Triage observations with `list-observations --actor <agent>`, then choose
    `promote-observations-to-issue`, `batch-link-observations`, or
    `batch-dismiss-observations` so each pending note is tracked, attached as

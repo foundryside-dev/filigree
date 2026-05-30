@@ -100,8 +100,16 @@ export function renderStandardKanban(columns) {
       const issues = columns[col.key] || [];
       const inner = issues.length
         ? issues.map((i) => renderCard(i)).join("")
-        : '<div class="text-xs p-4 text-center" style="color:var(--text-muted)">' + (EMPTY_STATES[col.key] || "") + "</div>";
-      return renderColumnShell(col.label, col.color, issues.length, inner, ` data-status-category="${col.key}"`);
+        : '<div class="text-xs p-4 text-center" style="color:var(--text-muted)">' +
+          (EMPTY_STATES[col.key] || "") +
+          "</div>";
+      return renderColumnShell(
+        col.label,
+        col.color,
+        issues.length,
+        inner,
+        ` data-status-category="${col.key}"`,
+      );
     })
     .join("");
 }
@@ -121,13 +129,27 @@ function renderListMode(items) {
   const sorted = [...items].sort((a, b) => {
     let cmp = 0;
     switch (sortCol) {
-      case "priority": cmp = a.priority - b.priority; break;
-      case "type": cmp = (a.type || "").localeCompare(b.type || ""); break;
-      case "status": cmp = (a.status || "").localeCompare(b.status || ""); break;
-      case "title": cmp = (a.title || "").localeCompare(b.title || ""); break;
-      case "assignee": cmp = (a.assignee || "").localeCompare(b.assignee || ""); break;
-      case "updated": cmp = new Date(a.updated_at || 0) - new Date(b.updated_at || 0); break;
-      case "blocks": cmp = (state.impactScores[a.id] || 0) - (state.impactScores[b.id] || 0); break;
+      case "priority":
+        cmp = a.priority - b.priority;
+        break;
+      case "type":
+        cmp = (a.type || "").localeCompare(b.type || "");
+        break;
+      case "status":
+        cmp = (a.status || "").localeCompare(b.status || "");
+        break;
+      case "title":
+        cmp = (a.title || "").localeCompare(b.title || "");
+        break;
+      case "assignee":
+        cmp = (a.assignee || "").localeCompare(b.assignee || "");
+        break;
+      case "updated":
+        cmp = new Date(a.updated_at || 0) - new Date(b.updated_at || 0);
+        break;
+      case "blocks":
+        cmp = (state.impactScores[a.id] || 0) - (state.impactScores[b.id] || 0);
+        break;
     }
     return sortDir === "desc" ? -cmp : cmp;
   });
@@ -218,7 +240,8 @@ export function renderClusterKanban(columns) {
       } else {
         // Normal cluster: group by parent epics/milestones in the column
         const epicIssues = issues.filter(
-          (i) => (i.type === "epic" || i.type === "milestone") && i.children && i.children.length > 0,
+          (i) =>
+            (i.type === "epic" || i.type === "milestone") && i.children && i.children.length > 0,
         );
         const epicIds = new Set(epicIssues.map((i) => i.id));
         const childIds = new Set();
@@ -235,7 +258,13 @@ export function renderClusterKanban(columns) {
       const inner = issues.length
         ? groupCards + orphanCards
         : '<div class="text-xs italic p-2" style="color:var(--text-muted)">No issues</div>';
-      return renderColumnShell(col.label, col.color, issues.length, inner, ` data-status-category="${col.key}"`);
+      return renderColumnShell(
+        col.label,
+        col.color,
+        issues.length,
+        inner,
+        ` data-status-category="${col.key}"`,
+      );
     })
     .join("");
 }
@@ -448,15 +477,20 @@ function compareVersions(a, b) {
 export function renderTypeKanban(stateColumns, template) {
   return template.states
     .map((s) => {
-      const issues = (stateColumns[s.name] || []).slice().sort(
-        (a, b) => a.priority - b.priority || compareVersions(a, b)
-      );
+      const issues = (stateColumns[s.name] || [])
+        .slice()
+        .sort((a, b) => a.priority - b.priority || compareVersions(a, b));
       const catColor = CATEGORY_COLORS[s.category] || "#64748B";
       const inner = issues.length
         ? issues.map((i) => renderCard(i)).join("")
         : '<div class="text-xs italic p-2" style="color:var(--text-muted)">No issues</div>';
-      return renderColumnShell(s.name, catColor, issues.length, inner, ` data-status="${escHtml(s.name)}" data-status-category="${escHtml(s.category)}"`);
-
+      return renderColumnShell(
+        s.name,
+        catColor,
+        issues.length,
+        inner,
+        ` data-status="${escHtml(s.name)}" data-status-category="${escHtml(s.category)}"`,
+      );
     })
     .join("");
 }
@@ -480,35 +514,37 @@ export function initDragAndDrop() {
     // Fetch valid transitions, then mark columns
     state._transitionsLoaded = false;
     const dragToken = state._dragIssueId;
-    fetchTransitions(state._dragIssueId).then((transitions) => {
-      if (state._dragIssueId !== dragToken) return; // drag ended before response
-      state._dragTransitions = transitions || [];
-      const validCategories = new Set();
-      const validStatuses = new Set();
-      for (const t of transitions) {
-        if (t.ready) {
-          validStatuses.add(t.to);
-          validCategories.add(t.category);
+    fetchTransitions(state._dragIssueId)
+      .then((transitions) => {
+        if (state._dragIssueId !== dragToken) return; // drag ended before response
+        state._dragTransitions = transitions || [];
+        const validCategories = new Set();
+        const validStatuses = new Set();
+        for (const t of transitions) {
+          if (t.ready) {
+            validStatuses.add(t.to);
+            validCategories.add(t.category);
+          }
         }
-      }
-      const cols = board.querySelectorAll(".kanban-col");
-      for (const col of cols) {
-        const colStatus = col.getAttribute("data-status");
-        const colCat = col.getAttribute("data-status-category");
-        const isValid = colStatus ? validStatuses.has(colStatus) : validCategories.has(colCat);
-        // Don't mark the source column
-        const sourceIssue = state.issueMap[state._dragIssueId];
-        const isSameCol = colStatus
-          ? colStatus === sourceIssue?.status
-          : colCat === sourceIssue?.status_category;
-        if (isSameCol) continue;
-        col.classList.add(isValid ? "drag-valid" : "drag-invalid");
-      }
-      state._transitionsLoaded = true;
-    }).catch((err) => {
-      console.error("[kanban] Error loading transitions during drag:", err);
-      state._transitionsLoaded = true;
-    });
+        const cols = board.querySelectorAll(".kanban-col");
+        for (const col of cols) {
+          const colStatus = col.getAttribute("data-status");
+          const colCat = col.getAttribute("data-status-category");
+          const isValid = colStatus ? validStatuses.has(colStatus) : validCategories.has(colCat);
+          // Don't mark the source column
+          const sourceIssue = state.issueMap[state._dragIssueId];
+          const isSameCol = colStatus
+            ? colStatus === sourceIssue?.status
+            : colCat === sourceIssue?.status_category;
+          if (isSameCol) continue;
+          col.classList.add(isValid ? "drag-valid" : "drag-invalid");
+        }
+        state._transitionsLoaded = true;
+      })
+      .catch((err) => {
+        console.error("[kanban] Error loading transitions during drag:", err);
+        state._transitionsLoaded = true;
+      });
   });
 
   board.addEventListener("dragover", (e) => {

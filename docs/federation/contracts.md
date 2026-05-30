@@ -84,6 +84,7 @@ Living-surface aliases (`/api/<endpoint>` with no generation prefix) land per-en
 | `GET` /types | n/a | `/api/loom/types` | `/api/types` | classic-and-loom only (2026-04-26, Phase C4) | Classic owns the un-prefixed path with a bare list; loom wraps in `ListResponse[TypeSummaryLoom]`. Alias would collide. |
 | `GET` /blocked, /findings, /observations, /scanners, /packs, /changes | deferred (alias-eligible) | `/api/loom/<endpoint>` | none | loom-only (2026-04-26, Phase C4) | No classic dashboard counterpart — these were MCP-only in the classic generation. **Living-surface aliases at `/api/<endpoint>` are eligible per the precedent rule but deferred to a later pass**, mirroring the C3 decision to defer single-issue surface aliases: federation consumers should commit to a pinnable generation (`/api/loom/...`) until at least Phase D when the federation is operating in production. Reconsider when stability data warrants. |
 | `GET` /issues/{issue_id}/{comments,events,files} | n/a | `/api/loom/issues/{issue_id}/...` | none (classic uses singular `/issue/...`) | loom-only (2026-04-26, Phase C4) | Classic uses `/api/issue/{id}/files` (singular); loom uses plural symmetric with `/issues`. No collision but **deliberately not aliased** for the same reason as C3's single-issue surface — these are the most-coupled federation entry points; consumers commit to the loom generation. Loom adds GET counterparts for `/comments` and `/events` (classic exposed them only via MCP / POST). |
+| `POST` findings/clean-stale | deferred (alias-eligible) | `/api/loom/findings/clean-stale` | none | loom-only (2026-05-30, ADR-015) | Findings retention surface — soft-archives stale `unseen_in_latest` findings to `fixed`, `scan_source`-scoped. No classic counterpart (retention was MCP/CLI-absent and CLI-only respectively). Living-surface alias deferred per the C4 precedent — federation consumers commit to `/api/loom/...`. |
 
 The pattern is illustrative for later C tasks: where a loom endpoint has no classic counterpart at the un-prefixed path, prefer aliasing **unless** the endpoint is on a coupled surface where pinning the generation matters more (single-issue surface in C3; per-issue list endpoints in C4); where classic and loom would collide, classic stays at `/api/<endpoint>` and loom is reachable only at `/api/loom/<endpoint>`. The decision for each endpoint lands in the commit that mounts the loom handler.
 
@@ -240,6 +241,107 @@ now at full parity with MCP and loom HTTP.
 **Forward-only.** CLI does not accept dual vocabularies. The loom
 envelope shape (`--json` output) replaces legacy shapes outright;
 clients pinning to old `--json` output re-pin against the new schema.
+
+## ADR-014 — Registry-Backend File Identity (2026-05-19)
+
+ADR-014 adds a project-scoped `registry_backend` flag for file identity.
+The default remains `local`: Filigree generates and owns `file_records.id`
+as before. In `clarion` mode, auto-create file paths delegate identity
+resolution to Clarion's read API:
+
+`GET /api/v1/files?path=&language=`
+
+Clarion owns the response shape for that endpoint. Filigree expects
+`{entity_id, content_hash, canonical_path, language}` and stores
+`entity_id` as `file_records.id`, `content_hash` as the file drift signal,
+and `registry_backend = 'clarion'` on the row. The classic, loom, and
+living scan-results response shapes are unchanged; only the file ID grammar
+changes under the opt-in backend.
+
+Capability probing is published on `GET /api/files/_schema`:
+
+```json
+{
+  "config_flags": {
+    "registry_backend": "local",
+    "registry_backend_features": ["local", "clarion"],
+    "allow_local_fallback": false
+  }
+}
+```
+
+Federation consumers use this block to distinguish older Filigree builds
+from ADR-014-aware builds, and to detect whether the current project is
+running in `local` or `clarion` mode.
+
+Direct file registration is displaced in `clarion` mode. MCP `register_file`
+and CLI `filigree register-file` return
+`FILE_REGISTRY_DISPLACED` with the Clarion read URL to use instead.
+Auto-create surfaces (`POST /api/v1/scan-results`,
+`POST /api/loom/scan-results`, `POST /api/scan-results`, observations, and
+scanner helpers) route through the registry backend and should not emit that
+code unless a caller attempts direct local mutation.
+
+Operational launch and migration steps live in
+[`registry-backend-launch-runbook.md`](./registry-backend-launch-runbook.md).
+The Filigree-side contract is pinned by
+`tests/api/test_registry_backend_integration.py`, which runs loom scan ingest
+against both the default local backend and a live loopback implementation of
+Clarion's read API.
+
+## F5 — Deletion signal (`issue_deleted` on `/api/loom/changes`) (2026-05-30)
+
+A hard delete (`delete_issue` / `filigree delete-issue`) removes the issue row
+and every dependent row in one transaction, so a deleted issue is otherwise
+invisible to consumers reconciling off `GET /api/loom/changes` (the feed INNER
+JOINs `issues`). To close that, `delete_issue` writes a `deleted_issues`
+tombstone in the same transaction, and the changes feed surfaces it as a
+synthetic change record:
+
+```json
+{
+  "event_id": 4611686018427387905,
+  "issue_id": "filigree-2183fea23a",
+  "event_type": "issue_deleted",
+  "actor": "alice",
+  "old_value": null,
+  "new_value": null,
+  "comment": "",
+  "created_at": "2026-05-30T12:00:00+00:00",
+  "issue_title": "the deleted issue's last title",
+  "affected_entities": ["py:func:foo", "py:mod:bar"]
+}
+```
+
+The record is cursored on `deleted_at` (mapped to `created_at`) with a
+VACUUM-stable synthetic `event_id`, so an incremental consumer walking the
+`since` / `after_event_id` cursor sees each deletion exactly once. A
+**label-filtered** feed never surfaces deletions (a deleted issue has no
+labels) — reconcile deletions on an *unfiltered* feed.
+
+### `affected_entities` — the entity-association amplifier (schema v21)
+
+`delete_issue` cascades the issue's `entity_associations` rows
+(`ON DELETE CASCADE`). Filigree's own reverse-lookup surfaces
+(`list_associations_by_entity`, `GET /api/entity-associations?entity_id=…`)
+read that table, so post-delete they correctly return nothing. **The hazard is
+on the consumer side:** a consumer that mirrors those bindings (e.g. Clarion's
+reverse lookup) and reconciles only the issue would keep the mirrored binding
+and surface a user-facing *phantom issue*.
+
+`affected_entities` carries the sorted `clarion_entity_id`s the cascade removed,
+captured before the cascade ran. It is **always present** on the changes feed —
+`[]` for live-issue change records, populated only on `issue_deleted`.
+
+**Consumer obligation:** on an `issue_deleted` record, purge by `issue_id`
+*and* drop/tombstone every mirrored entity-association binding listed in
+`affected_entities` (or, equivalently, every binding your mirror keys to that
+`issue_id`). Do this on an unfiltered feed. The tracking issue for the
+Clarion/Wardline consumer is `filigree-f3bf56554c`.
+
+Pinned by `tests/api/test_loom_changes_deletion.py`
+(`TestDeletionCarriesAffectedEntities`) and the `deleted_issues` schema tests in
+`tests/core/test_schema.py`.
 
 ## When a contract evolves
 

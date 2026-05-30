@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
@@ -529,6 +531,18 @@ class TestPlanCli:
         assert result.exit_code == 1
         assert "Not found" in result.output
 
+    def test_plan_non_milestone_root_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        with get_db() as db:
+            phase = db.create_issue("Wrong root", type="phase")
+
+        result = runner.invoke(cli, ["plan", phase.id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "not a milestone" in data["error"]
+
     def test_plan_display(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         plan_json = json.dumps(
@@ -792,6 +806,20 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "NOT_FOUND"
         assert "demo-nope" in data["error"]
 
+    def test_plan_sqlite_error_returns_io_envelope(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_plan", _raise)
+        result = runner.invoke(cli, ["plan", "demo-milestone", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
     def test_create_plan_invalid_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["create-plan", "--json"], input="not json")
@@ -832,6 +860,25 @@ class TestPlanningCliJsonErrorEnvelope:
         assert data["code"] == "VALIDATION"
         assert "phase 1" in data["error"].lower()
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"milestone": {"title": "MS", "fields": ["not", "a", "dict"]}, "phases": []},
+            {"milestone": {"title": "MS", "description": []}, "phases": []},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "fields": ["bad"]}]},
+            {"milestone": {"title": "MS"}, "phases": [{"title": "P", "steps": [{"title": "S", "description": []}]}]},
+        ],
+    )
+    def test_create_plan_malformed_optional_fields_json_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], payload: dict[str, object]
+    ) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["create-plan", "--json"], input=json.dumps(payload))
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "Traceback" not in result.output
+
     def test_changes_invalid_timestamp_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["changes", "--since", "not-a-timestamp", "--json"])
@@ -839,6 +886,41 @@ class TestPlanningCliJsonErrorEnvelope:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION"
         assert "timestamp" in data["error"].lower() or "iso" in data["error"].lower()
+
+    def test_changes_limit_zero_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["changes", "--since", "2020-01-01T00:00:00", "--limit", "0", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "limit" in data["error"].lower()
+
+    def test_changes_after_event_id_negative_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(
+            cli,
+            ["changes", "--since", "2020-01-01T00:00:00", "--after-event-id", "-1", "--json"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+        assert "after-event-id" in data["error"].lower()
+
+    def test_changes_sqlite_error_returns_io_envelope(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_events_since", _raise)
+        result = runner.invoke(cli, ["changes", "--since", "2020-01-01T00:00:00", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
 
 
 class TestBatchCli:
@@ -876,7 +958,7 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-update", id1, "nonexistent-abc", "--priority", "1", "--json"])
+        result = runner.invoke(cli, ["batch-update", id1, "test-deadbeef00", "--priority", "1", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
@@ -906,7 +988,7 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-close", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-close", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
@@ -961,12 +1043,12 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-add-label", "security", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-add-label", "security", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
     def test_batch_add_label_rejects_priority_like_label_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -1009,13 +1091,13 @@ class TestBatchCli:
         id1 = _extract_id(r1.output)
         runner.invoke(cli, ["add-label", "security", id1])
 
-        result = runner.invoke(cli, ["batch-remove-label", "security", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-remove-label", "security", id1, "test-deadbeef00", "--json"])
 
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data["succeeded"] == [id1]
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
     def test_batch_add_comment_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -1041,12 +1123,12 @@ class TestBatchCli:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
         id1 = _extract_id(r1.output)
-        result = runner.invoke(cli, ["batch-add-comment", "triage-complete", id1, "nonexistent-abc", "--json"])
+        result = runner.invoke(cli, ["batch-add-comment", "triage-complete", id1, "test-deadbeef00", "--json"])
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert len(data["succeeded"]) == 1
         assert len(data["failed"]) == 1
-        assert data["failed"][0]["id"] == "nonexistent-abc"
+        assert data["failed"][0]["id"] == "test-deadbeef00"
 
 
 class TestEventsCli:

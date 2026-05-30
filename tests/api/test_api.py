@@ -130,6 +130,40 @@ class TestIssuesAPI:
         for field in ["id", "title", "status", "priority", "type", "blocks", "blocked_by", "is_ready"]:
             assert field in issue
 
+    async def test_update_issue_force_overwrite_corrupt_fields(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        issue = dashboard_db.db.create_issue("HTTP corrupt fields")
+        dashboard_db.db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
+        dashboard_db.db.conn.commit()
+
+        resp = await client.patch(
+            f"/api/issue/{issue.id}",
+            json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["fields"] == {"restored": True}
+
+    async def test_loom_update_issue_force_overwrite_corrupt_fields(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        issue = dashboard_db.db.create_issue("Loom corrupt fields")
+        dashboard_db.db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
+        dashboard_db.db.conn.commit()
+
+        resp = await client.patch(
+            f"/api/loom/issues/{issue.id}",
+            json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["fields"] == {"restored": True}
+
 
 class TestIssueDetailAPI:
     async def test_issue_detail(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
@@ -515,6 +549,42 @@ class TestCloseReopenAPI:
         data = resp.json()
         assert data["status_category"] == "done"
 
+    async def test_classic_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        source = dashboard_db.db.db_path.parent / "api-close-classic.py"
+        source.write_text("x = 1\n")
+        issue = dashboard_db.db.create_issue("Classic annotated close")
+        annotation = dashboard_db.db.annotate_file(
+            source.name,
+            "Must be considered before close.",
+            critical=True,
+            links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+        )
+
+        resp = await client.post(f"/api/issue/{issue.id}/close", json={"reason": "completed"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["annotation_warnings"][0]["annotation_id"] == annotation["annotation_id"]
+        assert data["annotation_warnings"][0]["relationship"] == "must_consider"
+
+    async def test_loom_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        source = dashboard_db.db.db_path.parent / "api-close-loom.py"
+        source.write_text("x = 1\n")
+        issue = dashboard_db.db.create_issue("Loom annotated close")
+        annotation = dashboard_db.db.annotate_file(
+            source.name,
+            "Must be considered before close.",
+            critical=True,
+            links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+        )
+
+        resp = await client.post(f"/api/loom/issues/{issue.id}/close", json={"reason": "completed"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["annotation_warnings"][0]["annotation_id"] == annotation["annotation_id"]
+        assert data["annotation_warnings"][0]["relationship"] == "must_consider"
+
     async def test_close_already_closed(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         # C is already closed
@@ -524,6 +594,23 @@ class TestCloseReopenAPI:
         )
         assert resp.status_code == 409
         assert "error" in resp.json()
+
+    async def test_close_invalid_transition_includes_valid_transitions(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        bug = dashboard_db.db.create_issue("API invalid close", type="bug")
+
+        resp = await client.post(
+            f"/api/issue/{bug.id}/close",
+            json={"reason": "cleanup"},
+        )
+
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["code"] == "INVALID_TRANSITION"
+        assert {t["to"] for t in data["details"]["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
 
     async def test_close_not_found(self, client: AsyncClient) -> None:
         resp = await client.post(
@@ -650,8 +737,41 @@ class TestClaimAPI:
         )
 
         assert resp.status_code == 409
-        assert resp.json()["code"] == "CONFLICT"
+        body = resp.json()
+        assert body["code"] == "CONFLICT"
+        assert body["details"] == {"issue_id": ids["a"], "observed": "agent-2", "expected": "agent-1"}
         assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-2"
+
+    async def test_release_claim_invalid_reverse_transition_returns_invalid_transition(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from filigree.types.api import InvalidTransitionError
+
+        ids = dashboard_db.ids
+        dashboard_db.db.start_work(ids["a"], assignee="agent-1", actor="agent-1")
+        original_validate_transition = dashboard_db.db.templates.validate_transition
+
+        def fail_backward_validation(
+            type_name: str,
+            from_state: str,
+            to_state: str,
+            fields: dict[str, Any],
+            *,
+            backward: bool = False,
+        ) -> Any:
+            if backward:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
+            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+
+        monkeypatch.setattr(dashboard_db.db.templates, "validate_transition", fail_backward_validation)
+
+        resp = await client.post(f"/api/issue/{ids['a']}/release", json={"actor": "agent-1"})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "INVALID_TRANSITION"
 
     async def test_claim_next(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         resp = await client.post(
@@ -946,6 +1066,16 @@ class TestPlanAPI:
         assert resp.status_code == 404
         assert "error" in resp.json()
 
+    async def test_plan_non_milestone_root_returns_not_found(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        phase = dashboard_db.db.create_issue("Wrong root", type="phase")
+
+        resp = await client.get(f"/api/plan/{phase.id}")
+
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND"
+        assert "not a milestone" in body["error"]
+
     async def test_plan_returns_tree(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         # Create a mini milestone -> phase -> step hierarchy
         milestone = dashboard_db.db.create_issue("Test Milestone", type="milestone")
@@ -1051,22 +1181,65 @@ class TestBatchAPI:
         data = resp.json()
         assert len(data["closed"]) == 1
 
-    async def test_batch_close_force_bypasses_transition_check(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
-        """HTTP batch-close accepts force=true to bypass the transition
-        validator — matches CLI ``--force`` and MCP ``force``. Without it,
-        a phase in 'pending' cannot reach the template default 'completed'
-        and surfaces INVALID_TRANSITION per item.
+    async def test_http_batch_close_force_returns_400(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """2.1.0 §1.1: HTTP batch-close rejects ``force=true`` by default.
+
+        Without ``--allow-http-force-close`` at dashboard startup, passing
+        ``force=true`` returns 400/VALIDATION instead of bypassing the
+        transition validator. Closes the privilege-escalation footgun
+        where any HTTP client could clear the workflow gate.
         """
+        import filigree.dashboard as dash_module
+
+        monkeypatch.setattr(dash_module, "_allow_http_force_close", False)
         phase = dashboard_db.db.create_issue("Cleanup phase", type="phase")
-        # No force → default 'completed' unreachable from 'pending'.
+        resp = await client.post(
+            "/api/batch/close",
+            json={"issue_ids": [phase.id], "force": True},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "force=true" in body["error"]
+        # And the loom mirror behaves the same.
+        resp_loom = await client.post(
+            "/api/loom/batch/close",
+            json={"issue_ids": [phase.id], "force": True},
+        )
+        assert resp_loom.status_code == 400
+        assert resp_loom.json()["code"] == "VALIDATION"
+
+    async def test_http_batch_close_force_with_opt_in_works(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """2.1.0 §1.1: ``force=true`` is honoured once the operator opts in
+        via ``--allow-http-force-close`` (modeled here by flipping the
+        module flag the CLI option toggles).
+        """
+        import filigree.dashboard as dash_module
+
+        monkeypatch.setattr(dash_module, "_allow_http_force_close", True)
+        phase = dashboard_db.db.create_issue("Cleanup phase", type="phase")
+        # Without force the default 'completed' is unreachable from 'pending'.
         resp = await client.post("/api/batch/close", json={"issue_ids": [phase.id]})
         assert resp.status_code == 200
         data = resp.json()
         assert data["closed"] == []
         assert len(data["errors"]) == 1
         assert data["errors"][0]["code"] == "INVALID_TRANSITION"
-        # force=true → lands in the type's default done state.
-        resp = await client.post("/api/batch/close", json={"issue_ids": [phase.id], "force": True})
+        # With force AND the opt-in, the close goes through.
+        resp = await client.post(
+            "/api/batch/close",
+            json={"issue_ids": [phase.id], "force": True},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["closed"]) == 1
@@ -1078,6 +1251,81 @@ class TestBatchAPI:
         resp = await client.post("/api/batch/close", json={"issue_ids": [ids["b"]], "force": "yes"})
         assert resp.status_code == 400
         assert "force" in resp.json()["error"].lower()
+
+
+class TestActorLengthCapAtHTTPBoundary:
+    """2.1.0 §1.4 / ADR-012: ``sanitize_actor``'s 128-character cap is
+    enforced at every HTTP entry point that accepts an actor.
+
+    Pinning each surface guards against a regression where one route
+    plumbs the actor directly into the DB without routing through
+    ``_validate_actor``. The CLI and MCP cap is already pinned at
+    ``tests/cli/test_compose_commands.py`` and
+    ``tests/mcp/test_boundary_validation.py``; this is the HTTP arm.
+    """
+
+    _OVERLONG = "a" * 129  # exactly one over _MAX_ACTOR_LENGTH
+
+    async def test_claim_overlong_actor_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/claim",
+            json={"assignee": "alice", "actor": self._OVERLONG},
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "VALIDATION", body
+        assert "128" in body["error"]
+
+    async def test_release_overlong_actor_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/release",
+            json={"actor": self._OVERLONG},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_close_overlong_actor_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/close",
+            json={"actor": self._OVERLONG},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_batch_close_overlong_actor_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            "/api/batch/close",
+            json={"issue_ids": [ids["a"]], "actor": self._OVERLONG},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_add_comment_overlong_author_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/comments",
+            json={"text": "hi", "author": self._OVERLONG},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_control_char_actor_rejected(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Control characters must be rejected pre-strip so smuggled
+        newlines can't reach the audit log.
+        """
+        ids = dashboard_db.ids
+        resp = await client.post(
+            f"/api/issue/{ids['a']}/claim",
+            json={"assignee": "alice", "actor": "bad\nactor"},
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "VALIDATION", body
+        assert "control" in body["error"].lower()
 
 
 class TestNonObjectBodyReturns400:
@@ -1171,12 +1419,36 @@ class TestBatchClosePartialMutation:
         """Even if all items fail, batch/close should return 200 with errors list."""
         resp = await client.post(
             "/api/batch/close",
-            json={"issue_ids": ["bad-1", "bad-2"]},
+            json={"issue_ids": ["test-deadbeef00", "test-cafebabe01"]},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["closed"]) == 0
         assert len(data["errors"]) == 2
+
+    async def test_batch_close_foreign_prefix_aborts_envelope_level(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """2.1.0 §0.4: foreign-prefix in a batch aborts envelope-level
+        rather than producing N misleading per-item NOT_FOUND errors."""
+        ids = dashboard_db.ids
+        resp = await client.post(
+            "/api/batch/close",
+            # ids["a"] is local; "foreign-deadbeef01" parses as foreign-prefix
+            # (hex 12 chars, candidate prefix "foreign" != local "test").
+            json={"issue_ids": [ids["a"], "foreign-deadbeef01"]},
+        )
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["code"] == "VALIDATION"
+        # 2.1.0 §1.2: the HTTP envelope uses ``WrongProjectError.safe_message``,
+        # so the foreign prefix is no longer echoed back. The assertion
+        # pinning "the error indicates a project-membership problem"
+        # moves to the generic safe wording.
+        from filigree.core import WrongProjectError
+
+        assert data["error"] == WrongProjectError.SAFE_MESSAGE
+        # No partial mutation: the local id must NOT have been closed.
+        check = await client.get(f"/api/issue/{ids['a']}")
+        assert check.json()["status"] != "closed"
 
     async def test_core_batch_close_returns_tuple(self, dashboard_db: PopulatedDB) -> None:
         """core.batch_close should return (results, errors) like batch_update."""
@@ -1398,14 +1670,14 @@ class TestDashboardBatchCloseKeyError:
     async def test_batch_close_nonexistent_id(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api/batch/close",
-            json={"issue_ids": ["nonexistent-xyz"]},
+            json={"issue_ids": ["test-deadbeef00"]},
         )
         # Returns 200 with per-item error collection (not fail-fast 404)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["closed"]) == 0
         assert len(data["errors"]) == 1
-        assert data["errors"][0]["id"] == "nonexistent-xyz"
+        assert data["errors"][0]["id"] == "test-deadbeef00"
 
 
 class TestDashboardMalformedJSON:

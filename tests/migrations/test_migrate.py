@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -1129,3 +1131,58 @@ class TestMigrateClosedAtNormalization:
         migrate_from_beads(beads, db)
         issue = db.get_issue("bd-cat1")
         assert issue.closed_at == original
+
+
+class TestMigrateV18ToV19:
+    """v18 -> v19: scan_findings.fingerprint + partitioned dedup indexes (Loom §3.B)."""
+
+    @pytest.fixture
+    def pre_v19_conn(self) -> Iterator[sqlite3.Connection]:
+        """A connection holding a minimal pre-v19 scan_findings table (no
+        fingerprint column, old non-partial dedup index), closed on teardown."""
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "CREATE TABLE scan_findings (id TEXT PRIMARY KEY, file_id TEXT, scan_source TEXT, rule_id TEXT, line_start INTEGER)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX idx_scan_findings_dedup ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1))"
+            )
+            yield conn
+
+    def test_adds_fingerprint_column_defaulting_empty(self, pre_v19_conn: sqlite3.Connection) -> None:
+        from filigree.migrations import migrate_v18_to_v19
+
+        pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-1', 'f-1', 'ruff', 'E501', 7)")
+        migrate_v18_to_v19(pre_v19_conn)
+
+        cols = {r[1] for r in pre_v19_conn.execute("PRAGMA table_info(scan_findings)").fetchall()}
+        assert "fingerprint" in cols
+        row = pre_v19_conn.execute("SELECT fingerprint FROM scan_findings WHERE id = 'sf-1'").fetchone()
+        assert row["fingerprint"] == ""
+
+    def test_distinct_fingerprints_same_site_allowed_after_migration(self, pre_v19_conn: sqlite3.Connection) -> None:
+        """The rebuilt dedup index is partial, so two distinct-fingerprint rows
+        at the same file/rule/line no longer collide."""
+        from filigree.migrations import migrate_v18_to_v19
+
+        migrate_v18_to_v19(pre_v19_conn)
+        pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-1', 'f-1', 'wln', 'R', 5, 'fp-a')")
+        pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-2', 'f-1', 'wln', 'R', 5, 'fp-b')")
+        assert pre_v19_conn.execute("SELECT COUNT(*) FROM scan_findings").fetchone()[0] == 2
+
+    def test_duplicate_fingerprint_rejected_after_migration(self, pre_v19_conn: sqlite3.Connection) -> None:
+        from filigree.migrations import migrate_v18_to_v19
+
+        migrate_v18_to_v19(pre_v19_conn)
+        pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-1', 'f-1', 'wln', 'R', 5, 'fp-dup')")
+        with pytest.raises(sqlite3.IntegrityError):
+            pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-2', 'f-9', 'wln', 'R', 99, 'fp-dup')")
+
+    def test_fingerprintless_legacy_dedup_still_enforced(self, pre_v19_conn: sqlite3.Connection) -> None:
+        from filigree.migrations import migrate_v18_to_v19
+
+        migrate_v18_to_v19(pre_v19_conn)
+        pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-1', 'f-1', 'ruff', 'E501', 7, '')")
+        with pytest.raises(sqlite3.IntegrityError):
+            pre_v19_conn.execute("INSERT INTO scan_findings VALUES ('sf-2', 'f-1', 'ruff', 'E501', 7, '')")

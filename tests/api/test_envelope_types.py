@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import get_type_hints
+from typing import get_args, get_type_hints
 
 from filigree.types.api import BatchFailure, BatchResponse, ListResponse, SlimIssue
 
@@ -39,9 +39,17 @@ def test_batch_response_is_generic() -> None:
 def test_error_code_enum_members() -> None:
     from filigree.types.api import ErrorCode
 
-    # Exact 11-member set. SCHEMA_MISMATCH and INTERNAL were added so the
+    # Exact 15-member set. SCHEMA_MISMATCH and INTERNAL were added so the
     # typed SchemaVersionMismatchError and the catch-all except-Exception
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
+    # FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
+    # conflict code for projects whose file registry is owned by Clarion.
+    # CLARION_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
+    # Clarion advertises an api_version this Filigree was not built for.
+    # BRIEFING_BLOCKED is the Clarion 1.0 cross-product code (CONTRACT-3):
+    # Clarion returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
+    # intentionally withholds; surfaces as HTTP 403 to the dashboard caller
+    # and MUST NOT engage the local-registry fallback.
     expected = {
         "VALIDATION",
         "NOT_FOUND",
@@ -51,6 +59,10 @@ def test_error_code_enum_members() -> None:
         "NOT_INITIALIZED",
         "IO",
         "INVALID_API_URL",
+        "FILE_REGISTRY_DISPLACED",
+        "REGISTRY_UNAVAILABLE",
+        "CLARION_REGISTRY_VERSION_MISMATCH",
+        "BRIEFING_BLOCKED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",
         "INTERNAL",
@@ -63,6 +75,21 @@ def test_error_code_is_str_subclass() -> None:
 
     assert ErrorCode.VALIDATION == "VALIDATION"
     assert isinstance(ErrorCode.VALIDATION, str)
+
+
+def test_legacy_displaced_registry_code_maps_to_current_name() -> None:
+    from filigree.types.api import LEGACY_CODE_TO_ERRORCODE, ErrorCode
+
+    assert LEGACY_CODE_TO_ERRORCODE["FILIGREE_FILE_REGISTRY_DISPLACED"] is ErrorCode.FILE_REGISTRY_DISPLACED
+
+
+def test_event_type_reversibility_classifier_is_total() -> None:
+    from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventType, is_reversible_event_type
+
+    classified = {event_type: is_reversible_event_type(event_type) for event_type in get_args(EventType)}
+    assert {event_type for event_type, reversible in classified.items() if reversible} == set(REVERSIBLE_EVENT_TYPES)
+    assert classified["created"] is False
+    assert classified["status_changed"] is True
 
 
 def test_error_response_flat_shape() -> None:
@@ -108,9 +135,25 @@ def test_transition_errors_exist() -> None:
 
     exc1 = AmbiguousTransitionError("X", ["fixing", "reviewing"])
     assert "fixing" in str(exc1)
+    assert isinstance(exc1, ValueError)
 
-    exc2 = InvalidTransitionError("X", "confirmed")
+    exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", backward=True)
     assert "confirmed" in str(exc2)
+    enriched = exc2.with_valid_transitions([{"to": "open", "category": "open", "ready": True}])
+    assert enriched is not exc2
+    assert str(enriched) == str(exc2)
+    assert enriched.backward is True
+    assert enriched.valid_transitions == [{"to": "open", "category": "open", "ready": True}]
+
+
+def test_invalid_transition_details_omits_uncomputed_transitions() -> None:
+    from filigree.types.api import InvalidTransitionError, invalid_transition_details
+
+    exc = InvalidTransitionError("X", "confirmed", to_state="closed")
+    assert invalid_transition_details(exc) is None
+
+    enriched = exc.with_valid_transitions([])
+    assert invalid_transition_details(enriched) == {"valid_transitions": []}
 
 
 def test_scan_ingest_response_loom_concrete_shape() -> None:
@@ -200,5 +243,6 @@ def test_errorcode_to_http_status_is_exhaustive() -> None:
     assert errorcode_to_http_status(ErrorCode.PERMISSION) == 403
     assert errorcode_to_http_status(ErrorCode.NOT_INITIALIZED) == 503
     assert errorcode_to_http_status(ErrorCode.SCHEMA_MISMATCH) == 503
+    assert errorcode_to_http_status(ErrorCode.REGISTRY_UNAVAILABLE) == 503
     assert errorcode_to_http_status(ErrorCode.INTERNAL) == 500
     assert errorcode_to_http_status(ErrorCode.IO) == 500

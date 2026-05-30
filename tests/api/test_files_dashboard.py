@@ -399,6 +399,22 @@ class TestScanResultsEndpointEnhancements:
         )
         assert resp.status_code == 200
 
+    async def test_clarion_registry_unavailable_returns_503(self, unavailable_clarion_client: AsyncClient) -> None:
+        resp = await unavailable_clarion_client.post(
+            "/api/v1/scan-results",
+            json={
+                "scan_source": "ruff",
+                "findings": [{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "msg"}],
+            },
+        )
+
+        assert resp.status_code == 503
+        data = resp.json()
+        assert data["code"] == "REGISTRY_UNAVAILABLE"
+        # CONTRACT-1: scan-results goes through the batch endpoint now;
+        # the unreachable message has the batch-resolve prefix.
+        assert "Clarion batch resolve unreachable" in data["error"]
+
     async def test_new_finding_ids_in_response(self, client: AsyncClient) -> None:
         resp = await client.post(
             "/api/v1/scan-results",

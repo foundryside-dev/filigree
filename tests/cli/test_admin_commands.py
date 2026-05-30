@@ -85,7 +85,9 @@ class TestJsonRetrofit:
         data = json.loads(result.output)
         assert isinstance(data, dict)
         assert "succeeded" in data
-        assert "newly_unblocked" in data
+        # Standalone issue, no dependents: newly_unblocked is empty and therefore
+        # OMITTED from the envelope (batch contract; filigree-1025b9f6ab / F6).
+        assert "newly_unblocked" not in data
         assert data["succeeded"][0]["issue_id"] == issue_id
 
     def test_reopen_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
@@ -203,6 +205,12 @@ class TestJsonRetrofit:
         unrelated_show = runner.invoke(cli, ["show", unrelated_id, "--json"])
         assert json.loads(scratch_show.output)["status"] == "archived"
         assert json.loads(unrelated_show.output)["status"] == "closed"
+
+    def test_archive_tight_window_requires_label_scope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["archive", "--days", "0"])
+        assert result.exit_code == 1
+        assert "--days 0 requires a non-empty --label" in result.output
 
     def test_archive_rejects_negative_days(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -941,6 +949,54 @@ class TestInstallMode:
         assert config["mode"] == "server"
 
 
+class TestAdminProjectConfigValidation:
+    @staticmethod
+    def _write_invalid_clarion_config(project_root: Path) -> None:
+        config_path = project_root / ".filigree" / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "prefix": "test",
+                    "name": "test",
+                    "version": 1,
+                    "registry_backend": "clarion",
+                    "clarion": {},
+                }
+            )
+            + "\n"
+        )
+
+    def test_existing_init_reports_project_config_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        init_result = cli_runner.invoke(cli, ["init"])
+        assert init_result.exit_code == 0
+        self._write_invalid_clarion_config(tmp_path)
+
+        result = cli_runner.invoke(cli, ["init"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, ValueError)
+        assert "Invalid project config" in (result.output or "")
+        assert "clarion.base_url" in (result.output or "")
+
+    def test_install_mode_reports_project_config_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        init_result = cli_runner.invoke(cli, ["init"])
+        assert init_result.exit_code == 0
+        self._write_invalid_clarion_config(tmp_path)
+
+        result = cli_runner.invoke(cli, ["install", "--mode", "server"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, ValueError)
+        assert "Invalid project config" in (result.output or "")
+        assert "clarion.base_url" in (result.output or "")
+
+
 @pytest.mark.slow
 class TestInstallModeIntegration:
     def test_install_server_mode_registers_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -1183,6 +1239,25 @@ class TestServerRegisterReload:
 
 
 class TestDashboardServerModePidTracking:
+    def test_dashboard_passes_allow_local_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        observed: dict[str, object] = {}
+
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
+            observed["allow_local_fallback"] = allow_local_fallback
+
+        monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
+
+        result = cli_runner.invoke(cli, ["dashboard", "--no-browser", "--allow-local-fallback"])
+
+        assert result.exit_code == 0
+        assert observed["allow_local_fallback"] is True
+
     def test_dashboard_server_mode_claims_pid_for_status(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
     ) -> None:
@@ -1196,7 +1271,13 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             from filigree.server import SERVER_PID_FILE, daemon_status
 
             status = daemon_status()
@@ -1236,7 +1317,13 @@ class TestDashboardServerModePidTracking:
 
         called = {"main": False}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             called["main"] = True
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
@@ -1263,7 +1350,13 @@ class TestDashboardServerModePidTracking:
 
         observed: dict[str, object] = {}
 
-        def _fake_dashboard_main(port: int, no_browser: bool, server_mode: bool) -> None:
+        def _fake_dashboard_main(
+            port: int,
+            no_browser: bool,
+            server_mode: bool,
+            allow_http_force_close: bool = False,
+            allow_local_fallback: bool = False,
+        ) -> None:
             observed["port_arg"] = port
 
         monkeypatch.setattr("filigree.dashboard.main", _fake_dashboard_main)
@@ -1434,6 +1527,26 @@ class TestInstallStepFailureExitCode:
         result = runner.invoke(cli, ["install", "--gitignore"])
         assert result.exit_code == 0
         assert "Next: filigree create" in (result.output or "")
+
+
+class TestInstallStepExceptionReporting:
+    def test_install_reports_step_exception_as_failure(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _project = cli_in_project
+
+        def _raise_oserror(*_args: object, **_kwargs: object) -> tuple[bool, str]:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("filigree.install.inject_instructions", _raise_oserror)
+
+        result = runner.invoke(cli, ["install", "--claude-md"])
+
+        assert result.exit_code == 1
+        assert not isinstance(result.exception, OSError)
+        assert "CLAUDE.md: disk full" in (result.output or "")
+        assert "Some install steps failed" in (result.output or "")
+        assert "Next: filigree create" not in (result.output or "")
 
 
 class TestMetricsDaysValidation:

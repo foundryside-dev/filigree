@@ -6,6 +6,7 @@ Commands are defined in cli_commands/ subpackage modules.
 
 from __future__ import annotations
 
+import copy
 import json as json_mod
 
 import click
@@ -62,6 +63,54 @@ def cli(ctx: click.Context, actor: str) -> None:
 # Register domain command modules
 for _mod in (issues, planning, meta, workflow, admin, server, observations, files, annotations_cmds, scanners):
     _mod.register(cli)
+
+
+# Surface consolidation (filigree-c73c75b652): each of these long-form verbs
+# mirrors an MCP tool name but is a pure duplicate of a shorter, canonical CLI
+# verb that the docs/skill-pack teach (e.g. ``get-ready``→``ready``,
+# ``update-issue``→``update``, ``get-issue``→``show``). Hiding them declutters
+# ``--help`` (125→~103 visible verbs) WITHOUT removing them: the long forms stay
+# fully functional for MCP-name muscle-memory and existing scripts — they just
+# no longer appear in help. The canonical short verb in each pair stays visible.
+_HIDDEN_ALIAS_VERBS = (
+    "get-issue",
+    "get-ready",
+    "get-blocked",
+    "get-changes",
+    "get-plan",
+    "get-critical-path",
+    "get-type-info",
+    "get-valid-transitions",
+    "get-workflow-statuses",
+    "get-workflow-guide",
+    "get-label-taxonomy",
+    "get-issue-events",
+    "get-stale-claims",
+    "list-issues",
+    "list-labels",
+    "list-types",
+    "list-packs",
+    "update-issue",
+    "validate-issue",
+    "reclaim-issue",
+    "release-claim",
+    "undo-last",
+)
+for _alias in _HIDDEN_ALIAS_VERBS:
+    _cmd = cli.commands.get(_alias)
+    if _cmd is None:
+        continue
+    # A few aliases (e.g. ``reclaim``/``reclaim-issue``, ``stale-claims``/
+    # ``get-stale-claims``) are the SAME Command object registered under two
+    # names. Setting ``.hidden`` on a shared object would also hide its visible
+    # canonical sibling, so clone the object for the alias registration.
+    _shares_object = any(c is _cmd and n != _alias for n, c in cli.commands.items())
+    if _shares_object:
+        _clone = copy.copy(_cmd)
+        _clone.hidden = True
+        cli.commands[_alias] = _clone
+    else:
+        _cmd.hidden = True
 
 
 if __name__ == "__main__":

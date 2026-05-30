@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import json as json_mod
 import logging
+import sqlite3
 import sys
 from typing import Any
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import ActorCommand, get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
-from filigree.types.api import AmbiguousTransitionError, ErrorCode, InvalidTransitionError, classify_value_error
+from filigree.types.api import (
+    AmbiguousTransitionError,
+    ClaimConflictError,
+    ErrorCode,
+    InvalidTransitionError,
+    IssueDeletionRefusedError,
+    claim_conflict_envelope,
+    classify_release_claim_error,
+    classify_value_error,
+)
 from filigree.validation import sanitize_actor
 
 
@@ -37,6 +47,37 @@ logger = logging.getLogger(__name__)
 
 _MAX_SQLITE_OFFSET = 9_223_372_036_854_775_807
 _MAX_SQLITE_OVERFETCH_LIMIT = _MAX_SQLITE_OFFSET - 1
+
+
+def _log_transition_enrichment_failure(issue_id: str, exc: Exception) -> None:
+    if isinstance(exc, KeyError):
+        logger.debug("Issue %s disappeared while enriching invalid-transition payload", issue_id, exc_info=True)
+        return
+    logger.warning("Failed to enrich invalid-transition payload for %s", issue_id, exc_info=True)
+
+
+def _transition_error_payload(db: Any, issue_id: str, exc: BaseException) -> dict[str, Any]:
+    payload: dict[str, Any] = {"error": str(exc), "code": ErrorCode.INVALID_TRANSITION}
+    if isinstance(exc, AmbiguousTransitionError):
+        details: dict[str, Any] = {
+            "type": exc.type_name,
+            "candidates": exc.candidates,
+        }
+        if exc.current_status is not None:
+            details["current_status"] = exc.current_status
+        payload["details"] = details
+        return payload
+    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
+        payload["valid_transitions"] = exc.valid_transitions
+        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+        return payload
+    try:
+        transitions = db.get_valid_transitions(issue_id)
+        payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+    except Exception as enrich_exc:
+        _log_transition_enrichment_failure(issue_id, enrich_exc)
+    return payload
 
 
 def _range_check_int(value: int | None, name: str, *, min_val: int, max_val: int, as_json: bool) -> None:
@@ -92,7 +133,7 @@ def _min_check_int(value: int, name: str, *, min_val: int, as_json: bool) -> Non
         sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("title")
 @click.option(
     "--type",
@@ -465,11 +506,21 @@ def _update_impl(
             else:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
+        except InvalidTransitionError as e:
+            if as_json:
+                click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             if as_json:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                elif classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
+                    click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
+                else:
+                    click.echo(json_mod.dumps({"error": msg, "code": classify_value_error(msg)}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -477,7 +528,7 @@ def _update_impl(
         refresh_summary(db)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--status", default=None, help="New status")
 @click.option("--priority", "-p", default=None, type=int, help="New priority")
@@ -524,7 +575,7 @@ def update(
     )
 
 
-@click.command("update-issue")
+@click.command("update-issue", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--status", default=None, help="New status")
 @click.option("--priority", "-p", default=None, type=int, help="New priority")
@@ -571,7 +622,7 @@ def update_issue_cmd(
     )
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--reason", default="", help="Close reason")
 @click.option(
@@ -588,8 +639,8 @@ def update_issue_cmd(
     is_flag=True,
     default=False,
     help=(
-        "Bypass the template transition validator and close from any state. Use only "
-        "for cleanup flows that intentionally skip the workflow."
+        "Use the template reverse/escape transition and close from any state. Use only "
+        "for cleanup flows that intentionally leave the normal workflow."
     ),
 )
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
@@ -607,7 +658,7 @@ def close(
     """Close one or more issues."""
     with get_db() as db:
         succeeded: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         ready_before = {i.id for i in db.get_ready()} if as_json else set()
         for issue_id in issue_ids:
             try:
@@ -644,8 +695,12 @@ def close(
                     click.echo(f"Not found: {issue_id}", err=True)
             except ValueError as e:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
-                errors.append({"id": issue_id, "error": msg, "code": code})
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
+                error_item: dict[str, Any] = {"id": issue_id, "error": msg, "code": code}
+                if isinstance(e, ClaimConflictError):
+                    envelope = claim_conflict_envelope(e)
+                    error_item["details"] = envelope["details"]
+                errors.append(error_item)
                 if not as_json:
                     click.echo(msg, err=True)
         if as_json:
@@ -656,7 +711,10 @@ def close(
             # behaviour for N≥2.
             if len(issue_ids) == 1 and errors and not succeeded:
                 err = errors[0]
-                click.echo(json_mod.dumps({"error": err["error"], "code": err["code"]}))
+                error_payload: dict[str, Any] = {"error": err["error"], "code": err["code"]}
+                if "details" in err:
+                    error_payload["details"] = err["details"]
+                click.echo(json_mod.dumps(error_payload))
                 refresh_summary(db)
                 sys.exit(1)
             # Only issues that became ready *after* the close (per docs/cli.md).
@@ -666,14 +724,18 @@ def close(
                 for i in ready
                 if i.id not in ready_before
             ]
-            payload: dict[str, Any] = {"succeeded": succeeded, "failed": errors, "newly_unblocked": newly_unblocked}
+            # Batch envelope contract: ``newly_unblocked`` is OMITTED when
+            # empty (matches MCP ``batch_close`` at mcp_tools/issues.py).
+            payload: dict[str, Any] = {"succeeded": succeeded, "failed": errors}
+            if newly_unblocked:
+                payload["newly_unblocked"] = newly_unblocked
             click.echo(json_mod.dumps(payload, indent=2, default=str))
         refresh_summary(db)
         if errors:
             sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -681,7 +743,7 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
     """Reopen one or more closed issues to their last non-done statuses."""
     with get_db() as db:
         reopened: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         for issue_id in issue_ids:
             try:
                 issue = db.reopen_issue(issue_id, actor=ctx.obj["actor"])
@@ -702,7 +764,13 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
                 if not as_json:
                     click.echo(f"Not found: {issue_id}", err=True)
             except ValueError as e:
-                errors.append({"id": issue_id, "error": str(e), "code": classify_value_error(str(e))})
+                msg = str(e)
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(msg)
+                error_item: dict[str, Any] = {"id": issue_id, "error": msg, "code": code}
+                if isinstance(e, ClaimConflictError):
+                    envelope = claim_conflict_envelope(e)
+                    error_item["details"] = envelope["details"]
+                errors.append(error_item)
                 if not as_json:
                     click.echo(f"Error reopening {issue_id}: {e}", err=True)
         if as_json:
@@ -713,7 +781,7 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
             sys.exit(1)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="Who is claiming (agent name)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -746,10 +814,14 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
         except ValueError as e:
             msg = str(e)
             if as_json:
-                code = classify_value_error(msg)
-                if code != ErrorCode.INVALID_TRANSITION:
-                    code = ErrorCode.CONFLICT
-                click.echo(json_mod.dumps({"error": msg, "code": code}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    code = classify_value_error(msg)
+                    if code == ErrorCode.INVALID_TRANSITION:
+                        click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
+                    else:
+                        click.echo(json_mod.dumps({"error": msg, "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -761,7 +833,7 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
         refresh_summary(db)
 
 
-@click.command("claim-next")
+@click.command("claim-next", cls=ActorCommand)
 @click.option("--assignee", required=True, help="Who is claiming")
 @click.option("--type", "type_filter", default=None, help="Filter by issue type")
 @click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
@@ -848,16 +920,40 @@ def _release_impl(
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except InvalidTransitionError as e:
+            if as_json:
+                payload: dict[str, Any] = {"error": str(e), "code": ErrorCode.INVALID_TRANSITION}
+                if e.valid_transitions is not None:
+                    payload["valid_transitions"] = e.valid_transitions
+                    payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                else:
+                    try:
+                        transitions = db.get_valid_transitions(issue_id)
+                        payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                    except Exception as enrich_exc:
+                        _log_transition_enrichment_failure(issue_id, enrich_exc)
+                click.echo(json_mod.dumps(payload))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except ClaimConflictError as e:
+            if as_json:
+                click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                code = classify_release_claim_error(issue_id, e)
+                click.echo(json_mod.dumps({"error": str(e), "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         refresh_summary(db)
 
 
-@click.command("release")
+@click.command("release", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
     "--if-held",
@@ -880,7 +976,7 @@ def release(
     _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
 
 
-@click.command("release-claim")
+@click.command("release-claim", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option(
     "--if-held",
@@ -903,7 +999,7 @@ def release_claim_cmd(
     _release_impl(ctx.obj["actor"], issue_id, as_json, if_held=if_held, expected_assignee=expected_assignee, reason=reason)
 
 
-@click.command("release-my-claims")
+@click.command("release-my-claims", cls=ActorCommand)
 @click.option("--label", default=None, help="Restrict to issues carrying this exact label.")
 @click.option("--label-prefix", default=None, help="Restrict to issues with a label starting with this prefix (must end with ':').")
 @click.option("--dry-run", is_flag=True, help="List the issues that would be released without making changes.")
@@ -962,6 +1058,10 @@ def release_my_claims_cmd(
             if dry_run:
                 payload["dry_run"] = True
             click.echo(json_mod.dumps(payload, indent=2, default=str))
+            if not dry_run:
+                refresh_summary(db)
+            if failures:
+                sys.exit(1)
             return
         verb = "would release" if dry_run else "released"
         click.echo(f"{verb} {len(released)} claim(s) for actor {actor!r}")
@@ -973,9 +1073,11 @@ def release_my_claims_cmd(
                 click.echo(f"  {fail['id']}: {fail['error']}", err=True)
         if not dry_run:
             refresh_summary(db)
+        if failures:
+            sys.exit(1)
 
 
-@click.command("heartbeat-work")
+@click.command("heartbeat-work", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--expected-assignee", default=None, help="Expected current assignee; defaults to global --actor.")
 @click.option("--lease-hours", default=48, type=int, help="Lease duration from this heartbeat.")
@@ -1012,7 +1114,10 @@ def heartbeat_work_cmd(
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    click.echo(json_mod.dumps({"error": str(e), "code": classify_value_error(str(e))}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1063,7 +1168,7 @@ def stale_claims_cmd(stale_after_hours: int, expires_within_hours: int | None, a
                 click.echo(f'P{issue.priority} {issue.id} [{issue.type}] "{issue.title}" -> {issue.assignee}')
 
 
-@click.command("reclaim")
+@click.command("reclaim", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="New assignee")
 @click.option("--expected-assignee", required=True, help="Current assignee expected by the caller")
@@ -1124,7 +1229,10 @@ def reclaim_cmd(
             sys.exit(1)
         except ValueError as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+                if isinstance(e, ClaimConflictError):
+                    click.echo(json_mod.dumps(claim_conflict_envelope(e)))
+                else:
+                    click.echo(json_mod.dumps({"error": str(e), "code": classify_value_error(str(e))}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1159,7 +1267,7 @@ def _undo_impl(actor: str, issue_id: str, as_json: bool) -> None:
         refresh_summary(db)
 
 
-@click.command()
+@click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1168,7 +1276,7 @@ def undo(ctx: click.Context, issue_id: str, as_json: bool) -> None:
     _undo_impl(ctx.obj["actor"], issue_id, as_json)
 
 
-@click.command("undo-last")
+@click.command("undo-last", cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1177,17 +1285,77 @@ def undo_last_cmd(ctx: click.Context, issue_id: str, as_json: bool) -> None:
     _undo_impl(ctx.obj["actor"], issue_id, as_json)
 
 
+@click.command("delete-issue", cls=ActorCommand)
+@click.argument("issue_id")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Delete a non-terminal issue; orphan children and cascade inbound dependencies",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def delete_issue_cmd(ctx: click.Context, issue_id: str, force: bool, as_json: bool) -> None:
+    """Hard-delete an issue and all of its dependent rows. IRREVERSIBLE.
+
+    Destroys the issue's events, so `undo-last` cannot reverse it. Writes a
+    deletion tombstone so federation consumers see an issue_deleted record on
+    /changes. Refuses unless the issue is in a done-category status or
+    'archived', has no children, and has no other issues blocked by it. Pass
+    --force to delete anyway: children orphan and inbound dependencies cascade.
+    """
+    with get_db() as db:
+        try:
+            result = db.delete_issue(issue_id, force=force, actor=ctx.obj["actor"])
+            refresh_summary(db)
+        except KeyError:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Not found: {issue_id}", "code": ErrorCode.NOT_FOUND}))
+            else:
+                click.echo(f"Error: issue {issue_id} not found", err=True)
+            sys.exit(1)
+        except IssueDeletionRefusedError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.CONFLICT}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except ValueError as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
+            click.echo(json_mod.dumps(result, indent=2, default=str))
+        else:
+            click.echo(
+                f"Deleted {issue_id} "
+                f"({result['deleted_events']} event(s), "
+                f"{result['orphaned_children']} child(ren) orphaned, "
+                f"{result['deleted_dependencies_in']} inbound dep(s) cascaded)"
+            )
+
+
 @click.command("start-work")
 @click.argument("issue_id")
 @click.option("--assignee", required=True, help="Who is starting work (agent name)")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--advance", is_flag=True, help="Walk soft transitions to the nearest wip state (e.g. triage->confirmed->fixing)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_work(
     issue_id: str,
     assignee: str,
     target_status: str | None,
     actor: str | None,
+    advance: bool,
     as_json: bool,
 ) -> None:
     """Atomically claim an issue and transition it to its wip status."""
@@ -1208,6 +1376,7 @@ def start_work(
                 assignee=assignee,
                 target_status=target_status,
                 actor=resolved_actor,
+                advance=advance,
             )
         except KeyError:
             if as_json:
@@ -1217,13 +1386,22 @@ def start_work(
             sys.exit(1)
         except (AmbiguousTransitionError, InvalidTransitionError) as e:
             if as_json:
-                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.INVALID_TRANSITION}))
+                click.echo(json_mod.dumps(_transition_error_payload(db, issue_id, e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         except WrongProjectError as e:
             if as_json:
                 click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except ClaimConflictError as e:
+            # Optimistic-lock conflict — distinct error code so JSON
+            # consumers can branch on CONFLICT vs VALIDATION; mirrors the
+            # ``claim``, ``release``, and ``reclaim`` CLI paths.
+            if as_json:
+                click.echo(json_mod.dumps(claim_conflict_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1234,16 +1412,20 @@ def start_work(
                 if code == ErrorCode.INVALID_TRANSITION:
                     # Build enriched transition error (best-effort).
                     payload: dict[str, Any] = {"error": msg, "code": ErrorCode.INVALID_TRANSITION}
-                    try:
-                        transitions = db.get_valid_transitions(issue_id)
-                        payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                    if isinstance(e, InvalidTransitionError) and e.valid_transitions is not None:
+                        payload["valid_transitions"] = e.valid_transitions
                         payload["hint"] = "Use get_valid_transitions to see allowed state changes"
-                    except Exception:
-                        # Enrichment is best-effort — must never mask the original error.
-                        logger.debug("Could not resolve transitions for %s", issue_id, exc_info=True)
+                    else:
+                        try:
+                            transitions = db.get_valid_transitions(issue_id)
+                            payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
+                            payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                        except Exception as enrich_exc:
+                            # Enrichment is best-effort — must never mask the original error.
+                            _log_transition_enrichment_failure(issue_id, enrich_exc)
                     click.echo(json_mod.dumps(payload))
                 else:
-                    click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.CONFLICT}))
+                    click.echo(json_mod.dumps({"error": msg, "code": code}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -1262,6 +1444,7 @@ def start_work(
 @click.option("--priority-max", default=None, type=int, help="Maximum priority")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--advance", is_flag=True, help="Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def start_next_work(
     assignee: str,
@@ -1270,6 +1453,7 @@ def start_next_work(
     priority_max: int | None,
     target_status: str | None,
     actor: str | None,
+    advance: bool,
     as_json: bool,
 ) -> None:
     """Claim and start the highest-priority ready issue matching filters."""
@@ -1294,6 +1478,7 @@ def start_next_work(
                 priority_max=priority_max,
                 target_status=target_status,
                 actor=resolved_actor,
+                advance=advance,
             )
         except (AmbiguousTransitionError, InvalidTransitionError) as e:
             if as_json:
@@ -1340,6 +1525,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(update_issue_cmd)
     cli.add_command(close)
     cli.add_command(reopen)
+    cli.add_command(delete_issue_cmd)
     cli.add_command(claim)
     cli.add_command(claim_next)
     cli.add_command(release)

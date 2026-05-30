@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -20,6 +21,29 @@ from filigree.core import (
     write_config,
 )
 from tests._db_factory import make_db
+
+
+def _close_idle_current_event_loop() -> None:
+    """Close pytest-asyncio's restored idle loop before ResourceWarning GC.
+
+    pytest-asyncio records the pre-runner "old loop" with get_event_loop();
+    on Python 3.13 that can create a selector loop solely for bookkeeping.
+    The plugin restores that loop after the async test runner exits, but it
+    does not own-close it. With ResourceWarning promoted to an error, that
+    loop's self-pipe sockets surface as unraisable cleanup failures.
+    """
+    policy = asyncio.get_event_loop_policy()
+    local = getattr(policy, "_local", None)
+    loop = getattr(local, "_loop", None)
+    if loop is None or loop.is_closed() or loop.is_running():
+        return
+    loop.close()
+    local._loop = None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown() -> None:
+    _close_idle_current_event_loop()
 
 
 @dataclass
@@ -91,6 +115,25 @@ def filigree_project(tmp_path: Path) -> Path:
 def cli_runner() -> CliRunner:
     """Click CLI test runner."""
     return CliRunner()
+
+
+@pytest.fixture
+def concurrent_db_workers(tmp_path: Path) -> Generator[list[FiligreeDB], None, None]:
+    """Open multiple FiligreeDB connections to the same on-disk database.
+
+    Returns a list of two connections by default; tests requesting a
+    different N can call ``.append(make_db(tmp_path))`` to add more —
+    every connection points at the same ``tmp_path / "filigree.db"``
+    file so they exercise true SQLite-level concurrency. Lands as part
+    of 2.1.0 §0.1 (the update_issue CAS test needs a real second writer
+    to exercise the AND assignee = ? guard).
+    """
+    workers = [make_db(tmp_path) for _ in range(2)]
+    try:
+        yield workers
+    finally:
+        for w in workers:
+            w.close()
 
 
 def _fresh_project(tmp_path: Path) -> Path:

@@ -74,6 +74,42 @@ def _error_response(
     return JSONResponse(dict(body), status_code=status_code)
 
 
+def _check_read_prefix_in_server_mode(db: FiligreeDB, issue_id: str) -> JSONResponse | None:
+    """2.1.0 §1.3: in server mode, reject cross-project reads at the route boundary.
+
+    Returns a 404 envelope using :attr:`WrongProjectError.safe_message`
+    when the dashboard is running in multi-project server mode
+    (``filigree.dashboard._project_store`` is set) AND the requested
+    *issue_id* has a foreign prefix. Returns ``None`` in every other
+    case — including ethereal (single-project) mode, where the
+    documented read-tolerance of ``db.get_issue`` for foreign IDs is
+    preserved so CLI / MCP / migration tooling round-tripping through
+    the data layer keeps working.
+
+    Read enforcement deliberately lives at the route layer, not in
+    ``db_issues.get_issue``: the data-layer call is shared by tools
+    that operate cross-prefix on purpose (jsonl import, migration,
+    ``filigree doctor``). Putting the check in the route preserves
+    that tolerance while closing the cross-project probe surface that
+    only matters when the same process serves multiple projects.
+
+    The error envelope uses ``NOT_FOUND``/404 rather than ``VALIDATION``/400
+    so a probe ("does project alpha exist on this server?") cannot
+    distinguish "no such issue here" from "wrong project" — both look
+    identical to the caller.
+    """
+    from filigree.core import WrongProjectError
+    from filigree.dashboard import _project_store
+
+    if _project_store is None:
+        return None
+    try:
+        db._check_id_prefix(issue_id)
+    except WrongProjectError as exc:
+        return _error_response(exc.safe_message, ErrorCode.NOT_FOUND, 404)
+    return None
+
+
 async def _parse_json_body(request: Request) -> dict[str, Any] | JSONResponse:
     """Parse and validate a JSON object body, returning 400 on failure."""
     import json

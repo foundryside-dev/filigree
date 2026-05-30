@@ -14,6 +14,7 @@ Shape invariants (from ErrorResponse TypedDict, types/api.py):
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 from pathlib import Path
 
@@ -33,7 +34,9 @@ from filigree.core import (
 )
 from filigree.dashboard import create_app
 from filigree.mcp_tools.issues import _handle_get_issue, _handle_update_issue
+from filigree.registry import EXPECTED_CLARION_API_VERSION
 from filigree.types.api import ErrorCode
+from tests._fakes.clarion_http import clarion_stub
 
 _VALID_CODES: frozenset[str] = frozenset(e.value for e in ErrorCode)
 
@@ -291,6 +294,36 @@ class TestCLIStartupEnvelope:
         _assert_flat_envelope(payload, surface="cli")
         assert payload["code"] == ErrorCode.SCHEMA_MISMATCH
 
+    def test_clarion_api_version_mismatch_emits_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`stats --json` maps Clarion API mismatch to the public registry code."""
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        with clarion_stub(api_version=EXPECTED_CLARION_API_VERSION + 1) as (base_url, _state):
+            write_config(
+                filigree_dir,
+                {
+                    "prefix": "proj",
+                    "version": 1,
+                    "registry_backend": "clarion",
+                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                },
+            )
+
+            monkeypatch.chdir(tmp_path)
+            runner = CliRunner()
+            result = runner.invoke(cli, ["stats", "--json"])
+
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        _assert_flat_envelope(payload, surface="cli")
+        assert payload["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert payload["details"] == {
+            "cause": "clarion_registry_version_mismatch",
+            "url": f"{base_url}/api/v1/_capabilities",
+            "expected": EXPECTED_CLARION_API_VERSION,
+            "advertised": EXPECTED_CLARION_API_VERSION + 1,
+        }
+
     def test_corrupt_conf_emits_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """`stats --json` against a malformed `.filigree.conf` emits VALIDATION."""
         # `.filigree.conf` exists (so discovery anchors here) but is invalid JSON.
@@ -401,3 +434,19 @@ class TestCLIActorValidationEnvelope:
         payload = json.loads(result.output)
         _assert_flat_envelope(payload, surface="cli")
         assert payload["code"] == ErrorCode.VALIDATION
+
+
+# Bundled agent-instruction surfaces must enumerate every current ErrorCode, so
+# agents following installed/bundled guidance never branch on a stale, partial
+# enum (filigree-adbdda2ee5). Loaded the same way the package ships them.
+_INSTRUCTION_DOCS: list[str] = [
+    "data/instructions.md",
+    "skills/filigree-workflow/SKILL.md",
+]
+
+
+@pytest.mark.parametrize("doc", _INSTRUCTION_DOCS)
+def test_bundled_instructions_enumerate_every_error_code(doc: str) -> None:
+    text = (importlib.resources.files("filigree") / doc).read_text(encoding="utf-8")
+    missing = sorted(code for code in _VALID_CODES if f"`{code}`" not in text)
+    assert not missing, f"{doc} omits current ErrorCode value(s): {missing}"

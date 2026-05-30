@@ -35,6 +35,13 @@ class TestGetPlan:
         with pytest.raises(KeyError):
             db.get_plan("nonexistent-abc123")
 
+    def test_plan_rejects_non_milestone_root(self, db: FiligreeDB) -> None:
+        phase = db.create_issue("Phase without milestone root", type="phase")
+        db.create_issue("Step incorrectly treated as phase", type="step", parent_id=phase.id)
+
+        with pytest.raises(ValueError, match="not a milestone"):
+            db.get_plan(phase.id)
+
 
 class TestCreatePlan:
     def test_basic_plan(self, db: FiligreeDB) -> None:
@@ -91,6 +98,131 @@ class TestCreatePlan:
         assert plan["phases"][1]["phase"]["fields"]["sequence"] == 2
         assert plan["phases"][0]["steps"][0]["fields"]["sequence"] == 1
         assert plan["phases"][0]["steps"][1]["fields"]["sequence"] == 2
+
+    def test_plan_sequence_fields_accept_cli_string_values(self, db: FiligreeDB) -> None:
+        """CLI --field stores values as strings; get_plan should still sort."""
+        ms = db.create_issue("Milestone", type="milestone")
+        db.create_issue("Phase 2", type="phase", parent_id=ms.id, fields={"sequence": 2})
+        db.create_issue("Phase 3", type="phase", parent_id=ms.id, fields={"sequence": "3"})
+        phase1 = db.create_issue("Phase 1", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        db.create_issue("Step 2", type="step", parent_id=phase1.id, fields={"sequence": "2"})
+        db.create_issue("Step 1", type="step", parent_id=phase1.id, fields={"sequence": 1})
+
+        plan = db.get_plan(ms.id)
+
+        assert [phase["phase"]["title"] for phase in plan["phases"]] == ["Phase 1", "Phase 2", "Phase 3"]
+        assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2"]
+
+    def test_add_plan_step_counts_numeric_string_sequences(self, db: FiligreeDB) -> None:
+        ms = db.create_issue("Milestone", type="milestone")
+        phase = db.create_issue("Phase", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        db.create_issue("Step 1", type="step", parent_id=phase.id, fields={"sequence": "1"})
+        db.create_issue("Step 2", type="step", parent_id=phase.id, fields={"sequence": "2"})
+
+        added = db.add_plan_step(phase.id, "Step 3")
+
+        assert added.fields["sequence"] == 3
+        plan = db.get_plan(ms.id)
+        assert [step["title"] for step in plan["phases"][0]["steps"]] == ["Step 1", "Step 2", "Step 3"]
+
+    def test_add_plan_step_ignores_siblings_without_sequence(self, db: FiligreeDB) -> None:
+        """Regression (622da44): a sibling step lacking a 'sequence' field must
+        not inflate the next sequence to the (0, 999) sort sentinel + 1."""
+        ms = db.create_issue("Milestone", type="milestone")
+        phase = db.create_issue("Phase", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        # Steps created via generic create_issue carry no 'sequence' field.
+        db.create_issue("Bare step", type="step", parent_id=phase.id)
+        db.create_issue("Step 2", type="step", parent_id=phase.id, fields={"sequence": 2})
+
+        added = db.add_plan_step(phase.id, "Next")
+
+        # Highest real sequence is 2, so the next step is 3 — not 1000.
+        assert added.fields["sequence"] == 3
+
+    def test_move_plan_step_counts_numeric_string_sequences(self, db: FiligreeDB) -> None:
+        ms = db.create_issue("Milestone", type="milestone")
+        source = db.create_issue("Source", type="phase", parent_id=ms.id, fields={"sequence": 1})
+        target = db.create_issue("Target", type="phase", parent_id=ms.id, fields={"sequence": 2})
+        moving = db.create_issue("Move me", type="step", parent_id=source.id, fields={"sequence": 1})
+        db.create_issue("Target step 1", type="step", parent_id=target.id, fields={"sequence": "1"})
+        db.create_issue("Target step 2", type="step", parent_id=target.id, fields={"sequence": "2"})
+
+        moved = db.move_plan_step(moving.id, target.id)
+
+        assert moved.fields["sequence"] == 3
+        plan = db.get_plan(ms.id)
+        assert [step["title"] for step in plan["phases"][1]["steps"]] == ["Target step 1", "Target step 2", "Move me"]
+
+    def test_retarget_plan_dependency_swaps_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0]},
+                        {"title": "New blocker"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        new_blocker_id = steps[2]["id"]
+
+        updated = db.retarget_plan_dependency(blocked_step_id, old_blocker_id, new_blocker_id)
+
+        assert updated.blocked_by == [new_blocker_id]
+
+    def test_retarget_plan_dependency_to_existing_edge_removes_old_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget duplicate"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0, 2]},
+                        {"title": "Existing blocker"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        existing_blocker_id = steps[2]["id"]
+
+        updated = db.retarget_plan_dependency(blocked_step_id, old_blocker_id, existing_blocker_id)
+
+        assert updated.blocked_by == [existing_blocker_id]
+
+    def test_retarget_plan_dependency_rejects_cycle_without_removing_old_blocker(self, db: FiligreeDB) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget cycle"},
+            [
+                {
+                    "title": "Phase",
+                    "steps": [
+                        {"title": "Old blocker"},
+                        {"title": "Blocked step", "deps": [0]},
+                        {"title": "Cycle candidate"},
+                    ],
+                }
+            ],
+        )
+        steps = plan["phases"][0]["steps"]
+        old_blocker_id = steps[0]["id"]
+        blocked_step_id = steps[1]["id"]
+        cycle_candidate_id = steps[2]["id"]
+        db.add_dependency(cycle_candidate_id, blocked_step_id)
+
+        with pytest.raises(ValueError, match="would create a cycle"):
+            db.retarget_plan_dependency(blocked_step_id, old_blocker_id, cycle_candidate_id)
+
+        assert db.get_issue(blocked_step_id).blocked_by == [old_blocker_id]
 
     def test_plan_uses_template_initial_states(self, db: FiligreeDB) -> None:
         plan = db.create_plan(
@@ -287,6 +419,35 @@ class TestCreatePlan:
                 {"title": "MS"},
                 [{"title": "Phase", "steps": [{"title": "S1", "priority": 99}]}],
             )
+        assert len(db.list_issues()) == issues_before
+
+    @pytest.mark.parametrize(
+        ("milestone", "phases", "match"),
+        [
+            ({"title": 123}, [], "title.*string"),
+            ({"title": "MS", "fields": ["not", "a", "dict"]}, [], "fields must be a dict"),
+            ({"title": "MS", "description": ["not", "text"]}, [], "description.*string"),
+            ({"title": "MS"}, [None], "Phase 1 must be an object"),
+            ({"title": "MS"}, [{"title": "P", "fields": ["bad"]}], "fields must be a dict"),
+            ({"title": "MS"}, [{"title": "P", "description": {"bad": True}}], "description.*string"),
+            ({"title": "MS"}, [{"title": "P", "steps": "bad"}], "steps.*list"),
+            ({"title": "MS"}, [{"title": "P", "steps": [None]}], "Step 1 must be an object"),
+            ({"title": "MS"}, [{"title": "P", "steps": [{"title": "S", "fields": ["bad"]}]}], "fields must be a dict"),
+            ({"title": "MS"}, [{"title": "P", "steps": [{"title": "S", "description": []}]}], "description.*string"),
+        ],
+    )
+    def test_plan_rejects_malformed_nested_shapes_without_orphans(
+        self,
+        db: FiligreeDB,
+        milestone: object,
+        phases: object,
+        match: str,
+    ) -> None:
+        issues_before = len(db.list_issues())
+
+        with pytest.raises((TypeError, ValueError), match=match):
+            db.create_plan(milestone, phases)  # type: ignore[arg-type]
+
         assert len(db.list_issues()) == issues_before
 
 

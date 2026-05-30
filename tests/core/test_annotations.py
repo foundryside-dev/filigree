@@ -25,40 +25,46 @@ def _project_db(tmp_path: Path) -> FiligreeDB:
 class TestAnnotationSchema:
     def test_current_schema_creates_annotation_tables(self, tmp_path: Path) -> None:
         conn = sqlite3.connect(tmp_path / "schema.db")
-        conn.executescript(SCHEMA_SQL)
-        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
 
-        assert CURRENT_SCHEMA_VERSION >= 10
-        tables = {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
-        }
-        assert {
-            "annotations",
-            "annotation_provenance",
-            "annotation_links",
-            "annotation_events",
-            "annotation_closeout_acknowledgements",
-        }.issubset(tables)
+            assert CURRENT_SCHEMA_VERSION >= 10
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+            }
+            assert {
+                "annotations",
+                "annotation_provenance",
+                "annotation_links",
+                "annotation_events",
+                "annotation_closeout_acknowledgements",
+            }.issubset(tables)
+        finally:
+            conn.close()
 
     def test_v9_to_v10_migration_creates_annotation_tables(self, tmp_path: Path) -> None:
         conn = sqlite3.connect(tmp_path / "migration.db")
-        conn.executescript(SCHEMA_SQL)
-        for table in (
-            "annotation_closeout_acknowledgements",
-            "annotation_events",
-            "annotation_links",
-            "annotation_provenance",
-            "annotations",
-        ):
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.execute("PRAGMA user_version = 9")
-        conn.commit()
+        try:
+            conn.executescript(SCHEMA_SQL)
+            for table in (
+                "annotation_closeout_acknowledgements",
+                "annotation_events",
+                "annotation_links",
+                "annotation_provenance",
+                "annotations",
+            ):
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute("PRAGMA user_version = 9")
+            conn.commit()
 
-        applied = apply_pending_migrations(conn, 10)
+            applied = apply_pending_migrations(conn, 10)
 
-        assert applied == 1
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
-        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'annotations'").fetchone() is not None
+            assert applied == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'annotations'").fetchone() is not None
+        finally:
+            conn.close()
 
 
 class TestAnnotationCrud:
@@ -108,6 +114,14 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_annotate_file_rejects_absolute_path(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            with pytest.raises(ValueError, match="project-relative"):
+                db.annotate_file("/etc/passwd", "bad path")
+        finally:
+            db.close()
+
     def test_anchor_drift_is_computed_on_read(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:
@@ -125,6 +139,30 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_stored_annotation_path_escape_is_treated_as_missing(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("outside anchor\n")
+        db = _project_db(project)
+        try:
+            now = "2026-01-01T00:00:00+00:00"
+            db.conn.execute(
+                "INSERT INTO annotations "
+                "(id, file_path, line_start, line_end, anchor_snippet, note, intent, critical, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'breadcrumb', 0, 'active', ?, ?)",
+                ("test-ann-escape", "../outside.py", 1, 1, "outside anchor\n", "imported bad path", now, now),
+            )
+            db.conn.commit()
+
+            annotation = db.get_annotation("test-ann-escape")
+
+            assert annotation["anchor_state"] == "file_missing"
+            assert annotation["current_line_start"] is None
+            assert annotation["current_line_end"] is None
+        finally:
+            db.close()
+
     def test_anchor_drift_counts_final_line_without_trailing_newline(self, tmp_path: Path) -> None:
         """A two-line snippet without a final newline still spans two lines after drift."""
         db = _project_db(tmp_path)
@@ -139,6 +177,60 @@ class TestAnnotationCrud:
             assert drifted["anchor_state"] == "line_drifted"
             assert drifted["current_line_start"] == 2
             assert drifted["current_line_end"] == 3
+        finally:
+            db.close()
+
+    def test_list_annotations_filters_by_relationship_without_target(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "must.py").write_text("x = 1\n")
+            (tmp_path / "relevant.py").write_text("x = 2\n")
+            (tmp_path / "plain.py").write_text("x = 3\n")
+            issue = db.create_issue("Linked")
+            must_consider = db.annotate_file(
+                "must.py",
+                "Must consider this.",
+                links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
+            )
+            db.annotate_file(
+                "relevant.py",
+                "Relevant but not required.",
+                links=[{"target_type": "issue", "target_id": issue.id, "relationship": "relevant_to"}],
+            )
+            db.annotate_file("plain.py", "No relationship link.")
+
+            result = db.list_annotations(relationship="must_consider")
+
+            assert [item["annotation_id"] for item in result["items"]] == [must_consider["annotation_id"]]
+            assert result["has_more"] is False
+        finally:
+            db.close()
+
+    def test_list_annotations_paginates_before_building_payloads_without_computed_filters(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            for index in range(3):
+                path = tmp_path / f"ann_{index}.py"
+                path.write_text(f"x = {index}\n")
+                db.annotate_file(path.name, f"note {index}")
+
+            original = db._build_annotation_payload
+            calls = 0
+
+            def counted(row: sqlite3.Row, *, response_detail: str = "summary") -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return original(row, response_detail=response_detail)
+
+            monkeypatch.setattr(db, "_build_annotation_payload", counted)
+
+            result = db.list_annotations(limit=1)
+
+            assert len(result["items"]) == 1
+            assert result["has_more"] is True
+            assert calls <= 2
         finally:
             db.close()
 
@@ -162,6 +254,28 @@ class TestAnnotationCrud:
 
             paths = [row["path"] for row in db.conn.execute("SELECT path FROM file_records").fetchall()]
             assert "short.py" not in paths
+        finally:
+            db.close()
+
+    def test_failed_annotation_event_rolls_back_file_registration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "event.py").write_text("one\n")
+            original_event = db._record_annotation_event
+
+            def fail_created_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "created":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_created_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.annotate_file("event.py", "this fails after file registration", line_start=1)
+
+            assert db.conn.execute("SELECT COUNT(*) FROM file_records WHERE path = 'event.py'").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotation_provenance").fetchone()[0] == 0
         finally:
             db.close()
 
@@ -249,6 +363,70 @@ class TestAnnotationCrud:
         finally:
             db.close()
 
+    def test_promote_annotation_rolls_back_issue_target_when_audit_event_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "src.py").write_text("x = 1\n")
+            annotation = db.annotate_file("src.py", "This should become issue work.", line_start=1)
+            before_issue_ids = {row["id"] for row in db.conn.execute("SELECT id FROM issues").fetchall()}
+            original_event = db._record_annotation_event
+
+            def fail_promote_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "promoted":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_promote_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.promote_annotation(annotation["annotation_id"], target_type="issue", title="Promoted target")
+
+            after_issue_ids = {row["id"] for row in db.conn.execute("SELECT id FROM issues").fetchall()}
+            promoted_links = db.conn.execute(
+                "SELECT COUNT(*) FROM annotation_links WHERE annotation_id = ? AND relationship = 'promoted_to'",
+                (annotation["annotation_id"],),
+            ).fetchone()[0]
+            assert after_issue_ids == before_issue_ids
+            assert promoted_links == 0
+        finally:
+            db.close()
+
+    def test_promote_annotation_rolls_back_observation_target_when_audit_event_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _project_db(tmp_path)
+        try:
+            (tmp_path / "src.py").write_text("x = 1\n")
+            annotation = db.annotate_file("src.py", "This should become observation work.", line_start=1)
+            before_observation_ids = {row["id"] for row in db.conn.execute("SELECT id FROM observations").fetchall()}
+            original_event = db._record_annotation_event
+
+            def fail_promote_event(annotation_id: str, event_type: str, **kwargs: object) -> dict[str, object]:
+                if event_type == "promoted":
+                    raise sqlite3.OperationalError("simulated annotation event failure")
+                return original_event(annotation_id, event_type, **kwargs)
+
+            monkeypatch.setattr(db, "_record_annotation_event", fail_promote_event)
+
+            with pytest.raises(sqlite3.OperationalError, match="simulated annotation event failure"):
+                db.promote_annotation(annotation["annotation_id"], target_type="observation", title="Promoted target")
+
+            after_observation_ids = {row["id"] for row in db.conn.execute("SELECT id FROM observations").fetchall()}
+            promoted_links = db.conn.execute(
+                "SELECT COUNT(*) FROM annotation_links WHERE annotation_id = ? AND relationship = 'promoted_to'",
+                (annotation["annotation_id"],),
+            ).fetchone()[0]
+            assert after_observation_ids == before_observation_ids
+            assert promoted_links == 0
+        finally:
+            db.close()
+
     def test_provenance_flags_redaction_generated_binary_and_file_delete(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -276,6 +454,30 @@ class TestAnnotationCrud:
             file_id = ann["file_id"]
             db.delete_file_record(file_id)
             assert db.get_annotation(ann["annotation_id"])["file_id"] is None
+        finally:
+            db.close()
+
+    def test_provenance_captures_staged_tracked_file_diff(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True)
+        tracked = tmp_path / "tracked.py"
+        tracked.write_text("x = 1\n")
+        subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+        tracked.write_text("x = 1\ny = 2\n")
+        subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+
+        db = _project_db(tmp_path)
+        try:
+            annotation = db.annotate_file("tracked.py", "Staged change", line_start=2)
+            provenance = annotation["provenance"]
+
+            assert provenance["git_state"] == "dirty"
+            assert provenance["worktree_dirty"] is True
+            assert "dirty_worktree" in provenance["provenance_flags"]
+            assert provenance["dirty_diff_hash"]
+            assert "+y = 2" in provenance["file_diff"]
         finally:
             db.close()
 
@@ -316,3 +518,74 @@ class TestAnnotationCrud:
                 reject.import_jsonl(bad, merge=True)
         finally:
             reject.close()
+
+    def test_jsonl_import_rejects_missing_annotation_link_targets(self, tmp_path: Path) -> None:
+        imported = tmp_path / "dangling-annotation-link.jsonl"
+        now = "2026-01-01T00:00:00+00:00"
+        records = [
+            {
+                "_type": "annotation",
+                "id": "test-ann-dangling",
+                "file_path": "src.py",
+                "note": "imported annotation",
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "_type": "annotation_link",
+                "id": "test-annlink-dangling",
+                "annotation_id": "test-ann-dangling",
+                "target_type": "issue",
+                "target_id": "test-missingissue",
+                "relationship": "must_consider",
+                "created_at": now,
+            },
+        ]
+        imported.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+        db = _project_db(tmp_path / "import-reject")
+        try:
+            with pytest.raises(ValueError, match=r"annotation_link.*missing issue target"):
+                db.import_jsonl(imported, merge=True)
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE id = 'test-ann-dangling'").fetchone()[0] == 0
+            assert db.conn.execute("SELECT COUNT(*) FROM annotation_links WHERE id = 'test-annlink-dangling'").fetchone()[0] == 0
+        finally:
+            db.close()
+
+    def test_jsonl_import_rejects_missing_closeout_ack_issue_targets(self, tmp_path: Path) -> None:
+        imported = tmp_path / "dangling-closeout-ack.jsonl"
+        now = "2026-01-01T00:00:00+00:00"
+        records = [
+            {
+                "_type": "annotation",
+                "id": "test-ann-ack-dangling",
+                "file_path": "src.py",
+                "note": "imported annotation",
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "_type": "annotation_closeout_acknowledgement",
+                "annotation_id": "test-ann-ack-dangling",
+                "target_id": "test-missingissue",
+                "carried_to_target_id": "test-othermissing",
+                "actor": "import",
+                "reason": "carry it",
+                "acknowledged_at": now,
+            },
+        ]
+        imported.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+        db = _project_db(tmp_path / "closeout-import-reject")
+        try:
+            with pytest.raises(ValueError, match=r"closeout.*missing issue target"):
+                db.import_jsonl(imported, merge=True)
+            assert db.conn.execute("SELECT COUNT(*) FROM annotations WHERE id = 'test-ann-ack-dangling'").fetchone()[0] == 0
+            assert (
+                db.conn.execute(
+                    "SELECT COUNT(*) FROM annotation_closeout_acknowledgements WHERE annotation_id = 'test-ann-ack-dangling'"
+                ).fetchone()[0]
+                == 0
+            )
+        finally:
+            db.close()

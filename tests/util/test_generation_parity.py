@@ -130,7 +130,13 @@ def _assert_structural_equivalence(a: Any, b: Any, path: str = "$") -> None:
         assert type(a) is type(b), f"{path}: type mismatch — a={type(a).__name__} ({a!r}), b={type(b).__name__} ({b!r})"
 
 
-def _assert_error_envelope(body: Any, *, expected_code: str, path: str = "$") -> None:
+def _assert_error_envelope(
+    body: Any,
+    *,
+    expected_code: str,
+    path: str = "$",
+    expected_body: dict[str, Any] | None = None,
+) -> None:
     """Assert ``body`` is a flat 2.0 error envelope with the expected code.
 
     Used for the 400/404/409 cases in fixtures — more strict than shape
@@ -144,6 +150,18 @@ def _assert_error_envelope(body: Any, *, expected_code: str, path: str = "$") ->
     assert body["error"], f"{path}: 'error' is empty"
     assert body["code"] == expected_code, f"{path}: code={body['code']!r} expected {expected_code!r}"
     assert body["code"] in _VALID_ERROR_CODES, f"{path}: code {body['code']!r} not a known ErrorCode member"
+    if "details" in body:
+        assert isinstance(body["details"], dict), f"{path}: 'details' must be an object when present"
+        if body["code"] == ErrorCode.CONFLICT:
+            assert set(body["details"]) == {"issue_id", "observed", "expected"}, (
+                f"{path}: CONFLICT details must expose issue_id/observed/expected; got {set(body['details'])}"
+            )
+            assert all(isinstance(body["details"][key], str) for key in ("issue_id", "observed", "expected")), (
+                f"{path}: CONFLICT details values must all be strings"
+            )
+    if expected_body and "details" in expected_body:
+        assert "details" in body, f"{path}: fixture expects details but response omitted them"
+        _assert_shape_matches(body["details"], expected_body["details"], path=f"{path}.details")
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +226,12 @@ class TestClassicGenerationParityScanResults:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=example["name"])
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=example["name"],
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=example["name"])
 
@@ -246,7 +269,12 @@ class TestLoomGenerationParityScanResults:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=example["name"])
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=example["name"],
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=example["name"])
 
@@ -354,7 +382,12 @@ class TestLoomGenerationParityBatchUpdate:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=example["name"])
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=example["name"],
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=example["name"])
 
@@ -458,7 +491,12 @@ class TestLoomGenerationParityBatchClose:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=example["name"])
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=example["name"],
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=example["name"])
 
@@ -515,7 +553,14 @@ class TestLoomGenerationParityBatchClose:
         """``force=true`` on /api/loom/batch/close bypasses the template
         transition validator — matches CLI ``--force`` and MCP ``force``.
         Phase in 'pending' cannot reach 'completed' without it.
+
+        2.1.0 §1.1: HTTP ``force=true`` is gated behind
+        ``--allow-http-force-close`` (default-off). The test toggles the
+        module flag the CLI option sets so the legacy parity assertion
+        still pins behaviour-under-opt-in.
         """
+        import filigree.dashboard as dash_module
+
         create = await dashboard_surface.post(
             "/api/issues",
             json={"title": "C2 batch close force seed", "type": "phase"},
@@ -532,11 +577,17 @@ class TestLoomGenerationParityBatchClose:
         assert body["succeeded"] == []
         assert len(body["failed"]) == 1
         assert body["failed"][0]["code"] == "INVALID_TRANSITION"
-        # With force → lands in the type's default done state.
-        resp = await dashboard_surface.post(
-            "/api/loom/batch/close",
-            json={"issue_ids": [issue_id], "reason": "force", "force": True},
-        )
+        # With force AND --allow-http-force-close opt-in → lands in the
+        # type's default done state.
+        prev = dash_module._allow_http_force_close
+        dash_module._allow_http_force_close = True
+        try:
+            resp = await dashboard_surface.post(
+                "/api/loom/batch/close",
+                json={"issue_ids": [issue_id], "reason": "force", "force": True},
+            )
+        finally:
+            dash_module._allow_http_force_close = prev
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["failed"] == []
@@ -720,7 +771,12 @@ class TestLoomGenerationParityIssues:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=f"{slug}::{example['name']}")
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=f"{slug}::{example['name']}",
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=f"{slug}::{example['name']}")
 
@@ -926,7 +982,12 @@ class TestLoomGenerationParityLists:
         )
         body = resp.json()
         if expected_resp["status"] >= 400:
-            _assert_error_envelope(body, expected_code=expected_resp["body"]["code"], path=f"{slug}::{example['name']}")
+            _assert_error_envelope(
+                body,
+                expected_code=expected_resp["body"]["code"],
+                path=f"{slug}::{example['name']}",
+                expected_body=expected_resp["body"],
+            )
         else:
             _assert_shape_matches(body, expected_resp["body"], path=f"{slug}::{example['name']}")
             _assert_list_response_shape(body, path=f"{slug}::{example['name']}")

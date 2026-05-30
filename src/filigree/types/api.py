@@ -72,11 +72,20 @@ class SlimIssue(TypedDict):
 class ReadyIssue(SlimIssue):
     """Ready-queue issue projection.
 
-    By default ready surfaces return the inherited slim keys only. When callers
-    request context, parent fields are added so agents can display the owning
-    epic/plan without an immediate follow-up ``get_issue`` call.
+    By default ready surfaces return the inherited slim keys plus ``startable``.
+    When callers request context, parent fields are added so agents can display
+    the owning epic/plan without an immediate follow-up ``get_issue`` call.
+
+    ``startable`` (always present, filigree-406e6b7ee0) distinguishes "ready"
+    (open-category, unblocked) from "startable" (``start_work`` /
+    ``start_next_work`` can transition it to a working state in one hop): a
+    ``triage`` bug is ready but not startable. ``next_action`` is present only
+    when the item is not startable but a soft path to a working state exists —
+    it names the intermediate status to move through first (e.g. ``confirmed``).
     """
 
+    startable: bool
+    next_action: NotRequired[str | None]
     parent_issue_id: NotRequired[str | None]
     parent_title: NotRequired[str | None]
 
@@ -407,6 +416,7 @@ class WorkflowGuideResponse(TypedDict):
     guide: dict[str, Any] | None
     message: NotRequired[str]
     note: NotRequired[str]
+    tool_catalog: NotRequired[dict[str, Any]]
 
 
 class StatusExplanation(TypedDict):
@@ -449,6 +459,15 @@ class ErrorCode(StrEnum):
     NOT_INITIALIZED = "NOT_INITIALIZED"
     IO = "IO"
     INVALID_API_URL = "INVALID_API_URL"
+    FILE_REGISTRY_DISPLACED = "FILE_REGISTRY_DISPLACED"
+    REGISTRY_UNAVAILABLE = "REGISTRY_UNAVAILABLE"
+    CLARION_REGISTRY_VERSION_MISMATCH = "CLARION_REGISTRY_VERSION_MISMATCH"
+    # Surfaces a Clarion 403 + code="BRIEFING_BLOCKED" response. Distinct from
+    # NOT_FOUND (the file exists, Clarion is intentionally withholding it) and
+    # distinct from PERMISSION (the caller's auth is fine; the *file* is
+    # blocked by Clarion-side briefing policy). The auto-create path MUST
+    # propagate this rather than re-attaching the file under a local file_id.
+    BRIEFING_BLOCKED = "BRIEFING_BLOCKED"
     STOP_FAILED = "STOP_FAILED"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
     INTERNAL = "INTERNAL"
@@ -559,13 +578,57 @@ class SchemaVersionMismatchError(ValueError):
         )
 
 
-class AmbiguousTransitionError(Exception):
+class ClaimConflictError(ValueError):
+    """Raised when an optimistic-lock CAS check on a claim-aware write fails.
+
+    Carries the failing issue's id and the expected/observed assignee pair so
+    callers can render a structured conflict envelope. Subclasses
+    ``ValueError`` so pre-typed-exception callers (``except ValueError``)
+    continue to work; the dashboard / MCP / CLI surfaces route this class
+    to ``ErrorCode.CONFLICT`` via ``isinstance`` rather than message-text
+    matching (2.1.0 §0.3).
+    """
+
+    def __init__(self, issue_id: str, *, observed: str, expected: str, message: str | None = None) -> None:
+        self.issue_id = issue_id
+        self.observed = observed
+        self.expected = expected
+        super().__init__(message or f"Cannot operate on {issue_id}: assigned to '{observed}' (expected '{expected}')")
+
+
+def claim_conflict_details(exc: ClaimConflictError) -> dict[str, str]:
+    """Return the stable details payload for claim-aware CONFLICT envelopes."""
+    return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
+
+
+def claim_conflict_envelope(exc: ClaimConflictError) -> ErrorResponse:
+    """Return the canonical ErrorResponse for claim-aware optimistic-lock conflicts."""
+    return ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT, details=claim_conflict_details(exc))
+
+
+class IssueDeletionRefusedError(ValueError):
+    """Raised when ``delete_issue``'s force-gated guards refuse a hard delete.
+
+    Carries the issue id and the human-readable blocker list. Subclasses
+    ``ValueError`` so pre-typed-exception callers (``except ValueError``)
+    continue to work; the MCP / CLI surfaces route this class to
+    ``ErrorCode.CONFLICT`` via ``isinstance`` rather than message-text matching
+    (mirrors ``ClaimConflictError``; 2.1.0 §0.3). A bare ``ValueError`` (e.g.
+    ``force`` not a bool) stays VALIDATION.
+    """
+
+    def __init__(self, issue_id: str, message: str) -> None:
+        self.issue_id = issue_id
+        super().__init__(message)
+
+
+class AmbiguousTransitionError(ValueError):
     """Raised when start-work cannot choose between multiple wip-category targets.
 
-    Carries the ambiguous type_name plus the full list of candidate
-    target states so callers can render a disambiguation prompt. Stage 3
-    will wire this into the ``start_work`` path; the type is defined now
-    so the mapping is stable when the raise sites land.
+    Carries the issue type, candidate target states, and optionally the
+    current status so DB, CLI, MCP, and dashboard handlers can return a
+    structured disambiguation prompt and require callers to pass
+    ``target_status`` explicitly.
     """
 
     def __init__(self, type_name: str, candidates: list[str], current_status: str | None = None) -> None:
@@ -580,19 +643,83 @@ class AmbiguousTransitionError(Exception):
         )
 
 
-class InvalidTransitionError(Exception):
-    """Raised by WorkflowPack.canonical_working_status when no wip-category
-    target is reachable from the current status.
+class InvalidTransitionError(ValueError):
+    """Workflow transition failure with machine-readable context.
 
-    Carries type_name + current_status so callers can show *why* no
-    work-state transition is available. Stage 3 wires the raise site;
-    defined here for stable mapping.
+    Raised for explicit status updates, close/reopen/release reverse paths, and
+    start-work canonicalization when a requested target is unavailable. The
+    error carries ``type_name`` and ``current_status`` for the source state,
+    optional ``to_state`` for the rejected target, and ``backward`` when the
+    caller was using the declared reverse/escape lane instead of a forward
+    workflow transition.
+
+    ``valid_transitions`` is a compact hint list suitable for API, CLI, and MCP
+    error payloads. It is populated by callers that have enough field/template
+    context to compute next steps; consumers should treat ``None`` as
+    "not computed" rather than "no valid transitions exist." Subclasses
+    ``ValueError`` so existing state-machine handlers continue to classify it
+    as INVALID_TRANSITION.
+
+    ``backward`` is in-process diagnostic context for reverse/escape-edge
+    validation. Wire serializers intentionally choose the fields they expose
+    instead of serializing ``__dict__`` wholesale.
     """
 
-    def __init__(self, type_name: str, current_status: str) -> None:
+    def __init__(
+        self,
+        type_name: str,
+        current_status: str,
+        *,
+        to_state: str | None = None,
+        backward: bool = False,
+        valid_transitions: list[TransitionHint] | None = None,
+        message: str | None = None,
+    ) -> None:
         self.type_name = type_name
         self.current_status = current_status
-        super().__init__(f"No wip-category transition from {current_status!r} for type {type_name!r}.")
+        self.to_state = to_state
+        self.backward = backward
+        self.valid_transitions = valid_transitions
+        if message is not None:
+            super().__init__(message)
+            return
+        if to_state is None:
+            message = f"No wip-category transition from {current_status!r} for type {type_name!r}."
+        elif backward:
+            message = f"Reverse transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
+        else:
+            message = f"Transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
+        super().__init__(message)
+
+    def with_valid_transitions(self, valid_transitions: list[TransitionHint]) -> InvalidTransitionError:
+        """Return an enriched copy without mutating the caught exception.
+
+        Enrichment often happens after a lower layer raises. Returning a new
+        exception preserves the original object for diagnostics while keeping
+        ``type_name``, ``current_status``, ``to_state``, ``backward``, and the
+        human-readable message intact for the caller that will serialize or log
+        the enriched failure.
+        """
+        return InvalidTransitionError(
+            self.type_name,
+            self.current_status,
+            to_state=self.to_state,
+            backward=self.backward,
+            valid_transitions=valid_transitions,
+            message=str(self),
+        )
+
+
+def invalid_transition_details(exc: BaseException) -> dict[str, list[TransitionHint]] | None:
+    """Return the optional details payload for invalid-transition envelopes.
+
+    ``InvalidTransitionError.valid_transitions`` keeps ``None`` as the
+    internal "not yet enriched" sentinel. Public envelopes omit the details
+    key in that state rather than serializing ``valid_transitions: null``.
+    """
+    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
+        return {"valid_transitions": exc.valid_transitions}
+    return None
 
 
 def errorcode_to_http_status(code: ErrorCode) -> int:
@@ -606,16 +733,23 @@ def errorcode_to_http_status(code: ErrorCode) -> int:
     match code:
         case ErrorCode.VALIDATION | ErrorCode.INVALID_API_URL:
             return 400
-        case ErrorCode.PERMISSION:
+        case ErrorCode.PERMISSION | ErrorCode.BRIEFING_BLOCKED:
             return 403
         case ErrorCode.NOT_FOUND:
             return 404
-        case ErrorCode.CONFLICT | ErrorCode.INVALID_TRANSITION:
+        case ErrorCode.CONFLICT | ErrorCode.INVALID_TRANSITION | ErrorCode.FILE_REGISTRY_DISPLACED:
             return 409
-        case ErrorCode.NOT_INITIALIZED | ErrorCode.SCHEMA_MISMATCH:
+        case (
+            ErrorCode.NOT_INITIALIZED
+            | ErrorCode.SCHEMA_MISMATCH
+            | ErrorCode.REGISTRY_UNAVAILABLE
+            | ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        ):
             # Service exists but is not in a state where it can answer —
             # 503 lets clients retry once the project is initialized or
-            # the schema is migrated.
+            # the schema is migrated. Version-mismatch surfaces at startup
+            # only today; if a dashboard route ever propagates it, 503 is
+            # the right "operator must reconcile builds" signal.
             return 503
         case ErrorCode.IO | ErrorCode.STOP_FAILED | ErrorCode.INTERNAL:
             return 500
@@ -666,9 +800,28 @@ def classify_value_error(message: str) -> ErrorCode:
     breaking this rule in a future change trips CI.
     """
     lowered = message.lower()
+    if "expected open-category state or wip-category handoff state" in lowered:
+        return ErrorCode.VALIDATION
     if "status" in lowered or "transition" in lowered or "state" in lowered:
         return ErrorCode.INVALID_TRANSITION
     return ErrorCode.VALIDATION
+
+
+def classify_issue_write_error(exc: BaseException) -> ErrorCode:
+    """Classify claim-aware issue-write failures for dashboard, MCP, and CLI surfaces."""
+    if isinstance(exc, ClaimConflictError):
+        return ErrorCode.CONFLICT
+    if isinstance(exc, (AmbiguousTransitionError, InvalidTransitionError)):
+        return ErrorCode.INVALID_TRANSITION
+    return classify_value_error(str(exc))
+
+
+def classify_release_claim_error(issue_id: str, exc: BaseException) -> ErrorCode:
+    """Classify release-claim failures consistently across public surfaces."""
+    msg = str(exc)
+    if msg.startswith(f"Cannot release {issue_id}:") and "no assignee set" in msg:
+        return ErrorCode.CONFLICT
+    return classify_issue_write_error(exc)
 
 
 # Mapping used only during Stage 2a rollout for developer reference.
@@ -692,6 +845,8 @@ LEGACY_CODE_TO_ERRORCODE: dict[str, ErrorCode] = {
     "import_error": ErrorCode.IO,
     "batch_all_failed": ErrorCode.VALIDATION,  # rare; used in scanner batch path
     "invalid_api_url": ErrorCode.INVALID_API_URL,
+    "FILIGREE_FILE_REGISTRY_DISPLACED": ErrorCode.FILE_REGISTRY_DISPLACED,
+    "registry_unavailable": ErrorCode.REGISTRY_UNAVAILABLE,
     "stop_failed": ErrorCode.STOP_FAILED,
     # --- Added during Stage 2a sweep — legacy codes discovered beyond the
     # --- original 19-code mapping. Mapping decisions documented in

@@ -15,7 +15,9 @@ import pytest
 from filigree.core import FiligreeDB, write_config
 from filigree.mcp_server import call_tool, list_tools  # type: ignore[attr-defined]
 from filigree.mcp_tools.scanners import _validate_localhost_url
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
+from tests._fakes.registry import PathRegistry
 from tests.mcp._helpers import _parse
 
 
@@ -113,6 +115,19 @@ class TestPreviewScanTool:
         assert "--force" in data["error"]
         assert data["details"]["conflict_kind"] == "custom"
         assert scanner_path.exists()
+
+    async def test_mcp_disable_rejects_traversal_name_without_deleting_config(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        (mcp_mod._filigree_dir / "scanners").mkdir(exist_ok=True)
+        config = mcp_mod._filigree_dir / "config.toml"
+        config.write_text("[local]\nkeep = true\n")
+
+        data = _parse(await call_tool("disable_scanner", {"scanner": "../config"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert config.exists()
 
     async def test_scanner_management_schema_is_exposed(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
@@ -272,6 +287,25 @@ class TestPreviewScanTool:
         finally:
             _cleanup_files(mcp_db, files)
 
+    async def test_preview_scan_invalid_project_mode_returns_validation(self, mcp_db: FiligreeDB) -> None:
+        import filigree.mcp_server as mcp_mod
+
+        assert mcp_mod._filigree_dir is not None
+        write_config(mcp_mod._filigree_dir, {"prefix": "mcp", "version": 1, "mode": "bogus"})
+        files = _make_target_files(mcp_db, ["preview_invalid_mode.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            data = _parse(
+                await call_tool(
+                    "preview_scan",
+                    {"scanner": "test-scanner", "file_path": "preview_invalid_mode.py"},
+                )
+            )
+            assert data["code"] == ErrorCode.VALIDATION
+            assert "Unknown mode" in data["error"]
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_preview_scan_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
@@ -352,6 +386,61 @@ class TestGetScanStatusTool:
 
 
 class TestTriggerScanBatchTool:
+    async def test_batch_scan_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=batch_registry_a.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        files = _make_target_files(mcp_db, ["batch_registry_a.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = UnavailableRegistry()
+        try:
+            data = _parse(
+                await call_tool(
+                    "trigger_scan_batch",
+                    {"scanner": "test-scanner", "file_paths": ["batch_registry_a.py"]},
+                )
+            )
+
+            assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "batch_registry_a.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=batch_registry_a.py"
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_uses_registry_resolved_file_ids(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_registry_a.py", "batch_registry_b.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = PathRegistry()
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[_FakeProc(100), _FakeProc(101)],
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_registry_a.py", "batch_registry_b.py"]},
+                    )
+                )
+
+            expected_file_ids = ["core:file:batch_registry_a.py", "core:file:batch_registry_b.py"]
+            for child_id, expected_file_id in zip(data["scan_run_ids"], expected_file_ids, strict=True):
+                run = mcp_db.get_scan_run(child_id)
+                assert run["file_ids"] == [expected_file_id]
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_batch_scan_success(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["batch_a.py", "batch_b.py"])
         _write_scanner_toml(mcp_db)
@@ -507,6 +596,58 @@ class TestTriggerScanBatchTool:
         finally:
             _cleanup_files(mcp_db, files)
 
+    async def test_batch_scan_all_rate_limited_returns_conflict(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_reserved.py"])
+        _write_scanner_toml(mcp_db)
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                first = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
+                    )
+                )
+                second = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
+                    )
+                )
+
+            assert first["status"] == "triggered"
+            assert second["code"] == ErrorCode.CONFLICT
+            assert second["details"]["skipped"][0]["reason"] == "rate_limited"
+            assert second["details"]["skipped"][0]["blocking_run_id"] == first["scan_run_ids"][0]
+            assert second["details"]["blocking_run_ids"] == [first["scan_run_ids"][0]]
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_batch_scan_all_immediate_failure_preserves_prior_per_file_errors(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_spawn_fails.py", "batch_exits_fast.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=9))
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[OSError("spawn broken"), proc],
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {
+                            "scanner": "test-scanner",
+                            "file_paths": ["batch_spawn_fails.py", "missing_batch_file.py", "batch_exits_fast.py"],
+                        },
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["spawn_errors"][0]["file_path"] == "batch_spawn_fails.py"
+            assert "spawn broken" in data["details"]["spawn_errors"][0]["reason"]
+            assert data["details"]["skipped"][0] == {"file_path": "missing_batch_file.py", "reason": "File not found"}
+        finally:
+            _cleanup_files(mcp_db, files)
+
     async def test_batch_scan_empty_paths_rejected(self, mcp_db: FiligreeDB) -> None:
         _write_scanner_toml(mcp_db)
         data = _parse(
@@ -516,6 +657,28 @@ class TestTriggerScanBatchTool:
             )
         )
         assert data["code"] == ErrorCode.VALIDATION
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected_error"),
+        [
+            ({"scanner": ["bad"], "file_paths": ["batch_bad.py"]}, "scanner must be a string"),
+            ({"scanner": "test-scanner", "file_paths": [123]}, "file_paths entries must be strings"),
+            ({"scanner": "test-scanner", "file_paths": ["batch_bad.py"], "prompt": ["bad"]}, "prompt must be a string"),
+            ({"scanner": "test-scanner", "file_paths": ["batch_bad.py"], "api_url": ["bad"]}, "api_url must be a string"),
+        ],
+    )
+    async def test_batch_scan_rejects_malformed_argument_types(
+        self,
+        mcp_db: FiligreeDB,
+        arguments: dict[str, object],
+        expected_error: str,
+    ) -> None:
+        _write_scanner_toml(mcp_db)
+
+        data = _parse(await call_tool("trigger_scan_batch", arguments))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == expected_error
 
     async def test_batch_scan_scanner_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
@@ -817,12 +980,118 @@ class TestBatchScanDbTrackingFailure:
                 )
             assert data["code"] == ErrorCode.IO
             proc.kill.assert_called_once()
+            row = mcp_db.conn.execute("SELECT status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
+            assert mcp_db.check_scan_cooldown("test-scanner", "backfill_fail.py") is None
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_spawn_failure_status_update_failure_is_reported(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["spawn_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("spawn broken")),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["spawn_status_fail.py"]},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["spawn_errors"][0]["status_update_error"] == "status update broken"
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_immediate_batch_failure_status_update_failure_is_reported(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["batch_immediate_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=9))
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan_batch",
+                        {"scanner": "test-scanner", "file_paths": ["batch_immediate_status_fail.py"]},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert data["details"]["status_update_errors"][0]["error"] == "status update broken"
         finally:
             _cleanup_files(mcp_db, files)
 
 
 class TestTriggerScanCooldownReservation:
     """Regression tests for filigree-ed3be5a092: cooldown is reserved pre-spawn."""
+
+    async def test_trigger_scan_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=trigger_registry.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        files = _make_target_files(mcp_db, ["trigger_registry.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = UnavailableRegistry()
+        try:
+            data = _parse(await call_tool("trigger_scan", {"scanner": "test-scanner", "file_path": "trigger_registry.py"}))
+
+            assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "trigger_registry.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=trigger_registry.py"
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_trigger_scan_uses_registry_resolved_file_id(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["trigger_registry.py"])
+        _write_scanner_toml(mcp_db)
+        mcp_db.registry = PathRegistry()
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "trigger_registry.py"},
+                    )
+                )
+
+            assert data["file_id"] == "core:file:trigger_registry.py"
+            run = mcp_db.get_scan_run(data["scan_run_id"])
+            assert run["file_ids"] == ["core:file:trigger_registry.py"]
+        finally:
+            _cleanup_files(mcp_db, files)
 
     async def test_second_trigger_blocked_by_pending_reservation(self, mcp_db: FiligreeDB) -> None:
         """Trigger #1 leaves a pending reservation row; trigger #2 should see it and
@@ -872,6 +1141,30 @@ class TestTriggerScanCooldownReservation:
         finally:
             _cleanup_files(mcp_db, files)
 
+    @pytest.mark.parametrize(
+        ("arguments", "expected_error"),
+        [
+            ({"file_path": "trigger_bad.py"}, "scanner must be a string"),
+            ({"scanner": "test-scanner"}, "file_path must be a string"),
+            ({"scanner": ["bad"], "file_path": "trigger_bad.py"}, "scanner must be a string"),
+            ({"scanner": "test-scanner", "file_path": 123}, "file_path must be a string"),
+            ({"scanner": "test-scanner", "file_path": "trigger_bad.py", "prompt": ["bad"]}, "prompt must be a string"),
+            ({"scanner": "test-scanner", "file_path": "trigger_bad.py", "api_url": ["bad"]}, "api_url must be a string"),
+        ],
+    )
+    async def test_trigger_scan_rejects_malformed_argument_types(
+        self,
+        mcp_db: FiligreeDB,
+        arguments: dict[str, object],
+        expected_error: str,
+    ) -> None:
+        _write_scanner_toml(mcp_db)
+
+        data = _parse(await call_tool("trigger_scan", arguments))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == expected_error
+
     async def test_spawn_failure_marks_reservation_failed(self, mcp_db: FiligreeDB) -> None:
         """If the scanner fails to spawn, the reservation is transitioned to
         'failed' so cooldown doesn't keep blocking retries."""
@@ -892,5 +1185,60 @@ class TestTriggerScanCooldownReservation:
             # The cooldown query should no longer find a blocking run — failed
             # rows are excluded from the cooldown window.
             assert mcp_db.check_scan_cooldown("test-scanner", "spawn_fail_target.py") is None
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_trigger_scan_backfill_failure_marks_reservation_failed(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["single_backfill_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=None))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "single_backfill_fail.py"},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            proc.kill.assert_called_once()
+            row = mcp_db.conn.execute("SELECT status, error_message FROM scan_runs").fetchone()
+            assert row is not None
+            assert row["status"] == "failed"
+            assert "DB tracking failed" in row["error_message"]
+            assert mcp_db.check_scan_cooldown("test-scanner", "single_backfill_fail.py") is None
+        finally:
+            _cleanup_files(mcp_db, files)
+
+    async def test_immediate_exit_status_update_failure_preserves_scanner_error(self, mcp_db: FiligreeDB) -> None:
+        files = _make_target_files(mcp_db, ["immediate_status_fail.py"])
+        _write_scanner_toml(mcp_db)
+        proc = MagicMock(pid=100, poll=MagicMock(return_value=7))
+        original_update = mcp_db.update_scan_run_status
+
+        def fail_failed_status(scan_run_id: str, status: str, **kwargs: object) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(mcp_db, "update_scan_run_status", side_effect=fail_failed_status),
+            ):
+                data = _parse(
+                    await call_tool(
+                        "trigger_scan",
+                        {"scanner": "test-scanner", "file_path": "immediate_status_fail.py"},
+                    )
+                )
+
+            assert data["code"] == ErrorCode.IO
+            assert "Scanner process exited immediately with code 7" in data["error"]
+            assert data["details"]["status_update_error"] == "status update broken"
         finally:
             _cleanup_files(mcp_db, files)

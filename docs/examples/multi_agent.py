@@ -29,11 +29,11 @@ from filigree.core import FiligreeDB
 def create_work_items(db: FiligreeDB) -> list[str]:
     """Create 5 tasks with varying priorities and return their IDs."""
     tasks = [
-        ("Set up CI pipeline", 0),       # P0 - Critical
-        ("Write unit tests", 1),          # P1 - High
-        ("Update documentation", 2),      # P2 - Medium
-        ("Refactor logging module", 3),   # P3 - Low
-        ("Add changelog entry", 4),       # P4 - Backlog
+        ("Set up CI pipeline", 0),  # P0 - Critical
+        ("Write unit tests", 1),  # P1 - High
+        ("Update documentation", 2),  # P2 - Medium
+        ("Refactor logging module", 3),  # P3 - Low
+        ("Add changelog entry", 4),  # P4 - Backlog
     ]
 
     ids = []
@@ -118,10 +118,7 @@ def main() -> None:
         for issue in all_issues:
             comments = db.get_comments(issue.id)
             author = comments[-1]["author"] if comments else "n/a"
-            print(
-                f"  [{issue.id}] {issue.status:<12} P{issue.priority}  "
-                f"{issue.title:<30} (completed by: {author})"
-            )
+            print(f"  [{issue.id}] {issue.status:<12} P{issue.priority}  {issue.title:<30} (completed by: {author})")
 
         stats = db.get_stats()
         print(f"\nStats: {stats['by_category']}")

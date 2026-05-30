@@ -11,7 +11,7 @@
 
 // --- Module imports ---
 
-import { fetchAllData, fetchDashboardConfig, fetchProjects } from "./api.js";
+import { fetchAllData, fetchDashboardConfig, fetchFileSchema, fetchProjects } from "./api.js";
 import {
   applyFilters,
   applyTypeFilter,
@@ -87,6 +87,8 @@ import {
   callbacks as graphCallbacks,
   graphFit,
   renderGraph,
+  refreshCriticalPathState,
+  setCriticalPathStateFromPath,
   showHealthBreakdown,
   toggleCriticalPath,
 } from "./views/graph.js";
@@ -155,6 +157,7 @@ async function fetchData() {
     if (!state.graphConfigLoaded) {
       await loadDashboardConfig();
     }
+    await loadRegistryFallbackBanner();
     const data = await fetchAllData();
     if (!data) {
       console.warn("fetchData: non-OK response");
@@ -171,6 +174,7 @@ async function fetchData() {
     trackChanges(state.allIssues);
     computeImpactScores();
     computeHealthScore();
+    if (state.criticalPathActive) await refreshCriticalPathState();
     updateStaleBadge();
     renderSparkline();
     updateStats();
@@ -203,6 +207,33 @@ async function loadDashboardConfig() {
   state.graphConfigLoaded = true;
 }
 
+async function loadRegistryFallbackBanner() {
+  const banner = document.getElementById("registryFallbackBanner");
+  const rotationBanner = document.getElementById("clarionRotationBanner");
+  if (!banner && !rotationBanner) return;
+  try {
+    const schema = await fetchFileSchema();
+    if (banner) {
+      if (schema?.config_flags?.allow_local_fallback) {
+        banner.classList.remove("hidden");
+      } else {
+        banner.classList.add("hidden");
+      }
+    }
+    if (rotationBanner) {
+      if (schema?.config_flags?.clarion_instance_rotated) {
+        rotationBanner.classList.remove("hidden");
+      } else {
+        rotationBanner.classList.add("hidden");
+      }
+    }
+  } catch (err) {
+    console.warn("[loadRegistryFallbackBanner] Failed to load file schema:", err);
+    if (banner) banner.classList.add("hidden");
+    if (rotationBanner) rotationBanner.classList.add("hidden");
+  }
+}
+
 function updateStats() {
   if (!state.stats) return;
   const s = state.stats;
@@ -229,6 +260,7 @@ function setProject(key, opts) {
   state.graphQuery = {};
   state.graphQueryKey = "";
   state.graphFallbackNotice = "";
+  setCriticalPathStateFromPath([]);
   loadProjectFilterSettings();
   const sel = document.getElementById("projectSwitcher");
   if (sel) sel.value = key;
@@ -246,7 +278,8 @@ async function loadProjects() {
     if (!projects) return;
     state.allProjects = projects;
     const currentMissing =
-      !!state.currentProjectKey && !state.allProjects.some((p) => p.key === state.currentProjectKey);
+      !!state.currentProjectKey &&
+      !state.allProjects.some((p) => p.key === state.currentProjectKey);
     const sel = document.getElementById("projectSwitcher");
     if (!sel) return;
     sel.innerHTML = "";
@@ -339,7 +372,10 @@ detailCallbacks.render = render;
 // ---------------------------------------------------------------------------
 
 registerView("kanban", renderKanban);
-registerView("graph", () => { renderGraphSidebar(); renderGraph(); });
+registerView("graph", () => {
+  renderGraphSidebar();
+  renderGraph();
+});
 registerView("insights", loadMetrics);
 registerView("files", loadFiles);
 registerView("ready", loadReady);

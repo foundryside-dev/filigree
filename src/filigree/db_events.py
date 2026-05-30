@@ -11,8 +11,8 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from filigree.db_base import DBMixinProtocol, _now_iso
-from filigree.types.events import EventRecord, EventRecordWithTitle, EventType, UndoResult
+from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
+from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventRecord, EventRecordWithTitle, EventType, UndoResult
 
 _UNDO_CLAIM_LEASE_HOURS = 48
 
@@ -25,21 +25,7 @@ def _undo_claim_expiry(now: str) -> str:
 # Undo constants (moved from core.py — only used by undo_last)
 # ---------------------------------------------------------------------------
 
-_REVERSIBLE_EVENTS = frozenset(
-    {
-        "status_changed",
-        "title_changed",
-        "priority_changed",
-        "assignee_changed",
-        "claimed",
-        "dependency_added",
-        "dependency_removed",
-        "description_changed",
-        "notes_changed",
-        "fields_changed",
-        "parent_changed",
-    }
-)
+_REVERSIBLE_EVENTS = frozenset(REVERSIBLE_EVENT_TYPES)
 
 
 class EventsMixin(DBMixinProtocol):
@@ -93,10 +79,26 @@ class EventsMixin(DBMixinProtocol):
         new_value: str | None = None,
         comment: str = "",
     ) -> None:
+        """Append an audit event inside the caller-owned transaction.
+
+        Public write paths normally reach this through ``@_in_immediate_tx``,
+        which holds SQLite's single-writer lock until the surrounding mutation
+        commits or rolls back. Direct callers outside that decorator must own
+        equivalent transaction serialization before depending on the per-issue
+        ``event_seq`` monotonicity guarantee. This helper never commits.
+        """
+        # 2.1.0 §0.2: plain INSERT (not INSERT OR IGNORE) so unexpected
+        # same-key collisions bubble up to the caller's transaction for rollback.
+        # ``event_seq`` is computed inline as the next per-issue monotonic
+        # value via COALESCE+MAX subquery. The caller-held writer transaction
+        # serializes concurrent writers while avoiding in-memory counters, so
+        # this survives crashes and stays atomic with the issue mutation.
+        # Ensure same-second emissions get distinct sequence numbers; heartbeat
+        # bursts and batch ops sharing _now_iso() persist as separate audit rows.
         self.conn.execute(
-            "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (issue_id, event_type, actor, old_value, new_value, comment, _now_iso()),
+            "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",
+            (issue_id, event_type, actor, old_value, new_value, comment, _now_iso(), issue_id),
         )
 
     def get_recent_events(self, limit: int = 20) -> list[EventRecordWithTitle]:
@@ -160,7 +162,130 @@ class EventsMixin(DBMixinProtocol):
             "ORDER BY e.created_at ASC, e.id ASC LIMIT ?",
             params,
         ).fetchall()
-        return [self._build_event_record_with_title(r) for r in rows]
+        events = [self._build_event_record_with_title(r) for r in rows]
+
+        # Merge in hard-deletion tombstones as synthetic ``issue_deleted``
+        # records. A hard-deleted issue has no events row (and no issues row
+        # to JOIN), so the SELECT above can never surface it — yet federation
+        # consumers reconciling off this feed must learn of deletions exactly
+        # once. The tombstone rows in ``deleted_issues`` carry ``deleted_at``
+        # (the cursor timestamp) and a synthetic high-range ``event_id`` so the
+        # (created_at, id) total order — and thus the caller's has_more /
+        # next_event_id cursor math — stays correct across both sources.
+        tombstones = self._deleted_issue_changes(
+            since,
+            after_event_id=after_event_id,
+            limit=limit,
+            actor=actor,
+            issue_id=issue_id,
+            label=label,
+            event_type=event_type,
+            exclude_types=exclude_types,
+        )
+        if not tombstones:
+            return events
+
+        merged = events + tombstones
+        merged.sort(key=lambda r: (r["created_at"], r["id"]))
+        return merged[:limit]
+
+    # Synthetic ``event_id`` base for deletion tombstones. Deletions sort
+    # strictly above every real ``events.id`` (an AUTOINCREMENT INTEGER that in
+    # practice never approaches 2**62), so at equal ``created_at`` a deletion
+    # always orders last. This preserves the ``(created_at, id)`` total order
+    # the /changes cursor relies on, and stays well under the route's
+    # ``after_event_id`` ceiling of 2**63-1 (negatives would be rejected by the
+    # route's min_value=0 validator, so a high-positive base is required).
+    #
+    # The id is derived from ``deleted_issues.seq``, an AUTOINCREMENT key, NOT
+    # the implicit rowid. VACUUM (``filigree compact``) renumbers implicit
+    # rowids across the whole file; an unseen same-``deleted_at`` tombstone
+    # could be dragged below a consumer's frozen cursor and skipped forever.
+    # AUTOINCREMENT keys are never renumbered or reused, so the synthetic id is
+    # stable across compaction.
+    _TOMBSTONE_EVENT_ID_BASE = 1 << 62
+
+    def _deleted_issue_changes(
+        self,
+        since: str,
+        *,
+        after_event_id: int | None = None,
+        limit: int = 100,
+        actor: str | None = None,
+        issue_id: str | None = None,
+        label: str | None = None,
+        event_type: str | None = None,
+        exclude_types: list[str] | None = None,
+    ) -> list[EventRecordWithTitle]:
+        """Return hard-deletion tombstones as synthetic ``issue_deleted`` records.
+
+        Applies the same cursor and filter predicates as ``get_events_since``.
+        A ``label`` filter excludes all tombstones — a deleted issue's labels
+        are gone, so it can never match (documented-intentional). ``issue_deleted``
+        is never default-excluded the way ``heartbeat`` is; it only drops out
+        when an explicit ``event_type`` selects something else or
+        ``exclude_types`` names it.
+        """
+        if label is not None:
+            return []
+        if event_type is not None and event_type != "issue_deleted":
+            return []
+        if exclude_types and "issue_deleted" in exclude_types:
+            return []
+
+        # Mirror ``get_events_since``'s cursor *in SQL* (before LIMIT) so the
+        # tombstone source returns its true smallest ``limit`` rows above the
+        # cursor — a fetch-then-filter would under-fetch and let the merge
+        # boundary skip past un-returned tombstones. The synthetic id is
+        # ``BASE + seq``, so the seq-space cursor is ``after_event_id - BASE``:
+        # when the cursor's last item was a tombstone this is its seq; when it
+        # was a real event the value is hugely negative, so all same-timestamp
+        # tombstones (which always sort after any real id) are correctly
+        # included.
+        if after_event_id is None:
+            clauses = ["d.deleted_at > ?"]
+            params: list[object] = [since]
+        else:
+            clauses = ["(d.deleted_at > ? OR (d.deleted_at = ? AND d.seq > ?))"]
+            params = [since, since, after_event_id - self._TOMBSTONE_EVENT_ID_BASE]
+        if actor is not None:
+            clauses.append("d.deleted_by = ?")
+            params.append(actor)
+        if issue_id is not None:
+            clauses.append("d.issue_id = ?")
+            params.append(issue_id)
+        where_sql = " AND ".join(clauses)
+        rows = self.conn.execute(
+            "SELECT d.issue_id, d.title, d.type, d.deleted_at, d.deleted_by, d.entity_ids, d.seq AS _seq "
+            f"FROM deleted_issues d WHERE {where_sql} "
+            "ORDER BY d.deleted_at ASC, d.seq ASC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+
+        records: list[EventRecordWithTitle] = []
+        for r in rows:
+            synthetic_id = self._TOMBSTONE_EVENT_ID_BASE + int(r["_seq"])
+            # ``entity_ids`` is the JSON array of clarion_entity_ids the delete
+            # cascade removed (schema v21). Surface it as ``affected_entities`` so
+            # a consumer can purge its mirrored reverse lookup. ``or "[]"`` guards
+            # pre-v21 tombstones whose column defaulted to '[]' but may read NULL on
+            # exotic upgrade paths. (filigree-f3bf56554c)
+            affected_entities = json.loads(r["entity_ids"] or "[]")
+            records.append(
+                EventRecordWithTitle(
+                    id=synthetic_id,
+                    issue_id=r["issue_id"],
+                    event_type="issue_deleted",
+                    actor=r["deleted_by"] or "",
+                    old_value=None,
+                    new_value=None,
+                    comment="",
+                    created_at=r["deleted_at"],
+                    issue_title=r["title"] or "",
+                    affected_entities=affected_entities,
+                )
+            )
+        return records
 
     def get_issue_events(self, issue_id: str, *, limit: int = 50, offset: int = 0) -> list[EventRecord]:
         """Get events for a specific issue, newest first."""
@@ -439,6 +564,8 @@ class EventsMixin(DBMixinProtocol):
 
     # -- Archival / Compaction ------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("archive_closed")
     def archive_closed(self, *, days_old: int = 30, actor: str = "", label: str | None = None) -> list[str]:
         """Archive done-category issues older than `days_old` days.
 
@@ -484,20 +611,16 @@ class EventsMixin(DBMixinProtocol):
             return []
 
         now = _now_iso()
-        try:
-            for issue_id in archived_ids:
-                self.conn.execute(
-                    "UPDATE issues SET status = 'archived', updated_at = ? WHERE id = ?",
-                    (now, issue_id),
-                )
-                self._record_event(issue_id, "archived", actor=actor)
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        for issue_id in archived_ids:
+            self.conn.execute(
+                "UPDATE issues SET status = 'archived', updated_at = ? WHERE id = ?",
+                (now, issue_id),
+            )
+            self._record_event(issue_id, "archived", actor=actor)
         return archived_ids
 
+    @_retry_busy()
+    @_in_immediate_tx("compact_events")
     def compact_events(self, *, keep_recent: int = 50, actor: str = "") -> int:
         """Remove old events for archived issues, keeping only the most recent ones.
 
@@ -511,26 +634,18 @@ class EventsMixin(DBMixinProtocol):
             return 0
 
         total_deleted = 0
-        try:
-            for row in archived:
-                issue_id = row["id"]
-                event_count = self.conn.execute("SELECT COUNT(*) as cnt FROM events WHERE issue_id = ?", (issue_id,)).fetchone()["cnt"]
+        for row in archived:
+            issue_id = row["id"]
+            event_count = self.conn.execute("SELECT COUNT(*) as cnt FROM events WHERE issue_id = ?", (issue_id,)).fetchone()["cnt"]
 
-                if event_count <= keep_recent:
-                    continue
+            if event_count <= keep_recent:
+                continue
 
-                cursor = self.conn.execute(
-                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ?)",
-                    (issue_id, event_count - keep_recent),
-                )
-                total_deleted += cursor.rowcount
-
-            if total_deleted > 0:
-                self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-
+            cursor = self.conn.execute(
+                "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ?)",
+                (issue_id, event_count - keep_recent),
+            )
+            total_deleted += cursor.rowcount
         return total_deleted
 
     def vacuum(self) -> None:

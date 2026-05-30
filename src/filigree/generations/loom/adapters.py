@@ -190,6 +190,7 @@ def scan_finding_to_loom(record: ScanFindingDict) -> ScanFindingLoom:
         scan_run_id=record["scan_run_id"],
         line_start=record["line_start"],
         line_end=record["line_end"],
+        fingerprint=record["fingerprint"],
         issue_id=record["issue_id"],
         seen_count=record["seen_count"],
         first_seen=record["first_seen"],
@@ -300,6 +301,9 @@ def change_record_to_loom(record: EventRecordWithTitle) -> ChangeRecordLoom:
         comment=record["comment"],
         created_at=record["created_at"],
         issue_title=record["issue_title"],
+        # Uniform on the wire: only synthetic issue_deleted records carry the
+        # cascaded entity bindings; real event rows normalize to []. (schema v21)
+        affected_entities=record.get("affected_entities", []),
     )
 
 

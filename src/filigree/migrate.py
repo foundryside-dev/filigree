@@ -213,6 +213,7 @@ def migrate_from_beads(beads_db_path: str | Path, tracker: FiligreeDB) -> int:
                     dep["issue_id"],
                     dep["depends_on_id"],
                     dep["type"] or "blocks",
+                    validate=False,
                 )
 
         # -- Migrate events (only for migrated issues)

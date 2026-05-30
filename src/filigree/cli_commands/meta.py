@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import json as json_mod
+import sqlite3
 import sys
 from typing import Any
 
 import click
 
-from filigree.cli_common import get_db, refresh_summary
+from filigree.cli_common import ActorCommand, get_db, refresh_summary
+from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public, label_namespace_to_public
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp
-from filigree.types.api import ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode, ErrorResponse, claim_conflict_envelope
 
 
-@click.command("add-comment")
+def _value_error_envelope(exc: ValueError) -> ErrorResponse:
+    if isinstance(exc, ClaimConflictError):
+        return claim_conflict_envelope(exc)
+    return ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION)
+
+
+@click.command("add-comment", cls=ActorCommand)
 @click.argument("issue_id")
 @click.argument("text")
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
@@ -43,17 +51,32 @@ def add_comment(ctx: click.Context, issue_id: str, text: str, expected_assignee:
             else:
                 click.echo(f"Not found: {issue_id}", err=True)
             sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         try:
             comment_id = db.add_comment(issue_id, text, author=ctx.obj["actor"], expected_assignee=expected_assignee)
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
         if as_json:
-            comment = db.get_comment(comment_id)
+            try:
+                comment = db.get_comment(comment_id)
+            except sqlite3.Error as e:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+                sys.exit(1)
             click.echo(
                 json_mod.dumps(
                     {
@@ -96,7 +119,7 @@ def get_comments(issue_id: str, as_json: bool) -> None:
             click.echo(f"[{c['created_at']}] {c['author']}: {c['text']}")
 
 
-@click.command("add-label")
+@click.command("add-label", cls=ActorCommand)
 @click.argument("label_name")
 @click.argument("issue_id")
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
@@ -131,8 +154,7 @@ def add_label(ctx: click.Context, label_name: str, issue_id: str, expected_assig
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -155,7 +177,7 @@ def add_label(ctx: click.Context, label_name: str, issue_id: str, expected_assig
         refresh_summary(db)
 
 
-@click.command("remove-label")
+@click.command("remove-label", cls=ActorCommand)
 @click.argument("issue_id")
 @click.argument("label_name")
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
@@ -190,8 +212,7 @@ def remove_label(ctx: click.Context, issue_id: str, label_name: str, expected_as
             )
         except ValueError as e:
             if as_json:
-                code = ErrorCode.CONFLICT if "assigned to" in str(e) and "expected" in str(e) else ErrorCode.VALIDATION
-                click.echo(json_mod.dumps({"error": str(e), "code": code}))
+                click.echo(json_mod.dumps(_value_error_envelope(e)))
             else:
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -229,6 +250,63 @@ def stats(as_json: bool) -> None:
         click.echo(f"\nReady: {s['ready_count']}")
         click.echo(f"Blocked: {s['blocked_count']}")
         click.echo(f"Dependencies: {s['total_dependencies']}")
+
+
+@click.command("mcp-status")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def mcp_status(as_json: bool) -> None:
+    """Show MCP/runtime status (CLI counterpart of the get_mcp_status MCP tool).
+
+    Produces the same payload as the MCP ``get_mcp_status`` tool: schema
+    compatibility, DB-init state, and runtime/install diagnostics. Like the MCP
+    tool, this is intentionally read-only and safe in degraded modes (schema
+    mismatch, registry mismatch, DB-open failure) — it reports *why* the
+    connector is degraded rather than tracebacking.
+    """
+    # Lazy import: mcp_server pulls in mcp.server + starlette, which we do not
+    # want to load on every CLI invocation. Mirror the MCP handler, which also
+    # imports get_mcp_status_payload lazily (mcp_tools/workflow.py).
+    from filigree.core import FILIGREE_DIR_NAME, ProjectNotInitialisedError, find_filigree_anchor
+    from filigree.mcp_server import _attempt_startup, get_mcp_status_payload
+
+    # Resolve the project anchor exactly as the MCP server's _run() does, then
+    # populate the mcp_server module globals via _attempt_startup so the payload
+    # reflects real project state (calling get_mcp_status_payload cold would
+    # report "not_initialized" off the uninitialized globals).
+    try:
+        project_root, conf_path = find_filigree_anchor()
+    except ProjectNotInitialisedError as exc:
+        from filigree.cli_common import _emit_startup_failure
+
+        _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
+        sys.exit(1)
+
+    _attempt_startup(project_root / FILIGREE_DIR_NAME, conf_path=conf_path)
+    payload = get_mcp_status_payload()
+
+    if as_json:
+        # Same serializer the MCP _text() helper uses, so the two surfaces
+        # emit byte-identical payloads (default=str renders StrEnum codes).
+        click.echo(json_mod.dumps(payload, indent=2, default=str))
+        return
+
+    click.echo(f"Status: {payload['status']}")
+    click.echo(f"DB initialized: {payload['db_initialized']}")
+    click.echo(f"Schema compatible: {payload['schema_compatible']}")
+    click.echo(f"Installed schema version: {payload['installed_schema_version']}")
+    click.echo(f"Database schema version: {payload['database_schema_version']}")
+    click.echo(f"Project dir: {payload['filigree_dir']}")
+    if payload.get("code"):
+        click.echo(f"Code: {payload['code']}")
+    if payload.get("error"):
+        click.echo(f"Error: {payload['error']}")
+    if payload.get("guidance"):
+        click.echo(f"Guidance: {payload['guidance']}")
+    runtime = payload.get("runtime") or {}
+    if runtime:
+        click.echo("Runtime:")
+        for key, value in runtime.items():
+            click.echo(f"  {key}: {value}")
 
 
 @click.command()
@@ -322,7 +400,7 @@ def get_issue_events_cmd(issue_id: str, limit: int, as_json: bool) -> None:
     _events_impl(issue_id, limit, as_json)
 
 
-@click.command("batch-update")
+@click.command("batch-update", cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--status", default=None, help="New status")
 @click.option("--priority", "-p", default=None, type=click.IntRange(0, 4), help="New priority")
@@ -364,15 +442,23 @@ def batch_update(
             fields[k] = v
 
     with get_db() as db:
-        results, errors = db.batch_update(
-            list(issue_ids),
-            status=status,
-            priority=priority,
-            assignee=assignee,
-            fields=fields,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
+        try:
+            results, errors = db.batch_update(
+                list(issue_ids),
+                status=status,
+                priority=priority,
+                assignee=assignee,
+                fields=fields,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4: foreign-prefix id in the batch aborts envelope-level.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
         if as_json:
             if response_detail == "full":
                 succeeded_payload: list[dict[str, Any]] = [dict(issue_to_public(i)) for i in results]
@@ -404,7 +490,7 @@ def batch_update(
             sys.exit(1)
 
 
-@click.command("batch-close")
+@click.command("batch-close", cls=ActorCommand)
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option("--reason", default="", help="Close reason")
 @click.option(
@@ -418,7 +504,7 @@ def batch_update(
     "--force",
     is_flag=True,
     default=False,
-    help=("Bypass the template transition validator on every item. Use only for cleanup flows that intentionally skip the workflow."),
+    help=("Use the template reverse/escape transition on every item. Use only for cleanup flows that leave the normal workflow."),
 )
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -435,13 +521,21 @@ def batch_close(
     """Close multiple issues with per-item error reporting."""
     with get_db() as db:
         ready_before_batch = {i.id for i in db.get_ready()} if as_json else set()
-        closed, errors = db.batch_close(
-            list(issue_ids),
-            reason=reason,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-            force=force,
-        )
+        try:
+            closed, errors = db.batch_close(
+                list(issue_ids),
+                reason=reason,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+                force=force,
+            )
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
         if as_json:
             ready_after_batch = db.get_ready() if as_json else []
@@ -480,7 +574,7 @@ def batch_close(
             sys.exit(1)
 
 
-@click.command("batch-add-label")
+@click.command("batch-add-label", cls=ActorCommand)
 @click.argument("label_name")
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option(
@@ -503,18 +597,32 @@ def batch_add_label(
 ) -> None:
     """Add the same label to multiple issues."""
     with get_db() as db:
-        labeled, errors = db.batch_add_label(
-            list(issue_ids),
-            label=label_name,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
-
-        if as_json:
+        try:
+            labeled, errors = db.batch_add_label(
+                list(issue_ids),
+                label=label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
             if response_detail == "full":
                 succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in labeled]
             else:
                 succeeded_payload = [row["id"] for row in labeled]
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
             click.echo(
                 json_mod.dumps(
                     {
@@ -539,7 +647,7 @@ def batch_add_label(
             sys.exit(1)
 
 
-@click.command("batch-remove-label")
+@click.command("batch-remove-label", cls=ActorCommand)
 @click.argument("label_name")
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option(
@@ -562,18 +670,32 @@ def batch_remove_label(
 ) -> None:
     """Remove the same label from multiple issues."""
     with get_db() as db:
-        removed, errors = db.batch_remove_label(
-            list(issue_ids),
-            label=label_name,
-            actor=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
-
-        if as_json:
+        try:
+            removed, errors = db.batch_remove_label(
+                list(issue_ids),
+                label=label_name,
+                actor=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
             if response_detail == "full":
                 succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(row["id"]))) for row in removed]
             else:
                 succeeded_payload = [row["id"] for row in removed]
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
             click.echo(
                 json_mod.dumps(
                     {
@@ -598,7 +720,7 @@ def batch_remove_label(
             sys.exit(1)
 
 
-@click.command("batch-add-comment")
+@click.command("batch-add-comment", cls=ActorCommand)
 @click.argument("text")
 @click.argument("issue_ids", nargs=-1, required=True)
 @click.option(
@@ -621,18 +743,32 @@ def batch_add_comment(
 ) -> None:
     """Add the same comment to multiple issues."""
     with get_db() as db:
-        commented, errors = db.batch_add_comment(
-            list(issue_ids),
-            text=text,
-            author=ctx.obj["actor"],
-            expected_assignee=expected_assignee,
-        )
-
-        if as_json:
+        try:
+            commented, errors = db.batch_add_comment(
+                list(issue_ids),
+                text=text,
+                author=ctx.obj["actor"],
+                expected_assignee=expected_assignee,
+            )
             if response_detail == "full":
                 succeeded_payload: list[Any] = [dict(issue_to_public(db.get_issue(str(row["id"])))) for row in commented]
             else:
                 succeeded_payload = [str(row["id"]) for row in commented]
+        except WrongProjectError as e:
+            # 2.1.0 §0.4.
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.VALIDATION}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        if as_json:
             click.echo(
                 json_mod.dumps(
                     {
@@ -730,6 +866,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(taxonomy_cmd)
     cli.add_command(get_label_taxonomy_cmd)
     cli.add_command(stats)
+    cli.add_command(mcp_status)
     cli.add_command(search)
     cli.add_command(events_cmd)
     cli.add_command(get_issue_events_cmd)

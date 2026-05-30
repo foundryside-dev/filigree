@@ -27,7 +27,9 @@ import pytest
 
 from filigree.core import (
     CONF_FILENAME,
+    CONFIG_FILENAME,
     DB_FILENAME,
+    FILIGREE_APPLICATION_ID,
     FILIGREE_DIR_NAME,
     FiligreeDB,
     ForeignDatabaseError,
@@ -38,6 +40,7 @@ from filigree.core import (
     find_filigree_root,
     read_conf,
     write_conf,
+    write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 
@@ -111,6 +114,23 @@ class TestConfIO:
         write_conf(conf, data)
         assert read_conf(conf) == data
 
+    def test_read_accepts_registry_backend_and_clarion_settings(self, tmp_path: Path) -> None:
+        conf = tmp_path / CONF_FILENAME
+        data = {
+            "version": 1,
+            "project_name": "demo",
+            "prefix": "demo",
+            "db": ".filigree/filigree.db",
+            "registry_backend": "clarion",
+            "clarion": {
+                "base_url": "http://localhost:9111",
+                "timeout_seconds": 3,
+                "allow_local_fallback": True,
+            },
+        }
+        write_conf(conf, data)
+        assert read_conf(conf) == data
+
     def test_read_rejects_non_dict(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         conf.write_text(json.dumps([1, 2, 3]))
@@ -132,8 +152,35 @@ class TestConfIO:
             ({"prefix": "", "db": "filigree.db"}, r"'prefix'"),
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": "core"}, r"enabled_packs"),
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": [1, 2]}, r"enabled_packs"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "sqlite"}, r"registry_backend"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": 1}, r"registry_backend"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion"}, r"clarion\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion", "clarion": {}}, r"clarion\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": []}, r"clarion"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": 1}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": "file:///tmp/clarion"}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"base-url": "http://localhost:9111"}}, r"base-url"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
+            ({"prefix": "x", "db": "filigree.db", "clarion": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
         ],
-        ids=["db-list", "db-empty", "prefix-list", "prefix-empty", "packs-string", "packs-non-string-items"],
+        ids=[
+            "db-list",
+            "db-empty",
+            "prefix-list",
+            "prefix-empty",
+            "packs-string",
+            "packs-non-string-items",
+            "registry-backend-unknown",
+            "registry-backend-non-string",
+            "clarion-backend-missing-config",
+            "clarion-backend-missing-base-url",
+            "clarion-non-dict",
+            "clarion-base-url-non-string",
+            "clarion-base-url-invalid-scheme",
+            "clarion-unknown-key",
+            "clarion-timeout-non-numeric",
+            "clarion-fallback-non-bool",
+        ],
     )
     def test_read_rejects_malformed_field_types(self, tmp_path: Path, payload: dict[str, object], match: str) -> None:
         """Bug filigree-0f0e76f4b6: type-check ``prefix``/``db``/``enabled_packs``
@@ -161,6 +208,38 @@ class TestConfIO:
         conf.write_text(json.dumps({"prefix": "x", "db": db_value}))
         with pytest.raises(ValueError, match=r"'db'"):
             read_conf(conf)
+
+    def test_from_conf_passes_registry_backend(self, tmp_path: Path) -> None:
+        from tests._fakes.clarion_http import clarion_stub
+
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "demo", "version": 1})
+        init_db = FiligreeDB(filigree_dir / "filigree.db", prefix="demo")
+        init_db.initialize()
+        init_db.close()
+        # Real ``from_conf`` runs the ADR-014 capability probe at __init__;
+        # use a live stub so the probe handshake succeeds and the test
+        # remains focused on conf-loading rather than network reachability.
+        with clarion_stub() as (base_url, _state):
+            conf = tmp_path / CONF_FILENAME
+            write_conf(
+                conf,
+                {
+                    "version": 1,
+                    "project_name": "demo",
+                    "prefix": "demo",
+                    "db": ".filigree/filigree.db",
+                    "registry_backend": "clarion",
+                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                },
+            )
+
+            db = FiligreeDB.from_conf(conf)
+            try:
+                assert db.registry_backend == "clarion"
+            finally:
+                db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +573,38 @@ class TestGitWorktreeDiscovery:
         with pytest.raises(ForeignDatabaseError):
             find_filigree_anchor(submodule)
 
+    def test_submodule_inside_worktree_treated_as_boundary(self, tmp_path: Path) -> None:
+        """A submodule nested inside a linked worktree must not redirect to the main anchor."""
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
+        submodule = wt / "vendor" / "dep"
+        submodule.mkdir(parents=True)
+        submodule_gitdir = main / ".git" / "modules" / "vendor" / "dep"
+        submodule_gitdir.mkdir(parents=True)
+        (submodule / ".git").write_text(f"gitdir: {submodule_gitdir}\n")
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(submodule)
+        assert excinfo.value.git_boundary == submodule.resolve()
+        assert excinfo.value.found_anchor == main / CONF_FILENAME
+
+    def test_worktree_containing_submodule_resolves_normally(self, tmp_path: Path) -> None:
+        """A submodule elsewhere inside the worktree does not block normal worktree resolution."""
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
+        submodule = wt / "vendor" / "dep"
+        submodule.mkdir(parents=True)
+        submodule_gitdir = main / ".git" / "modules" / "vendor" / "dep"
+        submodule_gitdir.mkdir(parents=True)
+        (submodule / ".git").write_text(f"gitdir: {submodule_gitdir}\n")
+        ordinary_dir = wt / "src" / "pkg"
+        ordinary_dir.mkdir(parents=True)
+
+        project_root, conf_path = find_filigree_anchor(ordinary_dir)
+
+        assert project_root == main
+        assert conf_path == main / CONF_FILENAME
+
     def test_relative_gitdir_in_worktree_pointer(self, tmp_path: Path) -> None:
         """Some git versions write a relative ``gitdir:`` path. Must still resolve."""
         main = self._make_main_repo(tmp_path)
@@ -507,6 +618,75 @@ class TestGitWorktreeDiscovery:
 
         project_root, _ = find_filigree_anchor(wt)
         assert project_root == main
+
+    def test_copied_worktree_root_conf_without_metadata_rolls_up_to_main(self, tmp_path: Path) -> None:
+        """A linked worktree with only the tracked conf is still the main project.
+
+        Git worktrees copy tracked files such as ``.filigree.conf`` but not the
+        ignored ``.filigree/`` metadata directory. Treating that copied root conf
+        as a fresh project makes MCP/CLI resolve the DB inside the worktree and
+        fail instead of using the canonical tracker in the main checkout.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        (wt / CONF_FILENAME).write_text((main / CONF_FILENAME).read_text(encoding="utf-8"), encoding="utf-8")
+        deep = wt / "src" / "pkg"
+        deep.mkdir(parents=True)
+
+        assert not (wt / FILIGREE_DIR_NAME).exists()
+
+        project_root, conf_path = find_filigree_anchor(deep)
+        assert project_root == main
+        assert conf_path == main / CONF_FILENAME
+        assert find_filigree_conf(deep) == main / CONF_FILENAME
+
+    def test_copied_worktree_root_conf_with_tracked_dotfiligree_files_and_stale_db_rolls_up_to_main(self, tmp_path: Path) -> None:
+        """Tracked files and a stale generated DB do not make a worktree local.
+
+        This repo tracks ``.filigree/.gitkeep`` and scanner templates, so real
+        linked worktrees have a ``.filigree/`` directory even though the ignored
+        config metadata still live only in the main checkout. A previous buggy
+        open may also have created a tiny worktree-local DB; without local
+        config, that should still be treated as a stale artifact.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        (wt / CONF_FILENAME).write_text((main / CONF_FILENAME).read_text(encoding="utf-8"), encoding="utf-8")
+        tracked_dir = wt / FILIGREE_DIR_NAME
+        (tracked_dir / "scanners").mkdir(parents=True)
+        (tracked_dir / ".gitkeep").write_text("", encoding="utf-8")
+        (tracked_dir / "scanners" / "claude-code.toml").write_text("[scanner]\n", encoding="utf-8")
+        stale_db = FiligreeDB(tracked_dir / DB_FILENAME, prefix="filigree")
+        stale_db.initialize()
+        stale_db.close()
+        deep = wt / "src" / "pkg"
+        deep.mkdir(parents=True)
+
+        assert not (tracked_dir / CONFIG_FILENAME).exists()
+        assert (tracked_dir / DB_FILENAME).exists()
+
+        project_root, conf_path = find_filigree_anchor(deep)
+        assert project_root == main
+        assert conf_path == main / CONF_FILENAME
+        assert find_filigree_conf(deep) == main / CONF_FILENAME
+
+    def test_worktree_root_conf_with_metadata_dir_remains_local(self, tmp_path: Path) -> None:
+        """An explicitly initialised worktree project still wins locally."""
+        main = self._make_main_repo(tmp_path)
+        wt = self._make_worktree(main, tmp_path / "wt", "wt")
+        write_conf(
+            wt / CONF_FILENAME,
+            {"version": 1, "project_name": "local", "prefix": "local", "db": ".filigree/filigree.db"},
+        )
+        (wt / FILIGREE_DIR_NAME).mkdir()
+        write_config(wt / FILIGREE_DIR_NAME, {"prefix": "local", "version": 1})
+        deep = wt / "src" / "pkg"
+        deep.mkdir(parents=True)
+
+        project_root, conf_path = find_filigree_anchor(deep)
+        assert project_root == wt
+        assert conf_path == wt / CONF_FILENAME
+        assert find_filigree_conf(deep) == wt / CONF_FILENAME
 
     def test_nested_conf_inside_worktree_wins_over_main(self, tmp_path: Path) -> None:
         """A nested ``.filigree.conf`` inside a worktree subtree must still win.
@@ -593,6 +773,22 @@ class TestGitWorktreeDiscovery:
         with pytest.raises(ForeignDatabaseError):
             find_filigree_anchor(weird)
 
+    def test_foreign_database_error_remediation_for_malformed_git_file(self, tmp_path: Path) -> None:
+        """Malformed ``.git`` files get a specific remediation hint."""
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "outer", "prefix": "outer", "db": ".filigree/filigree.db"},
+        )
+        weird = tmp_path / "weird"
+        weird.mkdir()
+        (weird / ".git").write_text("# not a gitdir pointer\n")
+
+        with pytest.raises(ForeignDatabaseError) as excinfo:
+            find_filigree_anchor(weird)
+
+        git_file = weird.resolve() / ".git"
+        assert f"If `{git_file}` is malformed, fix or remove it before running `filigree init`." in str(excinfo.value)
+
 
 # ---------------------------------------------------------------------------
 # FiligreeDB.from_project / from_conf — discovery integration
@@ -668,6 +864,39 @@ class TestFromConf:
         finally:
             db.close()
 
+    def test_from_conf_custom_db_path_loads_project_local_templates(self, tmp_path: Path) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        templates_dir = filigree_dir / "templates"
+        templates_dir.mkdir(parents=True)
+        (tmp_path / "state").mkdir()
+        write_config(filigree_dir, {"prefix": "p", "version": 1, "enabled_packs": ["custom_only"]})
+        (templates_dir / "custom_item.json").write_text(
+            json.dumps(
+                {
+                    "type": "custom_item",
+                    "display_name": "Custom Item",
+                    "states": [
+                        {"name": "open", "category": "open"},
+                        {"name": "closed", "category": "done"},
+                    ],
+                    "initial_state": "open",
+                    "transitions": [{"from": "open", "to": "closed", "enforcement": "soft"}],
+                    "fields_schema": [],
+                }
+            )
+        )
+        conf = tmp_path / CONF_FILENAME
+        write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": "state/filigree.db"})
+
+        db = FiligreeDB.from_conf(conf)
+        try:
+            assert db.db_path == tmp_path / "state" / "filigree.db"
+            assert db.get_template("custom_item") is not None
+            created = db.create_issue("Custom", type="custom_item")
+            assert created.status == "open"
+        finally:
+            db.close()
+
 
 class TestFactoriesCloseConnOnInitFailure:
     """Regression: ``from_filigree_dir`` / ``from_conf`` must close the
@@ -689,6 +918,10 @@ class TestFactoriesCloseConnOnInitFailure:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path))
         try:
+            # Stamp filigree application_id so the classifier routes this through
+            # SchemaVersionMismatchError (newer-than-installed) instead of
+            # treating an unstamped file as a foreign SQLite database.
+            conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
             conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
             conn.commit()
         finally:
@@ -738,6 +971,51 @@ class TestFactoriesCloseConnOnInitFailure:
 
         assert len(created) == 1, "expected a single FiligreeDB instance to be constructed"
         assert created[0]._conn is None, "from_conf must close the SQLite connection when initialize() raises"
+
+    def test_from_filigree_dir_preserves_initialize_error_when_cleanup_close_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+
+        def fail_initialize(self: FiligreeDB) -> None:
+            raise ValueError("initialize root cause")
+
+        def fail_close(self: FiligreeDB) -> None:
+            raise sqlite3.ProgrammingError("cleanup close failed")
+
+        monkeypatch.setattr(FiligreeDB, "initialize", fail_initialize)
+        monkeypatch.setattr(FiligreeDB, "close", fail_close)
+
+        with pytest.raises(ValueError, match="initialize root cause"):
+            FiligreeDB.from_filigree_dir(filigree_dir)
+
+    def test_from_conf_preserves_initialize_error_when_cleanup_close_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        conf = tmp_path / CONF_FILENAME
+        write_conf(
+            conf,
+            {"version": 1, "project_name": "p", "prefix": "p", "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"},
+        )
+
+        def fail_initialize(self: FiligreeDB) -> None:
+            raise ValueError("initialize root cause")
+
+        def fail_close(self: FiligreeDB) -> None:
+            raise sqlite3.ProgrammingError("cleanup close failed")
+
+        monkeypatch.setattr(FiligreeDB, "initialize", fail_initialize)
+        monkeypatch.setattr(FiligreeDB, "close", fail_close)
+
+        with pytest.raises(ValueError, match="initialize root cause"):
+            FiligreeDB.from_conf(conf)
 
 
 class TestFromFiligreeDirLegacyPrefixFallback:
@@ -859,6 +1137,23 @@ class TestWrongProjectErrorOnWrites:
             db_p.release_claim("beefdata-abc123")
         db_p.close()
 
+    def test_release_my_claims_aborts_on_wrong_project(
+        self,
+        db_p: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        issue = db_p.create_issue("claimed task")
+        db_p.claim_issue(issue.id, assignee="alice", actor="alice")
+
+        def raise_wrong_project(*_args: object, **_kwargs: object) -> object:
+            raise WrongProjectError("foreign prefix beefdata does not match alpha")
+
+        monkeypatch.setattr(db_p, "release_claim", raise_wrong_project)
+
+        with pytest.raises(WrongProjectError):
+            db_p.release_my_claims(actor="alice")
+        db_p.close()
+
     def test_add_comment_with_wrong_prefix_raises(self, db_p: FiligreeDB) -> None:
         with pytest.raises(WrongProjectError):
             db_p.add_comment("beefdata-abc123", "hi")
@@ -892,11 +1187,92 @@ class TestWrongProjectErrorOnWrites:
         assert issue.id.startswith("alpha-")
         db_p.close()
 
+    def test_create_issue_rejects_foreign_parent_id(self, db_p: FiligreeDB) -> None:
+        before = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+
+        with pytest.raises(WrongProjectError):
+            db_p.create_issue("Child", parent_id="beefdata-abc123")
+
+        after = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        assert after == before
+        db_p.close()
+
+    def test_update_issue_rejects_foreign_parent_id_even_when_row_exists(self, db_p: FiligreeDB) -> None:
+        child = db_p.create_issue("Local child")
+        db_p.bulk_insert_issue(
+            {
+                "id": "beefdata-abc1234567",
+                "title": "Imported foreign parent",
+                "status": "open",
+                "type": "task",
+            },
+            validate=False,
+        )
+        db_p.conn.commit()
+
+        with pytest.raises(WrongProjectError):
+            db_p.update_issue(child.id, parent_id="beefdata-abc1234567")
+
+        assert db_p.get_issue(child.id).parent_id is None
+        db_p.close()
+
+    def test_create_issue_rejects_foreign_dep_id(self, db_p: FiligreeDB) -> None:
+        before = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+
+        with pytest.raises(WrongProjectError):
+            db_p.create_issue("Dependent", deps=["beefdata-abc123"])
+
+        after = db_p.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+        assert after == before
+        db_p.close()
+
     def test_correct_prefix_passes(self, db_p: FiligreeDB) -> None:
         """Sanity: the prefix check doesn't reject legitimate IDs."""
         issue = db_p.create_issue("Test")
         fetched = db_p.get_issue(issue.id)
         assert fetched.id == issue.id
+        db_p.close()
+
+    def test_get_issue_tolerates_foreign_prefix_locally(self, db_p: FiligreeDB) -> None:
+        """Read-tolerant local lookups can inspect imported cross-prefix rows; writes still reject."""
+        inserted = db_p.bulk_insert_issue(
+            {
+                "id": "beefdata-abc1234567",
+                "title": "Imported foreign row",
+                "status": "open",
+                "type": "task",
+            },
+            validate=False,
+        )
+        db_p.conn.commit()
+        assert inserted is True
+
+        fetched = db_p.get_issue("beefdata-abc1234567")
+        assert fetched.title == "Imported foreign row"
+        with pytest.raises(WrongProjectError):
+            db_p.update_issue("beefdata-abc1234567", title="mutated")
+        assert db_p.get_issue("beefdata-abc1234567").title == "Imported foreign row"
+        db_p.close()
+
+    def test_wrong_project_error_safe_message_omits_prefix(self, db_p: FiligreeDB) -> None:
+        """2.1.0 §1.2: ``safe_message`` strips both the open DB's prefix and
+        the offending id's prefix so untrusted-surface error envelopes
+        (HTTP / MCP) can't be used to probe project membership.
+
+        ``str(exc)`` still embeds the prefixes for CLI / stderr / doctor —
+        those callers are already inside the trust boundary.
+        """
+        with pytest.raises(WrongProjectError) as excinfo:
+            db_p.update_issue("beefdata-abc123", title="x")
+        rich = str(excinfo.value)
+        safe = excinfo.value.safe_message
+        # Rich (CLI) form keeps the diagnostic prefixes.
+        assert "alpha" in rich
+        assert "beefdata" in rich
+        # Safe (HTTP/MCP) form must NOT leak either prefix.
+        assert "alpha" not in safe
+        assert "beefdata" not in safe
+        assert safe == WrongProjectError.SAFE_MESSAGE
         db_p.close()
 
     def test_hyphenated_prefix_does_not_trip_guard(self, tmp_path: Path) -> None:

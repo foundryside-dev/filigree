@@ -6,6 +6,7 @@ from pathlib import Path
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
+from filigree.registry import RegistryUnavailableError, ResolvedFile
 from filigree.types.api import ErrorCode
 from tests.mcp._helpers import _parse
 
@@ -16,6 +17,34 @@ def _project_root(db: FiligreeDB) -> Path:
 
 
 class TestAnnotationMcpTools:
+    async def test_annotate_file_registry_unavailable_returns_error_response(self, mcp_db: FiligreeDB) -> None:
+        class UnavailableRegistry:
+            def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+                raise RegistryUnavailableError(
+                    "Clarion registry unavailable for test",
+                    url="http://clarion.test/api/v1/files?path=src%2Fmcp_ann.py",
+                    path=path,
+                    cause_kind="network",
+                )
+
+            def is_displaced(self) -> bool:
+                return False
+
+        root = _project_root(mcp_db)
+        source = root / "src" / "mcp_ann.py"
+        source.parent.mkdir()
+        source.write_text("alpha\n")
+        mcp_db.registry = UnavailableRegistry()
+
+        result = await call_tool("annotate_file", {"file_path": "src/mcp_ann.py", "note": "note"})
+        data = _parse(result)
+
+        assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+        assert data["details"]["cause"] == "registry_unavailable"
+        assert data["details"]["cause_kind"] == "network"
+        assert data["details"]["path"] == "src/mcp_ann.py"
+        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fmcp_ann.py"
+
     async def test_annotate_file_returns_public_full_payload(self, mcp_db: FiligreeDB) -> None:
         root = _project_root(mcp_db)
         source = root / "src" / "mcp_ann.py"

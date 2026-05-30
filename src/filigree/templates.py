@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from filigree.types.core import StatusCategory as StateCategory
 
@@ -163,14 +164,15 @@ class TypeTemplate:
     initial_state: str
     transitions: tuple[TransitionDefinition, ...]
     fields_schema: tuple[FieldSchema, ...]
+    reverse_transitions: tuple[TransitionDefinition, ...] = ()
     suggested_children: tuple[str, ...] = ()
     suggested_labels: tuple[str, ...] = ()
 
     def canonical_working_status(self) -> str:
         """Return the unique wip-category status name for this type.
 
-        Used by ``start_work`` / ``start_next_work`` (Phase D6) to default
-        ``target_status`` for legacy type-level callers. Raises
+        Used by ``start_work`` / ``start_next_work`` to default
+        ``target_status`` for type-level callers. Raises
         ``AmbiguousTransitionError`` if multiple wip statuses exist (caller
         must specify ``target_status`` explicitly); raises
         ``InvalidTransitionError`` if the type has no wip statuses.
@@ -207,6 +209,119 @@ class TypeTemplate:
         if not candidates:
             raise InvalidTransitionError(self.type, current_status)
         raise AmbiguousTransitionError(self.type, candidates, current_status=current_status)
+
+    def startability(self, current_status: str) -> tuple[bool, str | None]:
+        """Return ``(startable, next_action)`` for ``current_status``.
+
+        ``startable`` is True iff ``start_work`` / ``start_next_work`` can
+        transition this status into a working state *without* an explicit
+        ``target_status`` — i.e. ``reachable_working_status`` resolves a unique
+        single-hop wip target (or the status is already wip). This is the
+        single source of truth that distinguishes "ready" (open-category,
+        unblocked) from "startable" (filigree-406e6b7ee0): a ``triage`` bug is
+        ready but not startable because ``triage`` reaches no wip state in one
+        hop.
+
+        When not startable because no single-hop wip target exists,
+        ``next_action`` names the next SOFT hop on the shortest path toward the
+        nearest wip state (``triage`` bugs return ``"confirmed"``). It is an
+        informational hint only — callers never auto-walk it. When the status
+        is *ambiguous* (multiple single-hop wip targets) ``next_action`` is
+        None: the caller must choose a ``target_status``.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        try:
+            self.reachable_working_status(current_status)
+        except AmbiguousTransitionError:
+            return False, None
+        except InvalidTransitionError:
+            return False, self._next_soft_hop_to_wip(current_status)
+        return True, None
+
+    def soft_path_to_working_status(self, current_status: str) -> list[str]:
+        """Return the SOFT-edge hop sequence from ``current_status`` to the
+        nearest wip-category state — e.g. a bug at ``triage`` yields
+        ``["confirmed", "fixing"]``.
+
+        This is the multi-hop "advance" walk behind ``start_work(advance=True)``
+        (filigree-406e6b7ee0 Part 2). Returns ``[]`` when the status is already
+        wip (nothing to walk). Raises ``AmbiguousTransitionError`` when the
+        status has multiple single-hop wip targets (caller must choose a
+        ``target_status``). Raises ``InvalidTransitionError`` when no soft path
+        reaches a wip state.
+
+        The *terminal* single hop mirrors ``reachable_working_status`` exactly
+        (any enforcement), so ``advance`` is always a superset of the default
+        resolver — never more restrictive — and agrees with it on ambiguity. It
+        is only the *intermediate* hops of a multi-hop walk that are restricted
+        to SOFT edges: hard edges gate deliberate progression (e.g.
+        ``verifying -> closed``), and auto-walking *through* one to reach a more
+        distant wip state would bypass a gate the workflow author marked as
+        requiring an explicit decision.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        categories = {state.name: state.category for state in self.states}
+        if categories.get(current_status) == "wip":
+            return []
+
+        # The single-hop case mirrors reachable_working_status (any enforcement)
+        # so advance and the default resolver agree on directly-startable states
+        # and on ambiguity — advance must be a superset, never a subset.
+        direct = [
+            transition.to_state
+            for transition in self.transitions
+            if transition.from_state == current_status and categories.get(transition.to_state) == "wip"
+        ]
+        direct = list(dict.fromkeys(direct))
+        if len(direct) > 1:
+            raise AmbiguousTransitionError(self.type, direct, current_status=current_status)
+        if len(direct) == 1:
+            return [direct[0]]
+
+        # Breadth-first search over soft edges for the shortest path to any wip
+        # state, reconstructing the hop sequence from a predecessor map.
+        predecessor: dict[str, str] = {}
+        visited = {current_status}
+        queue: deque[str] = deque([current_status])
+        target: str | None = None
+        while queue and target is None:
+            node = queue.popleft()
+            for transition in self.transitions:
+                if transition.from_state != node or transition.enforcement != "soft" or transition.to_state in visited:
+                    continue
+                visited.add(transition.to_state)
+                predecessor[transition.to_state] = node
+                if categories.get(transition.to_state) == "wip":
+                    target = transition.to_state
+                    break
+                queue.append(transition.to_state)
+        if target is None:
+            raise InvalidTransitionError(self.type, current_status)
+
+        path: list[str] = []
+        node = target
+        while node != current_status:
+            path.append(node)
+            node = predecessor[node]
+        path.reverse()
+        return path
+
+    def _next_soft_hop_to_wip(self, current_status: str) -> str | None:
+        """First hop toward the nearest wip state, or None when none exists.
+
+        Thin wrapper over ``soft_path_to_working_status`` for the informational
+        ``next_action`` hint: swallows the ambiguous / no-path errors into None
+        so ``startability`` can report a hint without raising.
+        """
+        from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        try:
+            path = self.soft_path_to_working_status(current_status)
+        except (AmbiguousTransitionError, InvalidTransitionError):
+            return None
+        return path[0] if path else None
 
 
 @dataclass(frozen=True)
@@ -302,6 +417,7 @@ class TemplateRegistry:
         self._packs: dict[str, WorkflowPack] = {}
         self._category_cache: dict[str, dict[str, StateCategory]] = {}
         self._transition_cache: dict[str, dict[tuple[str, str], TransitionDefinition]] = {}
+        self._reverse_transition_cache: dict[str, dict[tuple[str, str], TransitionDefinition]] = {}
         self._loaded = False
 
     # -- Parsing (from dict/JSON) -------------------------------------------
@@ -318,13 +434,52 @@ class TemplateRegistry:
 
         Raises:
             ValueError: If required fields are missing, invalid, or exceed size limits.
-            KeyError: If required keys are missing from the dict.
         """
+        if not isinstance(raw, dict):
+            msg = f"Type template root must be an object, got {type(raw).__name__}"
+            raise ValueError(msg)
+
+        def required_string(mapping: dict[str, Any], key: str, context: str) -> str:
+            if key not in mapping:
+                msg = f"{context}: missing required key '{key}'"
+                raise ValueError(msg)
+            value = mapping[key]
+            if not isinstance(value, str):
+                msg = f"{context}: '{key}' must be a string, got {type(value).__name__}"
+                raise ValueError(msg)
+            return value
+
+        def optional_string(mapping: dict[str, Any], key: str, default: str, context: str) -> str:
+            if key not in mapping:
+                return default
+            value = mapping[key]
+            if not isinstance(value, str):
+                msg = f"{context}: '{key}' must be a string, got {type(value).__name__}"
+                raise ValueError(msg)
+            return value
+
+        def optional_string_tuple(mapping: dict[str, Any], key: str, context: str) -> tuple[str, ...]:
+            if key not in mapping:
+                return ()
+            value = mapping[key]
+            if not isinstance(value, list):
+                msg = f"{context}: '{key}' must be a list of strings, got {type(value).__name__}"
+                raise ValueError(msg)
+            for i, item in enumerate(value):
+                if not isinstance(item, str):
+                    msg = f"{context}: '{key}' item at index {i} must be a string, got {type(item).__name__}"
+                    raise ValueError(msg)
+            return tuple(value)
+
         # Validate type name format
-        type_name = raw["type"]
+        type_name = required_string(raw, "type", "Type template")
         if not _NAME_PATTERN.match(type_name):
             msg = f"Invalid type name '{type_name}': must match ^[a-z][a-z0-9_]{{0,63}}$"
             raise ValueError(msg)
+        display_name = required_string(raw, "display_name", f"Type '{type_name}'")
+        description = optional_string(raw, "description", "", f"Type '{type_name}'")
+        pack = optional_string(raw, "pack", "custom", f"Type '{type_name}'")
+        initial_state = required_string(raw, "initial_state", f"Type '{type_name}'")
 
         # Defensive shape checks (must come before size limits to avoid TypeError on None)
         raw_states = raw.get("states")
@@ -334,10 +489,16 @@ class TemplateRegistry:
         if not raw_states:
             msg = f"Type '{type_name}': must have at least one state"
             raise ValueError(msg)
-        for i, s in enumerate(raw_states):
-            if not isinstance(s, dict) or "name" not in s or "category" not in s:
+        state_specs: list[tuple[str, str]] = []
+        for i, state in enumerate(raw_states):
+            if not isinstance(state, dict):
                 msg = f"Type '{type_name}': state at index {i} must be a dict with 'name' and 'category'"
                 raise ValueError(msg)
+            if "name" not in state or "category" not in state:
+                msg = f"Type '{type_name}': state at index {i} must be a dict with 'name' and 'category'"
+                raise ValueError(msg)
+            context = f"Type '{type_name}': state at index {i}"
+            state_specs.append((required_string(state, "name", context), required_string(state, "category", context)))
 
         # Defensive shape checks for transitions and fields_schema
         raw_transitions = raw.get("transitions", [])
@@ -346,10 +507,41 @@ class TemplateRegistry:
             raise ValueError(msg)
         if raw_transitions is None:
             raw_transitions = []
-        for i, t in enumerate(raw_transitions):
-            if not isinstance(t, dict):
-                msg = f"Type '{type_name}': transition at index {i} must be a dict, got {type(t).__name__}"
+        transition_specs: list[tuple[str, str, str, tuple[str, ...]]] = []
+        for i, transition in enumerate(raw_transitions):
+            if not isinstance(transition, dict):
+                msg = f"Type '{type_name}': transition at index {i} must be a dict, got {type(transition).__name__}"
                 raise ValueError(msg)
+            context = f"Type '{type_name}': transition at index {i}"
+            transition_specs.append(
+                (
+                    required_string(transition, "from", context),
+                    required_string(transition, "to", context),
+                    required_string(transition, "enforcement", context),
+                    optional_string_tuple(transition, "requires_fields", context),
+                )
+            )
+
+        raw_reverse_transitions = raw.get("reverse_transitions", [])
+        if raw_reverse_transitions is not None and not isinstance(raw_reverse_transitions, list):
+            msg = f"Type '{type_name}': 'reverse_transitions' must be a list, got {type(raw_reverse_transitions).__name__}"
+            raise ValueError(msg)
+        if raw_reverse_transitions is None:
+            raw_reverse_transitions = []
+        reverse_transition_specs: list[tuple[str, str, str, tuple[str, ...]]] = []
+        for i, transition in enumerate(raw_reverse_transitions):
+            if not isinstance(transition, dict):
+                msg = f"Type '{type_name}': reverse_transition at index {i} must be a dict, got {type(transition).__name__}"
+                raise ValueError(msg)
+            context = f"Type '{type_name}': reverse_transition at index {i}"
+            reverse_transition_specs.append(
+                (
+                    required_string(transition, "from", context),
+                    required_string(transition, "to", context),
+                    required_string(transition, "enforcement", context),
+                    optional_string_tuple(transition, "requires_fields", context),
+                )
+            )
 
         raw_fields = raw.get("fields_schema", [])
         if raw_fields is not None and not isinstance(raw_fields, list):
@@ -357,20 +549,37 @@ class TemplateRegistry:
             raise ValueError(msg)
         if raw_fields is None:
             raw_fields = []
-        for i, f in enumerate(raw_fields):
-            if not isinstance(f, dict):
-                msg = f"Type '{type_name}': field at index {i} must be a dict, got {type(f).__name__}"
+        field_specs: list[tuple[str, str, str, tuple[str, ...], Any, tuple[str, ...], str | None, Any]] = []
+        for i, field in enumerate(raw_fields):
+            if not isinstance(field, dict):
+                msg = f"Type '{type_name}': field at index {i} must be a dict, got {type(field).__name__}"
                 raise ValueError(msg)
+            context = f"Type '{type_name}': field at index {i}"
+            pattern = field.get("pattern")
+            if pattern is not None and not isinstance(pattern, str):
+                msg = f"{context}: 'pattern' must be a string, got {type(pattern).__name__}"
+                raise ValueError(msg)
+            field_specs.append(
+                (
+                    required_string(field, "name", context),
+                    required_string(field, "type", context),
+                    optional_string(field, "description", "", context),
+                    optional_string_tuple(field, "options", context),
+                    field.get("default"),
+                    optional_string_tuple(field, "required_at", context),
+                    pattern,
+                    field.get("unique", False),
+                )
+            )
 
         # Enforcement validation (filigree-9b9e45: only "hard"/"soft" are valid)
         valid_enforcement = {"hard", "soft"}
-        for t in raw_transitions:
-            enforcement_val = t.get("enforcement")
+        for from_state, to_state, enforcement_val, _requires_fields in [*transition_specs, *reverse_transition_specs]:
             if enforcement_val not in valid_enforcement:
                 allowed = ", ".join(sorted(valid_enforcement))
                 msg = (
                     f"Type '{type_name}': transition "
-                    f"{t.get('from')}->{t.get('to')} "
+                    f"{from_state}->{to_state} "
                     f"has invalid enforcement '{enforcement_val}' "
                     f"(must be one of: {allowed})"
                 )
@@ -380,8 +589,9 @@ class TemplateRegistry:
         if len(raw_states) > TemplateRegistry.MAX_STATES:
             msg = f"Type '{type_name}' has {len(raw_states)} states (max {TemplateRegistry.MAX_STATES})"
             raise ValueError(msg)
-        if len(raw_transitions) > TemplateRegistry.MAX_TRANSITIONS:
-            msg = f"Type '{type_name}' has {len(raw_transitions)} transitions (max {TemplateRegistry.MAX_TRANSITIONS})"
+        total_transitions = len(raw_transitions) + len(raw_reverse_transitions)
+        if total_transitions > TemplateRegistry.MAX_TRANSITIONS:
+            msg = f"Type '{type_name}' has {total_transitions} transitions (max {TemplateRegistry.MAX_TRANSITIONS})"
             raise ValueError(msg)
         if len(raw_fields) > TemplateRegistry.MAX_FIELDS:
             msg = f"Type '{type_name}' has {len(raw_fields)} fields (max {TemplateRegistry.MAX_FIELDS})"
@@ -390,7 +600,7 @@ class TemplateRegistry:
         logger.debug("Parsing template for type: %s", type_name)
 
         # StateDefinition.__post_init__ validates each state name format + category
-        states = tuple(StateDefinition(name=s["name"], category=s["category"]) for s in raw_states)
+        states = tuple(StateDefinition(name=name, category=cast("StateCategory", category)) for name, category in state_specs)
 
         # Detect duplicate state names (filigree-eff214)
         seen_names: set[str] = set()
@@ -402,12 +612,21 @@ class TemplateRegistry:
 
         transitions = tuple(
             TransitionDefinition(
-                from_state=t["from"],
-                to_state=t["to"],
-                enforcement=t["enforcement"],
-                requires_fields=tuple(t.get("requires_fields", [])),
+                from_state=from_state,
+                to_state=to_state,
+                enforcement=cast("EnforcementLevel", enforcement),
+                requires_fields=requires_fields,
             )
-            for t in raw_transitions
+            for from_state, to_state, enforcement, requires_fields in transition_specs
+        )
+        reverse_transitions = tuple(
+            TransitionDefinition(
+                from_state=from_state,
+                to_state=to_state,
+                enforcement=cast("EnforcementLevel", enforcement),
+                requires_fields=requires_fields,
+            )
+            for from_state, to_state, enforcement, requires_fields in reverse_transition_specs
         )
 
         # Detect duplicate (from_state, to_state) pairs (filigree-ab91b3, filigree-3e3f12)
@@ -418,30 +637,38 @@ class TemplateRegistry:
                 msg = f"Type '{type_name}': duplicate transition '{t.from_state}' -> '{t.to_state}'"
                 raise ValueError(msg)
             seen_transitions.add(key)
+        seen_reverse_transitions: set[tuple[str, str]] = set()
+        for t in reverse_transitions:
+            key = (t.from_state, t.to_state)
+            if key in seen_reverse_transitions:
+                msg = f"Type '{type_name}': duplicate reverse_transition '{t.from_state}' -> '{t.to_state}'"
+                raise ValueError(msg)
+            seen_reverse_transitions.add(key)
         fields_schema = tuple(
             FieldSchema(
-                name=f["name"],
-                type=f["type"],
-                description=f.get("description", ""),
-                options=tuple(f.get("options", [])),
-                default=f.get("default"),
-                required_at=tuple(f.get("required_at", [])),
-                pattern=f.get("pattern"),
-                unique=f.get("unique", False),
+                name=name,
+                type=cast("FieldType", field_type),
+                description=field_description,
+                options=options,
+                default=default,
+                required_at=required_at,
+                pattern=pattern,
+                unique=unique,
             )
-            for f in raw_fields
+            for name, field_type, field_description, options, default, required_at, pattern, unique in field_specs
         )
         return TypeTemplate(
             type=type_name,
-            display_name=raw["display_name"],
-            description=raw.get("description", ""),
-            pack=raw.get("pack", "custom"),
+            display_name=display_name,
+            description=description,
+            pack=pack,
             states=states,
-            initial_state=raw["initial_state"],
+            initial_state=initial_state,
             transitions=transitions,
             fields_schema=fields_schema,
-            suggested_children=tuple(raw.get("suggested_children", [])),
-            suggested_labels=tuple(raw.get("suggested_labels", [])),
+            reverse_transitions=reverse_transitions,
+            suggested_children=optional_string_tuple(raw, "suggested_children", f"Type '{type_name}'"),
+            suggested_labels=optional_string_tuple(raw, "suggested_labels", f"Type '{type_name}'"),
         )
 
     @staticmethod
@@ -478,12 +705,33 @@ class TemplateRegistry:
                 errors.append(f"transition from_state '{t.from_state}' is not in states list")
             if t.to_state not in state_names:
                 errors.append(f"transition to_state '{t.to_state}' is not in states list")
+        seen_reverse_trans: set[tuple[str, str]] = set()
+        for t in tpl.reverse_transitions:
+            key = (t.from_state, t.to_state)
+            if key in seen_reverse_trans:
+                errors.append(f"duplicate reverse_transition '{t.from_state}' -> '{t.to_state}'")
+            seen_reverse_trans.add(key)
+            if t.from_state not in state_names:
+                errors.append(f"reverse_transition from_state '{t.from_state}' is not in states list")
+            if t.to_state not in state_names:
+                errors.append(f"reverse_transition to_state '{t.to_state}' is not in states list")
 
         field_names = {f.name for f in tpl.fields_schema}
+        if len(field_names) != len(tpl.fields_schema):
+            seen_fields: set[str] = set()
+            for field in tpl.fields_schema:
+                if field.name in seen_fields:
+                    errors.append(f"duplicate field name '{field.name}'")
+                seen_fields.add(field.name)
+
         for t in tpl.transitions:
             for rf in t.requires_fields:
                 if rf not in field_names:
                     errors.append(f"transition {t.from_state}->{t.to_state} requires_fields '{rf}' not in fields_schema")
+        for t in tpl.reverse_transitions:
+            for rf in t.requires_fields:
+                if rf not in field_names:
+                    errors.append(f"reverse_transition {t.from_state}->{t.to_state} requires_fields '{rf}' not in fields_schema")
 
         for f in tpl.fields_schema:
             for ra in f.required_at:
@@ -582,6 +830,15 @@ class TemplateRegistry:
 
         # Build transition cache -- O(1) lookup
         self._transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.transitions}
+        self._reverse_transition_cache[tpl.type] = {(t.from_state, t.to_state): t for t in tpl.reverse_transitions}
+
+        # Project-local template overrides call _register_type after the pack was
+        # loaded. Keep pack lookup surfaces coherent with the registry cache.
+        pack = self._packs.get(tpl.pack)
+        if pack is not None:
+            updated_types = dict(pack.types)
+            updated_types[tpl.type] = tpl
+            self._packs[tpl.pack] = _dc_replace(pack, types=MappingProxyType(updated_types))
 
     def _register_pack(self, pack: WorkflowPack) -> None:
         """Register a workflow pack."""
@@ -701,6 +958,8 @@ class TemplateRegistry:
         from_state: str,
         to_state: str,
         fields: dict[str, Any],
+        *,
+        backward: bool = False,
     ) -> TransitionResult:
         """Validate a state transition.
 
@@ -709,6 +968,11 @@ class TemplateRegistry:
             from_state: Current state.
             to_state: Target state.
             fields: Current issue fields dict.
+            backward: If True, validate against ``reverse_transitions`` and
+                raise ``InvalidTransitionError`` when the reverse edge is
+                undeclared; reverse edges enforce only their explicit
+                ``requires_fields`` and do not inherit target ``required_at``
+                gates.
 
         Returns:
             TransitionResult indicating whether the transition is allowed,
@@ -727,10 +991,14 @@ class TemplateRegistry:
                 ),
             )
 
-        transition_map = self._transition_cache.get(type_name, {})
+        transition_map = self._reverse_transition_cache.get(type_name, {}) if backward else self._transition_cache.get(type_name, {})
         transition = transition_map.get((from_state, to_state))
 
         if transition is None:
+            if backward:
+                from filigree.types.api import InvalidTransitionError
+
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
             # Transition not in table: REJECTED for known types
             return TransitionResult(
                 allowed=False,
@@ -745,8 +1013,11 @@ class TemplateRegistry:
         # Check required fields for this transition
         missing = tuple(f for f in transition.requires_fields if not self._is_field_populated(fields.get(f)))
 
-        # Also check fields required_at the target state
-        state_required = self.validate_fields_for_state(type_name, to_state, fields)
+        # Forward workflow transitions also honor fields required at the target
+        # state. Backward/escape edges only enforce their explicit
+        # requires_fields contract so force-close preserves its historical
+        # cleanup semantics instead of inheriting normal close gates.
+        state_required = [] if backward else self.validate_fields_for_state(type_name, to_state, fields)
         all_missing = tuple(dict.fromkeys(list(missing) + state_required))  # dedupe, preserve order
 
         warnings: list[str] = []
@@ -906,6 +1177,8 @@ class TemplateRegistry:
             for pack_file in sorted(packs_dir.glob("*.json")):
                 try:
                     pack_data = _json.loads(pack_file.read_text())
+                    if not isinstance(pack_data, dict):
+                        raise TypeError(f"pack root must be an object, got {type(pack_data).__name__}")
                     pack_name = pack_data.get("pack", pack_file.stem)
                     if "pack" not in pack_data:
                         pack_data["pack"] = pack_name
@@ -951,7 +1224,10 @@ class TemplateRegistry:
 
         # Phase 1: Parse all types into staging dict (no side effects)
         types_dict: dict[str, TypeTemplate] = {}
-        for type_name, type_data in pack_data.get("types", {}).items():
+        raw_types = pack_data.get("types", {})
+        if not isinstance(raw_types, dict):
+            raise TypeError(f"pack {pack_name} types must be an object, got {type(raw_types).__name__}")
+        for type_name, type_data in raw_types.items():
             try:
                 tpl = self.parse_type_template(type_data)
                 # Ensure the type is tagged with the actual pack name,
@@ -965,15 +1241,19 @@ class TemplateRegistry:
                 quality_warnings = self.check_type_template_quality(tpl)
                 for qw in quality_warnings:
                     logger.warning("Quality: %s/%s: %s", pack_name, type_name, qw)
-                types_dict[type_name] = tpl
+                if type_name != tpl.type:
+                    logger.warning(
+                        "Pack %s type key %s does not match template type %s; using parsed type name",
+                        pack_name,
+                        type_name,
+                        tpl.type,
+                    )
+                types_dict[tpl.type] = tpl
             except (ValueError, KeyError) as exc:
                 logger.warning("Skipping unparseable type %s in pack %s: %s", type_name, pack_name, exc)
 
-        # Phase 2: Register all staged types atomically
-        for tpl in types_dict.values():
-            self._register_type(tpl)
-
-        # Register the pack itself — wrap mutable containers for immutability
+        # Phase 2: Build the pack object before mutating registry caches. Invalid
+        # pack-level metadata must not leak staged types into the registry.
         raw_guide = pack_data.get("guide")
         if raw_guide is not None and not isinstance(raw_guide, dict):
             logger.warning("Pack %s has non-mapping guide (got %s), ignoring", pack_name, type(raw_guide).__name__)
@@ -991,5 +1271,9 @@ class TemplateRegistry:
             ),
             guide=MappingProxyType(raw_guide) if raw_guide is not None else None,
         )
+
+        # Phase 3: Register all staged types and the pack atomically.
+        for tpl in types_dict.values():
+            self._register_type(tpl)
         self._register_pack(pack)
         logger.debug("Registered pack: %s (%d types)", pack_name, len(types_dict))

@@ -233,6 +233,34 @@ class TestUpdateAndClose:
         assert data["status"] == "confirmed"
         assert data["data_warnings"] == ["Missing recommended fields for 'confirmed': severity"]
 
+    def test_update_invalid_transition_json_includes_valid_transitions(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Invalid transition hints", "--type", "bug", "--json"])
+        assert created.exit_code == 0
+        issue_id = json.loads(created.output)["issue_id"]
+
+        result = runner.invoke(cli, ["update", issue_id, "--status", "fixing", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert {transition["to"] for transition in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
+        assert data["hint"] == "Use get_valid_transitions to see allowed state changes"
+
+    def test_update_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Claim-aware update", "--json"])
+        assert created.exit_code == 0
+        issue_id = json.loads(created.output)["issue_id"]
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "update", issue_id, "--priority", "0", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
+
     def test_update_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["update", "test-nonexistent", "--title", "nope"])
@@ -324,6 +352,49 @@ class TestUpdateAndClose:
         assert blocked in unblocked_ids, "issue whose only dep closed must appear in newly_unblocked"
         assert already_ready not in unblocked_ids, f"pre-existing ready issue must NOT appear in newly_unblocked; got {unblocked_ids}"
 
+    def test_close_json_omits_newly_unblocked_when_empty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Batch envelope contract: ``newly_unblocked`` is OMITTED when empty.
+
+        Closing an issue with no downstream dependents must not attach an
+        empty ``newly_unblocked`` list (matches MCP ``batch_close``).
+        (filigree-1025b9f6ab / F6)
+        """
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Standalone"]).output)
+        result = runner.invoke(cli, ["close", issue_id, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "newly_unblocked" not in data, f"empty newly_unblocked must be absent; got keys {list(data)}"
+
+    def test_close_json_includes_newly_unblocked_when_nonempty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """The key MUST be present (with the unblocked id) when a dependent unblocks.
+
+        Complements the ABSENT case above. (filigree-1025b9f6ab / F6)
+        """
+        runner, _ = cli_in_project
+        dep = _extract_id(runner.invoke(cli, ["create", "Dependency"]).output)
+        blocked = _extract_id(runner.invoke(cli, ["create", "Blocked by dep"]).output)
+        assert runner.invoke(cli, ["add-dep", blocked, dep]).exit_code == 0
+        result = runner.invoke(cli, ["close", dep, "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "newly_unblocked" in data, f"non-empty newly_unblocked must be present; got keys {list(data)}"
+        assert {i["issue_id"] for i in data["newly_unblocked"]} == {blocked}
+
+    def test_close_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Claim-aware close", "--json"])
+        assert created.exit_code == 0
+        issue_id = json.loads(created.output)["issue_id"]
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "close", issue_id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
+
 
 class TestReopen:
     def test_reopen_issue(self, cli_in_project: tuple[CliRunner, Path]) -> None:
@@ -377,6 +448,23 @@ class TestReopen:
         assert data["succeeded"][0]["issue_id"] == good_id
         assert len(data["failed"]) == 1
 
+    def test_reopen_json_batch_ignores_closed_audit_assignee(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        held = runner.invoke(cli, ["create", "Held reopen"])
+        free = runner.invoke(cli, ["create", "Free reopen"])
+        held_id = _extract_id(held.output)
+        free_id = _extract_id(free.output)
+        assert runner.invoke(cli, ["claim", held_id, "--assignee", "agent-holder"]).exit_code == 0
+        assert runner.invoke(cli, ["--actor", "agent-holder", "close", held_id]).exit_code == 0
+        assert runner.invoke(cli, ["close", free_id]).exit_code == 0
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "reopen", held_id, free_id, "--json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert {item["issue_id"] for item in data["succeeded"]} == {held_id, free_id}
+        assert data["failed"] == []
+
     def test_reopen_json_all_success(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
@@ -414,6 +502,38 @@ class TestCommentsCli:
         assert data["comment"]["author"] == "cli-commenter"
         assert data["comment"]["text"] == "My comment"
         assert isinstance(data["comment"]["created_at"], str)
+
+    def test_add_comment_json_get_comment_sqlite_error_returns_io(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sqlite3
+
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Commentable"])
+        issue_id = _extract_id(r.output)
+
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("filigree.core.FiligreeDB.get_comment", _raise)
+        result = runner.invoke(cli, ["add-comment", issue_id, "My comment", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "IO"
+        assert "database is locked" in data["error"]
+
+    def test_add_comment_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Claim-aware comment"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "add-comment", issue_id, "note", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
     def test_list_comments(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -510,6 +630,32 @@ class TestLabelCli:
         assert data["code"] == "VALIDATION"
         assert "priority field" in data["error"]
 
+    def test_label_add_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Claim-aware label"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "add-label", "needs-review", issue_id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
+
+    def test_label_remove_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Claim-aware remove label", "-l", "needs-review"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-holder"])
+
+        result = runner.invoke(cli, ["--actor", "other-agent", "remove-label", issue_id, "needs-review", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
+
     def test_label_add_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["add-label", "bug", "test-nonexistent"])
@@ -565,6 +711,19 @@ class TestClaimCli:
         assert data["claimed_at"] is not None
         assert data["last_heartbeat_at"] == data["claimed_at"]
         assert data["claim_expires_at"] is not None
+
+    def test_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Claim conflict JSON"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        result = runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-2", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "CONFLICT"
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-1", "expected": "agent-2"}
 
     def test_claim_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -874,6 +1033,7 @@ class TestReleaseCli:
         data = json.loads(result.output)
         assert data["code"] == "CONFLICT"
         assert "agent-2" in data["error"]
+        assert data["details"] == {"issue_id": issue_id, "observed": "agent-2", "expected": "agent-1"}
 
     def test_release_json_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -881,6 +1041,95 @@ class TestReleaseCli:
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert "error" in data
+
+    def test_release_my_claims_json_exits_nonzero_on_failures(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release failure"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        def fail_release_claim(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("simulated release failure")
+
+        monkeypatch.setattr("filigree.db_issues.IssuesMixin.release_claim", fail_release_claim)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["succeeded"] == []
+        assert data["failed"][0]["id"] == issue_id
+        assert "simulated release failure" in data["failed"][0]["error"]
+
+    def test_release_my_claims_text_exits_nonzero_on_failures(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Text bulk release failure"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+
+        def fail_release_claim(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("simulated release failure")
+
+        monkeypatch.setattr("filigree.db_issues.IssuesMixin.release_claim", fail_release_claim)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims"])
+
+        assert result.exit_code == 1
+        assert "failure(s)" in result.output
+        assert issue_id in result.output
+        assert "simulated release failure" in result.output
+
+    def test_release_my_claims_json_refreshes_context_after_release(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release refresh"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+        calls: list[object] = []
+
+        def spy_refresh(db: object) -> None:
+            calls.append(db)
+
+        monkeypatch.setattr("filigree.cli_commands.issues.refresh_summary", spy_refresh)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert calls, "release-my-claims --json must refresh context.md after real releases"
+
+    def test_release_my_claims_json_dry_run_does_not_refresh_context(
+        self,
+        cli_in_project: tuple[CliRunner, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "JSON bulk release dry-run"])
+        issue_id = _extract_id(r.output)
+        runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+        calls: list[object] = []
+
+        def spy_refresh(db: object) -> None:
+            calls.append(db)
+
+        monkeypatch.setattr("filigree.cli_commands.issues.refresh_summary", spy_refresh)
+
+        result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--dry-run", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["dry_run"] is True
+        assert calls == []
 
 
 class TestListLabelQuery:
@@ -938,3 +1187,169 @@ class TestListLabelQuery:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION", data
         assert "label_prefix" in data["error"].lower() or "colon" in data["error"].lower()
+
+
+class TestPostVerbActor:
+    """`--actor` accepted AFTER the verb, recorded on the event.
+
+    Regression for filigree-873dd5817c (F1): `--actor` was a group-only
+    option, so the natural post-verb position (`filigree update <id>
+    --actor X`) was rejected with "No such option", silently losing
+    attribution.
+    """
+
+    def _events(self, runner: CliRunner, issue_id: str) -> list[dict]:
+        res = runner.invoke(cli, ["events", issue_id, "--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)
+        return data.get("items", []) if isinstance(data, dict) else data
+
+    def test_post_verb_actor_accepted_and_recorded_on_update(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Post-verb actor"]).output)
+
+        result = runner.invoke(cli, ["update", issue_id, "--priority", "1", "--actor", "agent-zeta"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, f"no priority_changed event; events: {events}"
+        assert prio_events[0]["actor"] == "agent-zeta"
+
+    def test_post_verb_actor_recorded_on_close(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Close actor"]).output)
+
+        result = runner.invoke(cli, ["close", issue_id, "--actor", "agent-closer"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        closed = [e for e in events if e.get("event_type") in ("closed", "status_changed")]
+        assert any(e["actor"] == "agent-closer" for e in closed), f"events: {events}"
+
+    def test_post_verb_actor_recorded_on_add_comment(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Comment actor"]).output)
+
+        result = runner.invoke(cli, ["add-comment", issue_id, "hello", "--actor", "agent-commenter"])
+        assert result.exit_code == 0, result.output
+
+        comments = runner.invoke(cli, ["get-comments", issue_id, "--json"])
+        assert comments.exit_code == 0, comments.output
+        data = json.loads(comments.output)
+        items = data.get("items", data) if isinstance(data, dict) else data
+        assert any(c.get("author") == "agent-commenter" for c in items), data
+
+    def test_post_verb_actor_wins_over_group_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Precedence: explicit post-verb --actor beats the group-level --actor."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Precedence"]).output)
+
+        result = runner.invoke(cli, ["--actor", "group-actor", "update", issue_id, "--priority", "1", "--actor", "post-actor"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, events
+        assert prio_events[0]["actor"] == "post-actor", events
+
+    def test_pre_verb_actor_still_works(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Fallback: with no post-verb --actor, the group-level value is used."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Pre-verb"]).output)
+
+        result = runner.invoke(cli, ["--actor", "group-only", "update", issue_id, "--priority", "1"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        prio_events = [e for e in events if e.get("event_type") == "priority_changed"]
+        assert prio_events, events
+        assert prio_events[0]["actor"] == "group-only", events
+
+    def test_post_verb_actor_validation_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """A blank post-verb --actor is sanitized like the group-level one."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Bad actor"]).output)
+
+        result = runner.invoke(cli, ["update", issue_id, "--priority", "1", "--actor", "   ", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "VALIDATION"
+
+    def test_start_work_local_actor_unaffected(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """start-work owns its own --actor (assignee fallback); not double-injected."""
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Start-work actor"]).output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--assignee", "frank", "--actor", "agent-sw", "--json"])
+        assert result.exit_code == 0, result.output
+
+        events = self._events(runner, issue_id)
+        claimed = [e for e in events if e.get("event_type") == "claimed"]
+        assert claimed, events
+        assert claimed[0]["actor"] == "agent-sw", events
+
+
+class TestDeleteIssueCommand:
+    """CLI `delete-issue` verb (F5)."""
+
+    def _create_closed(self, runner: CliRunner, title: str) -> str:
+        issue_id = _extract_id(runner.invoke(cli, ["create", title]).output)
+        assert runner.invoke(cli, ["close", issue_id]).exit_code == 0
+        return issue_id
+
+    def test_registered_in_help(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["delete-issue", "--help"])
+        assert result.exit_code == 0
+        assert "IRREVERSIBLE" in result.output
+        assert "--force" in result.output
+
+    def test_delete_success_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = self._create_closed(runner, "Delete via CLI")
+        result = runner.invoke(cli, ["delete-issue", issue_id, "--json", "--actor", "alice"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["status"] == "deleted"
+        assert data["issue_id"] == issue_id
+        assert data["actor"] == "alice"
+        # Gone.
+        assert runner.invoke(cli, ["show", issue_id, "--json"]).exit_code == 1
+
+    def test_delete_success_plain(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = self._create_closed(runner, "Delete plain")
+        result = runner.invoke(cli, ["delete-issue", issue_id])
+        assert result.exit_code == 0, result.output
+        assert f"Deleted {issue_id}" in result.output
+
+    def test_not_found_maps_to_not_found(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["delete-issue", "test-nonexistent", "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["code"] == "NOT_FOUND"
+
+    def test_non_terminal_maps_to_conflict(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        issue_id = _extract_id(runner.invoke(cli, ["create", "Still open"]).output)
+        result = runner.invoke(cli, ["delete-issue", issue_id, "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["code"] == "CONFLICT"
+
+    def test_has_children_refused_then_force(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        parent_id = _extract_id(runner.invoke(cli, ["create", "Parent"]).output)
+        child = json.loads(runner.invoke(cli, ["create", "Child", "--parent", parent_id, "--json"]).output)
+        assert runner.invoke(cli, ["close", parent_id]).exit_code == 0
+
+        refused = runner.invoke(cli, ["delete-issue", parent_id, "--json"])
+        assert refused.exit_code == 1
+        assert json.loads(refused.output)["code"] == "CONFLICT"
+
+        forced = runner.invoke(cli, ["delete-issue", parent_id, "--force", "--json"])
+        assert forced.exit_code == 0, forced.output
+        assert json.loads(forced.output)["orphaned_children"] == 1
+        # Child orphaned, still present.
+        child_shown = json.loads(runner.invoke(cli, ["show", child["issue_id"], "--json"]).output)
+        assert child_shown["parent_id"] is None

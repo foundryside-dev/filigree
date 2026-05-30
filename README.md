@@ -11,15 +11,17 @@ Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, n
 
 ## What Is Filigree?
 
-Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 113 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
+Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 114 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
 Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Loom HTTP generation at `/api/loom/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
 
+**Security boundary:** Filigree does not encrypt, sandbox, harden, or secure stored project data beyond ordinary filesystem permissions and standard HTTPS transport if you put it behind HTTPS yourself. Do not use Filigree for secure, regulated, confidential, or business-sensitive data.
+
 ### Key Features
 
-- **MCP server** with 113 tools — agents interact natively without parsing text
+- **MCP server** with 114 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
 - **Loom HTTP generation** — stable `/api/loom/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
@@ -86,6 +88,9 @@ The session hook runs `filigree session-context` at startup, giving the agent a 
 
 Filigree is designed for a specific niche: local-first, agent-driven development. It is not a replacement for GitHub Issues or Jira.
 
+**Is Filigree suitable for my project?**
+Use Filigree when your priority is plug-and-play agent coordination: install it, run `filigree init` and `filigree install`, open your agent, and immediately get project context, tickets, scanner findings, and local workflow tools. Do not use Filigree when the issue database, comments, scans, or integrations would contain secrets, regulated data, customer data, confidential business information, or anything that must be encrypted or access-controlled beyond normal local filesystem protections and HTTPS transport you provide yourself.
+
 | Feature | Filigree | GitHub Issues | Jira |
 |---------|----------|---------------|------|
 | Agent-native MCP tools | Yes | No | No |
@@ -115,6 +120,9 @@ The web dashboard supports switching between local projects, but Filigree has no
 **Mobile or browser-based access.**
 The dashboard runs on localhost. If stakeholders need to read or file issues from their phone or a machine where the project is not checked out, Filigree is not the right choice.
 
+**Secure or sensitive data.**
+Nothing in Filigree is encrypted or secured beyond ordinary local filesystem protections and standard HTTPS if you provide it. Do not use this system for secure or sensitive data.
+
 **The sweet spot**: one developer or agent team, one project, offline or airgapped, where you want structured workflow enforcement and agent-native tooling without standing up external infrastructure.
 
 ## Documentation
@@ -123,7 +131,7 @@ The dashboard runs on localhost. If stakeholders need to read or file issues fro
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
-| [MCP Server Reference](docs/mcp.md) | 113 MCP tools for agent-native interaction |
+| [MCP Server Reference](docs/mcp.md) | 114 MCP tools for agent-native interaction |
 | [Federation Contracts](docs/federation/contracts.md) | Classic and Loom HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |

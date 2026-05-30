@@ -598,6 +598,34 @@ def migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
     add_column(conn, "file_events", "actor", "TEXT", "''")
 
 
+def migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """v15 -> v16: Add event_seq column + rebuild the unique event index (2.1.0 §0.2).
+
+    Previously the events table's UNIQUE event index was
+    ``(issue_id, event_type, actor, old_value, new_value, created_at)``.
+    With ISO-second precision on ``created_at``, same-actor heartbeats in
+    the same second collided and silently lost events under ``INSERT OR
+    IGNORE`` — the silent-failure C3 surface from the 2.1.0 panel review.
+
+    The new column ``event_seq INTEGER NOT NULL DEFAULT 0`` is a
+    per-issue event ordering key. ``_record_event`` computes the next value inline under the
+    caller-held writer transaction via
+    ``COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
+    -1) + 1`` so bursts at the same second land distinct rows. Historical
+    rows default to 0; since the old behaviour was to silently drop the
+    collision, replaying history with all-zero ``event_seq`` is no worse
+    than the pre-v16 state.
+    """
+    add_column(conn, "events", "event_seq", "INTEGER NOT NULL", "0")
+    conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_events_dedup ON events("
+        "issue_id, event_type, actor, "
+        "coalesce(old_value, ''), coalesce(new_value, ''), "
+        "created_at, event_seq)"
+    )
+
+
 def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     """v14 -> v15: Add entity_associations table (ADR-029, Clarion B.7).
 
@@ -619,6 +647,116 @@ def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     add_index(conn, "ix_entity_assoc_entity", "entity_associations", ["clarion_entity_id"])
 
 
+def migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """v16 -> v17: Add ADR-014 file registry metadata columns."""
+    add_column(conn, "file_records", "content_hash", "TEXT NOT NULL", "''")
+    add_column(conn, "file_records", "registry_backend", "TEXT NOT NULL", "'local'")
+
+
+def migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """v17 -> v18: Stamp ``application_id`` on pre-app-id-aware filigree DBs.
+
+    Pure metadata hop, no DDL. Every filigree DB created before the app-id-aware
+    install lacks ``application_id`` (it was never written). v18 closes the gap
+    by writing it during the normal migration path so subsequent opens can
+    distinguish a filigree DB from a foreign SQLite file at the same path
+    (catalog §6.8 errata).
+
+    The PRAGMA write lands in the database header on page 1 and is journaled
+    like any other page change, so it participates in the migration's
+    transaction — rollback reverts ``application_id`` along with
+    ``user_version``. Idempotent under re-run.
+    """
+    from filigree.core import FILIGREE_APPLICATION_ID
+
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+
+
+def migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Loom §3.B).
+
+    A scanner may supply a stable per-finding ``fingerprint`` as the finding's
+    cross-run identity. When present it keys lifecycle/``seen_count`` instead of
+    the ``(file_id, scan_source, rule_id, line_start)`` heuristic — which is
+    itself unstable, since line attribution is clamped/cleared against file
+    length on ingest. The column is generic (any scanner may use it); absent
+    (empty string) preserves the legacy heuristic.
+
+    The pre-v19 unique dedup index is **non-partial** and constrains every row,
+    so it would reject two distinct-fingerprint findings at the same
+    file/rule/line (e.g. two taint paths into one sink). It is rebuilt as a
+    partial index over fingerprint-less rows, and a second partial unique index
+    keys fingerprint-bearing rows on ``(scan_source, fingerprint)``. Because the
+    column is ``NOT NULL DEFAULT ''``, the empty-string sentinel partitions all
+    rows cleanly between the two indexes. Idempotent under re-run.
+    """
+    add_column(conn, "scan_findings", "fingerprint", "TEXT NOT NULL", "''")
+    conn.execute("DROP INDEX IF EXISTS idx_scan_findings_dedup")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_scan_findings_dedup ON scan_findings("
+        "file_id, scan_source, rule_id, coalesce(line_start, -1)) "
+        "WHERE fingerprint = ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint ON scan_findings(scan_source, fingerprint) WHERE fingerprint <> ''"
+    )
+
+
+def migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """v19 -> v20: Add the ``deleted_issues`` tombstone table.
+
+    A hard delete (``FiligreeDB.delete_issue``) removes the issue row and all
+    of its child rows, including its ``events``. Because ``GET
+    /api/loom/changes`` (``get_events_since``) INNER JOINs ``issues``, a
+    hard-deleted issue is otherwise invisible to federation consumers — they
+    keep a stale reference forever. ``delete_issue`` writes a tombstone row
+    here in the same transaction, and the changes feed surfaces it as a
+    synthetic ``issue_deleted`` change record cursored on ``deleted_at`` so
+    incremental consumers see each deletion exactly once. Idempotent under
+    re-run.
+
+    ``seq`` is an AUTOINCREMENT key (not implicit rowid) so VACUUM never
+    renumbers it and the synthetic change-feed event_id stays stable across
+    ``filigree compact``. The DDL is byte-identical to the ``deleted_issues``
+    block in ``SCHEMA_SQL`` so fresh-create and migrated schemas are textually
+    the same.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deleted_issues (\n"
+        "    seq        INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+        "    issue_id   TEXT NOT NULL UNIQUE,\n"
+        "    title      TEXT NOT NULL DEFAULT '',\n"
+        "    type       TEXT NOT NULL DEFAULT '',\n"
+        "    deleted_at TEXT NOT NULL,\n"
+        "    deleted_by TEXT DEFAULT '',\n"
+        "    reason     TEXT DEFAULT ''\n"
+        ")"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq)")
+
+
+def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """v20 -> v21: Add ``deleted_issues.entity_ids`` (F5 entity-association amplifier).
+
+    ``delete_issue`` cascades ``entity_associations`` (``ON DELETE CASCADE``), so a
+    hard delete silently drops Filigree's side of every Clarion entity binding. The
+    v20 tombstone recorded only the issue identity, so the synthetic ``issue_deleted``
+    change record could not name *which* bindings the cascade removed — a consumer
+    that mirrors the reverse lookup (``list_associations_by_entity``) would keep
+    returning the deleted issue and surface a user-facing phantom (filigree-f3bf56554c).
+
+    This adds a JSON-array column holding the affected ``clarion_entity_id``s,
+    captured in ``delete_issue`` before the cascade and surfaced as
+    ``affected_entities`` on the change record. The column is ``NOT NULL DEFAULT
+    '[]'`` to match the fresh ``SCHEMA_SQL`` shape (SQLite permits a NOT NULL ADD
+    COLUMN when a non-NULL DEFAULT is supplied). Tombstones written under v20 get
+    ``'[]'`` — their cascaded bindings are already gone and unrecoverable, the
+    documented limitation of upgrading after the fact. Idempotent: ``add_column``
+    no-ops if the column already exists.
+    """
+    add_column(conn, "deleted_issues", "entity_ids", "TEXT NOT NULL", default="'[]'")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -634,6 +772,12 @@ MIGRATIONS: dict[int, MigrationFn] = {
     12: migrate_v12_to_v13,
     13: migrate_v13_to_v14,
     14: migrate_v14_to_v15,
+    15: migrate_v15_to_v16,
+    16: migrate_v16_to_v17,
+    17: migrate_v17_to_v18,
+    18: migrate_v18_to_v19,
+    19: migrate_v19_to_v20,
+    20: migrate_v20_to_v21,
 }
 
 
@@ -698,6 +842,7 @@ def apply_pending_migrations(conn: sqlite3.Connection, target_version: int) -> i
             raise MigrationError(version, version + 1, KeyError(msg))
 
         logger.info("Applying migration v%d → v%d ...", version, version + 1)
+        migration_failed = False
         try:
             # Disable FK enforcement so rebuild_table() can atomically
             # DROP + RENAME FK-referenced tables within the transaction.
@@ -715,13 +860,27 @@ def apply_pending_migrations(conn: sqlite3.Connection, target_version: int) -> i
             applied += 1
             logger.info("Migration v%d → v%d complete.", version, version + 1)
         except Exception as exc:
+            migration_failed = True
             conn.rollback()
             raise MigrationError(version, version + 1, exc) from exc
         finally:
             # Restore caller's original FK enforcement setting.
             # After commit/rollback the connection is in autocommit mode,
             # so this PRAGMA takes effect immediately.
-            conn.execute(f"PRAGMA foreign_keys={'ON' if original_fk else 'OFF'}")
+            try:
+                conn.execute(f"PRAGMA foreign_keys={'ON' if original_fk else 'OFF'}")
+            except sqlite3.Error as exc:
+                logger.error(
+                    "foreign_key_restore_failed",
+                    extra={
+                        "from_version": version,
+                        "to_version": version + 1,
+                        "original_foreign_keys": original_fk,
+                    },
+                    exc_info=True,
+                )
+                if not migration_failed:
+                    raise MigrationError(version, version + 1, exc) from exc
 
     return applied
 

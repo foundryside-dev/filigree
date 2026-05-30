@@ -10,7 +10,7 @@ hands ``content_hash_at_attach`` back at query time so the consumer
 (Clarion's ``issues_for`` MCP tool, lands separately in B.6) can
 compute drift.
 
-Three operations form the surface:
+Four operations form the surface:
 
 - :meth:`EntityAssociationsMixin.add_entity_association` — idempotent
   on ``(issue_id, entity_id)``; re-attach refreshes
@@ -20,22 +20,33 @@ Three operations form the surface:
   key, not a surrogate.
 - :meth:`EntityAssociationsMixin.list_entity_associations` — returns
   raw rows; drift detection is the consumer's job.
+- :meth:`EntityAssociationsMixin.list_associations_by_entity` — reverse
+  lookup from opaque entity ID to every bound issue in this project.
 """
 
 from __future__ import annotations
 
 from typing import TypedDict
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
+from filigree.types.core import (
+    ClarionEntityId,
+    ContentHash,
+    ISOTimestamp,
+    IssueId,
+    make_clarion_entity_id,
+    make_content_hash,
+    make_issue_id,
+)
 
 
 class EntityAssociationRow(TypedDict):
     """One row of the entity_associations table."""
 
-    issue_id: str
-    clarion_entity_id: str
-    content_hash_at_attach: str
-    attached_at: str
+    issue_id: IssueId
+    clarion_entity_id: ClarionEntityId
+    content_hash_at_attach: ContentHash
+    attached_at: ISOTimestamp
     attached_by: str
 
 
@@ -47,11 +58,13 @@ class EntityAssociationsMixin(DBMixinProtocol):
     method treats ``entity_id`` as an opaque string.
     """
 
+    @_retry_busy()
+    @_in_immediate_tx("add_entity_association")
     def add_entity_association(
         self,
-        issue_id: str,
-        entity_id: str,
-        content_hash: str,
+        issue_id: IssueId,
+        entity_id: ClarionEntityId,
+        content_hash: ContentHash,
         *,
         actor: str = "",
     ) -> EntityAssociationRow:
@@ -61,7 +74,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         Idempotent on ``(issue_id, entity_id)``. Re-attaching updates
         ``content_hash_at_attach`` and ``attached_at``; the original
         ``attached_by`` is preserved so the audit signal "who first
-        bound this issue to this entity" survives drift refreshes.
+        bound this issue to this entity" survives drift refreshes. First
+        attach records ``entity_association_added``; re-attach records
+        ``entity_association_refreshed`` with the prior and replacement
+        content hashes.
 
         Args:
             issue_id: Filigree issue ID. Must exist; verified by FK.
@@ -76,44 +92,45 @@ class EntityAssociationsMixin(DBMixinProtocol):
             The resulting row as an :class:`EntityAssociationRow`.
 
         Raises:
-            ValueError: ``issue_id`` doesn't exist, or arguments are
-                blank where they must not be.
+            KeyError: ``issue_id`` doesn't exist.
+            ValueError: arguments are blank or invalid where they must not be.
         """
+        issue_id = make_issue_id(issue_id)
+        entity_id = make_clarion_entity_id(entity_id)
+        content_hash = make_content_hash(content_hash)
         self._check_id_prefix(issue_id)
-        if not entity_id or not entity_id.strip():
-            msg = "entity_id must not be blank"
-            raise ValueError(msg)
-        if not content_hash or not content_hash.strip():
-            msg = "content_hash must not be blank"
-            raise ValueError(msg)
         # Validate issue exists (FK would catch this too, but the SQLite
         # error is less informative than a typed ValueError).
         row = self.conn.execute("SELECT 1 FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
-            msg = f'Issue not found: "{issue_id}". Verify the issue exists before attaching an entity.'
-            raise ValueError(msg)
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+
+        existing = self.conn.execute(
+            """
+            SELECT content_hash_at_attach
+            FROM entity_associations
+            WHERE issue_id = ? AND clarion_entity_id = ?
+            """,
+            (issue_id, entity_id),
+        ).fetchone()
 
         now = _now_iso()
-        try:
-            # Idempotent: insert-or-update on the composite PK. The
-            # excluded.* alias is the row we tried to insert; we
-            # deliberately do NOT update attached_by, preserving the
-            # original attribution.
-            self.conn.execute(
-                """
-                INSERT INTO entity_associations
-                    (issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(issue_id, clarion_entity_id) DO UPDATE SET
-                    content_hash_at_attach = excluded.content_hash_at_attach,
-                    attached_at = excluded.attached_at
-                """,
-                (issue_id, entity_id, content_hash, now, actor),
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        # Idempotent: insert-or-update on the composite PK. The
+        # excluded.* alias is the row we tried to insert; we
+        # deliberately do NOT update attached_by, preserving the
+        # original attribution.
+        self.conn.execute(
+            """
+            INSERT INTO entity_associations
+                (issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(issue_id, clarion_entity_id) DO UPDATE SET
+                content_hash_at_attach = excluded.content_hash_at_attach,
+                attached_at = excluded.attached_at
+            """,
+            (issue_id, entity_id, content_hash, now, actor),
+        )
 
         # Re-read the row — necessary because re-attach preserves the
         # original attached_by, which differs from the value we just
@@ -133,37 +150,63 @@ class EntityAssociationsMixin(DBMixinProtocol):
             # propagate.
             msg = f"entity_associations row for ({issue_id!r}, {entity_id!r}) vanished between insert and read"
             raise RuntimeError(msg)
+        if existing is None:
+            self._record_event(
+                str(issue_id),
+                "entity_association_added",
+                actor=actor,
+                new_value=str(entity_id),
+                comment=str(content_hash),
+            )
+        else:
+            self._record_event(
+                str(issue_id),
+                "entity_association_refreshed",
+                actor=actor,
+                old_value=existing["content_hash_at_attach"],
+                new_value=str(content_hash),
+                comment=str(entity_id),
+            )
         return EntityAssociationRow(
-            issue_id=stored["issue_id"],
-            clarion_entity_id=stored["clarion_entity_id"],
-            content_hash_at_attach=stored["content_hash_at_attach"],
-            attached_at=stored["attached_at"],
+            issue_id=IssueId(stored["issue_id"]),
+            clarion_entity_id=ClarionEntityId(stored["clarion_entity_id"]),
+            content_hash_at_attach=ContentHash(stored["content_hash_at_attach"]),
+            attached_at=ISOTimestamp(stored["attached_at"]),
             attached_by=stored["attached_by"],
         )
 
-    def remove_entity_association(self, issue_id: str, entity_id: str) -> bool:
+    @_retry_busy()
+    @_in_immediate_tx("remove_entity_association")
+    def remove_entity_association(
+        self,
+        issue_id: IssueId,
+        entity_id: ClarionEntityId,
+        *,
+        actor: str = "",
+    ) -> bool:
         """Remove the association identified by the composite key.
 
         Returns:
             ``True`` if a row was deleted, ``False`` if the association
             did not exist (idempotent — no-op on missing).
         """
+        issue_id = make_issue_id(issue_id)
+        entity_id = make_clarion_entity_id(entity_id)
         self._check_id_prefix(issue_id)
-        if not entity_id or not entity_id.strip():
-            msg = "entity_id must not be blank"
-            raise ValueError(msg)
-        try:
-            cursor = self.conn.execute(
-                "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
-                (issue_id, entity_id),
+        cursor = self.conn.execute(
+            "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
+            (issue_id, entity_id),
+        )
+        if cursor.rowcount > 0:
+            self._record_event(
+                str(issue_id),
+                "entity_association_removed",
+                actor=actor,
+                old_value=str(entity_id),
             )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
         return cursor.rowcount > 0
 
-    def list_entity_associations(self, issue_id: str) -> list[EntityAssociationRow]:
+    def list_entity_associations(self, issue_id: IssueId) -> list[EntityAssociationRow]:
         """Return all entity associations for an issue.
 
         Returns raw rows in attach-time order. Drift detection is the
@@ -172,6 +215,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         consumer's (Clarion's ``issues_for``) responsibility after
         fetching the rows.
         """
+        issue_id = make_issue_id(issue_id)
         self._check_id_prefix(issue_id)
         rows = self.conn.execute(
             """
@@ -184,16 +228,16 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ).fetchall()
         return [
             EntityAssociationRow(
-                issue_id=r["issue_id"],
-                clarion_entity_id=r["clarion_entity_id"],
-                content_hash_at_attach=r["content_hash_at_attach"],
-                attached_at=r["attached_at"],
+                issue_id=IssueId(r["issue_id"]),
+                clarion_entity_id=ClarionEntityId(r["clarion_entity_id"]),
+                content_hash_at_attach=ContentHash(r["content_hash_at_attach"]),
+                attached_at=ISOTimestamp(r["attached_at"]),
                 attached_by=r["attached_by"],
             )
             for r in rows
         ]
 
-    def list_associations_by_entity(self, entity_id: str) -> list[EntityAssociationRow]:
+    def list_associations_by_entity(self, entity_id: ClarionEntityId) -> list[EntityAssociationRow]:
         """Return all issue bindings for a given Clarion entity.
 
         The reverse of :meth:`list_entity_associations`: given an
@@ -209,9 +253,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         Raw rows are returned in attach-time order; drift detection is
         the consumer's job per ADR-029 §"Decision 3".
         """
-        if not entity_id or not entity_id.strip():
-            msg = "entity_id must not be blank"
-            raise ValueError(msg)
+        entity_id = make_clarion_entity_id(entity_id)
         rows = self.conn.execute(
             """
             SELECT issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by
@@ -223,10 +265,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ).fetchall()
         return [
             EntityAssociationRow(
-                issue_id=r["issue_id"],
-                clarion_entity_id=r["clarion_entity_id"],
-                content_hash_at_attach=r["content_hash_at_attach"],
-                attached_at=r["attached_at"],
+                issue_id=IssueId(r["issue_id"]),
+                clarion_entity_id=ClarionEntityId(r["clarion_entity_id"]),
+                content_hash_at_attach=ContentHash(r["content_hash_at_attach"]),
+                attached_at=ISOTimestamp(r["attached_at"]),
                 attached_by=r["attached_by"],
             )
             for r in rows

@@ -431,16 +431,16 @@ class TestInvalidTransitionParity:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 6b: claim on closed issue -> INVALID_TRANSITION
+# Scenario 6b: claim on closed issue -> VALIDATION
 #
 # claim_issue has two logical ValueError branches below the data layer:
 # assignee CAS failure (retryable CONFLICT) and status/category mismatch
-# (operator-action INVALID_TRANSITION). Pin the latter across surfaces.
+# (caller picked an unclaimable issue). Pin the latter across surfaces.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-class TestClosedClaimInvalidTransitionParity:
+class TestClosedClaimValidationParity:
     async def test_parity(
         self,
         dashboard_surface: AsyncClient,
@@ -455,7 +455,7 @@ class TestClosedClaimInvalidTransitionParity:
         dash_resp = await dashboard_surface.post(f"/api/issue/{dash_id}/claim", json={"assignee": "agent-1"})
         dash_env = dash_resp.json()
         _assert_flat_envelope(dash_env, surface="dashboard")
-        assert dash_resp.status_code == 409
+        assert dash_resp.status_code == 400
 
         mcp_issue = mcp_surface.create_issue("Closed claim")
         mcp_surface.close_issue(mcp_issue.id)
@@ -473,7 +473,7 @@ class TestClosedClaimInvalidTransitionParity:
         cli_env = _cli_envelope(cli_surface(cli_action))
         _assert_flat_envelope(cli_env, surface="cli")
 
-        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.INVALID_TRANSITION, (
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.VALIDATION, (
             f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
         )
 

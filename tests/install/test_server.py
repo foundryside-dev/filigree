@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import portalocker
 import pytest
 
+from filigree.core import CONF_FILENAME, FILIGREE_DIR_NAME, write_conf
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 from filigree.server import (
     ServerConfig,
@@ -190,6 +191,38 @@ class TestVersionEnforcement:
         with pytest.raises(ValueError, match="schema version"):
             register_project(filigree_dir)
 
+    def test_register_rejects_incompatible_relocated_schema(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Registration must validate the DB path declared by adjacent .filigree.conf."""
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        project_root = tmp_path / "future-relocated"
+        filigree_dir = project_root / FILIGREE_DIR_NAME
+        db_dir = project_root / "storage"
+        filigree_dir.mkdir(parents=True)
+        db_dir.mkdir()
+        (filigree_dir / "config.json").write_text(json.dumps({"prefix": "future", "version": 1}))
+        write_conf(
+            project_root / CONF_FILENAME,
+            {
+                "version": 1,
+                "project_name": "future",
+                "prefix": "future",
+                "db": "storage/track.db",
+            },
+        )
+        conn = sqlite3.connect(db_dir / "track.db")
+        conn.executescript(SCHEMA_SQL)
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(ValueError, match="schema version"):
+            register_project(filigree_dir)
+
+        assert read_server_config().projects == {}
+
     def test_register_project_tolerates_transient_lock(self, tmp_path: Path) -> None:
         """A transiently locked DB should not prevent project registration."""
         from unittest.mock import patch
@@ -242,6 +275,18 @@ class TestConfigValidation:
         config = read_server_config()
         assert config.port == 8377
 
+    def test_bool_port_returns_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = self._setup(tmp_path, monkeypatch)
+        (config_dir / "server.json").write_text('{"port": true}')
+        config = read_server_config()
+        assert config.port == 8377
+
+    def test_fractional_port_returns_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = self._setup(tmp_path, monkeypatch)
+        (config_dir / "server.json").write_text('{"port": 9000.5}')
+        config = read_server_config()
+        assert config.port == 8377
+
     def test_out_of_range_port_returns_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = self._setup(tmp_path, monkeypatch)
         (config_dir / "server.json").write_text('{"port": 99999}')
@@ -272,6 +317,12 @@ class TestConfigValidation:
         config = read_server_config()
         assert "/good" in config.projects
         assert "/bad" not in config.projects
+
+    def test_project_values_with_non_string_prefix_dropped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = self._setup(tmp_path, monkeypatch)
+        (config_dir / "server.json").write_text('{"projects": {"/good": {"prefix": "a"}, "/bad": {"prefix": ["not", "hashable"]}}}')
+        config = read_server_config()
+        assert config.projects == {"/good": {"prefix": "a"}}
 
     def test_null_json_returns_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dir = self._setup(tmp_path, monkeypatch)
@@ -609,6 +660,27 @@ class TestDaemonLifecycle:
         release_daemon_pid_if_owned(123)
         assert not pid_file.exists()
 
+    def test_release_daemon_pid_if_owned_leaves_pid_on_rename_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        pid_file = config_dir / "server.pid"
+        pid_file.write_text(json.dumps({"pid": 123, "cmd": "filigree"}))
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", pid_file)
+
+        original_rename = Path.rename
+
+        def _rename(self: Path, target: Path) -> Path:
+            if self == pid_file:
+                raise OSError("permission denied")
+            return original_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", _rename)
+
+        from filigree.server import release_daemon_pid_if_owned
+
+        release_daemon_pid_if_owned(123)
+        assert pid_file.exists()
+
 
 class TestClaimDaemonLocking:
     """Bug filigree-f0707e: claim_current_process_as_daemon must acquire file lock."""
@@ -667,6 +739,32 @@ class TestStopDaemonEarlyReturns:
         assert result.success
         assert "not running" in result.message.lower()
         assert not pid_file.exists(), "PID file must be cleaned up when process is dead"
+
+    def test_stop_daemon_acquires_server_lock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """stop_daemon must serialize PID-file read/cleanup with start/claim writers."""
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        pid_file = config_dir / "server.pid"
+        pid_file.write_text(json.dumps({"pid": 99999, "cmd": "filigree"}))
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", pid_file)
+        monkeypatch.setattr("filigree.server.is_pid_alive", lambda pid: False)
+
+        lock_ops: list[int] = []
+        original_lock = portalocker.lock
+
+        def tracking_lock(fd: object, op: int) -> None:
+            lock_ops.append(op)
+            original_lock(fd, op)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("filigree.server.portalocker.lock", tracking_lock)
+
+        from filigree.server import stop_daemon
+
+        result = stop_daemon()
+
+        assert result.success
+        assert portalocker.LOCK_EX in lock_ops
 
 
 @pytest.mark.slow

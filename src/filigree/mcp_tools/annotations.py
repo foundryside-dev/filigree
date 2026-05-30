@@ -13,7 +13,16 @@ from filigree.core import (
     VALID_ANNOTATION_STATUSES,
     VALID_ANNOTATION_TARGET_TYPES,
 )
-from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range, _validate_str
+from filigree.mcp_tools.common import (
+    _list_response,
+    _parse_args,
+    _registry_error_text,
+    _text,
+    _validate_actor,
+    _validate_int_range,
+    _validate_str,
+)
+from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.inputs import (
     AnnotateFileArgs,
@@ -283,6 +292,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 
 def _db_error(exc: Exception, fallback: str) -> list[TextContent]:
+    if isinstance(exc, (RegistryResolutionError, RegistryUnavailableError)):
+        return _registry_error_text(exc, action="creating annotation")
     if isinstance(exc, KeyError):
         return _text(ErrorResponse(error=f"Not found: {exc.args[0]}", code=ErrorCode.NOT_FOUND))
     return _text(ErrorResponse(error=str(exc) or fallback, code=ErrorCode.VALIDATION))
@@ -313,7 +324,7 @@ async def _handle_annotate_file(arguments: dict[str, Any]) -> list[TextContent]:
         )
         _refresh_summary()
         return _text(result)
-    except (KeyError, ValueError) as exc:
+    except (KeyError, RegistryResolutionError, RegistryUnavailableError, ValueError) as exc:
         return _db_error(exc, "Could not create annotation")
 
 

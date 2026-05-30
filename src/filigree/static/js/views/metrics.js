@@ -97,17 +97,24 @@ function renderAgentWorkload(container) {
       const pct = (agentLoad[a] / maxLoad) * 100;
       return (
         '<div class="flex items-center gap-2 mb-1">' +
-        '<span class="text-xs w-24 truncate" style="color:var(--text-primary)">' + escHtml(a) + "</span>" +
+        '<span class="text-xs w-24 truncate" style="color:var(--text-primary)">' +
+        escHtml(a) +
+        "</span>" +
         '<div class="flex-1 h-4 rounded overflow-hidden" style="background:var(--surface-base)">' +
-        '<div class="h-full rounded" style="width:' + pct + '%;background:var(--accent)"></div></div>' +
-        '<span class="text-xs w-6 text-right" style="color:var(--text-secondary)">' + agentLoad[a] + "</span></div>"
+        '<div class="h-full rounded" style="width:' +
+        pct +
+        '%;background:var(--accent)"></div></div>' +
+        '<span class="text-xs w-6 text-right" style="color:var(--text-secondary)">' +
+        agentLoad[a] +
+        "</span></div>"
       );
     })
     .join("");
   container.innerHTML +=
     '<div class="rounded p-4 mt-4" style="background:var(--surface-raised);border:1px solid var(--border-default)">' +
     '<div class="text-xs font-medium mb-2" style="color:var(--text-secondary)">Agent Workload (Active WIP)</div>' +
-    agentHtml + "</div>";
+    agentHtml +
+    "</div>";
 }
 
 function renderObservationStats(container, obsStats) {
@@ -118,21 +125,34 @@ function renderObservationStats(container, obsStats) {
     '<div class="rounded p-4 mt-4" style="background:var(--surface-raised);border:1px solid var(--border-default)">' +
     '<div class="text-xs font-medium mb-3" style="color:var(--text-secondary)">Observations</div>' +
     '<div class="grid grid-cols-4 gap-3">' +
-    '<div><div class="text-lg font-bold" style="color:var(--accent)">' + escHtml(obsStats.count) + '</div>' +
+    '<div><div class="text-lg font-bold" style="color:var(--accent)">' +
+    escHtml(obsStats.count) +
+    "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">pending</div></div>' +
-    '<div><div class="text-lg font-bold ' + staleColor + '">' + escHtml(obsStats.stale_count) + '</div>' +
+    '<div><div class="text-lg font-bold ' +
+    staleColor +
+    '">' +
+    escHtml(obsStats.stale_count) +
+    "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">stale (&gt;48h)</div></div>' +
-    '<div><div class="text-lg font-bold ' + expiringColor + '">' + escHtml(obsStats.expiring_soon_count) + '</div>' +
+    '<div><div class="text-lg font-bold ' +
+    expiringColor +
+    '">' +
+    escHtml(obsStats.expiring_soon_count) +
+    "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">expiring &lt;24h</div></div>' +
-    '<div><div class="text-lg font-bold" style="color:var(--text-primary)">' + escHtml(obsStats.oldest_hours != null ? obsStats.oldest_hours + 'h' : '?') + '</div>' +
+    '<div><div class="text-lg font-bold" style="color:var(--text-primary)">' +
+    escHtml(obsStats.oldest_hours != null ? obsStats.oldest_hours + "h" : "?") +
+    "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">oldest</div></div>' +
-    '</div></div>';
+    "</div></div>";
 }
 
 async function renderActivityEmbed(container) {
   const activityBox = document.createElement("div");
   activityBox.className = "rounded mt-4";
-  activityBox.style.cssText = "background:var(--surface-raised);border:1px solid var(--border-default)";
+  activityBox.style.cssText =
+    "background:var(--surface-raised);border:1px solid var(--border-default)";
   activityBox.innerHTML =
     '<div class="text-xs font-medium px-4 py-3" style="color:var(--text-secondary)">Recent Activity</div>' +
     '<div id="activityEmbedContent" class="px-4 pb-3"></div>';

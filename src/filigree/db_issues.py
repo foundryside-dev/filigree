@@ -7,7 +7,6 @@ Python's MRO when composed into ``FiligreeDB``.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re as _re
@@ -16,11 +15,30 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from filigree.db_base import AGE_BUCKETS, DBMixinProtocol, _escape_like, _escape_like_chars, _now_iso, _safe_json_loads
+from filigree.db_base import (
+    AGE_BUCKETS,
+    DBMixinProtocol,
+    _escape_like,
+    _escape_like_chars,
+    _in_immediate_tx,
+    _now_iso,
+    _retry_busy,
+    _safe_json_loads,
+)
 from filigree.models import Issue
-from filigree.templates import TransitionResult, validate_field_pattern
-from filigree.types.api import BatchFailure, ErrorCode, classify_value_error
+from filigree.templates import TransitionOption, TransitionResult, validate_field_pattern
+from filigree.types.api import (
+    AmbiguousTransitionError,
+    BatchFailure,
+    ClaimConflictError,
+    ErrorCode,
+    InvalidTransitionError,
+    IssueDeletionRefusedError,
+    TransitionHint,
+    classify_value_error,
+)
 from filigree.types.core import StatusCategory
+from filigree.types.files import DeleteIssueResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,6 +47,31 @@ logger = logging.getLogger(__name__)
 
 _REOPEN_CLEAR_FIELDS = frozenset({"close_reason"})
 DEFAULT_CLAIM_LEASE_HOURS = 48
+
+
+class _StartCandidateUnclaimableError(Exception):
+    """Internal sentinel: ``_start_work_locked``'s claim phase failed.
+
+    Wraps the original claim-conflict or vanished-row error from ``claim_issue`` so
+    the ``start_next_work`` iterator can distinguish "try a different
+    candidate" from a user-supplied error in the transition phase (which
+    propagates unchanged). Outside the iteration loop, ``start_work``
+    unwraps the sentinel and re-raises the original exception to preserve
+    its composed start-work public API contract.
+    """
+
+
+class _ClaimCandidateVanishedError(Exception):
+    """Internal sentinel for a candidate deleted between discovery and claim."""
+
+
+_CLAIM_STATUS_MISMATCH_MARKER = "expected open-category state or wip-category handoff state"
+
+
+def _is_claim_status_mismatch(exc: ValueError) -> bool:
+    """Return True when claim_issue reports a stale/non-claimable candidate."""
+    return _CLAIM_STATUS_MISMATCH_MARKER in str(exc)
+
 
 _LIST_ISSUE_SORT_COLUMNS = {
     "created_at": "i.created_at",
@@ -67,6 +110,19 @@ def _transition_data_warnings(result: TransitionResult) -> list[str]:
     if not warnings and result.enforcement == "soft" and result.missing_fields:
         warnings.append(f"Missing recommended fields: {', '.join(result.missing_fields)}")
     return warnings
+
+
+def _transition_hints(options: list[TransitionOption]) -> list[TransitionHint]:
+    """Return the compact structured transition hints used in error envelopes."""
+    return [{"to": t.to, "category": t.category, "ready": t.ready} for t in options]
+
+
+def _log_transition_enrichment_failure(issue_id: str, exc: Exception) -> None:
+    """Log a best-effort transition-hint enrichment failure at the right level."""
+    if isinstance(exc, KeyError):
+        logger.debug("Issue %s disappeared while enriching invalid-transition error", issue_id, exc_info=True)
+        return
+    logger.warning("failed to enrich invalid-transition error for %s", issue_id, exc_info=True)
 
 
 def _fields_for_reopen(fields: dict[str, Any]) -> dict[str, Any]:
@@ -211,6 +267,22 @@ def _validate_string_list(value: object, name: str) -> None:
         raise TypeError(msg)
 
 
+def _validate_fields_payload(fields: object) -> None:
+    """Validate the caller-supplied custom-fields payload shape."""
+    if fields is None:
+        return
+    if not isinstance(fields, dict):
+        msg = "fields must be a dict"
+        raise TypeError(msg)
+    for key in fields:
+        if not isinstance(key, str):
+            msg = "field keys must be strings"
+            raise TypeError(msg)
+        if not key.strip():
+            msg = "Field key cannot be empty"
+            raise ValueError(msg)
+
+
 def _normalize_assignee(value: object) -> str:
     """Strip whitespace from an assignee value; whitespace-only becomes ``""`` (unassigned).
 
@@ -237,9 +309,9 @@ def _check_expected_assignee(
     When ``expected_assignee`` is omitted but ``actor`` is present and the issue
     is currently held, the actor becomes the expected holder by default
     (ADR-008). Actorless writes to held issues remain permissive for local/manual
-    workflows. When set or derived, raises ``ValueError`` with a message shaped
-    like the heartbeat / reclaim / release-claim CONFLICT envelope so the MCP /
-    CLI / dashboard surfaces classify it as ``CONFLICT`` consistently.
+    workflows. When set or derived, raises ``ClaimConflictError`` carrying the
+    observed and expected assignee fields so the MCP / CLI / dashboard surfaces
+    can render a structured ``CONFLICT`` envelope without message parsing.
 
     The compare normalises whitespace via ``_normalize_assignee`` so callers
     don't have to think about leading/trailing whitespace differences.
@@ -260,8 +332,7 @@ def _check_expected_assignee(
         return
     expected = _normalize_assignee(expected_assignee)
     if current != expected:
-        msg = f"Cannot operate on {issue_id}: assigned to '{current}' (expected '{expected}')"
-        raise ValueError(msg)
+        raise ClaimConflictError(issue_id, observed=current, expected=expected)
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -281,6 +352,23 @@ def _sanitize_fts_query(query: str) -> str:
 # hyphens and bracket-like delimiters wreck cluster prefixes that agents
 # rely on for self-discovery (``[mcp-review-e]``, ``cluster-foo``, etc.).
 _FTS_LITERAL_HINT_RE = _re.compile(r"[-\[\](){}]")
+
+
+def _is_fts_unavailable_error(exc: sqlite3.OperationalError) -> bool:
+    """Return True when an FTS query failed because FTS5 is unavailable.
+
+    Python's sqlite3 exposes both missing FTS tables and missing FTS5 modules
+    as SQLITE_ERROR, so use the error code when SQLite provides it. Synthetic
+    or older-driver OperationalErrors may not carry ``sqlite_errorcode``; keep
+    a narrow compatibility fallback for the historical messages.
+    """
+    message = str(exc).lower()
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        if (code & 0xFF) != sqlite3.SQLITE_ERROR:
+            return False
+        return "no such table: issues_fts" in message or "no such module: fts" in message
+    return "no such table: issues_fts" in message or "no such module: fts" in message
 
 
 def _query_uses_literal_substring(query: str) -> bool:
@@ -398,6 +486,8 @@ class IssuesMixin(DBMixinProtocol):
 
     # -- Issue CRUD ----------------------------------------------------------
 
+    @_retry_busy()
+    @_in_immediate_tx("create_issue")
     def create_issue(
         self,
         title: str,
@@ -412,25 +502,27 @@ class IssuesMixin(DBMixinProtocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        _skip_begin: bool = False,
     ) -> Issue:
+        if not isinstance(title, str):
+            msg = "title must be a string"
+            raise TypeError(msg)
         if not title or not title.strip():
             msg = "Title cannot be empty"
             raise ValueError(msg)
         _validate_priority_value(priority)
-        if fields is not None and not isinstance(fields, dict):
-            msg = "fields must be a dict"
-            raise TypeError(msg)
-        if fields:
-            for k in fields:
-                if not k or not k.strip():
-                    msg = "Field key cannot be empty"
-                    raise ValueError(msg)
+        _validate_fields_payload(fields)
         # Validate container shape before iterating — a bare str would otherwise
         # be iterated character-by-character (see filigree-0b4fcb6d30).
         if labels is not None:
             _validate_string_list(labels, "labels")
         if deps is not None:
             _validate_string_list(deps, "deps")
+        if parent_id:
+            self._check_id_prefix(parent_id)
+        if deps:
+            for dep_id in deps:
+                self._check_id_prefix(dep_id)
         assignee = _normalize_assignee(assignee)
         if labels:
             labels = [self._validate_label_name(label) for label in labels]
@@ -469,51 +561,45 @@ class IssuesMixin(DBMixinProtocol):
         # Determine initial state from template
         initial_state = self.templates.get_initial_state(type)
 
-        try:
-            self.conn.execute(
-                "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "
-                "claimed_at, last_heartbeat_at, claim_expires_at, created_at, updated_at, description, notes, fields) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    issue_id,
-                    title,
-                    initial_state,
-                    priority,
-                    type,
-                    parent_id,
-                    assignee,
-                    claimed_at,
-                    last_heartbeat_at,
-                    claim_expires_at,
-                    now,
-                    now,
-                    description,
-                    notes,
-                    json.dumps(fields),
-                ),
-            )
+        self.conn.execute(
+            "INSERT INTO issues (id, title, status, priority, type, parent_id, assignee, "
+            "claimed_at, last_heartbeat_at, claim_expires_at, created_at, updated_at, description, notes, fields) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                issue_id,
+                title,
+                initial_state,
+                priority,
+                type,
+                parent_id,
+                assignee,
+                claimed_at,
+                last_heartbeat_at,
+                claim_expires_at,
+                now,
+                now,
+                description,
+                notes,
+                json.dumps(fields),
+            ),
+        )
 
-            self._record_event(issue_id, "created", actor=actor, new_value=title)
+        self._record_event(issue_id, "created", actor=actor, new_value=title)
 
-            if labels:
-                labels = list(dict.fromkeys(labels))  # explicit dedup, preserve order
-                for label in labels:
-                    self.conn.execute(
-                        "INSERT INTO labels (issue_id, label) VALUES (?, ?)",
-                        (issue_id, label),
-                    )
+        if labels:
+            labels = list(dict.fromkeys(labels))  # explicit dedup, preserve order
+            for label in labels:
+                self.conn.execute(
+                    "INSERT INTO labels (issue_id, label) VALUES (?, ?)",
+                    (issue_id, label),
+                )
 
-            if deps:
-                for dep_id in deps:
-                    self.conn.execute(
-                        "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
-                        (issue_id, dep_id, now),
-                    )
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        if deps:
+            for dep_id in deps:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
+                    (issue_id, dep_id, now),
+                )
 
         return self.get_issue(issue_id)
 
@@ -531,30 +617,39 @@ class IssuesMixin(DBMixinProtocol):
             raise KeyError(msg)
         return issues[0]
 
+    def _chunk_issue_ids_for_sqlite(self, issue_ids: list[str], *, extra_params: int = 0) -> list[list[str]]:
+        variable_limit = self.conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        chunk_size = max(1, variable_limit - extra_params)
+        return [issue_ids[start : start + chunk_size] for start in range(0, len(issue_ids), chunk_size)]
+
     def _build_issues_batch(self, issue_ids: list[str]) -> list[Issue]:
         """Build multiple Issues efficiently with batched queries (eliminates N+1)."""
         if not issue_ids:
             return []
 
-        placeholders = ",".join("?" * len(issue_ids))
-
         # 1. Fetch all issue rows
         rows_by_id: dict[str, sqlite3.Row] = {}
-        for r in self.conn.execute(f"SELECT * FROM issues WHERE id IN ({placeholders})", issue_ids).fetchall():
-            rows_by_id[r["id"]] = r
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT * FROM issues WHERE id IN ({placeholders})", chunk).fetchall():
+                rows_by_id[r["id"]] = r
 
         # 2. Batch fetch labels
         labels_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(f"SELECT issue_id, label FROM labels WHERE issue_id IN ({placeholders})", issue_ids).fetchall():
-            labels_by_id[r["issue_id"]].append(r["label"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT issue_id, label FROM labels WHERE issue_id IN ({placeholders})", chunk).fetchall():
+                labels_by_id[r["issue_id"]].append(r["label"])
 
         # 3. Batch fetch "blocks" — issues blocked BY these IDs (where depends_on_id = this issue)
         blocks_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(
-            f"SELECT depends_on_id, issue_id FROM dependencies WHERE depends_on_id IN ({placeholders})",
-            issue_ids,
-        ).fetchall():
-            blocks_by_id[r["depends_on_id"]].append(r["issue_id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT depends_on_id, issue_id FROM dependencies WHERE depends_on_id IN ({placeholders})",
+                chunk,
+            ).fetchall():
+                blocks_by_id[r["depends_on_id"]].append(r["issue_id"])
 
         # 4. Batch fetch "blocked_by" — only open (non-done, non-archived) blockers.
         # Archived blockers must not appear here (filigree-42045dd065): archive_closed
@@ -569,29 +664,35 @@ class IssuesMixin(DBMixinProtocol):
             include_archived=True,
         )
         blocked_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(
-            f"SELECT d.issue_id, d.depends_on_id FROM dependencies d "
-            f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-            f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql})",
-            [*issue_ids, *blocker_done_params],
-        ).fetchall():
-            blocked_by_id[r["issue_id"]].append(r["depends_on_id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT d.issue_id, d.depends_on_id FROM dependencies d "
+                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql})",
+                [*chunk, *blocker_done_params],
+            ).fetchall():
+                blocked_by_id[r["issue_id"]].append(r["depends_on_id"])
 
         # 5. Batch fetch children
         children_by_id: dict[str, list[str]] = {iid: [] for iid in issue_ids}
-        for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", issue_ids).fetchall():
-            children_by_id[r["parent_id"]].append(r["id"])
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", chunk).fetchall():
+                children_by_id[r["parent_id"]].append(r["id"])
 
         # 6. Batch compute open blocker counts — same blocker semantics as step 4.
         open_blockers_by_id: dict[str, int] = dict.fromkeys(issue_ids, 0)
-        for r in self.conn.execute(
-            f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
-            f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-            f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
-            f"GROUP BY d.issue_id",
-            [*issue_ids, *blocker_done_params],
-        ).fetchall():
-            open_blockers_by_id[r["issue_id"]] = r["cnt"]
+        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
+            placeholders = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
+                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
+                f"GROUP BY d.issue_id",
+                [*chunk, *blocker_done_params],
+            ).fetchall():
+                open_blockers_by_id[r["issue_id"]] = r["cnt"]
 
         # Build Issue objects preserving input order
         result: list[Issue] = []
@@ -635,6 +736,8 @@ class IssuesMixin(DBMixinProtocol):
             )
         return result
 
+    @_retry_busy()
+    @_in_immediate_tx("update_issue")
     def update_issue(
         self,
         issue_id: str,
@@ -649,20 +752,85 @@ class IssuesMixin(DBMixinProtocol):
         fields: dict[str, Any] | None = None,
         actor: str = "",
         expected_assignee: str | None = None,
-        _skip_transition_check: bool = False,
+        force_overwrite_corrupt: bool = False,
+        backward: bool = False,
+        _skip_begin: bool = False,
     ) -> Issue:
+        """Update issue fields, workflow status, assignment, and parent links.
+
+        The write runs in an IMMEDIATE transaction and applies a compare-and-swap
+        guard when the issue is already assigned, so a concurrent reassignment
+        cannot be silently overwritten. Status changes are validated against the
+        issue type's workflow template; pass ``backward=True`` only for declared
+        reverse/escape transitions such as force-close, reopen, or release.
+
+        Args:
+            issue_id: Issue identifier to mutate. The id prefix must belong to
+                this project for write operations.
+            title: Replacement title. Blank titles are rejected.
+            status: Target workflow state. When it differs from the current
+                state, template transition and field-gate validation run before
+                any write.
+            priority: Replacement priority value.
+            assignee: Replacement assignee. Non-empty values refresh claim
+                timestamps; empty values clear claim metadata.
+            description: Replacement description.
+            notes: Replacement notes.
+            parent_id: Replacement parent id, or ``""`` to clear the parent.
+            fields: Field delta to merge into the existing field object.
+            actor: Audit identity. If ``expected_assignee`` is omitted and the
+                issue is held, this also acts as the expected holder.
+            expected_assignee: Optional compare-and-swap holder precondition.
+                Use this when a caller has already observed ownership and wants
+                stale ownership writes to fail with ``ClaimConflictError``.
+            force_overwrite_corrupt: When the stored ``fields`` JSON is corrupt,
+                refuse merges by default. Set this to replace the corrupt value
+                entirely and record a ``corrupt_fields_overwritten`` event.
+            backward: Validate a status change against declared reverse/escape
+                transitions and audit the shortcut with ``transition_forced``.
+
+        Returns:
+            The freshly loaded issue. Soft transition data warnings are also
+            copied onto ``Issue.data_warnings`` for callers that need to surface
+            non-blocking template warnings.
+
+        Raises:
+            KeyError: The issue or requested parent issue does not exist.
+            WrongProjectError: The write targets an id from another project.
+            TypeError: ``fields`` is provided but is not a dictionary.
+            ValueError: Input validation fails, including invalid status,
+                priority, title, parent cycle, field pattern, uniqueness, or a
+                corrupt-field merge without ``force_overwrite_corrupt``.
+            ClaimConflictError: The observed or expected assignee no longer
+                matches at validation or write time.
+            InvalidTransitionError: The requested transition is not declared or
+                is blocked by required fields. ``valid_transitions`` is included
+                when template context is available.
+        """
         self._check_id_prefix(issue_id)
         current = self.get_issue(issue_id)
         # Claim-aware precondition: explicit expected_assignee still behaves
         # like a compare-and-swap guard, while ADR-008 defaults the expected
         # holder to actor when actor is present and the issue is held.
         _check_expected_assignee(issue_id, expected_assignee, current.assignee, actor=actor)
+        # 2.1.0 §0.1: capture the observed assignee at SELECT time. When
+        # non-empty the WHERE clause below adds ``AND assignee = ?`` so a
+        # concurrent reassignment between this read and the write below
+        # closes the race instead of silently overwriting the new claimant's
+        # state. Matches the pattern already used by claim_issue:1080,
+        # heartbeat_work:1332, reclaim_issue:1438.
+        _observed_assignee = current.assignee or ""
         now = _now_iso()
 
         # --- Validate all inputs BEFORE any writes to prevent partial commits ---
-        if fields is not None and not isinstance(fields, dict):
-            msg = "fields must be a dict"
-            raise TypeError(msg)
+        _validate_fields_payload(fields)
+        corrupt_fields_raw: Any | None = None
+        if fields is not None and getattr(current.fields, "_filigree_corrupt", False):
+            if not force_overwrite_corrupt:
+                msg = "Refusing to merge fields: current value is corrupt; pass force_overwrite_corrupt=True to overwrite"
+                raise ValueError(msg)
+            raw_row = self.conn.execute("SELECT fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            corrupt_fields_raw = raw_row["fields"] if raw_row is not None else None
         if title is not None and not title.strip():
             # filigree-365dff403e: mirror create_issue's invariant on update.
             msg = "Title cannot be empty"
@@ -676,6 +844,7 @@ class IssuesMixin(DBMixinProtocol):
             if parent_id == issue_id:
                 msg = f"Issue {issue_id} cannot be its own parent"
                 raise ValueError(msg)
+            self._check_id_prefix(parent_id)
             self._validate_parent_id(parent_id)
             if self._would_create_parent_cycle(issue_id, parent_id):
                 msg = f"Setting parent_id to '{parent_id}' would create a circular parent chain"
@@ -687,28 +856,42 @@ class IssuesMixin(DBMixinProtocol):
         if status is not None and status != current.status:
             self._validate_status(status, current.type)
 
-            if not _skip_transition_check:
-                # Atomic transition-with-fields: validate merged fields against target state
-                merged_fields = {**current.fields}
-                if fields is not None:
-                    merged_fields.update(fields)
+            # Atomic transition-with-fields: validate merged fields against target state.
+            # ``backward=True`` routes through the declared reverse/escape edge
+            # table, preserving auditability without the old skip-check bypass.
+            merged_fields = {**current.fields}
+            if fields is not None:
+                merged_fields.update(fields)
 
-                tpl = self.templates.get_type(current.type)
-                if tpl is not None:
-                    _transition_result = self.templates.validate_transition(current.type, current.status, status, merged_fields)
-                    if not _transition_result.allowed:
-                        if _transition_result.missing_fields:
-                            missing_str = ", ".join(_transition_result.missing_fields)
-                            msg = (
-                                f"Cannot transition '{current.status}' -> '{status}' for type "
-                                f"'{current.type}': missing required fields: {missing_str}"
-                            )
-                        else:
-                            msg = (
-                                f"Transition '{current.status}' -> '{status}' is not allowed for type "
-                                f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
-                            )
-                        raise ValueError(msg)
+            tpl = self.templates.get_type(current.type)
+            if tpl is not None:
+                _transition_result = self.templates.validate_transition(
+                    current.type,
+                    current.status,
+                    status,
+                    merged_fields,
+                    backward=backward,
+                )
+                if not _transition_result.allowed:
+                    valid_transitions = _transition_hints(self.templates.get_valid_transitions(current.type, current.status, merged_fields))
+                    if _transition_result.missing_fields:
+                        missing_str = ", ".join(_transition_result.missing_fields)
+                        msg = (
+                            f"Cannot transition '{current.status}' -> '{status}' for type "
+                            f"'{current.type}': missing required fields: {missing_str}"
+                        )
+                    else:
+                        msg = (
+                            f"Transition '{current.status}' -> '{status}' is not allowed for type "
+                            f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
+                        )
+                    raise InvalidTransitionError(
+                        current.type,
+                        current.status,
+                        to_state=status,
+                        valid_transitions=valid_transitions,
+                        message=msg,
+                    )
 
         # Validate field patterns and uniqueness for incoming fields
         if fields is not None:
@@ -741,146 +924,185 @@ class IssuesMixin(DBMixinProtocol):
                     _close_reason_only = True
                     _close_reason_comment = str(fields.get("close_reason", ""))
 
-        try:
-            if title is not None and title != current.title:
-                self._record_event(issue_id, "title_changed", actor=actor, old_value=current.title, new_value=title)
-                updates.append("title = ?")
-                params.append(title)
+        if title is not None and title != current.title:
+            self._record_event(issue_id, "title_changed", actor=actor, old_value=current.title, new_value=title)
+            updates.append("title = ?")
+            params.append(title)
 
-            if status is not None and status != current.status:
-                # Record soft-enforcement warnings from cached validation result
-                if _transition_result is not None:
-                    _transition_warnings = _transition_data_warnings(_transition_result)
-                    for warning in _transition_warnings:
-                        self._record_event(
-                            issue_id,
-                            "transition_warning",
-                            actor=actor,
-                            old_value=current.status,
-                            new_value=status,
-                            comment=warning,
-                        )
+        if status is not None and status != current.status:
+            # Record soft-enforcement warnings from cached validation result
+            if _transition_result is not None:
+                _transition_warnings = _transition_data_warnings(_transition_result)
+                for warning in _transition_warnings:
+                    self._record_event(
+                        issue_id,
+                        "transition_warning",
+                        actor=actor,
+                        old_value=current.status,
+                        new_value=status,
+                        comment=warning,
+                    )
 
+            # 2.1.0 §4.1: when the declared backward/escape workflow lane is used
+            # the audit trail records a ``transition_forced`` event
+            # alongside the ``status_changed`` so reviewers can find every
+            # workflow shortcut. Sequenced before the status_changed event so
+            # the chain is causally ordered when read top-to-bottom.
+            if backward:
                 self._record_event(
                     issue_id,
-                    "status_changed",
+                    "transition_forced",
                     actor=actor,
                     old_value=current.status,
                     new_value=status,
-                    comment=_close_reason_comment,
                 )
-                updates.append("status = ?")
-                params.append(status)
 
-                # Set closed_at when entering a done-category state
-                status_cat = self.templates.get_category(current.type, status)
-                is_done = (status_cat or self._infer_status_category(current.type, status)) == "done"
+            self._record_event(
+                issue_id,
+                "status_changed",
+                actor=actor,
+                old_value=current.status,
+                new_value=status,
+                comment=_close_reason_comment,
+            )
+            updates.append("status = ?")
+            params.append(status)
 
-                if is_done:
-                    updates.append("closed_at = ?")
-                    params.append(now)
-                else:
-                    # Clear closed_at when leaving a done-category state
-                    old_cat = self.templates.get_category(current.type, current.status)
-                    if (old_cat or self._infer_status_category(current.type, current.status)) == "done":
-                        updates.append("closed_at = NULL")
+            # Set closed_at when entering a done-category state
+            status_cat = self.templates.get_category(current.type, status)
+            is_done = (status_cat or self._infer_status_category(current.type, status)) == "done"
 
-            if priority is not None and priority != current.priority:
-                self._record_event(
-                    issue_id,
-                    "priority_changed",
-                    actor=actor,
-                    old_value=str(current.priority),
-                    new_value=str(priority),
-                )
-                updates.append("priority = ?")
-                params.append(priority)
-
-            if assignee is not None and assignee != current.assignee:
-                self._record_event(issue_id, "assignee_changed", actor=actor, old_value=current.assignee, new_value=assignee)
-                updates.append("assignee = ?")
-                params.append(assignee)
-                if assignee:
-                    updates.extend(["claimed_at = ?", "last_heartbeat_at = ?", "claim_expires_at = ?"])
-                    params.extend([now, now, _claim_expiry(now)])
-                else:
-                    updates.extend(["claimed_at = NULL", "last_heartbeat_at = NULL", "claim_expires_at = NULL"])
-
-            if description is not None and description != current.description:
-                self._record_event(
-                    issue_id,
-                    "description_changed",
-                    actor=actor,
-                    old_value=current.description,
-                    new_value=description,
-                )
-                updates.append("description = ?")
-                params.append(description)
-
-            if notes is not None and notes != current.notes:
-                self._record_event(
-                    issue_id,
-                    "notes_changed",
-                    actor=actor,
-                    old_value=current.notes,
-                    new_value=notes,
-                )
-                updates.append("notes = ?")
-                params.append(notes)
-
-            if parent_id is not None:
-                if parent_id == "":
-                    # Clear parent
-                    if current.parent_id is not None:
-                        self._record_event(
-                            issue_id,
-                            "parent_changed",
-                            actor=actor,
-                            old_value=current.parent_id or "",
-                            new_value="",
-                        )
-                        updates.append("parent_id = NULL")
-                else:
-                    if parent_id != current.parent_id:
-                        self._record_event(
-                            issue_id,
-                            "parent_changed",
-                            actor=actor,
-                            old_value=current.parent_id or "",
-                            new_value=parent_id,
-                        )
-                        updates.append("parent_id = ?")
-                        params.append(parent_id)
-
-            if fields is not None:
-                # Merge into existing fields
-                merged = {**current.fields, **fields}
-                if merged != current.fields:
-                    if not _close_reason_only:
-                        # Skip the event for the close-with-reason-only path —
-                        # the reason is already audit-trailed on the status_changed
-                        # event's ``comment``. The fields column update still runs
-                        # so ``issue.fields.close_reason`` remains readable.
-                        self._record_event(
-                            issue_id,
-                            "fields_changed",
-                            actor=actor,
-                            old_value=json.dumps(current.fields),
-                            new_value=json.dumps(merged),
-                        )
-                    updates.append("fields = ?")
-                    params.append(json.dumps(merged))
-
-            if updates:
-                updates.append("updated_at = ?")
+            if is_done:
+                updates.append("closed_at = ?")
                 params.append(now)
-                params.append(issue_id)
-                sql = f"UPDATE issues SET {', '.join(updates)} WHERE id = ?"
-                self.conn.execute(sql, params)
-                self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+            else:
+                # Clear closed_at when leaving a done-category state
+                old_cat = self.templates.get_category(current.type, current.status)
+                if (old_cat or self._infer_status_category(current.type, current.status)) == "done":
+                    updates.append("closed_at = NULL")
+
+        if priority is not None and priority != current.priority:
+            self._record_event(
+                issue_id,
+                "priority_changed",
+                actor=actor,
+                old_value=str(current.priority),
+                new_value=str(priority),
+            )
+            updates.append("priority = ?")
+            params.append(priority)
+
+        if assignee is not None and assignee != current.assignee:
+            self._record_event(issue_id, "assignee_changed", actor=actor, old_value=current.assignee, new_value=assignee)
+            updates.append("assignee = ?")
+            params.append(assignee)
+            if assignee:
+                updates.extend(["claimed_at = ?", "last_heartbeat_at = ?", "claim_expires_at = ?"])
+                params.extend([now, now, _claim_expiry(now)])
+            else:
+                updates.extend(["claimed_at = NULL", "last_heartbeat_at = NULL", "claim_expires_at = NULL"])
+
+        if description is not None and description != current.description:
+            self._record_event(
+                issue_id,
+                "description_changed",
+                actor=actor,
+                old_value=current.description,
+                new_value=description,
+            )
+            updates.append("description = ?")
+            params.append(description)
+
+        if notes is not None and notes != current.notes:
+            self._record_event(
+                issue_id,
+                "notes_changed",
+                actor=actor,
+                old_value=current.notes,
+                new_value=notes,
+            )
+            updates.append("notes = ?")
+            params.append(notes)
+
+        if parent_id is not None:
+            if parent_id == "":
+                # Clear parent
+                if current.parent_id is not None:
+                    self._record_event(
+                        issue_id,
+                        "parent_changed",
+                        actor=actor,
+                        old_value=current.parent_id or "",
+                        new_value="",
+                    )
+                    updates.append("parent_id = NULL")
+            else:
+                if parent_id != current.parent_id:
+                    self._record_event(
+                        issue_id,
+                        "parent_changed",
+                        actor=actor,
+                        old_value=current.parent_id or "",
+                        new_value=parent_id,
+                    )
+                    updates.append("parent_id = ?")
+                    params.append(parent_id)
+
+        if fields is not None:
+            # Merge into existing fields
+            merged = dict(fields) if corrupt_fields_raw is not None else {**current.fields, **fields}
+            if corrupt_fields_raw is not None or merged != current.fields:
+                if corrupt_fields_raw is not None:
+                    self._record_event(
+                        issue_id,
+                        "corrupt_fields_overwritten",
+                        actor=actor,
+                        old_value=corrupt_fields_raw,
+                        new_value=json.dumps(merged),
+                    )
+                elif not _close_reason_only:
+                    # Skip the event for the close-with-reason-only path —
+                    # the reason is already audit-trailed on the status_changed
+                    # event's ``comment``. The fields column update still runs
+                    # so ``issue.fields.close_reason`` remains readable.
+                    self._record_event(
+                        issue_id,
+                        "fields_changed",
+                        actor=actor,
+                        old_value=json.dumps(current.fields),
+                        new_value=json.dumps(merged),
+                    )
+                updates.append("fields = ?")
+                params.append(json.dumps(merged))
+
+        if updates:
+            updates.append("updated_at = ?")
+            params.append(now)
+            params.append(issue_id)
+            # §0.1 CAS guard: when an assignee was observed at SELECT time,
+            # add ``AND assignee = ?`` so a concurrent reassignment fails
+            # the UPDATE atomically. On rowcount==0 we re-read to
+            # distinguish "row vanished" from "reassigned" and raise
+            # ClaimConflictError (typed CONFLICT, not silent VALIDATION).
+            where = "WHERE id = ?"
+            if _observed_assignee:
+                where += " AND assignee = ?"
+                params.append(_observed_assignee)
+            sql = f"UPDATE issues SET {', '.join(updates)} {where}"
+            cursor = self.conn.execute(sql, params)
+            if _observed_assignee and cursor.rowcount == 0:
+                row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+                if row is None:
+                    msg = f"Issue not found: {issue_id}"
+                    raise KeyError(msg)
+                new_assignee = row["assignee"] or ""
+                msg = f"Cannot update {issue_id}: reassigned to '{new_assignee}' (expected '{_observed_assignee}')"
+                raise ClaimConflictError(
+                    issue_id,
+                    observed=new_assignee,
+                    expected=_observed_assignee,
+                    message=msg,
+                )
 
         updated = self.get_issue(issue_id)
         if _transition_warnings:
@@ -902,18 +1124,17 @@ class IssuesMixin(DBMixinProtocol):
 
         Routes through ``update_issue`` so the same template transition
         validator enforces ``triage → closed`` (and similar shortcuts)
-        consistently across both close paths. Pass ``force=True`` to
-        rage-close from any state, skipping the template's transition
-        table — this is the documented escape hatch for cleanup
-        flows that intentionally bypass the workflow.
+        consistently across both close paths. Pass ``force=True`` to use
+        the template's declared reverse/escape edge — this is the documented
+        cleanup lane for flows that intentionally leave the normal workflow.
 
         When ``status`` is omitted, the close target defaults to the first
         done-category state for the type. If that default is not reachable
         from the current status, ``update_issue`` raises INVALID_TRANSITION
         and the caller must either pass ``status=`` explicitly to pick a
         done-category target, walk the workflow forward to a state from
-        which the default is reachable, or pass ``force=True`` to bypass
-        the transition table. The close path never silently picks a done
+        which the default is reachable, or pass ``force=True`` to use the
+        declared escape edge. The close path never silently picks a done
         state on the caller's behalf — that hid intent (a feature in
         ``building`` that's actually shipped should not become ``deferred``
         just because that's the only reachable done-state).
@@ -957,20 +1178,41 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
+        use_reverse_transition = force
         return self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
             actor=actor,
             expected_assignee=expected_assignee,
-            _skip_transition_check=force,
+            backward=use_reverse_transition,
         )
 
+    @_retry_busy()
+    @_in_immediate_tx("reopen_issue")
     def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
 
-        Clears closed_at and stale close-only fields. Only works on issues in
-        done-category states.
+        The target comes from the most recent ``status_changed`` event whose
+        old status is non-done and whose new status is done. If no such event is
+        available, the issue type's initial state is used. Reopen routes through
+        ``update_issue(backward=True)`` so the reverse/escape transition must be
+        declared and any invalid transition carries normal ``valid_transitions``
+        context. After the transition it clears ``closed_at`` and stale
+        close-only fields such as ``close_reason``.
+
+        Args:
+            issue_id: Closed issue to reopen. The id prefix must belong to this
+                project for write operations.
+            actor: Audit identity recorded on transition, fields, and reopened
+                events.
+
+        Raises:
+            KeyError: The issue does not exist.
+            WrongProjectError: The write targets an id from another project.
+            ValueError: The issue is not currently in a done-category state.
+            InvalidTransitionError: The reverse transition to the computed
+                reopen target is not declared or is blocked by field gates.
         """
         self._check_id_prefix(issue_id)
         current = self.get_issue(issue_id)
@@ -979,7 +1221,14 @@ class IssuesMixin(DBMixinProtocol):
             raise ValueError(msg)
 
         reopen_status = self._reopen_target_status(current)
-        result = self.update_issue(issue_id, status=reopen_status, actor=actor, _skip_transition_check=True)
+        result = self.update_issue(
+            issue_id,
+            status=reopen_status,
+            actor=actor,
+            expected_assignee=current.assignee,
+            backward=True,
+            _skip_begin=True,
+        )
         reopen_fields = _fields_for_reopen(current.fields)
         if reopen_fields != current.fields:
             self._record_event(
@@ -993,19 +1242,8 @@ class IssuesMixin(DBMixinProtocol):
                 "UPDATE issues SET fields = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(reopen_fields), _now_iso(), issue_id),
             )
-            self.conn.commit()
             result = self.get_issue(issue_id)
-        # Record "reopened" event after update_issue has committed the status
-        # change and its own status_changed event.  The state change is already
-        # durable, so a failure here must not propagate — callers would wrongly
-        # assume the reopen failed and retry into a confusing error.
-        try:
-            self._record_event(issue_id, "reopened", actor=actor, old_value=current.status, new_value=reopen_status)
-            self.conn.commit()
-        except Exception:
-            logger.warning("Failed to record reopened event for %s (status change succeeded)", issue_id, exc_info=True)
-            with contextlib.suppress(sqlite3.Error):
-                self.conn.rollback()
+        self._record_event(issue_id, "reopened", actor=actor, old_value=current.status, new_value=reopen_status)
         return result
 
     def _reopen_target_status(self, issue: Issue) -> str:
@@ -1032,7 +1270,168 @@ class IssuesMixin(DBMixinProtocol):
                 return cast(str, old_status)
         return self.templates.get_initial_state(issue.type)
 
-    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", _commit: bool = True) -> Issue:
+    @_retry_busy()
+    @_in_immediate_tx("delete_issue")
+    def delete_issue(self, issue_id: str, *, force: bool = False, actor: str = "") -> DeleteIssueResult:
+        """Hard-delete an issue and all of its dependent rows, leaving a tombstone.
+
+        This is a general-purpose, irreversible delete — not just an eval-cleanup
+        path. The events row is destroyed along with the issue, so ``undo_last``
+        cannot reverse it. A row is written to ``deleted_issues`` in the same
+        transaction so federation consumers reconciling off ``GET
+        /api/loom/changes`` learn of the deletion (they would otherwise keep a
+        stale reference forever — the changes feed INNER JOINs ``issues``).
+
+        Guards (each refuses with a ``ValueError`` unless ``force=True``):
+
+        1. **Terminal-only.** The issue must be in a ``done``-category status or
+           ``archived``. Reuses the same category check ``close_issue`` uses.
+        2. **No children.** Refuses if the issue has children. With ``force`` the
+           children orphan (their ``parent_id`` ``SET NULL`` fires on the final
+           delete).
+        3. **No inbound dependents.** Refuses if other issues are blocked by this
+           one. With ``force`` the inbound dependency rows cascade (silently
+           unblocking those dependents).
+
+        FK enforcement is ON, so a bare ``DELETE FROM issues`` is blocked by child
+        rows. Child rows are deleted explicitly in FK-safe order, the issues row
+        last. ``children.parent_id``, ``scan_findings.issue_id`` (both ``ON DELETE
+        SET NULL``) and ``entity_associations`` (``ON DELETE CASCADE``) resolve
+        automatically on the final delete. ``observations.source_issue_id`` and
+        ``observation_links.source_issue_id`` are text provenance breadcrumbs with
+        no FK — intentionally left untouched.
+
+        Raises:
+            KeyError: if the issue does not exist (-> NOT_FOUND at the surface).
+            IssueDeletionRefusedError: on a force-gated guard refusal (terminal-only,
+                has-children, has-inbound-dependents) (-> CONFLICT at the
+                surface). A ``ValueError`` subclass.
+            ValueError: on other validation failures, e.g. non-bool ``force``
+                (-> VALIDATION at the surface).
+        """
+        if not isinstance(force, bool):
+            msg = "force must be a boolean"
+            raise ValueError(msg)
+        self._check_id_prefix(issue_id)
+
+        current = self.get_issue(issue_id)  # raises KeyError if not found
+
+        if not force:
+            blockers: list[str] = []
+            is_done = self._resolve_status_category(current.type, current.status) == "done"
+            if not (is_done or current.status == "archived"):
+                blockers.append(f"status '{current.status}' is not terminal (must be a done-category state or 'archived')")
+            child_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM issues WHERE parent_id = ?",
+                    (issue_id,),
+                ).fetchone()[0]
+            )
+            if child_count:
+                blockers.append(f"{child_count} child issue{'s' if child_count != 1 else ''}")
+            inbound = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM dependencies WHERE depends_on_id = ?",
+                    (issue_id,),
+                ).fetchone()[0]
+            )
+            if inbound:
+                blockers.append(f"{inbound} issue{'s' if inbound != 1 else ''} blocked by it")
+            if blockers:
+                msg = (
+                    f"Cannot delete issue {issue_id}: " + "; ".join(blockers) + "; pass force=True to delete anyway (orphans children, "
+                    "cascades inbound dependencies)."
+                )
+                raise IssueDeletionRefusedError(issue_id, msg)
+
+        now = _now_iso()
+        # The final DELETE cascades this issue's entity_associations rows away
+        # (ON DELETE CASCADE). Capture the bound clarion_entity_ids BEFORE the
+        # cascade — sorted for a deterministic signal — so the tombstone (and the
+        # synthetic issue_deleted change record built from it) can name them as
+        # ``affected_entities``. Without this, a consumer mirroring the reverse
+        # lookup (list_associations_by_entity) can't tell which bindings the
+        # cascade dropped and surfaces a phantom issue. (filigree-f3bf56554c)
+        affected_entity_ids = [
+            row[0]
+            for row in self.conn.execute(
+                "SELECT clarion_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY clarion_entity_id",
+                (issue_id,),
+            ).fetchall()
+        ]
+        # Tombstone first, in the same transaction, BEFORE the issue row is gone.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO deleted_issues "
+            "(issue_id, title, type, deleted_at, deleted_by, reason, entity_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (issue_id, current.title, current.type, now, actor, "", json.dumps(affected_entity_ids)),
+        )
+
+        # Counts that the final DELETE auto-resolves via ON DELETE SET NULL /
+        # CASCADE — capture them before they vanish.
+        orphaned_children = int(self.conn.execute("SELECT COUNT(*) FROM issues WHERE parent_id = ?", (issue_id,)).fetchone()[0])
+        orphaned_findings = int(self.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE issue_id = ?", (issue_id,)).fetchone()[0])
+        deleted_entity_associations = len(affected_entity_ids)
+
+        # Explicit cascade in FK-safe order; the issues row is deleted last.
+        deleted_events = self.conn.execute("DELETE FROM events WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_comments = self.conn.execute("DELETE FROM comments WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_labels = self.conn.execute("DELETE FROM labels WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_deps_out = self.conn.execute("DELETE FROM dependencies WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_deps_in = self.conn.execute("DELETE FROM dependencies WHERE depends_on_id = ?", (issue_id,)).rowcount
+        deleted_file_associations = self.conn.execute("DELETE FROM file_associations WHERE issue_id = ?", (issue_id,)).rowcount
+        deleted_observation_links = self.conn.execute("DELETE FROM observation_links WHERE issue_id = ?", (issue_id,)).rowcount
+        # ``attachments`` is a never-registered template table (migrations.py
+        # _template_new_table_migration) — no real DB has it. Guard the delete
+        # so this is correct whether or not the table exists.
+        deleted_attachments = 0
+        if self._table_exists("attachments"):
+            deleted_attachments = self.conn.execute("DELETE FROM attachments WHERE issue_id = ?", (issue_id,)).rowcount
+        # Non-FK polymorphic links keyed on (target_type, target_id).
+        deleted_annotation_links = self.conn.execute(
+            "DELETE FROM annotation_links WHERE target_type = 'issue' AND target_id = ?",
+            (issue_id,),
+        ).rowcount
+        deleted_annotation_closeout_acks = self.conn.execute(
+            "DELETE FROM annotation_closeout_acknowledgements WHERE target_type = 'issue' AND target_id = ?",
+            (issue_id,),
+        ).rowcount
+
+        deleted_issue_rows = self.conn.execute("DELETE FROM issues WHERE id = ?", (issue_id,)).rowcount
+        if deleted_issue_rows != 1:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+
+        return DeleteIssueResult(
+            status="deleted",
+            issue_id=issue_id,
+            deleted_events=deleted_events,
+            deleted_comments=deleted_comments,
+            deleted_labels=deleted_labels,
+            deleted_dependencies_out=deleted_deps_out,
+            deleted_dependencies_in=deleted_deps_in,
+            deleted_file_associations=deleted_file_associations,
+            deleted_observation_links=deleted_observation_links,
+            deleted_attachments=deleted_attachments,
+            deleted_annotation_links=deleted_annotation_links,
+            deleted_annotation_closeout_acks=deleted_annotation_closeout_acks,
+            deleted_entity_associations=deleted_entity_associations,
+            orphaned_children=orphaned_children,
+            orphaned_findings=orphaned_findings,
+            actor=actor,
+        )
+
+    def _table_exists(self, name: str) -> bool:
+        """Return True if a table with ``name`` exists in the schema."""
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    @_retry_busy()
+    @_in_immediate_tx("claim_issue")
+    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", _skip_begin: bool = False) -> Issue:
         """Atomically claim an open/wip-category issue with optimistic locking.
 
         Sets assignee only — does NOT change status. Agent uses update_issue
@@ -1042,6 +1441,10 @@ class IssuesMixin(DBMixinProtocol):
 
         Uses a single atomic UPDATE with WHERE guard to prevent race conditions
         where two agents try to claim the same issue concurrently.
+
+        Composed callers (``start_work``, ``_claim_next_with_prior``) pass the
+        decorator's ``_skip_begin=True`` so this method runs inside the outer
+        IMMEDIATE transaction.
         """
         # filigree-694f7e9bf8: enforce the same trimmed-identity invariant as
         # create_issue/update_issue. Without normalization, claiming with
@@ -1075,37 +1478,31 @@ class IssuesMixin(DBMixinProtocol):
         status_ph = ",".join("?" * len(claimable_states))
         now = _now_iso()
         claim_expires_at = _claim_expiry(now)
-        try:
-            cursor = self.conn.execute(
-                f"UPDATE issues SET assignee = ?, claimed_at = COALESCE(claimed_at, ?), "
-                f"last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? "
-                f"WHERE id = ? AND status IN ({status_ph}) "
-                f"AND (assignee = '' OR assignee IS NULL OR assignee = ?)",
-                [assignee, now, now, claim_expires_at, now, issue_id, *claimable_states, assignee],
-            )
+        cursor = self.conn.execute(
+            f"UPDATE issues SET assignee = ?, claimed_at = COALESCE(claimed_at, ?), "
+            f"last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? "
+            f"WHERE id = ? AND status IN ({status_ph}) "
+            f"AND (assignee = '' OR assignee IS NULL OR assignee = ?)",
+            [assignee, now, now, claim_expires_at, now, issue_id, *claimable_states, assignee],
+        )
 
-            if cursor.rowcount == 0:
-                # Figure out why it failed: wrong status or already claimed?
-                current = self.conn.execute("SELECT status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-                if current is None:
-                    msg = f"Issue not found: {issue_id}"
-                    raise KeyError(msg)
-                if current["assignee"] and current["assignee"] != assignee:
-                    msg = f"Cannot claim {issue_id}: already assigned to '{current['assignee']}'"
-                    raise ValueError(msg)
-                msg = (
-                    f"Cannot claim {issue_id}: status is '{current['status']}', expected open-category state or wip-category handoff state"
-                )
-                raise ValueError(msg)
+        if cursor.rowcount == 0:
+            # Figure out why it failed: wrong status or already claimed?
+            current = self.conn.execute("SELECT status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if current is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            if current["assignee"] and current["assignee"] != assignee:
+                msg = f"Cannot claim {issue_id}: already assigned to '{current['assignee']}'"
+                raise ClaimConflictError(issue_id, observed=current["assignee"], expected=assignee, message=msg)
+            msg = f"Cannot claim {issue_id}: status is '{current['status']}', expected open-category state or wip-category handoff state"
+            raise ValueError(msg)
 
-            self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
-            if _commit:
-                self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        self._record_event(issue_id, "claimed", actor=actor, old_value=old_assignee, new_value=assignee)
         return self.get_issue(issue_id)
 
+    @_retry_busy()
+    @_in_immediate_tx("release_claim")
     def release_claim(
         self,
         issue_id: str,
@@ -1133,14 +1530,46 @@ class IssuesMixin(DBMixinProtocol):
         direct predecessor exists. Types with no open-category state get
         no reverse target and stay in wip.
 
-        When ``if_held`` is true, the call is idempotent for release-if-held
-        cleanup flows: unassigned issues are returned unchanged, and claimed
-        issues are only released when the observed assignee matches
-        ``expected_assignee``. If no expected assignee is provided, ``actor`` is
-        used as the expected holder.
+        When ``if_held`` is true, the call is idempotent only for already
+        unassigned issues: those are returned unchanged. Claimed issues are
+        released only when the observed assignee matches ``expected_assignee``;
+        if no expected assignee is provided, ``actor`` is used as the expected
+        holder. A claimed-by-someone-else mismatch raises
+        ``ClaimConflictError`` rather than silently no-oping, so cleanup
+        scripts cannot hide ownership surprises.
+
+        Args:
+            issue_id: Claimed issue to release. The id prefix must belong to
+                this project for write operations.
+            actor: Audit identity. Also becomes the expected holder for
+                ``if_held=True`` when ``expected_assignee`` is omitted.
+            if_held: Make already-unassigned issues idempotent no-ops, while
+                still rejecting claims held by another assignee.
+            expected_assignee: Optional expected holder for ``if_held=True``.
+                A mismatch raises ``ClaimConflictError``.
+            reason: Audit comment recorded on the ``released`` event.
+            revert_status: When true, move wip-category issues back through the
+                declared reverse/escape transition to the open predecessor, or
+                to the template initial state when no direct predecessor exists.
+
+        Raises:
+            KeyError: The issue does not exist.
+            WrongProjectError: The write targets an id from another project.
+            ValueError: ``if_held`` is not boolean, the expected holder is blank,
+                the issue is unassigned and ``if_held`` is false, or the claim
+                was concurrently released.
+            ClaimConflictError: The issue is held by someone other than the
+                expected holder, or it is reassigned between read and write.
+            InvalidTransitionError: The reverse status transition selected by
+                ``revert_status`` is not declared or is blocked by field gates.
+                ``valid_transitions`` is attached when template context is
+                available.
         """
         if not isinstance(if_held, bool):
             msg = "if_held must be a boolean"
+            raise ValueError(msg)
+        if not isinstance(revert_status, bool):
+            msg = "revert_status must be a boolean"
             raise ValueError(msg)
         expected_holder: str | None = None
         if if_held:
@@ -1149,7 +1578,7 @@ class IssuesMixin(DBMixinProtocol):
                 msg = "expected_assignee or actor is required when if_held=True"
                 raise ValueError(msg)
         self._check_id_prefix(issue_id)
-        row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        row = self.conn.execute("SELECT type, status, assignee, fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if row is None:
             msg = f"Issue not found: {issue_id}"
             raise KeyError(msg)
@@ -1159,52 +1588,96 @@ class IssuesMixin(DBMixinProtocol):
                 return self.get_issue(issue_id)
             msg = f"Cannot release {issue_id}: no assignee set"
             raise ValueError(msg)
+        if self._resolve_status_category(row["type"], row["status"]) == "done":
+            if if_held:
+                return self.get_issue(issue_id)
+            msg = f"Cannot release {issue_id}: status '{row['status']}' is done-category; assignee is closure audit trail"
+            raise ValueError(msg)
         if if_held and observed != expected_holder:
             msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder or "", message=msg)
 
-        try:
-            cursor = self.conn.execute(
-                "UPDATE issues SET assignee = '', claimed_at = NULL, last_heartbeat_at = NULL, "
-                "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND assignee = ?",
-                [_now_iso(), issue_id, observed],
-            )
-
-            if cursor.rowcount == 0:
-                current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-                if current is None:
-                    msg = f"Issue not found: {issue_id}"
-                    raise KeyError(msg)
-                new_assignee = current["assignee"] or ""
-                if not new_assignee:
-                    if if_held:
-                        self.conn.commit()
-                        return self.get_issue(issue_id)
-                    msg = f"Cannot release {issue_id}: already released"
-                    raise ValueError(msg)
-                if if_held:
-                    msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
-                    raise ValueError(msg)
-                msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
-                raise ValueError(msg)
-
-            self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-
-        # Auto-revert wip→open so the issue rejoins discovery surfaces. The
-        # status change runs after the assignee-clear commit so a failure to
-        # find a reverse target leaves the release intact rather than rolling
-        # the whole call back. _skip_transition_check=True because we may need
-        # to walk a backward edge (e.g. fixing→confirmed, verifying→triage)
-        # that the forward graph doesn't define. (filigree-cb980eee0d, P1.3.)
+        target: str | None = None
         if revert_status:
-            released = self.get_issue(issue_id)
-            target = self.templates.get_release_target(released.type, released.status)
-            if target is not None and target != released.status:
-                return self.update_issue(issue_id, status=target, actor=actor, _skip_transition_check=True)
+            target = self.templates.get_release_target(row["type"], row["status"])
+            if target == row["status"]:
+                target = None
+            if target is not None:
+                fields = _safe_fields_json(row["fields"], issue_id)
+                valid_transitions = _transition_hints(self.templates.get_valid_transitions(row["type"], row["status"], fields))
+                try:
+                    result = self.templates.validate_transition(
+                        row["type"],
+                        row["status"],
+                        target,
+                        fields,
+                        backward=True,
+                    )
+                except InvalidTransitionError as exc:
+                    if exc.valid_transitions is None:
+                        raise exc.with_valid_transitions(valid_transitions) from exc
+                    raise
+                if not result.allowed:
+                    if result.missing_fields:
+                        missing_str = ", ".join(result.missing_fields)
+                        msg = (
+                            f"Cannot transition '{row['status']}' -> '{target}' for type "
+                            f"'{row['type']}': missing required fields: {missing_str}"
+                        )
+                    else:
+                        msg = (
+                            f"Transition '{row['status']}' -> '{target}' is not allowed for type "
+                            f"'{row['type']}'. Use get_valid_transitions() to see allowed transitions."
+                        )
+                    raise InvalidTransitionError(
+                        row["type"],
+                        row["status"],
+                        to_state=target,
+                        backward=True,
+                        valid_transitions=valid_transitions,
+                        message=msg,
+                    )
+
+        now = _now_iso()
+        updates = [
+            "assignee = ''",
+            "claimed_at = NULL",
+            "last_heartbeat_at = NULL",
+            "claim_expires_at = NULL",
+        ]
+        params: list[Any] = []
+        if target is not None:
+            updates.extend(["status = ?", "closed_at = NULL"])
+            params.append(target)
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.extend([issue_id, observed])
+        cursor = self.conn.execute(
+            f"UPDATE issues SET {', '.join(updates)} WHERE id = ? AND assignee = ?",
+            params,
+        )
+
+        if cursor.rowcount == 0:
+            current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if current is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            new_assignee = current["assignee"] or ""
+            if not new_assignee:
+                if if_held:
+                    return self.get_issue(issue_id)
+                msg = f"Cannot release {issue_id}: already released"
+                raise ValueError(msg)
+            if if_held:
+                msg = f"Cannot release {issue_id}: assigned to '{new_assignee}' (expected '{expected_holder}')"
+                raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_holder or "", message=msg)
+            msg = f"Cannot release {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
+            raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
+
+        self._record_event(issue_id, "released", actor=actor, old_value=observed, comment=reason.strip())
+        if target is not None:
+            self._record_event(issue_id, "transition_forced", actor=actor, old_value=row["status"], new_value=target)
+            self._record_event(issue_id, "status_changed", actor=actor, old_value=row["status"], new_value=target)
         return self.get_issue(issue_id)
 
     def release_my_claims(
@@ -1270,6 +1743,8 @@ class IssuesMixin(DBMixinProtocol):
         # trail. Releasing them would erase the "X closed this" signal.
         live = [issue for issue in candidates if self._resolve_status_category(issue.type, issue.status) != "done"]
 
+        from filigree.core import WrongProjectError
+
         released: list[Issue] = []
         failures: list[BatchFailure] = []
         for issue in live:
@@ -1285,14 +1760,21 @@ class IssuesMixin(DBMixinProtocol):
                     reason=reason,
                 )
                 released.append(result)
+            except WrongProjectError:
+                raise
             except (ValueError, KeyError) as exc:
                 msg = str(exc)
-                code = ErrorCode.CONFLICT if "expected" in msg and "assigned to" in msg else ErrorCode.VALIDATION
                 if isinstance(exc, KeyError):
                     code = ErrorCode.NOT_FOUND
+                elif isinstance(exc, ClaimConflictError):
+                    code = ErrorCode.CONFLICT
+                else:
+                    code = classify_value_error(msg)
                 failures.append(BatchFailure(id=issue.id, error=msg, code=code))
         return released, failures
 
+    @_retry_busy()
+    @_in_immediate_tx("heartbeat_work")
     def heartbeat_work(
         self,
         issue_id: str,
@@ -1301,7 +1783,28 @@ class IssuesMixin(DBMixinProtocol):
         expected_assignee: str | None = None,
         lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
     ) -> Issue:
-        """Refresh liveness metadata for a claimed, non-done issue."""
+        """Refresh liveness metadata for a claimed, non-done issue.
+
+        Updates ``last_heartbeat_at``, ``claim_expires_at``, and ``updated_at``
+        only if the assignee observed before the write still owns the issue.
+
+        Args:
+            issue_id: Claimed issue to heartbeat. The id prefix must belong to
+                this project for write operations.
+            actor: Audit identity. If ``expected_assignee`` is omitted, this is
+                also accepted as the expected holder.
+            expected_assignee: Optional explicit holder precondition.
+            lease_hours: Number of hours from now until the refreshed claim
+                expires.
+
+        Raises:
+            KeyError: The issue does not exist.
+            WrongProjectError: The write targets an id from another project.
+            ValueError: The lease value is invalid, the issue is unassigned,
+                the expected holder is blank, or the issue is already done.
+            ClaimConflictError: The issue is held by someone other than the
+                expected holder, or it is reassigned between read and write.
+        """
         _validate_lease_hours(lease_hours)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT type, status, assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
@@ -1320,37 +1823,32 @@ class IssuesMixin(DBMixinProtocol):
                 raise ValueError(msg)
         if expected_holder and observed != expected_holder:
             msg = f"Cannot heartbeat {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot heartbeat {issue_id}: status is '{row['status']}'"
             raise ValueError(msg)
 
         now = _now_iso()
         claim_expires_at = _claim_expiry(now, lease_hours)
-        try:
-            cursor = self.conn.execute(
-                "UPDATE issues SET last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
-                (now, claim_expires_at, now, issue_id, observed),
-            )
-            if cursor.rowcount == 0:
-                current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-                if current is None:
-                    msg = f"Issue not found: {issue_id}"
-                    raise KeyError(msg)
-                new_assignee = current["assignee"] or ""
-                msg = f"Cannot heartbeat {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
-                raise ValueError(msg)
-            self._record_event(
-                issue_id,
-                "heartbeat",
-                actor=actor,
-                old_value=observed,
-                new_value=claim_expires_at,
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "UPDATE issues SET last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
+            (now, claim_expires_at, now, issue_id, observed),
+        )
+        if cursor.rowcount == 0:
+            current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if current is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            new_assignee = current["assignee"] or ""
+            msg = f"Cannot heartbeat {issue_id}: reassigned to '{new_assignee}' (expected '{observed}')"
+            raise ClaimConflictError(issue_id, observed=new_assignee, expected=observed, message=msg)
+        self._record_event(
+            issue_id,
+            "heartbeat",
+            actor=actor,
+            old_value=observed,
+            new_value=claim_expires_at,
+        )
         return self.get_issue(issue_id)
 
     def get_stale_claims(
@@ -1359,13 +1857,23 @@ class IssuesMixin(DBMixinProtocol):
         stale_after_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
         expires_within_hours: int | None = None,
     ) -> list[Issue]:
-        """Return assigned, non-done issues whose ownership appears abandoned or near expiry."""
+        """Return assigned, non-done issues whose ownership appears abandoned or near expiry.
+
+        Modern rows with parseable ``claim_expires_at`` have their expiry
+        check pushed into the WHERE clause so a polling agent that runs
+        ``get_stale_claims`` every N seconds does not scan every assigned
+        row in Python (2.1.0 §2.3). The legacy fallback — heartbeat /
+        claimed / updated timestamp against ``stale_after_hours`` — still
+        runs in Python for rows whose ``claim_expires_at`` is NULL or
+        malformed.
+        """
         _validate_lease_hours(stale_after_hours)
         if expires_within_hours is not None:
             _validate_lease_hours(expires_within_hours, name="expires_within_hours")
         now = datetime.now(UTC)
         cutoff = now - timedelta(hours=stale_after_hours)
-        expiry_cutoff = now + timedelta(hours=expires_within_hours) if expires_within_hours is not None else None
+        # SQL cutoff: matches expired-now and (if requested) near-expiry rows.
+        expiry_cutoff_iso = (now + timedelta(hours=expires_within_hours or 0)).isoformat()
 
         pred_sql, pred_params = self._category_predicate_sql("done", type_col="i.type", status_col="i.status")
         rows = self.conn.execute(
@@ -1373,18 +1881,27 @@ class IssuesMixin(DBMixinProtocol):
             "FROM issues i "
             "WHERE COALESCE(i.assignee, '') != '' "
             f"AND NOT ({pred_sql}) "
+            "AND ("
+            "  i.claim_expires_at IS NULL"
+            "  OR datetime(i.claim_expires_at) IS NULL"
+            "  OR datetime(i.claim_expires_at) <= datetime(?)"
+            ") "
             "ORDER BY i.priority ASC, i.created_at ASC, i.id ASC",
-            pred_params,
+            [*pred_params, expiry_cutoff_iso],
         ).fetchall()
 
         stale_ids: list[str] = []
         for row in rows:
-            expires_at = _parse_issue_timestamp(row["claim_expires_at"])
-            if expires_at is not None:
-                if expires_at <= now or (expiry_cutoff is not None and expires_at <= expiry_cutoff):
-                    stale_ids.append(row["id"])
+            # Modern parseable rows: the SQL filter already says this row is
+            # stale-or-near-expiry, so include unconditionally. Malformed
+            # non-NULL expiry text is intentionally left for the legacy
+            # timestamp fallback below.
+            if _parse_issue_timestamp(row["claim_expires_at"]) is not None:
+                stale_ids.append(row["id"])
                 continue
 
+            # Legacy fallback for rows predating the claim_expires_at column,
+            # plus malformed non-NULL expiry text.
             basis = (
                 _parse_issue_timestamp(row["last_heartbeat_at"])
                 or _parse_issue_timestamp(row["claimed_at"])
@@ -1395,6 +1912,8 @@ class IssuesMixin(DBMixinProtocol):
 
         return self._build_issues_batch(stale_ids)
 
+    @_retry_busy()
+    @_in_immediate_tx("reclaim_issue")
     def reclaim_issue(
         self,
         issue_id: str,
@@ -1405,7 +1924,31 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
     ) -> Issue:
-        """Atomically transfer a claim when the observed holder matches."""
+        """Atomically transfer a stale claim to a new assignee.
+
+        The transfer succeeds only when ``expected_assignee`` still matches the
+        observed holder at write time. On success it sets ``assignee``,
+        ``claimed_at``, ``last_heartbeat_at``, ``claim_expires_at``, and
+        ``updated_at`` together and records a ``reclaimed`` event.
+
+        Args:
+            issue_id: Claimed issue to reclaim. The id prefix must belong to
+                this project for write operations.
+            assignee: New holder for the claim. Blank values are rejected.
+            expected_assignee: Holder that the caller believes currently owns
+                the issue. This is the compare-and-swap precondition.
+            reason: Non-empty audit reason recorded on the ``reclaimed`` event.
+            actor: Audit identity performing the reclaim.
+            lease_hours: Number of hours from now until the new claim expires.
+
+        Raises:
+            KeyError: The issue does not exist.
+            WrongProjectError: The write targets an id from another project.
+            ValueError: ``assignee``, ``expected_assignee``, ``reason``, or
+                ``lease_hours`` is invalid, or the issue is already done.
+            ClaimConflictError: The current holder does not match
+                ``expected_assignee`` at validation or write time.
+        """
         _validate_lease_hours(lease_hours)
         assignee = _normalize_assignee(assignee)
         expected_assignee = _normalize_assignee(expected_assignee)
@@ -1427,39 +1970,34 @@ class IssuesMixin(DBMixinProtocol):
         observed = row["assignee"] or ""
         if observed != expected_assignee:
             msg = f"Cannot reclaim {issue_id}: assigned to '{observed}' (expected '{expected_assignee}')"
-            raise ValueError(msg)
+            raise ClaimConflictError(issue_id, observed=observed, expected=expected_assignee, message=msg)
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot reclaim {issue_id}: status is '{row['status']}'"
             raise ValueError(msg)
 
         now = _now_iso()
         claim_expires_at = _claim_expiry(now, lease_hours)
-        try:
-            cursor = self.conn.execute(
-                "UPDATE issues SET assignee = ?, claimed_at = ?, last_heartbeat_at = ?, "
-                "claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
-                (assignee, now, now, claim_expires_at, now, issue_id, expected_assignee),
-            )
-            if cursor.rowcount == 0:
-                current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
-                if current is None:
-                    msg = f"Issue not found: {issue_id}"
-                    raise KeyError(msg)
-                new_assignee = current["assignee"] or ""
-                msg = f"Cannot reclaim {issue_id}: reassigned to '{new_assignee}' (expected '{expected_assignee}')"
-                raise ValueError(msg)
-            self._record_event(
-                issue_id,
-                "reclaimed",
-                actor=actor,
-                old_value=expected_assignee,
-                new_value=assignee,
-                comment=reason,
-            )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        cursor = self.conn.execute(
+            "UPDATE issues SET assignee = ?, claimed_at = ?, last_heartbeat_at = ?, "
+            "claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
+            (assignee, now, now, claim_expires_at, now, issue_id, expected_assignee),
+        )
+        if cursor.rowcount == 0:
+            current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            if current is None:
+                msg = f"Issue not found: {issue_id}"
+                raise KeyError(msg)
+            new_assignee = current["assignee"] or ""
+            msg = f"Cannot reclaim {issue_id}: reassigned to '{new_assignee}' (expected '{expected_assignee}')"
+            raise ClaimConflictError(issue_id, observed=new_assignee, expected=expected_assignee, message=msg)
+        self._record_event(
+            issue_id,
+            "reclaimed",
+            actor=actor,
+            old_value=expected_assignee,
+            new_value=assignee,
+            comment=reason,
+        )
         return self.get_issue(issue_id)
 
     def claim_next(
@@ -1494,7 +2032,7 @@ class IssuesMixin(DBMixinProtocol):
         priority_min: int | None = None,
         priority_max: int | None = None,
         actor: str = "",
-        _commit: bool = True,
+        _skip_begin: bool = False,
     ) -> tuple[Issue, str] | None:
         """Internal: claim_next that also returns the candidate's prior assignee.
 
@@ -1505,6 +2043,11 @@ class IssuesMixin(DBMixinProtocol):
         ``claim_issue`` so a concurrent reassignment landing between the read
         and the UPDATE will surface as the same race ``claim_issue`` already
         handles (skip and continue).
+
+        ``_skip_begin`` is forwarded to the inner ``claim_issue`` decorator
+        stack: composed callers (``start_next_work``) own the outer IMMEDIATE
+        transaction and pass ``True`` so the inner claim does not commit
+        independently.
         """
         if not assignee or not assignee.strip():
             msg = "Assignee cannot be empty"
@@ -1521,12 +2064,23 @@ class IssuesMixin(DBMixinProtocol):
                 continue
             try:
                 row = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue.id,)).fetchone()
-                prior_assignee = (row["assignee"] if row is not None else "") or ""
-                claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _commit=_commit)
-            except (ValueError, KeyError) as exc:
+                if row is None:
+                    raise _ClaimCandidateVanishedError(issue.id)
+                prior_assignee = row["assignee"] or ""
+                try:
+                    claimed = self.claim_issue(issue.id, assignee=assignee, actor=actor or assignee, _skip_begin=_skip_begin)
+                except ClaimConflictError:
+                    raise
+                except KeyError as exc:
+                    raise _ClaimCandidateVanishedError(issue.id) from exc
+                except ValueError as exc:
+                    if _is_claim_status_mismatch(exc):
+                        raise _ClaimCandidateVanishedError(issue.id) from exc
+                    raise
+            except (ClaimConflictError, _ClaimCandidateVanishedError) as exc:
                 skipped += 1
                 logger.debug("claim_next: skipping %s: %s", issue.id, exc)
-                continue  # Race condition, status mismatch, or deleted issue
+                continue  # Claim race or deleted issue
             return claimed, prior_assignee
         if skipped:
             logger.warning("claim_next: all %d candidate(s) failed to claim for '%s'", skipped, assignee)
@@ -1539,20 +2093,29 @@ class IssuesMixin(DBMixinProtocol):
         assignee: str,
         target_status: str | None = None,
         actor: str = "",
+        advance: bool = False,
     ) -> Issue:
         """Atomically claim an issue and transition it to a working status.
 
-        Phase D6 composed operation. Performs ``claim_issue`` without
-        committing, followed by ``update_issue(status=target_status)``. If the
-        transition fails, rolling back that open transaction removes both the
-        attempted claim and its audit event, so failed starts do not look like
-        real claim/release handoffs.
+        Target resolution runs lock-free in this public wrapper; the writer
+        lock is acquired only inside ``_start_work_locked``, which composes
+        ``claim_issue`` + the status ``update_issue`` hop(s) under one
+        ``BEGIN IMMEDIATE``. The held-writer window is limited to claim UPDATE
+        + status UPDATE(s) + event INSERTs + COMMIT; template lookup happens
+        before the transaction opens.
 
         ``target_status`` defaults to the unique wip-category status reachable
         from the issue's current status. If the current status can transition
         to multiple wip statuses an ``AmbiguousTransitionError`` surfaces
         (caller must specify ``target_status`` explicitly); if zero,
-        ``InvalidTransitionError``.
+        ``InvalidTransitionError`` — unless ``advance=True``.
+
+        ``advance`` (filigree-406e6b7ee0 Part 2, opt-in / default off) walks the
+        shortest SOFT-edge path to the nearest wip state when no single-hop wip
+        target exists — e.g. a ``triage`` bug walks ``triage -> confirmed ->
+        fixing``. Missing required fields surface as warnings on the returned
+        issue rather than blocking. Hard edges are never auto-walked. ``advance``
+        is ignored when ``target_status`` is given explicitly.
 
         Transaction rollback preserves the prior ownership state
         (filigree-31404d228f). ``claim_issue`` is idempotent for the same
@@ -1561,34 +2124,18 @@ class IssuesMixin(DBMixinProtocol):
         wiping out an unrelated, pre-existing claim.
         """
         actor = actor or assignee
-
-        issue = self.claim_issue(issue_id, assignee=assignee, actor=actor, _commit=False)
-
-        def _rollback_claim() -> None:
-            self._rollback_uncommitted_start_claim(issue_id)
-
-        if target_status is None:
-            tpl = self.templates.get_type(issue.type)
-            if tpl is None:
-                # Roll back the claim before surfacing the error.
-                from filigree.types.api import InvalidTransitionError
-
-                _rollback_claim()
-                raise InvalidTransitionError(issue.type, issue.status)
-            try:
-                target_status = tpl.reachable_working_status(issue.status)
-            except Exception:
-                _rollback_claim()
-                raise
-
+        self._check_id_prefix(issue_id)
+        target_path = [target_status] if target_status is not None else self._resolve_start_path(issue_id, advance=advance)
         try:
-            updated = self.update_issue(issue_id, status=target_status, actor=actor)
-            if self.conn.in_transaction:
-                self.conn.commit()
-            return updated
-        except Exception:
-            _rollback_claim()
-            raise
+            return self._start_work_locked(
+                issue_id,
+                assignee=assignee,
+                target_path=target_path,
+                actor=actor,
+            )
+        except _StartCandidateUnclaimableError as exc:
+            # Public API contract: surface the underlying claim error.
+            raise exc.__cause__ from None  # type: ignore[misc]
 
     def start_next_work(
         self,
@@ -1599,100 +2146,244 @@ class IssuesMixin(DBMixinProtocol):
         priority_max: int | None = None,
         target_status: str | None = None,
         actor: str = "",
+        advance: bool = False,
     ) -> Issue | None:
         """Claim the highest-priority ready issue (filtered) and atomically
         transition it to a working status.
 
-        Phase D6 composed operation: ``claim_next`` + atomic transition with
-        compensating rollback (see ``start_work`` for the rollback contract).
-        Returns ``None`` if no ready issue matches the filters.
+        Candidate discovery (``get_ready``) and per-candidate target
+        resolution run lock-free; only the per-candidate claim+transition
+        composite acquires a writer lock via ``_start_work_locked``. On a
+        per-candidate race (claim conflict, status mismatch, deleted issue),
+        the iteration continues to the next candidate without holding any lock.
 
-        Rollback only releases the claim when *this* invocation acquired it.
-        ``claim_next`` reuses an existing same-assignee claim (claim_issue is
-        idempotent for the same identity), so an unconditional release on
-        transition failure would wipe out a pre-existing, unrelated claim.
-        Mirrors ``start_work``'s ownership-tracking contract.
+        Candidates that are ready but not single-hop startable (e.g. ``triage``
+        bugs, filigree-406e6b7ee0) are *skipped* rather than fatal. With
+        ``advance=True`` they instead become startable via the multi-hop SOFT
+        walk (``triage -> confirmed -> fixing``), so the highest-priority such
+        candidate is started rather than skipped.
+
+        Returns ``None`` if no ready issue matches the filters.
 
         Tie-break ordering inherits from ``claim_next``: priority asc,
         created_at asc, issue_id asc.
         """
+        if not assignee or not assignee.strip():
+            msg = "Assignee cannot be empty"
+            raise ValueError(msg)
         actor = actor or assignee
-        claimed_with_prior = self._claim_next_with_prior(
-            assignee,
-            type_filter=type_filter,
-            priority_min=priority_min,
-            priority_max=priority_max,
-            actor=actor,
-            _commit=False,
-        )
-        if claimed_with_prior is None:
-            return None
-        claimed, _prior_assignee = claimed_with_prior
 
-        def _rollback_claim() -> None:
-            self._rollback_uncommitted_start_claim(claimed.id)
+        # Discover candidates outside any writer transaction.
+        ready = self.get_ready()
 
-        if target_status is None:
-            tpl = self.templates.get_type(claimed.type)
-            if tpl is None:
-                from filigree.types.api import InvalidTransitionError
+        skipped = 0
+        first_explicit_transition_error: ValueError | None = None
+        for issue in ready:
+            if type_filter is not None and issue.type != type_filter:
+                continue
+            if priority_min is not None and issue.priority < priority_min:
+                continue
+            if priority_max is not None and issue.priority > priority_max:
+                continue
 
-                _rollback_claim()
-                raise InvalidTransitionError(claimed.type, claimed.status)
+            # Resolve target_status per-candidate, lock-free. When no explicit
+            # target was given, a candidate that has no single-hop wip target
+            # (e.g. a ``triage`` bug — ready but not startable,
+            # filigree-406e6b7ee0) or an ambiguous one is *skipped*, not fatal:
+            # "ready" no longer implies "startable", so start_next_work walks
+            # past it to the next candidate instead of throwing on the queue.
+            # An explicit ``target_status`` keeps its original error contract
+            # (handled below via ``first_explicit_transition_error``).
+            if target_status is None:
+                tpl = self.templates.get_type(issue.type)
+                if tpl is None:
+                    skipped += 1
+                    logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
+                    continue
+                try:
+                    this_path = tpl.soft_path_to_working_status(issue.status) if advance else [tpl.reachable_working_status(issue.status)]
+                except (InvalidTransitionError, AmbiguousTransitionError) as exc:
+                    skipped += 1
+                    logger.debug("start_next_work: skipping non-startable %s: %s", issue.id, exc)
+                    continue
+            else:
+                this_path = [target_status]
+
             try:
-                target_status = tpl.reachable_working_status(claimed.status)
-            except Exception:
-                _rollback_claim()
-                raise
+                return self._start_work_locked(
+                    issue.id,
+                    assignee=assignee,
+                    target_path=this_path,
+                    actor=actor,
+                )
+            except _StartCandidateUnclaimableError as exc:
+                # Race / status mismatch / deleted — try next candidate.
+                skipped += 1
+                logger.debug("start_next_work: skipping %s: %s", issue.id, exc.__cause__)
+                if (
+                    target_status is not None
+                    and first_explicit_transition_error is None
+                    and isinstance(exc.__cause__, ValueError)
+                    and classify_value_error(str(exc.__cause__)) == ErrorCode.INVALID_TRANSITION
+                ):
+                    first_explicit_transition_error = exc.__cause__
+                continue
 
-        try:
-            updated = self.update_issue(claimed.id, status=target_status, actor=actor)
-            if self.conn.in_transaction:
-                self.conn.commit()
-            return updated
-        except Exception:
-            _rollback_claim()
-            raise
+        if first_explicit_transition_error is not None:
+            raise first_explicit_transition_error
+        if skipped:
+            logger.warning("start_next_work: all %d candidate(s) failed to claim for '%s'", skipped, assignee)
+        return None
 
-    def _rollback_uncommitted_start_claim(self, issue_id: str) -> None:
-        """Rollback an uncommitted claim acquired by start_work/start_next_work.
+    def _resolve_start_path(self, issue_id: str, *, advance: bool) -> list[str]:
+        """Resolve the lock-free status hop sequence for a default start_work.
 
-        The composed operation keeps claim and transition in one transaction.
-        If transition selection or validation fails before update_issue commits,
-        this removes the attempted claim and its event without recording a
-        synthetic release.
+        Reads the issue's type and current status, then asks the template for
+        the walk to a working state. Without ``advance`` this is the single
+        unique reachable wip status (``[target]``); with ``advance`` it is the
+        shortest SOFT-edge path (``[hop1, ..., wip]``). Surfaces
+        ``AmbiguousTransitionError`` when a target cannot be chosen, and an
+        enriched ``InvalidTransitionError`` for a *named* start_work on a
+        non-startable issue (e.g. a triage bug) so the caller learns the
+        intermediate status to move through first (filigree-406e6b7ee0). It
+        must still raise — never silently no-op into a claim.
         """
-        if not self.conn.in_transaction:
-            return
+        row = self.conn.execute("SELECT type, status FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        if row is None:
+            msg = f"Issue not found: {issue_id}"
+            raise KeyError(msg)
+        tpl = self.templates.get_type(row["type"])
+        if tpl is None:
+            raise InvalidTransitionError(row["type"], row["status"])
+        if advance:
+            # Multi-hop walk: ambiguous / no-soft-path errors propagate as-is.
+            return tpl.soft_path_to_working_status(row["status"])
+        startable, next_action = tpl.startability(row["status"])
+        if not startable and next_action is not None:
+            raise InvalidTransitionError(
+                row["type"],
+                row["status"],
+                message=(
+                    f"{row['type']!r} in {row['status']!r} is not directly startable: no single-hop "
+                    f"transition to a working state. Move it to {next_action!r} first (or pass advance=True), "
+                    f"then start work."
+                ),
+            )
+        # startable -> resolves the target; ambiguous / no-soft-path -> the
+        # canonical Ambiguous/InvalidTransition error from the resolver stands.
+        return [tpl.reachable_working_status(row["status"])]
+
+    @_retry_busy()
+    @_in_immediate_tx("start_work")
+    def _start_work_locked(
+        self,
+        issue_id: str,
+        *,
+        assignee: str,
+        target_path: list[str],
+        actor: str,
+    ) -> Issue:
+        """Private critical section for ``start_work`` / ``start_next_work``.
+
+        The ``@_in_immediate_tx`` decorator wraps a tight claim+update
+        composite with no template lookups or candidate discovery, so the
+        writer lock is held only across the SQL writes. On exception the
+        decorator rolls back both the claim and its audit event.
+
+        Claim-phase failures (race, status mismatch, deleted issue) and
+        transition-class failures are repackaged as
+        ``_StartCandidateUnclaimableError`` so the ``start_next_work``
+        iterator can try another candidate. ``start_work`` unwraps the
+        sentinel to preserve its public error contract; ``start_next_work``
+        re-raises an explicit target-status transition error only after no
+        compatible candidate succeeds.
+
+        ``target_path`` is the pre-resolved status hop sequence (one element
+        for the single-hop default, several for an ``advance`` multi-hop walk,
+        empty when the issue is already wip). All hops apply inside the single
+        ``BEGIN IMMEDIATE`` so the claim+walk composite is atomic; the
+        per-hop ``update_issue`` reads templates from the in-memory registry,
+        not SQL, keeping the held-writer window free of template reads.
+
+        For a multi-hop walk, each hop's soft-enforcement ``data_warnings`` are
+        aggregated (order-preserved, deduped) onto the returned issue — otherwise
+        only the final hop's warnings would survive, hiding e.g. the missing
+        ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
+        """
         try:
-            self.conn.rollback()
-        except sqlite3.Error:
-            logger.warning("start_work rollback failed for uncommitted claim on %s", issue_id, exc_info=True)
+            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
+        except (ClaimConflictError, KeyError) as exc:
+            raise _StartCandidateUnclaimableError(issue_id) from exc
+        except ValueError as exc:
+            if _is_claim_status_mismatch(exc):
+                raise _StartCandidateUnclaimableError(issue_id) from exc
+            raise
+        hop_warnings: list[str] = []
+        try:
+            for next_status in target_path:
+                result = self.update_issue(issue_id, status=next_status, actor=actor, expected_assignee=assignee, _skip_begin=True)
+                hop_warnings.extend(result.data_warnings)
+        except InvalidTransitionError as exc:
+            raise _StartCandidateUnclaimableError(issue_id) from exc
+        except ValueError as exc:
+            if classify_value_error(str(exc)) == ErrorCode.INVALID_TRANSITION:
+                raise _StartCandidateUnclaimableError(issue_id) from exc
+            raise
+        # Surface every hop's advisory, not just the terminal one. Only touch the
+        # multi-hop case so the single-hop / already-wip results (which may carry
+        # claim-phase or data-integrity warnings) are returned untouched.
+        if len(target_path) > 1:
+            result.data_warnings = list(dict.fromkeys(hop_warnings))
+        return result
 
     def _batch_with_transition_errors(
         self,
         issue_ids: list[str],
         action: Callable[[str], Issue],
     ) -> tuple[list[Issue], list[BatchFailure]]:
-        """Run *action(issue_id)* per item with transition-enriched error handling."""
+        """Run *action(issue_id)* per item with transition-enriched error handling.
+
+        ``WrongProjectError`` aborts the whole batch envelope-level rather
+        than producing N per-item validation failures (2.1.0 §0.4). The
+        foreign-prefix surface is structurally distinct from "this issue
+        is missing in our DB" — silently masking it as N per-item errors
+        is exactly the silent foreign-DB-mutation surface `core.py`'s
+        anchor discovery was hardened against. Pre-flighting every id
+        through ``_check_id_prefix`` before any per-item work commits
+        ensures the abort fires before partial state lands; the helper
+        already raises ``WrongProjectError`` on a foreign prefix.
+        """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
         results: list[Issue] = []
         errors: list[BatchFailure] = []
         for issue_id in issue_ids:
             try:
                 results.append(action(issue_id))
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
                 msg = str(e)
-                code = ErrorCode.CONFLICT if "assigned to" in msg and "expected" in msg else classify_value_error(msg)
+                if isinstance(e, ClaimConflictError):
+                    code = ErrorCode.CONFLICT
+                elif isinstance(e, InvalidTransitionError):
+                    code = ErrorCode.INVALID_TRANSITION
+                else:
+                    code = classify_value_error(msg)
                 err = BatchFailure(id=issue_id, error=str(e), code=code)
-                if code == ErrorCode.INVALID_TRANSITION:
+                if isinstance(e, InvalidTransitionError) and e.valid_transitions is not None:
+                    err["valid_transitions"] = e.valid_transitions
+                elif code == ErrorCode.INVALID_TRANSITION:
                     try:
                         transitions = self.get_valid_transitions(issue_id)
-                        err["valid_transitions"] = [{"to": t.to, "category": t.category} for t in transitions]
-                    except KeyError:
-                        logger.debug("batch: could not enrich error with transitions for %s", issue_id)
+                        err["valid_transitions"] = _transition_hints(transitions)
+                    except Exception as exc:
+                        _log_transition_enrichment_failure(issue_id, exc)
                 errors.append(err)
         return results, errors
 
@@ -1711,9 +2402,9 @@ class IssuesMixin(DBMixinProtocol):
         single shared precondition. When omitted and ``actor`` is present,
         held issues default the expected holder to actor (ADR-008).
 
-        ``force=True`` skips the template transition validator on every
+        ``force=True`` uses the template reverse/escape transition on every
         item — same escape hatch as ``close_issue(force=True)``. Use only
-        for cleanup flows that intentionally bypass the workflow.
+        for cleanup flows that intentionally leave the normal workflow.
         Senior-user MCP review run e P1.3.
         """
         return self._batch_with_transition_errors(
@@ -1769,11 +2460,16 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``actor``
         is present, held issues default the expected holder to actor (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str]] = []
         errors: list[BatchFailure] = []
@@ -1787,10 +2483,12 @@ class IssuesMixin(DBMixinProtocol):
                     expected_assignee=expected_assignee,
                 )
                 results.append({"id": issue_id, "status": "added" if added else "already_exists"})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
@@ -1806,11 +2504,16 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``actor``
         is present, held issues default the expected holder to actor (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(label, str):
             msg = "label must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str]] = []
         errors: list[BatchFailure] = []
@@ -1824,10 +2527,12 @@ class IssuesMixin(DBMixinProtocol):
                     expected_assignee=expected_assignee,
                 )
                 results.append({"id": issue_id, "status": "removed" if removed else "not_found"})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
@@ -1843,7 +2548,10 @@ class IssuesMixin(DBMixinProtocol):
 
         ``expected_assignee`` is applied per-item. When omitted and ``author``
         is present, held issues default the expected holder to author (ADR-008).
+        ``WrongProjectError`` aborts the whole batch envelope-level (2.1.0 §0.4).
         """
+        from filigree.core import WrongProjectError
+
         _validate_string_list(issue_ids, "issue_ids")
         if not isinstance(text, str):
             msg = "text must be a string"
@@ -1851,6 +2559,8 @@ class IssuesMixin(DBMixinProtocol):
         if not isinstance(author, str):
             msg = "author must be a string"
             raise TypeError(msg)
+        for issue_id in issue_ids:
+            self._check_id_prefix(issue_id)
 
         results: list[dict[str, str | int]] = []
         errors: list[BatchFailure] = []
@@ -1859,10 +2569,12 @@ class IssuesMixin(DBMixinProtocol):
                 self.get_issue(issue_id)
                 comment_id = self.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
                 results.append({"id": issue_id, "comment_id": comment_id})
+            except WrongProjectError:
+                raise
             except KeyError:
                 errors.append(BatchFailure(id=issue_id, error=f"Not found: {issue_id}", code=ErrorCode.NOT_FOUND))
             except ValueError as e:
-                code = ErrorCode.CONFLICT if "expected" in str(e) and "assigned to" in str(e) else ErrorCode.VALIDATION
+                code = ErrorCode.CONFLICT if isinstance(e, ClaimConflictError) else classify_value_error(str(e))
                 errors.append(BatchFailure(id=issue_id, error=str(e), code=code))
         return results, errors
 
@@ -2008,7 +2720,7 @@ class IssuesMixin(DBMixinProtocol):
                 (fts_query,),
             ).fetchone()
         except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc) and "no such module" not in str(exc):
+            if not _is_fts_unavailable_error(exc):
                 raise
             logger.warning(
                 "FTS5 search unavailable (%s); falling back to LIKE. Performance may be degraded. Run 'filigree doctor' to check.",
@@ -2087,7 +2799,7 @@ class IssuesMixin(DBMixinProtocol):
                     params,
                 ).fetchall()
             except sqlite3.OperationalError as exc:
-                if "no such table" not in str(exc) and "no such module" not in str(exc):
+                if not _is_fts_unavailable_error(exc):
                     raise
                 logging.getLogger(__name__).warning(
                     "FTS5 search unavailable (%s); falling back to LIKE. Performance may be degraded. Run 'filigree doctor' to check.",

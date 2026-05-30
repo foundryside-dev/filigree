@@ -11,6 +11,7 @@ from filigree.core import FiligreeDB
 from filigree.mcp_tools.issues import (
     _handle_claim_issue,
     _handle_close_issue,
+    _handle_create_issue,
     _handle_heartbeat_work,
     _handle_reclaim_issue,
     _handle_release_claim,
@@ -42,6 +43,7 @@ Handler = Callable[[dict[str, Any]], Awaitable[list[Any]]]
             },
         ),
         (_handle_start_work, {"issue_id": "other-1234567890", "assignee": "agent"}),
+        (_handle_create_issue, {"title": "Bad parent", "parent_issue_id": "other-1234567890"}),
     ],
 )
 async def test_wrong_project_issue_ids_are_validation_errors(
@@ -54,4 +56,10 @@ async def test_wrong_project_issue_ids_are_validation_errors(
     data = _parse(await handler(args))
 
     assert data["code"] == ErrorCode.VALIDATION
-    assert "other-1234567890" in data["error"]
+    # 2.1.0 §1.2: MCP serialisation uses ``WrongProjectError.safe_message``,
+    # so the offending prefix no longer round-trips. The canonical safe
+    # wording is asserted instead.
+    from filigree.core import WrongProjectError
+
+    assert data["error"] == WrongProjectError.SAFE_MESSAGE
+    assert "other-" not in data["error"]

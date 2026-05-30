@@ -7,6 +7,7 @@ without circular imports.
 
 from __future__ import annotations
 
+import copy
 import json as json_mod
 import logging
 import sqlite3
@@ -23,10 +24,63 @@ from filigree.core import (
     find_filigree_anchor,
     find_filigree_root,
 )
+from filigree.registry import RegistryVersionMismatchError
+from filigree.registry_errors import registry_error_response
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
+from filigree.validation import sanitize_actor
 
 logger = logging.getLogger(__name__)
+
+
+class ActorCommand(click.Command):
+    """Command that also accepts ``--actor`` in the post-verb position.
+
+    The group-level ``--actor`` (cli.py) only binds when supplied *before*
+    the verb (``filigree --actor X update …``). Agents naturally type it
+    *after* the verb (``filigree update … --actor X``); without this, that
+    form was rejected with "No such option" and attribution was silently
+    lost. (filigree-873dd5817c)
+
+    This subclass appends an ``--actor`` option (``default=None`` so an
+    omitted flag is distinguishable from an explicit one) to every command
+    that uses it, and resolves precedence in :meth:`invoke`:
+
+    * explicit post-verb ``--actor`` wins (sanitized through the same
+      ``sanitize_actor`` validator the group uses), overwriting
+      ``ctx.obj["actor"]`` so command bodies that already read that key
+      pick it up with zero changes;
+    * otherwise the group-level ``ctx.obj["actor"]`` (its own value, or the
+      ``"cli"`` default) is left untouched.
+
+    The injected param is popped from ``ctx.params`` before the callback
+    runs so callbacks that do not declare an ``actor`` kwarg are unaffected.
+    """
+
+    _ACTOR_DEST = "_post_verb_actor"
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.params.append(
+            click.Option(
+                ["--actor", self._ACTOR_DEST],
+                default=None,
+                help="Actor identity for the audit trail (overrides the group-level --actor).",
+            )
+        )
+
+    def invoke(self, ctx: click.Context) -> object:
+        override = ctx.params.pop(self._ACTOR_DEST, None)
+        if override is not None:
+            cleaned, err = sanitize_actor(override)
+            if err:
+                if _wants_json():
+                    click.echo(json_mod.dumps({"error": err, "code": ErrorCode.VALIDATION}))
+                    ctx.exit(1)
+                raise click.BadParameter(err, param_hint="'--actor'")
+            ctx.ensure_object(dict)
+            ctx.obj["actor"] = cleaned
+        return super().invoke(ctx)
 
 
 def _wants_json() -> bool:
@@ -116,6 +170,15 @@ def _emit_startup_failure(exc: Exception, code: ErrorCode, *, human_prefix: str 
         click.echo(f"{human_prefix}{exc}" if human_prefix else str(exc), err=True)
 
 
+def _emit_registry_startup_failure(exc: RegistryVersionMismatchError) -> None:
+    """Render registry protocol failures from DB startup with public envelopes."""
+    response = registry_error_response(exc, action="opening project database")
+    if _wants_json():
+        click.echo(json_mod.dumps(response))
+    else:
+        click.echo(response["error"], err=True)
+
+
 def get_db() -> FiligreeDB:
     """Discover the project anchor and return an initialized FiligreeDB.
 
@@ -146,6 +209,9 @@ def get_db() -> FiligreeDB:
     except SchemaVersionMismatchError as exc:
         _emit_startup_failure(exc, ErrorCode.SCHEMA_MISMATCH, human_prefix="Error opening project database: ")
         sys.exit(1)
+    except RegistryVersionMismatchError as exc:
+        _emit_registry_startup_failure(exc)
+        sys.exit(1)
     except (OSError, sqlite3.Error) as exc:
         _emit_startup_failure(exc, ErrorCode.IO, human_prefix="Error opening project database: ")
         sys.exit(1)
@@ -170,3 +236,19 @@ def refresh_summary(db: FiligreeDB) -> None:
         logger.warning("Failed to refresh context.md summary: %s", exc)
     except Exception:
         logger.warning("Unexpected error refreshing context.md summary", exc_info=True)
+
+
+def add_hidden_flat_alias(cli: click.Group, cmd: click.Command, flat_name: str) -> None:
+    """Register ``cmd`` on ``cli`` under ``flat_name`` as a hidden back-compat alias.
+
+    Sub-command grouping (filigree-03303d6c5a) makes ``filigree <group> <subverb>``
+    the canonical, visible invocation while every pre-existing flat verb keeps
+    resolving. Because the *same* Command object is registered both inside the
+    group (visible) and flat on ``cli`` (hidden), we cannot set ``.hidden`` on the
+    shared object — that would also hide the group's visible copy. Clone the
+    object and hide the clone, mirroring the same-object guard the
+    ``_HIDDEN_ALIAS_VERBS`` loop in ``cli.py`` uses for dual-registered verbs.
+    """
+    clone = copy.copy(cmd)
+    clone.hidden = True
+    cli.add_command(clone, flat_name)

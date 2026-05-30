@@ -29,6 +29,7 @@ from click.testing import CliRunner
 from filigree.cli import cli
 from filigree.cli_common import get_db
 from filigree.core import FiligreeDB, write_config
+from filigree.registry import RegistryBriefingBlockedError, RegistryUnavailableError
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,13 @@ class _FakeProc:
 
     def kill(self) -> None:
         self.killed = True
+
+
+class _ImmediateFailureProc(_FakeProc):
+    """Popen stand-in for a child that exits during the immediate poll."""
+
+    def poll(self) -> int:
+        return 1
 
 
 @pytest.fixture
@@ -340,6 +348,22 @@ class TestScannerManagementCommand:
         finally:
             os.chdir(original)
 
+    def test_scanner_disable_rejects_traversal_name_without_deleting_config(self, initialized_project: Path) -> None:
+        config = initialized_project / ".filigree" / "config.toml"
+        config.write_text("[local]\nkeep = true\n")
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["scanner", "disable", "../config", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert config.exists()
+        finally:
+            os.chdir(original)
+
     def test_scanner_disable_refuses_custom_scanner_without_force(self, initialized_project: Path) -> None:
         custom = initialized_project / ".filigree" / "scanners" / "codex.toml"
         custom.write_text(
@@ -576,6 +600,20 @@ class TestPreviewScanCommand:
         finally:
             os.chdir(original)
 
+    def test_preview_scan_invalid_project_mode_returns_validation(self, project_with_scanner: SeededProject) -> None:
+        write_config(project_with_scanner.path / ".filigree", {"prefix": "test", "version": 1, "mode": "bogus"})
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            result = runner.invoke(cli, ["preview-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "VALIDATION"
+            assert "Unknown mode" in data["error"]
+        finally:
+            os.chdir(original)
+
     def test_preview_scan_uses_server_config_port_in_server_mode(
         self,
         project_with_scanner: SeededProject,
@@ -798,6 +836,85 @@ class TestReportFindingCommand:
         finally:
             os.chdir(original)
 
+    def test_report_finding_does_not_register_file_after_ingest(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """process_scan_results owns file creation; report-finding must not duplicate it."""
+        original_register_file = FiligreeDB.register_file
+
+        def fail_register_file(self: FiligreeDB, *args: object, **kwargs: object) -> object:
+            raise AssertionError("report-finding called register_file after ingest")
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", fail_register_file)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["status"] == "created"
+            assert "finding_id" in data
+        finally:
+            monkeypatch.setattr(FiligreeDB, "register_file", original_register_file)
+            os.chdir(original)
+
+    def test_report_finding_registry_unavailable_returns_structured_code(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_registry(self: FiligreeDB, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=src%2Ffoo.py",
+                path="src/foo.py",
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "process_scan_results", unavailable_registry)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "src/foo.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Ffoo.py"
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_registry_briefing_blocked_returns_structured_code(
+        self,
+        initialized_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def briefing_blocked(self: FiligreeDB, **kwargs: object) -> object:
+            raise RegistryBriefingBlockedError(
+                "Clarion registry refuses briefing-blocked file",
+                status_code=403,
+                url="http://clarion.test/api/v1/files?path=secret.py",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            monkeypatch.setattr(FiligreeDB, "process_scan_results", briefing_blocked)
+            result = runner.invoke(cli, ["report-finding", "--json"], input=_REPORT_FINDING_JSON)
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "BRIEFING_BLOCKED"
+            assert data["details"]["cause"] == "registry_briefing_blocked"
+        finally:
+            os.chdir(original)
+
     def test_report_finding_file_option(self, initialized_project: Path) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -828,6 +945,69 @@ class TestReportFindingCommand:
             assert data["observations_created"] == 1
             assert isinstance(data["observation_id"], str)
             assert data["observation_ids"] == [data["observation_id"]]
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_duplicate_update_returns_existing_ids(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            first = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full", "--create-observation"],
+                input=_REPORT_FINDING_JSON,
+            )
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+
+            payload = json.loads(_REPORT_FINDING_JSON)
+            payload["message"] = "Updated report"
+            second = runner.invoke(
+                cli,
+                ["report-finding", "--json", "--response-detail", "full", "--create-observation"],
+                input=json.dumps(payload),
+            )
+            assert second.exit_code == 0, second.output
+            second_data = json.loads(second.output)
+
+            assert second_data["status"] == "updated"
+            assert second_data["finding_id"] == first_data["finding_id"]
+            assert second_data["observation_id"] == first_data["observation_id"]
+            assert second_data["observation_ids"] == [first_data["observation_id"]]
+            assert second_data["findings_updated"] == 1
+            assert second_data["observations_created"] == 0
+        finally:
+            os.chdir(original)
+
+    def test_report_finding_update_after_line_start_normalization(self, initialized_project: Path) -> None:
+        (initialized_project / "src").mkdir()
+        (initialized_project / "src/foo.py").write_text("x = 1\n")
+        payload = json.dumps(
+            {
+                "path": "src/foo.py",
+                "rule_id": "line-too-high",
+                "message": "Line attribution should be cleared",
+                "severity": "high",
+                "line_start": 389,
+                "line_end": 391,
+            }
+        )
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            first = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=payload)
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+            assert first_data["status"] == "created"
+            assert any("line_start 389" in warning for warning in first_data["warnings"])
+
+            second = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=payload)
+            assert second.exit_code == 0, second.output
+            second_data = json.loads(second.output)
+            assert second_data["status"] == "updated"
+            assert second_data["findings_updated"] == 1
         finally:
             os.chdir(original)
 
@@ -936,6 +1116,64 @@ class TestReportFindingCommand:
 
 
 class TestTriggerScanCommand:
+    def test_trigger_scan_registry_unavailable_returns_structured_code(
+        self,
+        project_with_scanner: SeededProject,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=target.py",
+                path=path,
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", unavailable_register_file)
+            result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "target.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_batch_registry_unavailable_returns_structured_code(
+        self,
+        project_with_scanner: SeededProject,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
+            raise RegistryUnavailableError(
+                "Clarion registry unavailable for test",
+                url="http://clarion.test/api/v1/files?path=target.py",
+                path=path,
+                cause_kind="network",
+            )
+
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            monkeypatch.setattr(FiligreeDB, "register_file", unavailable_register_file)
+            result = runner.invoke(cli, ["trigger-scan-batch", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "REGISTRY_UNAVAILABLE"
+            assert data["details"]["cause"] == "registry_unavailable"
+            assert data["details"]["cause_kind"] == "network"
+            assert data["details"]["path"] == "target.py"
+            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+        finally:
+            os.chdir(original)
+
     def test_trigger_scan_success(self, project_with_scanner: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -986,12 +1224,15 @@ class TestTriggerScanCommand:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(12345)) as popen:
                 result = runner.invoke(
                     cli,
-                    ["trigger-scan", "test-scanner", "target.py", "--api-url", "http://localhost:9999", "--json"],
+                    ["trigger-scan", "test-scanner", "target.py", "--api-url", "http://localhost:9999///", "--json"],
                 )
             assert result.exit_code == 0, result.output
             assert "http://localhost:9999" in popen.call_args.args[0]
+            assert "http://localhost:9999///" not in popen.call_args.args[0]
             assert "http://localhost:9229" not in popen.call_args.args[0]
-            assert json.loads(result.output)["api_url_source"] == "explicit"
+            data = json.loads(result.output)
+            assert data["api_url"] == "http://localhost:9999"
+            assert data["api_url_source"] == "explicit"
         finally:
             os.chdir(original)
 
@@ -1078,6 +1319,30 @@ class TestTriggerScanCommand:
         finally:
             os.chdir(original)
 
+    def test_trigger_scan_spawn_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("mock spawn fail")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
     def test_trigger_scan_backfill_failure_marks_reserved_run_failed(self, project_with_scanner: SeededProject) -> None:
         runner = CliRunner()
         original = os.getcwd()
@@ -1098,6 +1363,66 @@ class TestTriggerScanCommand:
             assert row is not None
             assert row["status"] == "failed"
             assert "DB tracking failed" in row["error_message"]
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_backfill_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        proc = _FakeProc(12346)
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=proc),
+                patch.object(FiligreeDB, "set_scan_run_spawn_info", side_effect=sqlite3.OperationalError("DB broken")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert proc.killed is True
+            assert data["details"]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
+    def test_trigger_scan_immediate_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        original_update = FiligreeDB.update_scan_run_status
+
+        def fail_failed_status(
+            db: FiligreeDB,
+            scan_run_id: str,
+            status: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(db, scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=_ImmediateFailureProc(100)),
+                patch.object(FiligreeDB, "update_scan_run_status", autospec=True, side_effect=fail_failed_status),
+            ):
+                result = runner.invoke(cli, ["trigger-scan", "test-scanner", "target.py", "--json"])
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert "Scanner process exited immediately with code 1" in data["error"]
+            assert data["details"]["status_update_error"] == "status update broken"
         finally:
             os.chdir(original)
 
@@ -1151,6 +1476,120 @@ class TestTriggerScanBatchCommand:
             assert result.exit_code == 1
             data = json.loads(result.output)
             assert data["code"] == "IO"
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_all_rate_limited_returns_conflict(self, project_with_scanner: SeededProject) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
+                first = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+                second = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+
+            assert first.exit_code == 0, first.output
+            first_data = json.loads(first.output)
+            assert second.exit_code == 1
+            second_data = json.loads(second.output)
+            assert second_data["code"] == "CONFLICT"
+            assert second_data["details"]["skipped"][0]["reason"] == "rate_limited"
+            assert second_data["details"]["skipped"][0]["blocking_run_id"] == first_data["scan_run_ids"][0]
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_all_immediate_failure_preserves_prior_per_file_errors(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        _make_target_file(project_with_scanner.path, "target2.py")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with patch(
+                "filigree.scanner_runtime.subprocess.Popen",
+                side_effect=[OSError("spawn broken"), _ImmediateFailureProc(101)],
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "missing.py", "target2.py", "--json"],
+                )
+
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["spawn_errors"][0]["file_path"] == "target.py"
+            assert "spawn broken" in data["details"]["spawn_errors"][0]["reason"]
+            assert data["details"]["skipped"][0] == {"file_path": "missing.py", "reason": "File not found"}
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_spawn_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", side_effect=OSError("mock fail")),
+                patch.object(
+                    FiligreeDB,
+                    "update_scan_run_status",
+                    side_effect=sqlite3.OperationalError("status update broken"),
+                ),
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["spawn_errors"][0]["status_update_error"] == "status update broken"
+        finally:
+            os.chdir(original)
+
+    def test_batch_scan_immediate_failure_status_update_failure_is_reported(
+        self,
+        project_with_scanner: SeededProject,
+    ) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project_with_scanner.path))
+        original_update = FiligreeDB.update_scan_run_status
+
+        def fail_failed_status(
+            db: FiligreeDB,
+            scan_run_id: str,
+            status: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            if status == "failed":
+                raise sqlite3.OperationalError("status update broken")
+            return original_update(db, scan_run_id, status, **kwargs)
+
+        try:
+            with (
+                patch("filigree.scanner_runtime.subprocess.Popen", return_value=_ImmediateFailureProc(100)),
+                patch.object(FiligreeDB, "update_scan_run_status", autospec=True, side_effect=fail_failed_status),
+            ):
+                result = runner.invoke(
+                    cli,
+                    ["trigger-scan-batch", "test-scanner", "target.py", "--json"],
+                )
+            assert result.exit_code == 1
+            data = json.loads(result.output)
+            assert data["code"] == "IO"
+            assert data["details"]["status_update_errors"][0]["error"] == "status update broken"
         finally:
             os.chdir(original)
 

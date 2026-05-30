@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
-from filigree.core import FiligreeDB
+from filigree.core import (
+    FILIGREE_APPLICATION_ID,
+    FiligreeDB,
+    ForeignSqliteFileError,
+    classify_and_stamp_filigree_db,
+)
 from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL, SCHEMA_V1_SQL
 from filigree.migrations import (
     MigrationError,
@@ -18,15 +25,22 @@ from filigree.migrations import (
     rebuild_table,
     rename_column,
 )
+from filigree.types.api import SchemaVersionMismatchError
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
+class _AutoClosingConnection(sqlite3.Connection):
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.close()
+
+
 def _make_db(tmp_path: Path, name: str = "test.db") -> sqlite3.Connection:
     """Create a raw SQLite connection with filigree PRAGMAs."""
-    conn = sqlite3.connect(str(tmp_path / name))
+    conn = sqlite3.connect(str(tmp_path / name), factory=_AutoClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -78,6 +92,52 @@ class TestSchemaV1Constant:
     def test_v1_excludes_file_tables(self) -> None:
         for table in ("file_records", "scan_findings", "file_associations", "file_events"):
             assert table not in SCHEMA_V1_SQL
+
+
+class TestFileRegistryBackendSchema:
+    """Verify the ADR-014 file registry columns land additively."""
+
+    def test_fresh_schema_contains_file_registry_backend_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+
+        columns = _get_table_columns(conn, "file_records")
+
+        assert columns["content_hash"] == "TEXT"
+        assert columns["registry_backend"] == "TEXT"
+        conn.close()
+
+    def test_migration_v16_to_v17_adds_file_registry_backend_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("PRAGMA user_version = 16")
+        existing_columns = _get_table_columns(conn, "file_records")
+        if "content_hash" in existing_columns:
+            conn.execute("ALTER TABLE file_records DROP COLUMN content_hash")
+        if "registry_backend" in existing_columns:
+            conn.execute("ALTER TABLE file_records DROP COLUMN registry_backend")
+        conn.execute(
+            "INSERT INTO file_records (id, path, first_seen, updated_at) VALUES (?, ?, ?, ?)",
+            ("existing-f-1", "src/existing.py", "2026-05-18T00:00:00+00:00", "2026-05-18T00:00:00+00:00"),
+        )
+        conn.commit()
+
+        apply_pending_migrations(conn, 17)
+
+        columns = _get_table_columns(conn, "file_records")
+        assert columns["content_hash"] == "TEXT"
+        assert columns["registry_backend"] == "TEXT"
+        existing_row = conn.execute(
+            "SELECT content_hash, registry_backend FROM file_records WHERE id = ?",
+            ("existing-f-1",),
+        ).fetchone()
+        assert dict(existing_row) == {"content_hash": "", "registry_backend": "local"}
+        row = conn.execute(
+            "INSERT INTO file_records (id, path, first_seen, updated_at) VALUES (?, ?, ?, ?) RETURNING content_hash, registry_backend",
+            ("f-1", "src/a.py", "2026-05-19T00:00:00+00:00", "2026-05-19T00:00:00+00:00"),
+        ).fetchone()
+        assert dict(row) == {"content_hash": "", "registry_backend": "local"}
+        conn.close()
 
 
 class TestClaimLeaseSchema:
@@ -211,6 +271,141 @@ class TestEntityAssociationsSchema:
         assert "clarion_entity_id" in columns
         assert "content_hash_at_attach" in columns
         conn.close()
+
+    def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
+        """v15→v16 (2.1.0 §0.2): event_seq column added with DEFAULT 0;
+        the dedup UNIQUE index is rebuilt to include the new column so
+        same-second emissions stop silently colliding. Historical event
+        rows survive the migration with event_seq=0 — replaying the
+        pre-v16 silent-collision behaviour on the backfill is acceptable
+        because those events were already being dropped under the old
+        INSERT OR IGNORE."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Roll the schema back to v15 shape: drop event_seq + restore the
+        # pre-v16 dedup index.
+        conn.execute("PRAGMA user_version = 15")
+        conn.execute("DROP INDEX IF EXISTS idx_events_dedup")
+        # SQLite can't drop columns directly without rebuild; for the
+        # migration regression we just rely on add_column being
+        # idempotent and the rebuilt index being the observable change.
+        # First confirm the v16 column is *present* (because executescript
+        # ran SCHEMA_SQL above), then exercise the dedup-index rebuild.
+        assert "event_seq" in _get_table_columns(conn, "events")
+        # Seed one historical event row with event_seq=0 to mimic a
+        # backfilled pre-v16 record.
+        ts = "2026-01-01T00:00:00+00:00"
+        conn.execute(
+            "INSERT INTO issues (id, title, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("test-fffeeedd00", "t", "open", "task", ts, ts),
+        )
+        conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at, event_seq) VALUES (?, ?, ?, ?, ?)",
+            ("test-fffeeedd00", "created", "", ts, 0),
+        )
+        conn.commit()
+
+        apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+
+        # event_seq still there; historical row preserved.
+        assert "event_seq" in _get_table_columns(conn, "events")
+        rows = conn.execute("SELECT event_seq FROM events WHERE issue_id = 'test-fffeeedd00'").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["event_seq"] == 0
+        # Dedup index now includes event_seq — check the column count on
+        # the index covers the new tuple.
+        idx_info = conn.execute("PRAGMA index_info(idx_events_dedup)").fetchall()
+        # Composite is (issue_id, event_type, actor, coalesce(old), coalesce(new),
+        # created_at, event_seq) — 7 columns.
+        assert len(idx_info) == 7
+        conn.close()
+
+    def test_migration_v15_to_v16_adds_event_seq_to_true_v15_database(self, tmp_path: Path) -> None:
+        """The v15→v16 migration must exercise the ALTER TABLE path."""
+        conn = _make_db(tmp_path)
+        try:
+            conn.executescript(SCHEMA_V1_SQL)
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
+
+            apply_pending_migrations(conn, 15)
+            assert _get_schema_version(conn) == 15
+            assert "event_seq" not in _get_table_columns(conn, "events")
+
+            apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+
+            assert _get_schema_version(conn) == CURRENT_SCHEMA_VERSION
+            assert "event_seq" in _get_table_columns(conn, "events")
+            event_seq_info = {row["name"]: row for row in conn.execute("PRAGMA table_info(events)").fetchall()}["event_seq"]
+            assert event_seq_info["type"] == "INTEGER"
+            assert event_seq_info["notnull"] == 1
+            assert event_seq_info["dflt_value"] == "0"
+        finally:
+            conn.close()
+
+    def test_migration_v15_to_v16_populated_events_rejects_null_event_seq(self, tmp_path: Path) -> None:
+        """Populated v15 events must migrate to the same NOT NULL shape as fresh DBs."""
+        conn = _make_db(tmp_path)
+        try:
+            conn.executescript(SCHEMA_V1_SQL)
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
+
+            apply_pending_migrations(conn, 15)
+            assert _get_schema_version(conn) == 15
+            assert "event_seq" not in _get_table_columns(conn, "events")
+
+            ts = "2026-01-01T00:00:00+00:00"
+            conn.execute(
+                "INSERT INTO issues (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("test-populated-v15", "populated migration", ts, ts),
+            )
+            conn.execute(
+                "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES (?, ?, ?, ?)",
+                ("test-populated-v15", "created", "agent", ts),
+            )
+            conn.execute(
+                "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES (?, ?, ?, ?)",
+                ("test-populated-v15", "heartbeat", "agent", ts),
+            )
+            conn.commit()
+
+            apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+
+            event_seq_info = {row["name"]: row for row in conn.execute("PRAGMA table_info(events)").fetchall()}["event_seq"]
+            assert event_seq_info["notnull"] == 1
+            rows = conn.execute(
+                "SELECT event_type, event_seq FROM events WHERE issue_id = ? ORDER BY id",
+                ("test-populated-v15",),
+            ).fetchall()
+            assert [(row["event_type"], row["event_seq"]) for row in rows] == [
+                ("created", 0),
+                ("heartbeat", 0),
+            ]
+
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO events (issue_id, event_type, actor, created_at, event_seq) VALUES (?, ?, ?, ?, ?)",
+                    ("test-populated-v15", "heartbeat", "agent", ts, None),
+                )
+
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO events (issue_id, event_type, actor, created_at, event_seq) VALUES (?, ?, ?, ?, ?)",
+                    ("test-populated-v15", "heartbeat", "agent", ts, 0),
+                )
+
+            conn.execute(
+                "INSERT INTO events (issue_id, event_type, actor, created_at, event_seq) VALUES (?, ?, ?, ?, ?)",
+                ("test-populated-v15", "heartbeat", "agent", ts, 1),
+            )
+            heartbeat_count = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+                ("test-populated-v15", "heartbeat"),
+            ).fetchone()[0]
+            assert heartbeat_count == 2
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +703,61 @@ class TestMigrationRunnerFKPreservation:
 
             fk_after = conn.execute("PRAGMA foreign_keys").fetchone()[0]
             assert fk_after == 0  # must be restored to OFF
+        finally:
+            migrations.MIGRATIONS.clear()
+            migrations.MIGRATIONS.update(original)
+            conn.close()
+
+    def test_fk_restore_failure_is_reported(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """If FK restoration fails after commit, the runner must surface it."""
+        conn = _make_db(tmp_path)
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+        class RestoreFailingConnection:
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self.inner = inner
+                self.restore_attempts = 0
+
+            @property
+            def in_transaction(self) -> bool:
+                return self.inner.in_transaction
+
+            def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+                if sql == "PRAGMA foreign_keys=ON":
+                    self.restore_attempts += 1
+                    raise sqlite3.OperationalError("restore failed")
+                return self.inner.execute(sql, *args)
+
+            def commit(self) -> None:
+                self.inner.commit()
+
+            def rollback(self) -> None:
+                self.inner.rollback()
+
+        from filigree import migrations
+
+        original = migrations.MIGRATIONS.copy()
+
+        def noop(c: sqlite3.Connection) -> None:
+            pass
+
+        migrations.MIGRATIONS[1] = noop  # type: ignore[assignment]
+        wrapped = RestoreFailingConnection(conn)
+        try:
+            with caplog.at_level(logging.ERROR, logger="filigree.migrations"), pytest.raises(MigrationError, match="restore failed"):
+                apply_pending_migrations(wrapped, 2)  # type: ignore[arg-type]
+
+            assert wrapped.restore_attempts == 1
+            assert _get_schema_version(conn) == 2
+            assert "foreign_key_restore_failed" in caplog.text
         finally:
             migrations.MIGRATIONS.clear()
             migrations.MIGRATIONS.update(original)
@@ -1534,6 +1784,149 @@ class TestSchemaEquivalence:
     #     fresh.close()
 
 
+class TestDeletedIssuesTombstoneSchema:
+    """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
+    ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
+
+    def test_current_schema_version_is_21(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 21
+
+    def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        assert "deleted_issues" in _get_table_names(conn)
+        cols = _get_table_columns(conn, "deleted_issues")
+        assert set(cols) == {"seq", "issue_id", "title", "type", "deleted_at", "deleted_by", "reason", "entity_ids"}
+        # seq is the AUTOINCREMENT PK (VACUUM-stable cursor); issue_id is UNIQUE
+        # so a re-delete via INSERT OR REPLACE assigns a fresh higher seq.
+        pk_rows = conn.execute("PRAGMA table_info(deleted_issues)").fetchall()
+        assert {row[1] for row in pk_rows if row[5]} == {"seq"}
+        # AUTOINCREMENT registers the table in sqlite_sequence.
+        autoinc = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'").fetchone()
+        assert autoinc is not None
+        assert "AUTOINCREMENT" in conn.execute("SELECT sql FROM sqlite_master WHERE name='deleted_issues'").fetchone()[0]
+        # issue_id UNIQUE constraint present.
+        idx_list = conn.execute("PRAGMA index_list(deleted_issues)").fetchall()
+        unique_cols = set()
+        for idx in idx_list:
+            if idx[2]:  # unique flag
+                for info in conn.execute(f"PRAGMA index_info({idx[1]})").fetchall():
+                    unique_cols.add(info[2])
+        assert "issue_id" in unique_cols
+        assert "idx_deleted_issues_deleted_at" in _get_index_names(conn)
+        conn.close()
+
+    def test_migration_v19_to_v20_adds_table(self, tmp_path: Path) -> None:
+        """Pin the v19->v20 migration in isolation (target v20, not CURRENT)."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Bump *down* to v19 and drop the table so the migration re-creates it.
+        conn.execute("DROP INDEX IF EXISTS idx_deleted_issues_deleted_at")
+        conn.execute("DROP TABLE IF EXISTS deleted_issues")
+        conn.execute("PRAGMA user_version = 19")
+        conn.commit()
+        assert "deleted_issues" not in _get_table_names(conn)
+
+        # Stop at v20 so this pins the table-create migration alone; the
+        # entity_ids column arrives in v20->v21, asserted separately below.
+        applied = apply_pending_migrations(conn, 20)
+        assert applied == 1
+        assert _get_schema_version(conn) == 20
+        assert "deleted_issues" in _get_table_names(conn)
+        assert "idx_deleted_issues_deleted_at" in _get_index_names(conn)
+        assert "entity_ids" not in _get_table_columns(conn, "deleted_issues")
+        conn.close()
+
+    def test_migrated_and_fresh_deleted_issues_converge(self, tmp_path: Path) -> None:
+        """Fresh SCHEMA_SQL and the full migration chain converge on one shape.
+
+        Byte-identity of the table's CREATE text no longer holds: v20 creates the
+        table and v21 adds ``entity_ids`` via ALTER, so a migrated table's stored
+        ``sql`` text differs from the fresh inline CREATE. What must match is the
+        *logical* shape — column names, types, NOT NULL, defaults, and PK — captured
+        by PRAGMA table_info. The index DDL is untouched by v21 and stays
+        byte-identical.
+        """
+        fresh = _make_db(tmp_path, "fresh.db")
+        fresh.executescript(SCHEMA_SQL)
+        fresh.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        fresh.commit()
+
+        # Build a v19 DB (drop the table, stamp v19), then migrate the full chain.
+        migrated = _make_db(tmp_path, "migrated.db")
+        migrated.executescript(SCHEMA_SQL)
+        migrated.execute("DROP INDEX IF EXISTS idx_deleted_issues_deleted_at")
+        migrated.execute("DROP TABLE IF EXISTS deleted_issues")
+        migrated.execute("PRAGMA user_version = 19")
+        migrated.commit()
+        apply_pending_migrations(migrated, CURRENT_SCHEMA_VERSION)
+
+        def _table_info(conn: sqlite3.Connection, name: str) -> list[tuple]:
+            # PRAGMA table_info row: (cid, name, type, notnull, dflt_value, pk).
+            # Drop the positional cid; compare the rest.
+            return [tuple(row)[1:] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()]
+
+        assert _table_info(fresh, "deleted_issues") == _table_info(migrated, "deleted_issues")
+        # entity_ids is NOT NULL DEFAULT '[]' in both, appended last.
+        cols = {row[0]: row for row in _table_info(fresh, "deleted_issues")}
+        assert "entity_ids" in cols
+        assert cols["entity_ids"][2] == 1, "entity_ids must be NOT NULL"
+        assert cols["entity_ids"][3] == "'[]'", "entity_ids must default to '[]'"
+
+        def _ddl(conn: sqlite3.Connection, name: str) -> str:
+            return conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
+
+        assert _ddl(fresh, "idx_deleted_issues_deleted_at") == _ddl(migrated, "idx_deleted_issues_deleted_at")
+        fresh.close()
+        migrated.close()
+
+    def test_migration_v19_to_v20_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v19_to_v20
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Re-running the migration over an already-present table is a no-op.
+        migrate_v19_to_v20(conn)
+        assert "deleted_issues" in _get_table_names(conn)
+        conn.close()
+
+    def test_migration_v20_to_v21_adds_entity_ids_column(self, tmp_path: Path) -> None:
+        """Pin the v20->v21 migration in isolation: ALTER adds entity_ids, NOT NULL,
+        defaulting existing tombstones to '[]' (filigree-f3bf56554c)."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v20 DB: drop entity_ids and stamp the prior version.
+        conn.execute("ALTER TABLE deleted_issues DROP COLUMN entity_ids")
+        conn.execute("PRAGMA user_version = 20")
+        # A pre-existing (v20-era) tombstone must survive and adopt the default.
+        conn.execute(
+            "INSERT INTO deleted_issues (issue_id, title, type, deleted_at, deleted_by) VALUES ('old-1', 't', 'task', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "entity_ids" not in _get_table_columns(conn, "deleted_issues")
+
+        applied = apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+        assert applied == 1
+        assert _get_schema_version(conn) == 21
+        assert "entity_ids" in _get_table_columns(conn, "deleted_issues")
+        row = conn.execute("SELECT entity_ids FROM deleted_issues WHERE issue_id = 'old-1'").fetchone()
+        assert row["entity_ids"] == "[]"
+        conn.close()
+
+    def test_migration_v20_to_v21_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v20_to_v21
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Column already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v20_to_v21(conn)
+        assert "entity_ids" in _get_table_columns(conn, "deleted_issues")
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # FiligreeDB integration tests
 # ---------------------------------------------------------------------------
@@ -1567,6 +1960,10 @@ class TestFiligreeDBMigration:
         db_path = tmp_path / "future.db"
         conn = _make_db(tmp_path, "future.db")
         conn.executescript(SCHEMA_SQL)
+        # Stamp the filigree application_id so the classifier routes this
+        # through the newer-than-installed branch (SchemaVersionMismatchError)
+        # rather than treating an unstamped file as foreign.
+        conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
         conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 1}")
         conn.commit()
         conn.close()
@@ -1942,3 +2339,226 @@ class TestMigrateV8ToV9:
         assert "idx_labels_label_issue" in indexes
         assert "idx_issues_assignee_priority" in indexes
         d.close()
+
+
+# ---------------------------------------------------------------------------
+# Application ID + ForeignSqliteFileError
+# ---------------------------------------------------------------------------
+
+
+def test_application_id_constant_is_filg_bigendian():
+    """FILIGREE_APPLICATION_ID must be the 32-bit BE encoding of 'FILG'."""
+    assert FILIGREE_APPLICATION_ID == 0x46494C47
+    assert FILIGREE_APPLICATION_ID.to_bytes(4, "big") == b"FILG"
+
+
+def test_foreign_sqlite_file_error_carries_observed_id(tmp_path):
+    """ForeignSqliteFileError surfaces the observed application_id."""
+    err = ForeignSqliteFileError(
+        path=tmp_path / "alien.db",
+        observed_application_id=0xDEADBEEF,
+    )
+    assert err.observed_application_id == 0xDEADBEEF
+    assert "alien.db" in str(err)
+    assert err.safe_message  # untrusted-surface wording exists
+
+
+# ---------------------------------------------------------------------------
+# classify_and_stamp_filigree_db gatekeeper
+# ---------------------------------------------------------------------------
+
+
+def test_verify_fresh_db_stamps_application_id(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "fresh"
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    # Caller stamps user_version — verify the function did NOT stamp it.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_verify_current_filigree_db_is_noop(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "current"
+
+
+def test_verify_older_filigree_db_needs_upgrade(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "needs_upgrade"
+
+
+def test_verify_newer_db_raises_mismatch(tmp_path):
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {FILIGREE_APPLICATION_ID}")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 5}")
+    with pytest.raises(SchemaVersionMismatchError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.database == CURRENT_SCHEMA_VERSION + 5
+
+
+def test_verify_foreign_db_raises(tmp_path):
+    # SQLite stores application_id as a signed int32, so we use a value
+    # that fits cleanly. 0xDEADBEEF would silently truncate to 0.
+    foreign_app_id = 0x12345678
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA application_id = {foreign_app_id}")
+    conn.execute("PRAGMA user_version = 7")
+    with pytest.raises(ForeignSqliteFileError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.observed_application_id == foreign_app_id
+
+
+def test_verify_legacy_filigree_db_returns_legacy(tmp_path):
+    """user_version > 0 but application_id = 0 — pre-app-id filigree DB."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION - 1}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "legacy_needs_upgrade"
+
+
+def test_verify_legacy_db_already_at_current_version(tmp_path):
+    """app_id=0 but user_version already at CURRENT — pre-app-id install that ran the latest schema."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+    verdict = classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert verdict == "current"
+    # Pin contract: the legacy "current" branch does NOT stamp application_id.
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+
+
+def test_verify_legacy_too_new_db_raises_mismatch(tmp_path):
+    """app_id=0 (pre-app-id filigree) but user_version above CURRENT — a
+    downgrade. The lineage is trusted, so this is a version mismatch (upgrade
+    filigree), not a foreign-file error (which would tell the operator to move
+    the file)."""
+    db_file = tmp_path / "t.db"
+    conn = _make_db(tmp_path, "t.db")
+    conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION + 5}")
+    with pytest.raises(SchemaVersionMismatchError) as exc_info:
+        classify_and_stamp_filigree_db(conn, db_path=db_file)
+    assert exc_info.value.database == CURRENT_SCHEMA_VERSION + 5
+
+
+# ---------------------------------------------------------------------------
+# FiligreeDB.initialize() routes through classify_and_stamp_filigree_db
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_on_foreign_db_raises(tmp_path):
+    """Opening a non-filigree SQLite file at the DB path must raise."""
+    filigree_dir = tmp_path / ".filigree"
+    filigree_dir.mkdir()
+    (filigree_dir / "config.json").write_text('{"prefix": "test"}')
+    db_path = filigree_dir / "filigree.db"
+
+    # Pretend a different tool put its DB here.
+    foreign = sqlite3.connect(str(db_path))
+    # Use 0x12345678 (positive int32) — 0xDEADBEEF would silently overflow.
+    foreign.execute("PRAGMA application_id = 0x12345678")
+    foreign.execute("PRAGMA user_version = 3")
+    foreign.execute("CREATE TABLE not_filigree (id INTEGER)")
+    foreign.commit()
+    foreign.close()
+
+    with pytest.raises(ForeignSqliteFileError):
+        FiligreeDB.from_filigree_dir(filigree_dir)
+
+
+def test_initialize_on_fresh_db_stamps_application_id(tmp_path):
+    """Fresh DBs get application_id stamped."""
+    filigree_dir = tmp_path / ".filigree"
+    filigree_dir.mkdir()
+    (filigree_dir / "config.json").write_text('{"prefix": "test"}')
+
+    db = FiligreeDB.from_filigree_dir(filigree_dir)
+    try:
+        observed = db.conn.execute("PRAGMA application_id").fetchone()[0]
+        assert observed == FILIGREE_APPLICATION_ID
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# v17 -> v18: application_id stamp for legacy DBs
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_db_gets_application_id_stamped_by_v17_to_v18(tmp_path):
+    """A pre-app-id filigree DB at v17 must have application_id stamped after migration to v18."""
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("PRAGMA user_version = 17")
+    conn.commit()
+
+    # Sanity: legacy state.
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+
+    applied = apply_pending_migrations(conn, target_version=18)
+    assert applied == 1
+
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    conn.close()
+
+
+def test_v17_to_v18_rollback_reverts_application_id(tmp_path):
+    """If migrate_v17_to_v18 fails its FK check, the PRAGMA write rolls back with the rest.
+
+    Empirically, ``PRAGMA application_id`` IS transactional in modern SQLite
+    (the write lands in the database header on page 1 and is journaled with
+    every other page change). So on rollback, both ``application_id`` AND
+    ``user_version`` revert to their pre-migration values. The next run
+    re-applies v17→v18 cleanly and idempotently.
+    """
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SCHEMA_SQL)
+    conn.execute("PRAGMA user_version = 17")
+    conn.commit()
+
+    # Force a rollback by injecting a post-stamp FK violation that
+    # foreign_key_check catches before commit (apply_pending_migrations
+    # runs PRAGMA foreign_key_check before each per-hop commit).
+    from filigree import migrations as mig
+
+    original = mig.MIGRATIONS[17]
+
+    def failing_v17_to_v18(c: sqlite3.Connection) -> None:
+        original(c)
+        # Dangling FK: comments.issue_id REFERENCES issues(id).
+        c.execute(
+            "INSERT INTO comments (issue_id, author, text, created_at) "
+            "VALUES ('does-not-exist', 'test', 'orphan', '2026-05-23T00:00:00+00:00')"
+        )
+
+    mig.MIGRATIONS[17] = failing_v17_to_v18  # type: ignore[assignment]
+    try:
+        with pytest.raises(MigrationError):
+            apply_pending_migrations(conn, target_version=18)
+    finally:
+        mig.MIGRATIONS[17] = original
+
+    # Both PRAGMA writes reverted (application_id IS journaled in modern SQLite).
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == 0
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+
+    # Idempotent clean re-run succeeds.
+    applied = apply_pending_migrations(conn, target_version=18)
+    assert applied == 1
+    assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    conn.close()
