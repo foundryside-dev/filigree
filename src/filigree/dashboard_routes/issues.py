@@ -1562,13 +1562,32 @@ def create_loom_router() -> APIRouter:
         vocabulary); classic ``DELETE /api/issue/{id}/dependencies/{dep_id}``
         keeps its ``dep_id`` parameter name unchanged.
 
+        Response: ``{removed: bool, issue_found: bool}``. ``removed`` is the
+        classic boolean (an edge was actually deleted). ``issue_found`` is a
+        loom-only addition (wire-compatible per the contract's stability
+        clause): ``false`` exactly when a referenced issue does not exist, so
+        a caller can distinguish a typo'd id from a genuinely-absent edge
+        without parsing the server log.
+
         Idempotent at the wire layer per the loom contract
-        (tests/fixtures/contracts/loom/issues-dep-remove.json): a DELETE
-        between two valid-prefix IDs returns 200 ``{"removed": false}`` even
-        when one or both issues do not exist. The db layer still raises
-        ``KeyError`` for missing issues — CLI/MCP surfaces convert that to
-        NOT_FOUND — but the wire layer absorbs it so retried DELETEs after a
-        network glitch stay safe.
+        (tests/fixtures/contracts/loom/issues-dep-remove.json). Two distinct
+        cases both reach 200 ``{"removed": false}``, and they differ in kind:
+
+        - **Edge absent, both issues exist:** ``remove_dependency`` returns
+          ``False`` without raising → ``{removed: false, issue_found: true}``.
+          This is the genuine retry-safety case — a DELETE replayed after a
+          network glitch finds nothing to remove — and ``removed`` matches
+          classic, which returns the same 200.
+        - **Issue itself missing:** ``remove_dependency`` raises ``KeyError``
+          (it ``get_issue``-s both ids first; db_planning.py:285-286) →
+          ``{removed: false, issue_found: false}``. The wire layer absorbs the
+          ``KeyError`` to satisfy the frozen fixture, but it is a deliberate
+          tradeoff, *not* behaviour shared with classic: classic and the
+          CLI/MCP surfaces convert the same ``KeyError`` to NOT_FOUND.
+          Absorbing it here can mask a typo'd ``issue_id``, so the catch both
+          sets ``issue_found: false`` and logs a warning — the caller still
+          receives the idempotent 200, but the masked typo is now both
+          machine-detectable and traceable in the server log.
         """
         clean_actor, actor_err = _validate_actor(actor)
         if actor_err:
@@ -1576,9 +1595,19 @@ def create_loom_router() -> APIRouter:
         try:
             removed = db.remove_dependency(issue_id, dep_issue_id, actor=clean_actor)
         except KeyError:
-            return JSONResponse({"removed": False})
+            # KeyError fires only when an issue itself is missing (the absent-edge
+            # retry-safety case returns False without raising), so this branch is
+            # exactly the typo-masking path: flag it via issue_found=false, log
+            # it, then honour the frozen idempotent contract.
+            logger.warning(
+                "Loom dependency DELETE absorbed missing-issue KeyError (issue_id=%s dep_issue_id=%s); returning idempotent removed=false",
+                issue_id,
+                dep_issue_id,
+            )
+            return JSONResponse({"removed": False, "issue_found": False})
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
-        return JSONResponse({"removed": removed})
+        # No KeyError ⇒ remove_dependency resolved both issues, so they exist.
+        return JSONResponse({"removed": removed, "issue_found": True})
 
     return router

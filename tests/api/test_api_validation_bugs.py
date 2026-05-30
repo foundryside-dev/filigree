@@ -237,6 +237,10 @@ class TestRemoveDependencyForeignPrefix:
         so a retried DELETE after a network glitch stays safe. Classic
         keeps the 404 behaviour above — no classic fixture pins that
         contract, and CLI/MCP surfaces still surface NOT_FOUND.
+
+        Because the missing issue would otherwise be silently masked, the
+        loom-only ``issue_found`` field is ``false`` here, so a caller can
+        still detect the typo'd id programmatically.
         """
         target = bug_db.create_issue("Target")
         resp = await client.request(
@@ -244,7 +248,25 @@ class TestRemoveDependencyForeignPrefix:
             f"/api/loom/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"removed": False}
+        assert resp.json() == {"removed": False, "issue_found": False}
+
+    async def test_loom_remove_dependency_absent_edge_existing_issues_reports_issue_found(
+        self, bug_db: FiligreeDB, client: AsyncClient
+    ) -> None:
+        """The genuine retry-safety case: both issues exist but no edge
+        connects them. ``remove_dependency`` returns ``False`` without
+        raising, so this is idempotent 200 ``{"removed": false}`` — but
+        ``issue_found`` is ``true``, distinguishing it from the typo'd-id
+        case above where ``issue_found`` is ``false``.
+        """
+        a = bug_db.create_issue("A")
+        b = bug_db.create_issue("B")
+        resp = await client.request(
+            "DELETE",
+            f"/api/loom/issues/{a.id}/dependencies/{b.id}",
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"removed": False, "issue_found": True}
 
 
 # ---------------------------------------------------------------------------

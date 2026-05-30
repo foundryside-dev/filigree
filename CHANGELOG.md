@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Loom `DELETE /api/loom/issues/{id}/dependencies/{dep_id}` now returns an
+  `issue_found` field** alongside `removed` (`{removed: bool, issue_found:
+  bool}`). The endpoint is idempotent by contract: a DELETE between two
+  valid-prefix ids returns `200 {removed: false}` even when a referenced issue
+  does not exist, so retried DELETEs stay safe — but that absorption (classic
+  and the CLI/MCP surfaces raise NOT_FOUND for a missing issue) could silently
+  mask a typo'd id. `issue_found` is `false` exactly in the missing-issue case
+  and `true` for a genuinely-absent edge between two existing issues, letting
+  callers distinguish the two without parsing the server log (the handler also
+  now logs a warning on the absorbed `KeyError`). The addition is
+  wire-compatible per the loom contract's stability clause; `removed` is
+  unchanged.
+
 ### Changed
 
 - **File-identity types now make illegal backend/identity combinations
