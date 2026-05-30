@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The dashboard Select (multi-select) button now reflects its active state.**
+  `toggleMultiSelect()` switches the button's styling by looking up
+  `#btnMultiSelect`, but the toolbar Select button carried no `id`, so the
+  lookup returned `null` and the button never showed the accent (active)
+  styling when multi-select mode was on. The button now carries
+  `id="btnMultiSelect"`.
+
 - **Escape now closes a file detail panel, not just an issue detail panel.**
   The shared side panel is opened for both issue (`state.selectedIssue`) and
   file (`state.selectedFile`) detail, but the global Escape handler only called
