@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   analysis-failure guard. (`api_files_failed` aggregates both dropped per-file
   POSTs and a failed completion POST, so it counts an un-completed run too.)
 
+- **`register_file(_commit=False)` no longer discards a caller's transaction on
+  error.** When the file-record upsert ran inside a caller-owned transaction
+  (`_commit=False`, as the annotation path uses it), the `IntegrityError` and
+  generic error handlers in `register_file` / `_update_existing_file_record`
+  called `self.conn.rollback()` unconditionally — a full connection rollback
+  that would discard the caller's prior uncommitted writes. The write now runs
+  inside a `SAVEPOINT` and rolls back only to that savepoint when the caller
+  owns the transaction (mirroring `create_observation`); the standalone
+  (`_commit=True`) path is unchanged. Concurrent-insert recovery (requery the
+  collision and retry it as an update) is preserved in both modes — the failed
+  INSERT raised because the conflicting row is already visible in the read
+  snapshot, so the requery finds it after the savepoint rollback too.
+
 ## [2.1.1] - 2026-05-30
 
 Upgrade guide: [Upgrading from 2.1.0 to 2.1.1](docs/UPGRADING.md#upgrading-from-210-to-211).
