@@ -214,6 +214,74 @@ class TestScanRunsAPI:
         assert "/api/scan-runs" in paths
 
 
+class TestUnknownScanRunIdContract:
+    """POST scan-results with a client-supplied scan_run_id Filigree has never
+    seen — the permanent "tolerate-unknown" intake contract (F6, contracts.md).
+
+    Federation producers (Clarion `clarion analyze`) mint their own run_id and
+    POST findings carrying it with NO prior create handshake. Filigree ingests
+    the findings and reconstructs the run in GET /api/scan-runs from
+    scan_findings.scan_run_id. This is a supported, permanent contract — not a
+    transitional leniency — so it is pinned here at the HTTP intake boundary,
+    not only at the core-method level (TestScanRunsAPI / TestGetScanRunsCore).
+
+    If this class ever needs to change, the federation contract changed: update
+    docs/federation/contracts.md §F6 and notify Loom consumers before merging.
+    """
+
+    async def test_unknown_scan_run_id_ingests_with_200(self, client: AsyncClient) -> None:
+        """An unknown scan_run_id ingests successfully and is reconstructed in history."""
+        resp = await client.post(
+            "/api/v1/scan-results",
+            json={
+                "scan_source": "clarion",
+                "scan_run_id": "clarion-run-never-seen-001",
+                "findings": [{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["findings_created"] == 1
+        # The orphan run is reconstructed from scan_findings in history.
+        runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
+        assert any(r["scan_run_id"] == "clarion-run-never-seen-001" for r in runs)
+
+    async def test_unknown_run_completion_warning_is_benign(self, client: AsyncClient) -> None:
+        """With complete_scan_run=True (default) an unknown run emits a benign
+        completion warning in warnings[] — there is no scan_runs row to mark
+        'completed'. Consumers MUST NOT treat populated warnings[] as failure;
+        findings are still ingested (findings_created reflects the real work)."""
+        resp = await client.post(
+            "/api/v1/scan-results",
+            json={
+                "scan_source": "clarion",
+                "scan_run_id": "clarion-run-warn-001",
+                "findings": [{"path": "b.py", "rule_id": "C2", "severity": "high", "message": "m"}],
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["findings_created"] == 1
+        assert any("not updated to 'completed'" in w for w in body["warnings"])
+
+    async def test_complete_scan_run_false_suppresses_completion_warning(self, client: AsyncClient) -> None:
+        """complete_scan_run=False suppresses the completion attempt entirely,
+        so enrich-only producers get a clean warnings[] for an unknown run."""
+        resp = await client.post(
+            "/api/v1/scan-results",
+            json={
+                "scan_source": "clarion",
+                "scan_run_id": "clarion-run-noverify-001",
+                "findings": [{"path": "c.py", "rule_id": "C3", "severity": "high", "message": "m"}],
+                "complete_scan_run": False,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["findings_created"] == 1
+        assert not any("not updated to 'completed'" in w for w in body["warnings"])
+
+
 class TestFilesScanSourceFilterAPI:
     """GET /api/files?scan_source=... — filter files by scan source."""
 

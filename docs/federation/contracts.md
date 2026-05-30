@@ -343,6 +343,59 @@ Pinned by `tests/api/test_loom_changes_deletion.py`
 (`TestDeletionCarriesAffectedEntities`) and the `deleted_issues` schema tests in
 `tests/core/test_schema.py`.
 
+## F6 — Scan-run identity & the tolerate-unknown intake contract (2026-05-31)
+
+**Decision: tolerate-unknown is permanent (option a).** A `POST` to
+`/api/v1/scan-results`, `/api/loom/scan-results`, or `/api/scan-results`
+carrying a `scan_run_id` Filigree has never seen is a **supported, stable
+contract** — not transitional leniency. Findings ingest normally; Filigree
+reconstructs the run in `GET /api/scan-runs` from `scan_findings.scan_run_id`.
+There is **no** Phase-0 "create the scan run first" handshake, and none is
+planned. Federation producers (Clarion `clarion analyze`, Wardline, Shuttle)
+that mint their own run id and POST enrich-only may depend on this
+indefinitely.
+
+**Why this is intentional, not incidental.** Filigree deliberately built the
+orphan-reconstruction path: `get_scan_runs()` UNIONs `scan_runs` with
+`scan_findings.scan_run_id` precisely so that "ingestion paths that never
+created a `scan_runs` row" appear in history (see `db_files.py::get_scan_runs`
+docstring). `process_scan_runs` only validates an *existing* run's
+`scan_source` (it never requires the row to exist). A create handshake would
+contradict a path Filigree built on purpose. The `scan_runs` lifecycle table
+(`create_scan_run` / `reserve_scan_run`) exists for Filigree's **own**
+`trigger_scan` orchestration — where Filigree mints the id and pre-creates the
+row for cooldown + `pending → running → completed` tracking — and is not part
+of the external producer contract.
+
+### Intake semantics a producer must honour
+
+- **`scan_run_id` must be globally unique across all producers.** Filigree
+  keys on the id alone. If a producer's id collides with an existing
+  `scan_runs` row, ingest either rejects with `VALIDATION` (400) when the
+  `scan_source` differs, or **silently misattributes** when it matches. Use a
+  collision-free scheme (UUID4 or a `producer:`-prefixed id) so a producer id
+  can never collide with Filigree's own `trigger_scan`-minted ids.
+- **Keep `scan_source` stable across a run.** History groups on
+  `(scan_run_id, scan_source)`; a mid-run `scan_source` change splits the run.
+- **Completion warning is benign.** With `complete_scan_run=true` (the
+  default), an unknown run cannot be transitioned to `completed` (no
+  `scan_runs` row), so the response `warnings[]` carries a benign
+  `"Scan run <id> status not updated to 'completed': …"`. **Findings are still
+  ingested.** Consumers MUST NOT treat a populated `warnings[]` as failure —
+  switch on HTTP status and the `stats` counts (`findings_created`, etc.). An
+  enrich-only producer that wants a clean `warnings[]` should send
+  `complete_scan_run=false`, which skips the completion attempt entirely.
+
+Pinned at the HTTP intake boundary by
+`tests/api/test_files_api.py::TestUnknownScanRunIdContract` (200 + ingest +
+reconstruction, the benign completion warning, and `complete_scan_run=false`
+suppression), and at the core-method level by
+`tests/api/test_files_api.py::TestScanRunsAPI` and
+`tests/core/test_files.py::TestGetScanRunsCore`.
+
+**Clarion may drop its "pending Filigree's confirmation" caveat** on
+`docs/federation/contracts.md` (scan-results intake) and `REQ-FINDING-05`.
+
 ## When a contract evolves
 
 **Non-breaking additions** (new optional response fields, new optional request parameters with safe defaults) may land in-place without a new generation. Fixtures are updated to reflect the new shape; the `_meta.updated` field moves.
