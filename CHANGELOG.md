@@ -48,6 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Activity feed now distinguishes a load failure from an empty feed.**
+  `fetchActivity` returns `null` on a non-OK response and an array (possibly
+  empty) on success, but `renderActivityShell` rendered `!events || length === 0`
+  identically as "No recent activity." — so a failing `/api/activity` looked
+  like a quiet, healthy-but-empty feed and hid the server problem. The render
+  decision is now a pure `activityRenderState(events)` returning
+  `"error" | "empty" | "list"` (node behavior test), and a `null` result shows
+  a distinct "Could not load activity." state.
+
+- **Release-tree expansion now surfaces load failures instead of "no data".**
+  `fetchReleaseTree` returns `null` on a non-OK response (it does not throw),
+  so `toggleReleaseTree` cached the `null`, its `catch` never fired,
+  `errorReleaseIds` stayed empty, and the panel rendered "No tree data
+  available." for what was actually a failed load — with no retry affordance.
+  A new pure `classifyReleaseTreeFetch(tree)` (node behavior test) marks a
+  `null` result as an error so the existing error/retry state renders.
+
 - **Kanban drag no longer throws when the transitions fetch fails.**
   `fetchTransitions` returns `null` on an HTTP/network failure (it does not
   throw), but the drag-start handler normalized that into
