@@ -874,7 +874,11 @@ async def run_scanner_pipeline(
             print(f"  API files failed:  {stats['api_files_failed']}")
     print("=" * 50)
 
-    if not args.no_ingest and stats.get("api_files_posted", 0) == 0 and stats.get("api_files_failed", 0) > 0:
+    # Any ingest failure is fatal — symmetric with the analysis-failure guard
+    # below. api_files_failed counts both dropped per-file findings POSTs and a
+    # failed completion POST (an un-completed scan run), so a partial success
+    # must not be reported to the orchestrator as success.
+    if not args.no_ingest and stats.get("api_files_failed", 0) > 0:
         return 1
 
     if stats.get("failed", 0) > 0:

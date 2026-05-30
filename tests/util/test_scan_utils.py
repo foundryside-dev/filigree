@@ -707,6 +707,91 @@ class TestAnalyseFiles:
         assert "FAIL failed.py: scanner exploded" in err
         assert "[2/2] unknown.py" in err
 
+    async def test_partial_ingest_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 1 of 2 findings POSTs fails: dropped findings must not be reported as
+        # success. The old guard only fired when *every* post failed.
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "a.py").write_text("x = 1\n")
+        (src / "b.py").write_text("y = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--batch-size", "1", "--scan-run-id", "run-1"],
+        )
+
+        findings_posts = 0
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            nonlocal findings_posts
+            if kwargs.get("complete_scan_run") is True:
+                return True, ""
+            findings_posts += 1
+            if findings_posts == 2:
+                return False, "boom"
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 1
+
+    async def test_completion_post_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # All per-file POSTs succeed but the completion POST fails: the scan run
+        # is left un-completed, so the pipeline must report failure.
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--scan-run-id", "run-1"],
+        )
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            if kwargs.get("complete_scan_run") is True:
+                return False, "boom"
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 1
+
 
 # ── severity_map ───────────────────────────────────────────────────────
 

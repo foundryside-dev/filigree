@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Scanner pipeline now reports a non-zero exit on *any* ingest failure, not
+  only a total wipeout.** `run_scanner_pipeline` previously returned failure
+  only when every finding POST failed (`api_files_posted == 0 and
+  api_files_failed > 0`), so a partial success (e.g. 5 findings posted, 3
+  dropped) or a failed completion POST that left the scan run un-completed both
+  exited `0` — the orchestrator saw success while findings were silently lost.
+  The guard now fires on `api_files_failed > 0`, symmetric with the
+  analysis-failure guard. (`api_files_failed` aggregates both dropped per-file
+  POSTs and a failed completion POST, so it counts an un-completed run too.)
+
 ## [2.1.1] - 2026-05-30
 
 Upgrade guide: [Upgrading from 2.1.0 to 2.1.1](docs/UPGRADING.md#upgrading-from-210-to-211).
