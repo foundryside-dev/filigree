@@ -48,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Escape now closes a file detail panel, not just an issue detail panel.**
+  The shared side panel is opened for both issue (`state.selectedIssue`) and
+  file (`state.selectedFile`) detail, but the global Escape handler only called
+  `closeDetail()` when an *issue* was selected — pressing Escape over a file
+  panel cleared the search instead of closing the panel. The handler now closes
+  a file panel via `closeFileDetail()` when `state.selectedFile` is set.
+
+- **Opening a file detail panel no longer leaves a stale issue header.**
+  Issue detail writes issue-specific markup into the shared `#detailHeader`, but
+  `openFileDetail` only rewrote `#detailContent` — so opening an issue and then
+  a file showed a panel whose header still identified the previous issue.
+  `openFileDetail` now clears `#detailHeader` before rendering the file panel.
+
 - **Activity feed now distinguishes a load failure from an empty feed.**
   `fetchActivity` returns `null` on a non-OK response and an array (possibly
   empty) on success, but `renderActivityShell` rendered `!events || length === 0`
