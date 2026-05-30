@@ -5,7 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] - 2026-05-30
+
+Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).
+
+### Breaking Changes / Migration Notes
+
+- **Custom workflow packs must declare reverse escape paths.**
+  Workflow operations that reopen, release/revert, or force-close issues now
+  validate against template `reverse_transitions`. Custom packs that relied on
+  the previous internal bypass must add the corresponding reverse edge or
+  callers will receive `InvalidTransitionError`.
+
+- **HTTP batch-close no longer accepts `force=true` by default.**
+  `POST /api/batch/close` and `POST /api/loom/batch/close` reject forced HTTP
+  closes unless the dashboard starts with `--allow-http-force-close`. CLI
+  `filigree close --force` and MCP `batch_close(force=true)` are unchanged.
+
+- **Corrupt `issues.fields` rows are no longer merged over silently.**
+  `update_issue(fields=...)` now refuses to merge into unparsable stored JSON.
+  Operators or embedders that intentionally replace a corrupt value must pass
+  `force_overwrite_corrupt=True`, which records a
+  `corrupt_fields_overwritten` event with the raw old value.
+
+- **Duplicate audit-event writes now raise instead of disappearing.**
+  `_record_event` uses `event_seq` to preserve same-second event bursts and
+  uses a normal `INSERT`; true duplicate rows now raise `sqlite3.IntegrityError`
+  so the caller's transaction can roll back instead of losing audit history.
+
+- **The internal `_commit=` keyword was removed.**
+  `claim_issue` and `_claim_next_with_prior` no longer accept `_commit=`.
+  Embedders composing lower-level DB operations inside an existing transaction
+  should use the public `start_work` / `start_next_work` APIs where possible,
+  or the internal `_skip_begin=True` path only when they own the transaction
+  boundary.
 
 ### Added
 
@@ -81,67 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim+walk. Missing required fields surface as warnings rather than blocking;
   hard edges are never auto-walked (the confirm gate stays intact by default).
   Default off.
-
-### Deprecated
-
-- **`get_stats` keys `status_name_counts` / `status_category_counts` are
-  deprecated (filigree-17694d2db8).** They have always been exact duplicates of
-  `by_status` / `by_category` respectively, doubling the payload with no added
-  information. They remain emitted as compatibility aliases on every wire
-  surface (MCP `get_stats`, the `get_summary` `stats` envelope, and the HTTP
-  `StatsWithPrefix` projection) per ADR-009 §7 and will be **removed in the next
-  major**. Read `by_status` / `by_category` instead.
-
-### Fixed
-
-- **"ready" no longer falsely implies "startable" (filigree-406e6b7ee0).**
-  `get_ready` listed open-category `triage` bugs as ready, but
-  `start_work` / `start_next_work` then raised `InvalidTransitionError` because
-  `triage` has no single-hop transition to a wip state. `start_next_work` now
-  **skips** non-startable (and ambiguous, and template-less) candidates instead
-  of throwing on the queue, returning the next startable issue or a clean empty
-  result. A *named* `start_work` on such an issue still raises
-  `INVALID_TRANSITION`, but with an actionable message naming the intermediate
-  status to move through first (or to pass `advance`), rather than the bare
-  "no wip-category transition" text. The explicit-`target_status` error contract
-  is unchanged.
-
-## [2.1.0] - 2026-05-19
-
-Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).
-
-### Breaking Changes / Migration Notes
-
-- **Custom workflow packs must declare reverse escape paths.**
-  Workflow operations that reopen, release/revert, or force-close issues now
-  validate against template `reverse_transitions`. Custom packs that relied on
-  the previous internal bypass must add the corresponding reverse edge or
-  callers will receive `InvalidTransitionError`.
-
-- **HTTP batch-close no longer accepts `force=true` by default.**
-  `POST /api/batch/close` and `POST /api/loom/batch/close` reject forced HTTP
-  closes unless the dashboard starts with `--allow-http-force-close`. CLI
-  `filigree close --force` and MCP `batch_close(force=true)` are unchanged.
-
-- **Corrupt `issues.fields` rows are no longer merged over silently.**
-  `update_issue(fields=...)` now refuses to merge into unparsable stored JSON.
-  Operators or embedders that intentionally replace a corrupt value must pass
-  `force_overwrite_corrupt=True`, which records a
-  `corrupt_fields_overwritten` event with the raw old value.
-
-- **Duplicate audit-event writes now raise instead of disappearing.**
-  `_record_event` uses `event_seq` to preserve same-second event bursts and
-  uses a normal `INSERT`; true duplicate rows now raise `sqlite3.IntegrityError`
-  so the caller's transaction can roll back instead of losing audit history.
-
-- **The internal `_commit=` keyword was removed.**
-  `claim_issue` and `_claim_next_with_prior` no longer accept `_commit=`.
-  Embedders composing lower-level DB operations inside an existing transaction
-  should use the public `start_work` / `start_next_work` APIs where possible,
-  or the internal `_skip_begin=True` path only when they own the transaction
-  boundary.
-
-### Added
 
 - **`transition_forced` audit event (2.1.0 §1.1).** Every
   `_skip_transition_check=True` status change in `update_issue` now
@@ -400,7 +372,32 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   consumers don't add disk-existence guards that would break valid
   catalog-only lookups.
 
+### Deprecated
+
+- **`get_stats` keys `status_name_counts` / `status_category_counts` are
+  deprecated (filigree-17694d2db8).** They have always been exact duplicates of
+  `by_status` / `by_category` respectively, doubling the payload with no added
+  information. They remain emitted as compatibility aliases on every wire
+  surface (MCP `get_stats`, the `get_summary` `stats` envelope, and the HTTP
+  `StatsWithPrefix` projection) per ADR-009 §7 and will be **removed in the next
+  major**. Read `by_status` / `by_category` instead.
+
 ### Fixed
+
+- **"ready" no longer falsely implies "startable" (filigree-406e6b7ee0).**
+  `get_ready` listed open-category `triage` bugs as ready, but
+  `start_work` / `start_next_work` then raised `InvalidTransitionError` because
+  `triage` has no single-hop transition to a wip state. `start_next_work` now
+  **skips** non-startable (and ambiguous, and template-less) candidates instead
+  of throwing on the queue, returning the next startable issue or a clean empty
+  result. A *named* `start_work` on such an issue still raises
+  `INVALID_TRANSITION`, but with an actionable message naming the intermediate
+  status to move through first (or to pass `advance`), rather than the bare
+  "no wip-category transition" text. The explicit-`target_status` error contract
+  is unchanged. The multi-hop `advance` walk now also aggregates every hop's
+  soft-enforcement `data_warnings` onto the result, so an earlier hop's advisory
+  (e.g. a missing-`severity` warning on `triage → confirmed`) is no longer
+  hidden by the final hop.
 
 - **`ForeignDatabaseError` now points out malformed `.git` files in its
   remediation text (2.1.0 §6.1).** Discovery classifies `.git` boundaries as
