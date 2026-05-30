@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-05-30
+
+Upgrade guide: [Upgrading from 2.1.0 to 2.1.1](docs/UPGRADING.md#upgrading-from-210-to-211).
+
+### Added
+
+- **`issue_deleted` now carries `affected_entities` — the entity bindings a
+  delete cascade removed (F5 amplifier).** A hard `delete_issue` cascades the
+  issue's `entity_associations` (`ON DELETE CASCADE`), silently dropping
+  Filigree's side of every Clarion entity binding. The 2.1.0 `issue_deleted`
+  signal named only the issue, so a consumer mirroring the reverse lookup
+  (`list_associations_by_entity`) could not tell which bindings the cascade
+  dropped and would surface a user-facing phantom issue. The tombstone now
+  captures the bound `clarion_entity_id`s (sorted) **before** the cascade and
+  surfaces them as **`affected_entities`** on the `/api/loom/changes`
+  `issue_deleted` record — always present (`[]` for live-issue records);
+  consumers purge the listed bindings on reconcile. Schema **v20 → v21** (new
+  `deleted_issues.entity_ids` column, `NOT NULL DEFAULT '[]'`, backfilled for
+  existing tombstones; the migration is automatic on first open). Wire
+  contract: `docs/federation/contracts.md` §F5. Consumer tracking:
+  `filigree-f3bf56554c`.
+
 ## [2.1.0] - 2026-05-30
 
 Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-20x-to-210).
@@ -82,17 +104,7 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   `deleted_at` so federation consumers (Clarion / Wardline / Shuttle) learn of
   each deletion exactly once. Schema **v19 → v20** (new `deleted_issues` table,
   keyed on a VACUUM-stable `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a
-  `UNIQUE` `issue_id`). The `issue_deleted` record also carries
-  **`affected_entities`** — the sorted `clarion_entity_id`s whose
-  `entity_associations` the delete cascade removed, captured before the cascade
-  and stored on the tombstone (schema **v20 → v21**, new
-  `deleted_issues.entity_ids` column). Without it the deletion signal is lossy:
-  a consumer mirroring the reverse lookup (`list_associations_by_entity`) cannot
-  tell which bindings the cascade dropped and surfaces a user-facing phantom
-  issue. The field is always present on `/api/loom/changes` (`[]` for
-  live-issue records); consumers must purge the listed bindings on reconcile.
-  Wire contract: `docs/federation/contracts.md` §F5. Consumer tracking:
-  `filigree-f3bf56554c`.
+  `UNIQUE` `issue_id`).
 
 - **Scan findings accept an optional `fingerprint` as cross-run identity.**
   When a finding supplied to `process_scan_results` / `POST /api/v1/scan-results`

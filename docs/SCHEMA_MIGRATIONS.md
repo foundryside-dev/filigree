@@ -31,12 +31,14 @@ without grepping source. The source of truth remains
 
 | Release | Ships `user_version` | Notes |
 |---------|----------------------|-------|
-| 2.1.0 | 21 | Migrations 14 to 21: entity associations (v15), event sequencing (v16), file registry metadata (v17), scan-finding fingerprints (v19), the `deleted_issues` tombstone (v20), and its `entity_ids` / `affected_entities` deletion-signal amplifier (v21) |
+| 2.1.1 | 21 | Migration 20 to 21: `deleted_issues.entity_ids`, surfaced as `affected_entities` on the `issue_deleted` deletion-signal record (F5 amplifier) |
+| 2.1.0 | 20 | Migrations 14 to 20: entity associations (v15), event sequencing (v16), file registry metadata (v17), `application_id` stamp (v18), scan-finding fingerprints (v19), and the `deleted_issues` tombstone (v20) |
 | 2.0.0 to 2.0.3 | 14 | Loom/API generation and 2.0 surface releases |
 | 1.6.0 to 1.6.1 | 8 | Autodiscovery MCP install line |
 
 For the operator upgrade path from 2.0.x to 2.1.0, see
-[UPGRADING.md](UPGRADING.md#upgrading-from-20x-to-210).
+[UPGRADING.md](UPGRADING.md#upgrading-from-20x-to-210); for 2.1.0 to 2.1.1, see
+[UPGRADING.md](UPGRADING.md#upgrading-from-210-to-211).
 
 ## Adding a Migration
 

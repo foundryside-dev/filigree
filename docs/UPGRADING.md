@@ -3,11 +3,28 @@
 This guide covers version-to-version Filigree upgrades. For Beads import, see
 [MIGRATION.md](MIGRATION.md).
 
+## Upgrading from 2.1.0 to 2.1.1
+
+Filigree 2.1.1 ships database schema `user_version` 21 (2.1.0 ships 20). The
+first 2.1.1 open applies a single in-place migration:
+
+| Step | Schema | What changes |
+|------|--------|--------------|
+| 20 to 21 | v21 | Adds `deleted_issues.entity_ids`, surfaced as `affected_entities` on the `issue_deleted` changes-feed record |
+
+The migration is an additive `ALTER TABLE ... ADD COLUMN` (`NOT NULL DEFAULT
+'[]'`) that backfills existing tombstones; `FiligreeDB.initialize()` applies it
+automatically on first open, or run `filigree doctor --fix` for an
+operator-controlled upgrade. No application-level action is required. A
+federation consumer of `/api/loom/changes` should begin honouring the new
+`affected_entities` field on `issue_deleted` records — purge the listed entity
+bindings on reconcile; see `docs/federation/contracts.md` §F5.
+
 ## Upgrading from 2.0.x to 2.1.0
 
-Filigree 2.1.0 ships database schema `user_version` 21. Databases from the
+Filigree 2.1.0 ships database schema `user_version` 20. Databases from the
 2.0.x line ship schema 14, so the first 2.1.0 open applies migrations 14 to
-21 in place:
+20 in place:
 
 | Step | Schema | What changes |
 |------|--------|--------------|
@@ -17,7 +34,6 @@ Filigree 2.1.0 ships database schema `user_version` 21. Databases from the
 | 17 to 18 | v18 | Stamps `application_id` on pre-app-id-aware databases (metadata only) |
 | 18 to 19 | v19 | Adds `scan_findings.fingerprint` and partitions the dedup index |
 | 19 to 20 | v20 | Adds the `deleted_issues` tombstone behind the `issue_deleted` changes-feed signal |
-| 20 to 21 | v21 | Adds `deleted_issues.entity_ids`, surfaced as `affected_entities` on `issue_deleted` |
 
 `FiligreeDB.initialize()` applies pending migrations automatically. For an
 operator-controlled upgrade, use `filigree doctor --fix` so the schema step is
