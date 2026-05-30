@@ -620,6 +620,21 @@ class TestServerModeCrossProjectReadBlocking:
         assert "bravo" not in body["error"]
         assert "alpha" not in body["error"]
 
+    async def test_dashboard_server_mode_blocks_cross_project_release_tree_read(self, multi_client: AsyncClient) -> None:
+        """Release-tree reads must use the same route boundary guard as
+        issue/plan reads — otherwise the KeyError handler echoes the
+        foreign-prefixed ID instead of the safe cross-project wording."""
+        from filigree.core import WrongProjectError
+
+        resp = await multi_client.get("/api/p/alpha/release/bravo-deadbeef00/tree")
+
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == "NOT_FOUND", body
+        assert body["error"] == WrongProjectError.SAFE_MESSAGE
+        assert "bravo" not in body["error"]
+        assert "alpha" not in body["error"]
+
     async def test_server_mode_same_project_miss_indistinguishable(self, multi_client: AsyncClient) -> None:
         """Same-project miss and cross-project miss must return the same
         status code so a probe cannot distinguish the two. Bodies differ

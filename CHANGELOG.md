@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Release-tree reads now run the server-mode foreign-prefix guard.** The
+  dashboard `GET /release/{release_id}/tree` handler read straight from the DB
+  without the `_check_read_prefix_in_server_mode` guard that issue and plan
+  reads use, so in multi-project server mode a foreign-prefixed id fell through
+  to the `KeyError` branch and returned `Release not found: {release_id}` —
+  echoing the cross-project id verbatim instead of the safe wording. A probe
+  could thus distinguish "no such release here" from "wrong project" and read
+  back the foreign prefix. The handler now applies the same route-boundary
+  guard before the lookup, returning `404`/`WrongProjectError.safe_message`
+  indistinguishably from a same-project miss. Single-project (ethereal) mode is
+  unaffected — the guard is a no-op when `_project_store` is unset.
+
 - **Scanner pipeline now reports a non-zero exit on *any* ingest failure, not
   only a total wipeout.** `run_scanner_pipeline` previously returned failure
   only when every finding POST failed (`api_files_posted == 0 and
