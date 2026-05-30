@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from filigree.types.core import (
     AssocType,
@@ -111,7 +111,7 @@ class DeleteIssueResult(TypedDict):
     ``undo_last`` cannot reverse it.
     """
 
-    status: str
+    status: Literal["deleted"]
     issue_id: str
     deleted_events: int
     deleted_comments: int

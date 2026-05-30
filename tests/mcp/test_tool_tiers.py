@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from filigree.core import FiligreeDB
 from filigree.mcp_server import _all_tools, _tool_argument_names, call_tool
-from filigree.mcp_tools.tiers import TIER_MAP, tier_for
+from filigree.mcp_tools.tiers import _COMMON, _CORE, _NICHE, TIER_MAP, tier_for
 from tests.mcp._helpers import _parse
 
 _VALID_TIERS = {"core", "common", "niche"}
@@ -34,6 +34,16 @@ class TestTierCompleteness:
 
     def test_all_tier_values_valid(self) -> None:
         assert set(TIER_MAP.values()) <= _VALID_TIERS
+
+    def test_tier_sets_are_pairwise_disjoint(self) -> None:
+        # TIER_MAP is built by three sequential loops over _CORE/_COMMON/_NICHE;
+        # a tool listed in two sets would be silently overwritten by the last
+        # loop instead of raising. The completeness test only pins that every
+        # tool *has* a tier, not that each tool has exactly one. Guard the
+        # construction's disjointness explicitly.
+        assert not (_CORE & _COMMON), f"_CORE ∩ _COMMON: {sorted(_CORE & _COMMON)}"
+        assert not (_CORE & _NICHE), f"_CORE ∩ _NICHE: {sorted(_CORE & _NICHE)}"
+        assert not (_COMMON & _NICHE), f"_COMMON ∩ _NICHE: {sorted(_COMMON & _NICHE)}"
 
     def test_core_set_is_small(self) -> None:
         core = [name for name, tier in TIER_MAP.items() if tier == "core"]

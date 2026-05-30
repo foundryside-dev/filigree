@@ -679,30 +679,52 @@ class ClarionRegistry:
     def _resolve_files_batch_chunk(self, chunk: list[BatchQuery]) -> BatchResolution:
         url = clarion_files_batch_url(self.base_url)
         body = {"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}
-        try:
-            response = self._http_client.post(
-                url,
-                json=body,
-                headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
-                timeout=self.timeout_seconds,
-            )
-            raw = response.text
-            if response.status_code >= 400:
-                reason = response.reason_phrase
-                if response.status_code == 401:
-                    msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
-                if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
-                    msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
-                    raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
-                if 400 <= response.status_code < 500:
-                    msg = f"Clarion batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
-                    raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
-                msg = f"Clarion batch resolve failed at {url}: HTTP {response.status_code} {reason}"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            msg = f"Clarion batch resolve unreachable at {url}: {exc}"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
+        # Batch resolve is an idempotent read, so it retries transient 5xx and
+        # network failures on the same deadline/backoff budget as the
+        # single-file ``resolve_file`` path (CONTRACT-1 retry parity). Auth and
+        # 4xx outcomes are deterministic and raise immediately without retry.
+        deadline = time.monotonic() + self.timeout_seconds
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Clarion batch resolve unreachable at {url}: retry budget exhausted"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="timeout")
+            try:
+                response = self._http_client.post(
+                    url,
+                    json=body,
+                    headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                    timeout=remaining,
+                )
+                raw = response.text
+                if response.status_code >= 400:
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                        self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
+                        self._sleep_before_retry(deadline)
+                        attempt += 1
+                        continue
+                    reason = response.reason_phrase
+                    if response.status_code == 401:
+                        msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                    if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
+                        msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
+                        raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+                    if 400 <= response.status_code < 500:
+                        msg = f"Clarion batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
+                        raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
+                    msg = f"Clarion batch resolve failed at {url}: HTTP {response.status_code} {reason}"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if self._should_retry_read(attempt, deadline):
+                    self._log_retry(url=url, attempt=attempt, cause_kind="network")
+                    self._sleep_before_retry(deadline)
+                    attempt += 1
+                    continue
+                msg = f"Clarion batch resolve unreachable at {url}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
 
         try:
             payload = json.loads(raw)
