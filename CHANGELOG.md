@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Metrics view now renders zero observation counts as `0`, not blank.**
+  `renderObservationStats` passed numeric counts straight to `escHtml`, whose
+  `if (!str) return ""` falsy guard turns `0` into an empty string — so a
+  `stale_count` / `expiring_soon_count` of `0` rendered as a blank cell instead
+  of an explicit `0`. The counts are now stringified before escaping
+  (`escHtml(String(n))`), the locally-scoped fix; `escHtml`'s contract is
+  unchanged. (`renderObservationStats` is now exported so the rendering is
+  covered by a node behavior test.)
+
 - **`migrate_from_beads` no longer aborts when the Beads DB has no
   `dependencies` table.** The `events`, `labels`, and `comments` reads already
   tolerated a missing table (`OperationalError` filtered through

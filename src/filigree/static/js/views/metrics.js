@@ -117,7 +117,7 @@ function renderAgentWorkload(container) {
     "</div>";
 }
 
-function renderObservationStats(container, obsStats) {
+export function renderObservationStats(container, obsStats) {
   if (!obsStats || obsStats.count <= 0) return;
   const staleColor = obsStats.stale_count > 0 ? "text-amber-400" : "text-emerald-400";
   const expiringColor = obsStats.expiring_soon_count > 0 ? "text-red-400" : "text-emerald-400";
@@ -126,19 +126,19 @@ function renderObservationStats(container, obsStats) {
     '<div class="text-xs font-medium mb-3" style="color:var(--text-secondary)">Observations</div>' +
     '<div class="grid grid-cols-4 gap-3">' +
     '<div><div class="text-lg font-bold" style="color:var(--accent)">' +
-    escHtml(obsStats.count) +
+    escHtml(String(obsStats.count)) +
     "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">pending</div></div>' +
     '<div><div class="text-lg font-bold ' +
     staleColor +
     '">' +
-    escHtml(obsStats.stale_count) +
+    escHtml(String(obsStats.stale_count)) +
     "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">stale (&gt;48h)</div></div>' +
     '<div><div class="text-lg font-bold ' +
     expiringColor +
     '">' +
-    escHtml(obsStats.expiring_soon_count) +
+    escHtml(String(obsStats.expiring_soon_count)) +
     "</div>" +
     '<div class="text-[10px]" style="color:var(--text-muted)">expiring &lt;24h</div></div>' +
     '<div><div class="text-lg font-bold" style="color:var(--text-primary)">' +
