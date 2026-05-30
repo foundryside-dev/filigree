@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Restoring a saved filter now shows the correct "Done: Xd" pill label.**
+  `applyFilterState()` called `syncPillUI()` — which reads `#doneTimeBound`'s
+  value to render the Done pill label — before it restored that dropdown's
+  value, so applying a saved filter with a non-default window (e.g. 30 days)
+  could render the pill with the previous/default window (e.g. `Done: 7d`)
+  while the underlying filter used the saved value. The dropdown is now
+  restored before `syncPillUI()`.
+
 - **The dashboard Select (multi-select) button now reflects its active state.**
   `toggleMultiSelect()` switches the button's styling by looking up
   `#btnMultiSelect`, but the toolbar Select button carried no `id`, so the
