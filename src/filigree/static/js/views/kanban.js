@@ -499,6 +499,23 @@ export function renderTypeKanban(stateColumns, template) {
 // initDragAndDrop — drag-and-drop event handlers for kanban
 // ---------------------------------------------------------------------------
 
+/**
+ * Compute the valid drop targets for a drag, tolerant of a null/absent
+ * transitions list (fetchTransitions returns null on HTTP/network failure).
+ * Returns sets of valid target statuses and status categories.
+ */
+export function computeDragTargets(transitions) {
+  const validStatuses = new Set();
+  const validCategories = new Set();
+  for (const t of transitions || []) {
+    if (t.ready) {
+      validStatuses.add(t.to);
+      validCategories.add(t.category);
+    }
+  }
+  return { validStatuses, validCategories };
+}
+
 export function initDragAndDrop() {
   const board = document.getElementById("kanbanBoard");
   if (!board) return;
@@ -518,14 +535,7 @@ export function initDragAndDrop() {
       .then((transitions) => {
         if (state._dragIssueId !== dragToken) return; // drag ended before response
         state._dragTransitions = transitions || [];
-        const validCategories = new Set();
-        const validStatuses = new Set();
-        for (const t of transitions) {
-          if (t.ready) {
-            validStatuses.add(t.to);
-            validCategories.add(t.category);
-          }
-        }
+        const { validStatuses, validCategories } = computeDragTargets(transitions);
         const cols = board.querySelectorAll(".kanban-col");
         for (const col of cols) {
           const colStatus = col.getAttribute("data-status");

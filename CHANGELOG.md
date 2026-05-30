@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Kanban drag no longer throws when the transitions fetch fails.**
+  `fetchTransitions` returns `null` on an HTTP/network failure (it does not
+  throw), but the drag-start handler normalized that into
+  `state._dragTransitions = transitions || []` and then iterated the *raw*
+  `transitions` (`for (const t of transitions)`), throwing a `TypeError` that
+  the `.catch` could not see — so drag affordances silently stopped working.
+  The target-set computation is now a pure, null-tolerant
+  `computeDragTargets(transitions)` helper (covered by a node behavior test),
+  and the handler consumes its result.
+
 - **Metrics view now renders zero observation counts as `0`, not blank.**
   `renderObservationStats` passed numeric counts straight to `escHtml`, whose
   `if (!str) return ""` falsy guard turns `0` into an empty string — so a
