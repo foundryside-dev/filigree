@@ -1785,17 +1785,18 @@ class TestSchemaEquivalence:
 
 
 class TestDeletedIssuesTombstoneSchema:
-    """v19 -> v20: the ``deleted_issues`` tombstone table (F5)."""
+    """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
+    ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_20(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 20
+    def test_current_schema_version_is_21(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 21
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         assert "deleted_issues" in _get_table_names(conn)
         cols = _get_table_columns(conn, "deleted_issues")
-        assert set(cols) == {"seq", "issue_id", "title", "type", "deleted_at", "deleted_by", "reason"}
+        assert set(cols) == {"seq", "issue_id", "title", "type", "deleted_at", "deleted_by", "reason", "entity_ids"}
         # seq is the AUTOINCREMENT PK (VACUUM-stable cursor); issue_id is UNIQUE
         # so a re-delete via INSERT OR REPLACE assigns a fresh higher seq.
         pk_rows = conn.execute("PRAGMA table_info(deleted_issues)").fetchall()
@@ -1816,7 +1817,7 @@ class TestDeletedIssuesTombstoneSchema:
         conn.close()
 
     def test_migration_v19_to_v20_adds_table(self, tmp_path: Path) -> None:
-        """Pin the v19->v20 migration in isolation."""
+        """Pin the v19->v20 migration in isolation (target v20, not CURRENT)."""
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Bump *down* to v19 and drop the table so the migration re-creates it.
@@ -1826,33 +1827,55 @@ class TestDeletedIssuesTombstoneSchema:
         conn.commit()
         assert "deleted_issues" not in _get_table_names(conn)
 
-        applied = apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+        # Stop at v20 so this pins the table-create migration alone; the
+        # entity_ids column arrives in v20->v21, asserted separately below.
+        applied = apply_pending_migrations(conn, 20)
         assert applied == 1
         assert _get_schema_version(conn) == 20
         assert "deleted_issues" in _get_table_names(conn)
         assert "idx_deleted_issues_deleted_at" in _get_index_names(conn)
+        assert "entity_ids" not in _get_table_columns(conn, "deleted_issues")
         conn.close()
 
-    def test_migrated_and_fresh_ddl_byte_identical(self, tmp_path: Path) -> None:
-        """The migration and SCHEMA_SQL must produce textually-identical DDL.
+    def test_migrated_and_fresh_deleted_issues_converge(self, tmp_path: Path) -> None:
+        """Fresh SCHEMA_SQL and the full migration chain converge on one shape.
 
-        sqlite_master stores the CREATE statement verbatim; if the two paths
-        drift (whitespace or otherwise) the stored ``sql`` text differs.
+        Byte-identity of the table's CREATE text no longer holds: v20 creates the
+        table and v21 adds ``entity_ids`` via ALTER, so a migrated table's stored
+        ``sql`` text differs from the fresh inline CREATE. What must match is the
+        *logical* shape — column names, types, NOT NULL, defaults, and PK — captured
+        by PRAGMA table_info. The index DDL is untouched by v21 and stays
+        byte-identical.
         """
-        from filigree.migrations import migrate_v19_to_v20
-
         fresh = _make_db(tmp_path, "fresh.db")
         fresh.executescript(SCHEMA_SQL)
+        fresh.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
         fresh.commit()
 
+        # Build a v19 DB (drop the table, stamp v19), then migrate the full chain.
         migrated = _make_db(tmp_path, "migrated.db")
-        migrate_v19_to_v20(migrated)
+        migrated.executescript(SCHEMA_SQL)
+        migrated.execute("DROP INDEX IF EXISTS idx_deleted_issues_deleted_at")
+        migrated.execute("DROP TABLE IF EXISTS deleted_issues")
+        migrated.execute("PRAGMA user_version = 19")
         migrated.commit()
+        apply_pending_migrations(migrated, CURRENT_SCHEMA_VERSION)
+
+        def _table_info(conn: sqlite3.Connection, name: str) -> list[tuple]:
+            # PRAGMA table_info row: (cid, name, type, notnull, dflt_value, pk).
+            # Drop the positional cid; compare the rest.
+            return [tuple(row)[1:] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()]
+
+        assert _table_info(fresh, "deleted_issues") == _table_info(migrated, "deleted_issues")
+        # entity_ids is NOT NULL DEFAULT '[]' in both, appended last.
+        cols = {row[0]: row for row in _table_info(fresh, "deleted_issues")}
+        assert "entity_ids" in cols
+        assert cols["entity_ids"][2] == 1, "entity_ids must be NOT NULL"
+        assert cols["entity_ids"][3] == "'[]'", "entity_ids must default to '[]'"
 
         def _ddl(conn: sqlite3.Connection, name: str) -> str:
             return conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
 
-        assert _ddl(fresh, "deleted_issues") == _ddl(migrated, "deleted_issues")
         assert _ddl(fresh, "idx_deleted_issues_deleted_at") == _ddl(migrated, "idx_deleted_issues_deleted_at")
         fresh.close()
         migrated.close()
@@ -1866,6 +1889,41 @@ class TestDeletedIssuesTombstoneSchema:
         # Re-running the migration over an already-present table is a no-op.
         migrate_v19_to_v20(conn)
         assert "deleted_issues" in _get_table_names(conn)
+        conn.close()
+
+    def test_migration_v20_to_v21_adds_entity_ids_column(self, tmp_path: Path) -> None:
+        """Pin the v20->v21 migration in isolation: ALTER adds entity_ids, NOT NULL,
+        defaulting existing tombstones to '[]' (filigree-f3bf56554c)."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v20 DB: drop entity_ids and stamp the prior version.
+        conn.execute("ALTER TABLE deleted_issues DROP COLUMN entity_ids")
+        conn.execute("PRAGMA user_version = 20")
+        # A pre-existing (v20-era) tombstone must survive and adopt the default.
+        conn.execute(
+            "INSERT INTO deleted_issues (issue_id, title, type, deleted_at, deleted_by) VALUES ('old-1', 't', 'task', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "entity_ids" not in _get_table_columns(conn, "deleted_issues")
+
+        applied = apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+        assert applied == 1
+        assert _get_schema_version(conn) == 21
+        assert "entity_ids" in _get_table_columns(conn, "deleted_issues")
+        row = conn.execute("SELECT entity_ids FROM deleted_issues WHERE issue_id = 'old-1'").fetchone()
+        assert row["entity_ids"] == "[]"
+        conn.close()
+
+    def test_migration_v20_to_v21_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v20_to_v21
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Column already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v20_to_v21(conn)
+        assert "entity_ids" in _get_table_columns(conn, "deleted_issues")
         conn.close()
 
 

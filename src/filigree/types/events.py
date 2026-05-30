@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias, TypedDict, assert_never
+from typing import Literal, NotRequired, TypeAlias, TypedDict, assert_never
 
 from filigree.types.core import ISOTimestamp, IssueDict
 
@@ -132,6 +132,11 @@ class EventRecordWithTitle(EventRecord):
     """
 
     issue_title: str
+    # Only populated on synthetic ``issue_deleted`` tombstone records: the sorted
+    # ``clarion_entity_id``s whose entity_associations the delete cascade removed
+    # (schema v21, F5 amplifier). Absent on real event rows; consumers of the wire
+    # shape see it normalized to ``[]`` via ``change_record_to_loom``.
+    affected_entities: NotRequired[list[str]]
 
 
 class UndoSuccess(TypedDict):

@@ -301,6 +301,9 @@ def change_record_to_loom(record: EventRecordWithTitle) -> ChangeRecordLoom:
         comment=record["comment"],
         created_at=record["created_at"],
         issue_title=record["issue_title"],
+        # Uniform on the wire: only synthetic issue_deleted records carry the
+        # cascaded entity bindings; real event rows normalize to []. (schema v21)
+        affected_entities=record.get("affected_entities", []),
     )
 
 

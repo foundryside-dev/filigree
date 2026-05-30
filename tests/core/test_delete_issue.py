@@ -220,6 +220,28 @@ class TestDeleteIssueTombstone:
         assert row["deleted_by"] == "alice"
         assert row["deleted_at"]
 
+    def test_tombstone_records_affected_entity_ids(self, db: FiligreeDB) -> None:
+        """The tombstone captures the cascaded entity bindings (sorted JSON) so the
+        ``issue_deleted`` signal can name them after the rows vanish (filigree-f3bf56554c)."""
+        import json
+
+        i = db.create_issue("bound", type="task")
+        db.add_entity_association(i.id, "py:func:beta", "h1", actor="alice")
+        db.add_entity_association(i.id, "py:func:alpha", "h2", actor="alice")
+        _terminal(db, i.id)
+        db.delete_issue(i.id, actor="alice")
+        row = db.conn.execute("SELECT entity_ids FROM deleted_issues WHERE issue_id = ?", (i.id,)).fetchone()
+        assert json.loads(row["entity_ids"]) == ["py:func:alpha", "py:func:beta"]
+
+    def test_tombstone_entity_ids_empty_without_bindings(self, db: FiligreeDB) -> None:
+        import json
+
+        i = db.create_issue("unbound", type="task")
+        _terminal(db, i.id)
+        db.delete_issue(i.id, actor="alice")
+        row = db.conn.execute("SELECT entity_ids FROM deleted_issues WHERE issue_id = ?", (i.id,)).fetchone()
+        assert json.loads(row["entity_ids"]) == []
+
     def test_terminal_simple_delete_no_force_needed(self, db: FiligreeDB) -> None:
         i = db.create_issue("simple", type="task")
         _terminal(db, i.id)

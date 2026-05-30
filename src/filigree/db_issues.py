@@ -1345,19 +1345,33 @@ class IssuesMixin(DBMixinProtocol):
                 raise IssueDeletionRefusedError(issue_id, msg)
 
         now = _now_iso()
+        # The final DELETE cascades this issue's entity_associations rows away
+        # (ON DELETE CASCADE). Capture the bound clarion_entity_ids BEFORE the
+        # cascade — sorted for a deterministic signal — so the tombstone (and the
+        # synthetic issue_deleted change record built from it) can name them as
+        # ``affected_entities``. Without this, a consumer mirroring the reverse
+        # lookup (list_associations_by_entity) can't tell which bindings the
+        # cascade dropped and surfaces a phantom issue. (filigree-f3bf56554c)
+        affected_entity_ids = [
+            row[0]
+            for row in self.conn.execute(
+                "SELECT clarion_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY clarion_entity_id",
+                (issue_id,),
+            ).fetchall()
+        ]
         # Tombstone first, in the same transaction, BEFORE the issue row is gone.
         self.conn.execute(
-            "INSERT OR REPLACE INTO deleted_issues (issue_id, title, type, deleted_at, deleted_by, reason) VALUES (?, ?, ?, ?, ?, ?)",
-            (issue_id, current.title, current.type, now, actor, ""),
+            "INSERT OR REPLACE INTO deleted_issues "
+            "(issue_id, title, type, deleted_at, deleted_by, reason, entity_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (issue_id, current.title, current.type, now, actor, "", json.dumps(affected_entity_ids)),
         )
 
         # Counts that the final DELETE auto-resolves via ON DELETE SET NULL /
         # CASCADE — capture them before they vanish.
         orphaned_children = int(self.conn.execute("SELECT COUNT(*) FROM issues WHERE parent_id = ?", (issue_id,)).fetchone()[0])
         orphaned_findings = int(self.conn.execute("SELECT COUNT(*) FROM scan_findings WHERE issue_id = ?", (issue_id,)).fetchone()[0])
-        deleted_entity_associations = int(
-            self.conn.execute("SELECT COUNT(*) FROM entity_associations WHERE issue_id = ?", (issue_id,)).fetchone()[0]
-        )
+        deleted_entity_associations = len(affected_entity_ids)
 
         # Explicit cascade in FK-safe order; the issues row is deleted last.
         deleted_events = self.conn.execute("DELETE FROM events WHERE issue_id = ?", (issue_id,)).rowcount

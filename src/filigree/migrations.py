@@ -735,6 +735,28 @@ def migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq)")
 
 
+def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """v20 -> v21: Add ``deleted_issues.entity_ids`` (F5 entity-association amplifier).
+
+    ``delete_issue`` cascades ``entity_associations`` (``ON DELETE CASCADE``), so a
+    hard delete silently drops Filigree's side of every Clarion entity binding. The
+    v20 tombstone recorded only the issue identity, so the synthetic ``issue_deleted``
+    change record could not name *which* bindings the cascade removed — a consumer
+    that mirrors the reverse lookup (``list_associations_by_entity``) would keep
+    returning the deleted issue and surface a user-facing phantom (filigree-f3bf56554c).
+
+    This adds a JSON-array column holding the affected ``clarion_entity_id``s,
+    captured in ``delete_issue`` before the cascade and surfaced as
+    ``affected_entities`` on the change record. The column is ``NOT NULL DEFAULT
+    '[]'`` to match the fresh ``SCHEMA_SQL`` shape (SQLite permits a NOT NULL ADD
+    COLUMN when a non-NULL DEFAULT is supplied). Tombstones written under v20 get
+    ``'[]'`` — their cascaded bindings are already gone and unrecoverable, the
+    documented limitation of upgrading after the fact. Idempotent: ``add_column``
+    no-ops if the column already exists.
+    """
+    add_column(conn, "deleted_issues", "entity_ids", "TEXT NOT NULL", default="'[]'")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -755,6 +777,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     17: migrate_v17_to_v18,
     18: migrate_v18_to_v19,
     19: migrate_v19_to_v20,
+    20: migrate_v20_to_v21,
 }
 
 

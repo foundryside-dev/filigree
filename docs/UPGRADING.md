@@ -5,15 +5,19 @@ This guide covers version-to-version Filigree upgrades. For Beads import, see
 
 ## Upgrading from 2.0.x to 2.1.0
 
-Filigree 2.1.0 ships database schema `user_version` 17. Databases from the
+Filigree 2.1.0 ships database schema `user_version` 21. Databases from the
 2.0.x line ship schema 14, so the first 2.1.0 open applies migrations 14 to
-17 in place:
+21 in place:
 
 | Step | Schema | What changes |
 |------|--------|--------------|
 | 14 to 15 | v15 | Adds `entity_associations` for issue-to-entity bindings |
 | 15 to 16 | v16 | Adds `events.event_seq` and rebuilds the audit-event unique index |
 | 16 to 17 | v17 | Adds `file_records.content_hash` and `file_records.registry_backend` |
+| 17 to 18 | v18 | Stamps `application_id` on pre-app-id-aware databases (metadata only) |
+| 18 to 19 | v19 | Adds `scan_findings.fingerprint` and partitions the dedup index |
+| 19 to 20 | v20 | Adds the `deleted_issues` tombstone behind the `issue_deleted` changes-feed signal |
+| 20 to 21 | v21 | Adds `deleted_issues.entity_ids`, surfaced as `affected_entities` on `issue_deleted` |
 
 `FiligreeDB.initialize()` applies pending migrations automatically. For an
 operator-controlled upgrade, use `filigree doctor --fix` so the schema step is

@@ -617,7 +617,13 @@ class TestEventRecordWithTitleShape:
         events = db.get_recent_events(limit=1)
         assert len(events) >= 1
         hints = get_type_hints(EventRecordWithTitle)
-        assert set(events[0].keys()) == set(hints.keys())
+        keys = set(events[0].keys())
+        # ``affected_entities`` is NotRequired — only synthetic ``issue_deleted``
+        # tombstone records carry it; a normal event row omits it. (``__required_keys__``
+        # is unreliable here: PEP 563 stringized annotations hide ``NotRequired`` from
+        # TypedDict at class creation, so assert against the known optional key.)
+        assert keys <= set(hints.keys())
+        assert set(hints.keys()) - keys == {"affected_entities"}
 
     def test_value_types(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Test", type="task")

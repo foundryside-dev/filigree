@@ -31,7 +31,7 @@ without grepping source. The source of truth remains
 
 | Release | Ships `user_version` | Notes |
 |---------|----------------------|-------|
-| 2.1.0 | 17 | Adds entity associations, event sequencing, and file registry metadata through migrations 14 to 17 |
+| 2.1.0 | 21 | Migrations 14 to 21: entity associations (v15), event sequencing (v16), file registry metadata (v17), scan-finding fingerprints (v19), the `deleted_issues` tombstone (v20), and its `entity_ids` / `affected_entities` deletion-signal amplifier (v21) |
 | 2.0.0 to 2.0.3 | 14 | Loom/API generation and 2.0 surface releases |
 | 1.6.0 to 1.6.1 | 8 | Autodiscovery MCP install line |
 

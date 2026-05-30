@@ -82,7 +82,17 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   `deleted_at` so federation consumers (Clarion / Wardline / Shuttle) learn of
   each deletion exactly once. Schema **v19 → v20** (new `deleted_issues` table,
   keyed on a VACUUM-stable `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a
-  `UNIQUE` `issue_id`).
+  `UNIQUE` `issue_id`). The `issue_deleted` record also carries
+  **`affected_entities`** — the sorted `clarion_entity_id`s whose
+  `entity_associations` the delete cascade removed, captured before the cascade
+  and stored on the tombstone (schema **v20 → v21**, new
+  `deleted_issues.entity_ids` column). Without it the deletion signal is lossy:
+  a consumer mirroring the reverse lookup (`list_associations_by_entity`) cannot
+  tell which bindings the cascade dropped and surfaces a user-facing phantom
+  issue. The field is always present on `/api/loom/changes` (`[]` for
+  live-issue records); consumers must purge the listed bindings on reconcile.
+  Wire contract: `docs/federation/contracts.md` §F5. Consumer tracking:
+  `filigree-f3bf56554c`.
 
 - **Scan findings accept an optional `fingerprint` as cross-run identity.**
   When a finding supplied to `process_scan_results` / `POST /api/v1/scan-results`

@@ -256,7 +256,7 @@ class EventsMixin(DBMixinProtocol):
             params.append(issue_id)
         where_sql = " AND ".join(clauses)
         rows = self.conn.execute(
-            "SELECT d.issue_id, d.title, d.type, d.deleted_at, d.deleted_by, d.seq AS _seq "
+            "SELECT d.issue_id, d.title, d.type, d.deleted_at, d.deleted_by, d.entity_ids, d.seq AS _seq "
             f"FROM deleted_issues d WHERE {where_sql} "
             "ORDER BY d.deleted_at ASC, d.seq ASC LIMIT ?",
             (*params, limit),
@@ -265,6 +265,12 @@ class EventsMixin(DBMixinProtocol):
         records: list[EventRecordWithTitle] = []
         for r in rows:
             synthetic_id = self._TOMBSTONE_EVENT_ID_BASE + int(r["_seq"])
+            # ``entity_ids`` is the JSON array of clarion_entity_ids the delete
+            # cascade removed (schema v21). Surface it as ``affected_entities`` so
+            # a consumer can purge its mirrored reverse lookup. ``or "[]"`` guards
+            # pre-v21 tombstones whose column defaulted to '[]' but may read NULL on
+            # exotic upgrade paths. (filigree-f3bf56554c)
+            affected_entities = json.loads(r["entity_ids"] or "[]")
             records.append(
                 EventRecordWithTitle(
                     id=synthetic_id,
@@ -276,6 +282,7 @@ class EventsMixin(DBMixinProtocol):
                     comment="",
                     created_at=r["deleted_at"],
                     issue_title=r["title"] or "",
+                    affected_entities=affected_entities,
                 )
             )
         return records

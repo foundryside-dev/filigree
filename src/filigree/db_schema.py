@@ -435,6 +435,15 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 -- across compaction. ``issue_id`` is UNIQUE rather than the primary key so a
 -- re-deletion (``INSERT OR REPLACE`` on the same id) assigns a NEW, strictly
 -- higher ``seq`` and re-notifies consumers as a fresh deletion, monotonically.
+--
+-- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``clarion_entity_id``s
+-- whose ``entity_associations`` rows the delete cascade removed. ``delete_issue``
+-- captures them BEFORE the cascade so the synthetic ``issue_deleted`` change record
+-- can name them as ``affected_entities`` — a consumer must purge its mirrored
+-- reverse lookup (Clarion ``list_associations_by_entity``) for those entities or it
+-- surfaces a phantom issue (filigree-f3bf56554c). Kept out of the column list as an
+-- inline comment on purpose: SQLite cannot re-parse a CREATE that carries comments,
+-- which would break any future ``ALTER TABLE … DROP/RENAME COLUMN`` on this table.
 CREATE TABLE IF NOT EXISTS deleted_issues (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id   TEXT NOT NULL UNIQUE,
@@ -442,7 +451,8 @@ CREATE TABLE IF NOT EXISTS deleted_issues (
     type       TEXT NOT NULL DEFAULT '',
     deleted_at TEXT NOT NULL,
     deleted_by TEXT DEFAULT '',
-    reason     TEXT DEFAULT ''
+    reason     TEXT DEFAULT '',
+    entity_ids TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_deleted_issues_deleted_at ON deleted_issues(deleted_at, seq);
@@ -554,4 +564,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21

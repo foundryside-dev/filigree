@@ -289,6 +289,60 @@ The Filigree-side contract is pinned by
 against both the default local backend and a live loopback implementation of
 Clarion's read API.
 
+## F5 — Deletion signal (`issue_deleted` on `/api/loom/changes`) (2026-05-30)
+
+A hard delete (`delete_issue` / `filigree delete-issue`) removes the issue row
+and every dependent row in one transaction, so a deleted issue is otherwise
+invisible to consumers reconciling off `GET /api/loom/changes` (the feed INNER
+JOINs `issues`). To close that, `delete_issue` writes a `deleted_issues`
+tombstone in the same transaction, and the changes feed surfaces it as a
+synthetic change record:
+
+```json
+{
+  "event_id": 4611686018427387905,
+  "issue_id": "filigree-2183fea23a",
+  "event_type": "issue_deleted",
+  "actor": "alice",
+  "old_value": null,
+  "new_value": null,
+  "comment": "",
+  "created_at": "2026-05-30T12:00:00+00:00",
+  "issue_title": "the deleted issue's last title",
+  "affected_entities": ["py:func:foo", "py:mod:bar"]
+}
+```
+
+The record is cursored on `deleted_at` (mapped to `created_at`) with a
+VACUUM-stable synthetic `event_id`, so an incremental consumer walking the
+`since` / `after_event_id` cursor sees each deletion exactly once. A
+**label-filtered** feed never surfaces deletions (a deleted issue has no
+labels) — reconcile deletions on an *unfiltered* feed.
+
+### `affected_entities` — the entity-association amplifier (schema v21)
+
+`delete_issue` cascades the issue's `entity_associations` rows
+(`ON DELETE CASCADE`). Filigree's own reverse-lookup surfaces
+(`list_associations_by_entity`, `GET /api/entity-associations?entity_id=…`)
+read that table, so post-delete they correctly return nothing. **The hazard is
+on the consumer side:** a consumer that mirrors those bindings (e.g. Clarion's
+reverse lookup) and reconciles only the issue would keep the mirrored binding
+and surface a user-facing *phantom issue*.
+
+`affected_entities` carries the sorted `clarion_entity_id`s the cascade removed,
+captured before the cascade ran. It is **always present** on the changes feed —
+`[]` for live-issue change records, populated only on `issue_deleted`.
+
+**Consumer obligation:** on an `issue_deleted` record, purge by `issue_id`
+*and* drop/tombstone every mirrored entity-association binding listed in
+`affected_entities` (or, equivalently, every binding your mirror keys to that
+`issue_id`). Do this on an unfiltered feed. The tracking issue for the
+Clarion/Wardline consumer is `filigree-f3bf56554c`.
+
+Pinned by `tests/api/test_loom_changes_deletion.py`
+(`TestDeletionCarriesAffectedEntities`) and the `deleted_issues` schema tests in
+`tests/core/test_schema.py`.
+
 ## When a contract evolves
 
 **Non-breaking additions** (new optional response fields, new optional request parameters with safe defaults) may land in-place without a new generation. Fixtures are updated to reflect the new shape; the `_meta.updated` field moves.

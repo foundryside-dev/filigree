@@ -222,6 +222,58 @@ class TestLoomChangesHttpDeletion:
         assert len(deletion_hits) == len(set(deletion_hits))
 
 
+class TestDeletionCarriesAffectedEntities:
+    """F5 entity-association amplifier (filigree-f3bf56554c).
+
+    ``delete_issue`` cascades ``entity_associations`` (ON DELETE CASCADE), so a
+    hard delete silently drops Filigree's side of every Clarion entity binding.
+    A consumer reconciling off ``issue_deleted`` only learns the *issue* is gone;
+    without the dropped bindings it cannot purge its mirrored reverse lookup
+    (``list_associations_by_entity``) and surfaces a user-facing phantom issue.
+    The synthetic record therefore carries ``affected_entities`` — the sorted
+    ``clarion_entity_id``s the cascade removed — captured in the tombstone before
+    the rows vanish.
+    """
+
+    def test_affected_entities_on_synthetic_record(self, changes_db: FiligreeDB) -> None:
+        issue = changes_db.create_issue("bound", type="task")
+        # Inserted out of order; the signal must be deterministically sorted.
+        changes_db.add_entity_association(issue.id, "py:func:beta", "h1", actor="tester")
+        changes_db.add_entity_association(issue.id, "py:func:alpha", "h2", actor="tester")
+        changes_db.close_issue(issue.id, force=True)
+        changes_db.delete_issue(issue.id, actor="alice")
+
+        events = changes_db.get_events_since(_EPOCH, limit=100)
+        rec = next(e for e in events if e["event_type"] == "issue_deleted")
+        assert rec["affected_entities"] == ["py:func:alpha", "py:func:beta"]
+
+    def test_affected_entities_empty_when_no_bindings(self, changes_db: FiligreeDB) -> None:
+        _delete_terminal(changes_db, "unbound")
+        events = changes_db.get_events_since(_EPOCH, limit=100)
+        rec = next(e for e in events if e["event_type"] == "issue_deleted")
+        assert rec["affected_entities"] == []
+
+    async def test_affected_entities_on_http_changes(self, changes_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = changes_db.create_issue("bound", type="task")
+        changes_db.add_entity_association(issue.id, "py:func:foo", "h1", actor="tester")
+        changes_db.close_issue(issue.id, force=True)
+        changes_db.delete_issue(issue.id, actor="alice")
+
+        resp = await client.get("/api/loom/changes", params={"since": _EPOCH, "type": "issue_deleted"})
+        assert resp.status_code == 200
+        rec = resp.json()["items"][0]
+        assert rec["affected_entities"] == ["py:func:foo"]
+
+    async def test_non_deletion_change_has_empty_affected_entities(self, changes_db: FiligreeDB, client: AsyncClient) -> None:
+        """The wire shape is uniform: live-issue change records carry an empty list."""
+        changes_db.create_issue("live", type="task")
+        resp = await client.get("/api/loom/changes", params={"since": _EPOCH, "type": "created"})
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert items
+        assert all(it["affected_entities"] == [] for it in items)
+
+
 def _insert_tombstone(db: FiligreeDB, issue_id: str, deleted_at: str) -> None:
     """Insert a tombstone row directly, exercising the real production INSERT path.
 
