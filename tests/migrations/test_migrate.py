@@ -619,6 +619,49 @@ class TestMigrationEdgeCases:
         count = migrate_from_beads(db_path, db)
         assert count == 1
 
+    def test_missing_dependencies_table(self, tmp_path: Path, db: FiligreeDB) -> None:
+        """Beads DB without a dependencies table should not crash or roll back.
+
+        dependencies is optional like events/labels/comments; a missing table
+        must yield zero migrated dependency rows rather than aborting the whole
+        migration (which previously rolled back already-imported issues).
+        """
+        db_path = tmp_path / "no_deps_beads.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE issues (
+                id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'open',
+                priority INTEGER DEFAULT 2, issue_type TEXT DEFAULT 'task',
+                parent_id TEXT, parent_epic TEXT, assignee TEXT DEFAULT '',
+                created_at TEXT, updated_at TEXT, closed_at TEXT, deleted_at TEXT,
+                description TEXT DEFAULT '', notes TEXT DEFAULT '',
+                metadata TEXT DEFAULT 'null',
+                design TEXT DEFAULT '', acceptance_criteria TEXT DEFAULT '',
+                estimated_minutes INTEGER DEFAULT 0, close_reason TEXT DEFAULT '',
+                external_ref TEXT DEFAULT '', mol_type TEXT DEFAULT '',
+                work_type TEXT DEFAULT '', quality_score TEXT DEFAULT '',
+                source_system TEXT DEFAULT '', event_kind TEXT DEFAULT '',
+                actor TEXT DEFAULT '', target TEXT DEFAULT '',
+                payload TEXT DEFAULT '', source_repo TEXT DEFAULT '',
+                await_type TEXT DEFAULT '', await_id TEXT DEFAULT '',
+                role_type TEXT DEFAULT '', rig TEXT DEFAULT '',
+                spec_id TEXT DEFAULT '', wisp_type TEXT DEFAULT '',
+                sender TEXT DEFAULT ''
+            );
+        """)
+        now = "2026-01-01T00:00:00+00:00"
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("bd-nodeps", "Test", now, now),
+        )
+        conn.commit()
+        conn.close()
+
+        count = migrate_from_beads(db_path, db)
+        assert count == 1
+        # The issue must be committed, not rolled back.
+        assert db.conn.execute("SELECT 1 FROM issues WHERE id = ?", ("bd-nodeps",)).fetchone() is not None
+
     def test_empty_beads_db(self, tmp_path: Path, db: FiligreeDB) -> None:
         """Empty beads DB should return 0."""
         db_path = tmp_path / "empty_beads.db"

@@ -65,7 +65,10 @@ class Issue:
     def __post_init__(self) -> None:
         if self.status_category not in _VALID_STATUS_CATEGORIES:
             raise ValueError(f"Invalid status_category {self.status_category!r}, expected one of {sorted(_VALID_STATUS_CATEGORIES)}")
-        if not isinstance(self.priority, int) or not (0 <= self.priority <= 4):
+        # bool is an int subclass, so a bare isinstance check would let
+        # True/False through and they would serialize as priority:true/false
+        # into agent-facing JSON. Exclude bool explicitly.
+        if isinstance(self.priority, bool) or not isinstance(self.priority, int) or not (0 <= self.priority <= 4):
             raise ValueError(f"Invalid priority {self.priority!r}, expected int 0-4")
 
     def to_dict(self) -> IssueDict:

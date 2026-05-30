@@ -48,6 +48,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`migrate_from_beads` no longer aborts when the Beads DB has no
+  `dependencies` table.** The `events`, `labels`, and `comments` reads already
+  tolerated a missing table (`OperationalError` filtered through
+  `_is_missing_table_error`), but the `dependencies` read ran unguarded — a
+  Beads DB with issues but no `dependencies` table raised `OperationalError: no
+  such table: dependencies`, and the outer `BaseException` handler rolled the
+  whole migration back, discarding already-imported issues. The
+  `dependencies` read now uses the same missing-table guard, yielding zero
+  migrated dependency rows instead of aborting.
+
+- **`Issue.__post_init__` now rejects `bool` priorities.** `bool` is an `int`
+  subclass, so the `isinstance(self.priority, int)` range check accepted `True`
+  / `False` and they would serialize as `priority: true` / `priority: false`
+  into agent-facing JSON, violating the int-only contract. (The MCP/HTTP create
+  paths already rejected boolean priority; this closes the model-layer hole for
+  code that constructs `Issue` directly.) The check now excludes `bool`
+  explicitly.
+
 - **Release-tree reads now run the server-mode foreign-prefix guard.** The
   dashboard `GET /release/{release_id}/tree` handler read straight from the DB
   without the `_check_read_prefix_in_server_mode` guard that issue and plan

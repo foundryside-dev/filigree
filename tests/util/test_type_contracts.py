@@ -150,6 +150,30 @@ class TestIssueDictShape:
         assert result["closed_at"] != ""
 
 
+class TestIssuePriorityContract:
+    """Issue.priority is an int 0-4 and explicitly excludes bool.
+
+    bool is an int subclass in Python, so a bare isinstance(_, int) check
+    lets True/False through and they would serialize as priority:true/false
+    into agent-facing JSON, violating the int-only contract.
+    """
+
+    @pytest.mark.parametrize("bad", [True, False])
+    def test_bool_priority_rejected(self, bad: bool) -> None:
+        from filigree.models import Issue
+
+        with pytest.raises(ValueError, match="Invalid priority"):
+            Issue(id="x", title="t", priority=bad)
+
+    @pytest.mark.parametrize("good", [0, 1, 2, 3, 4])
+    def test_int_priority_accepted(self, good: int) -> None:
+        from filigree.models import Issue
+
+        issue = Issue(id="x", title="t", priority=good)
+        assert type(issue.priority) is int
+        assert type(issue.to_dict()["priority"]) is int
+
+
 class TestPaginatedResultShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
         db.create_issue("Test", type="task")
