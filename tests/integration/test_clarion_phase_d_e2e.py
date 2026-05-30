@@ -34,6 +34,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
@@ -106,6 +107,21 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
     if install.returncode != 0:
         _clarion_unavailable(f"clarion install failed — installed binary may be too old for this test (stderr: {install.stderr.strip()!r})")
 
+    # Index the tree so Clarion's read API has entities to resolve. Without an
+    # analyze pass the catalog is empty and `GET /api/v1/files` fail-closes with
+    # 404 — Clarion will not mint an identity for a file it was never asked to
+    # analyze. (analyze exits 0 with `skipped_no_plugins` when no Clarion
+    # language plugin is on PATH; the per-file precondition probe in the test
+    # body turns that into an honest skip rather than a spurious failure.)
+    analyze = subprocess.run(
+        ["clarion", "analyze", str(project_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if analyze.returncode != 0:
+        _clarion_unavailable(f"clarion analyze failed (stderr: {analyze.stderr.strip()!r})")
+
     port = _free_loopback_port()
     bind = f"127.0.0.1:{port}"
     (project_root / "clarion.yaml").write_text(f'version: 1\nserve:\n  http:\n    enabled: true\n    bind: "{bind}"\n')
@@ -163,6 +179,23 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[str]:
                     pipe.close()
 
 
+def _probe_clarion_file(base_url: str, *, path: str, language: str) -> dict[str, object] | None:
+    """Return Clarion's resolved file entity for *path*, or None if unindexed.
+
+    A 404 means Clarion's catalog has no entity for the path — the fail-closed
+    behaviour when ``clarion analyze`` indexed nothing (no language plugin on
+    PATH). Any other HTTP error is a real fault and propagates.
+    """
+    url = f"{base_url}/api/v1/files?path={path}&language={language}"
+    try:
+        with urlopen(Request(url), timeout=2) as response:  # noqa: S310
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
 async def _post_scan_results(db: FiligreeDB, *, path: str) -> dict[str, object]:
     dash_module._db = db
     app = create_app()
@@ -202,6 +235,17 @@ async def test_filigree_resolves_file_identity_via_live_clarion_serve(tmp_path: 
         try:
             assert db.clarion_instance_id is not None, "capability probe should have populated state"
             assert db.clarion_api_version is not None
+
+            # Precondition: Clarion must have indexed the fixture, or the
+            # registry resolve (and thus the scan-results POST) fail-closes with
+            # 404. With no Clarion language plugin on PATH, `clarion analyze`
+            # indexes nothing — skip with an accurate reason rather than fail.
+            if _probe_clarion_file(base_url, path="src/phase_d.py", language="python") is None:
+                _clarion_unavailable(
+                    "clarion analyze indexed no entity for src/phase_d.py — a Clarion "
+                    "language plugin (e.g. the Python plugin) must be on PATH for the "
+                    "read API to mint a core:file: identity. Install one to run this e2e."
+                )
 
             await _post_scan_results(db, path="src/phase_d.py")
 
