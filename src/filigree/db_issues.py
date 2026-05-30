@@ -2290,6 +2290,11 @@ class IssuesMixin(DBMixinProtocol):
         ``BEGIN IMMEDIATE`` so the claim+walk composite is atomic; the
         per-hop ``update_issue`` reads templates from the in-memory registry,
         not SQL, keeping the held-writer window free of template reads.
+
+        For a multi-hop walk, each hop's soft-enforcement ``data_warnings`` are
+        aggregated (order-preserved, deduped) onto the returned issue — otherwise
+        only the final hop's warnings would survive, hiding e.g. the missing
+        ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
         """
         try:
             result = self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
@@ -2299,15 +2304,22 @@ class IssuesMixin(DBMixinProtocol):
             if _is_claim_status_mismatch(exc):
                 raise _StartCandidateUnclaimableError(issue_id) from exc
             raise
+        hop_warnings: list[str] = []
         try:
             for next_status in target_path:
                 result = self.update_issue(issue_id, status=next_status, actor=actor, expected_assignee=assignee, _skip_begin=True)
+                hop_warnings.extend(result.data_warnings)
         except InvalidTransitionError as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:
             if classify_value_error(str(exc)) == ErrorCode.INVALID_TRANSITION:
                 raise _StartCandidateUnclaimableError(issue_id) from exc
             raise
+        # Surface every hop's advisory, not just the terminal one. Only touch the
+        # multi-hop case so the single-hop / already-wip results (which may carry
+        # claim-phase or data-integrity warnings) are returned untouched.
+        if len(target_path) > 1:
+            result.data_warnings = list(dict.fromkeys(hop_warnings))
         return result
 
     def _batch_with_transition_errors(

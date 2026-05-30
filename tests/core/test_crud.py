@@ -247,7 +247,10 @@ class TestAdvanceMultiHop:
 
         assert result.status == "fixing"
         assert result.assignee == "alice"
-        # The walk surfaces missing required fields as warnings, not blocks.
+        # The walk surfaces missing required fields as warnings, not blocks —
+        # and aggregates EVERY hop's advisory, not just the terminal one
+        # (severity is required at 'confirmed', root_cause at 'fixing').
+        assert any("severity" in w for w in result.data_warnings)
         assert any("root_cause" in w for w in result.data_warnings)
         # Full audit chain: claim + both soft hops.
         events = db.get_issue_events(bug.id)
