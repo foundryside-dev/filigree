@@ -593,6 +593,16 @@ function renderReleaseCard(release) {
 
 // --- Expand/collapse handlers (exported, registered on window by app.js) ---
 
+/**
+ * Classify a fetchReleaseTree result. fetchReleaseTree returns null on a
+ * non-OK/network failure (it does not throw), so a null/undefined result is a
+ * load failure that must drive the error/retry state rather than being cached
+ * (or silently treated as "no tree data"). Returns "error" | "ok".
+ */
+export function classifyReleaseTreeFetch(tree) {
+  return tree == null ? "error" : "ok";
+}
+
 export async function toggleReleaseExpand(releaseId) {
   if (expandedReleaseIds.has(releaseId)) {
     expandedReleaseIds.delete(releaseId);
@@ -607,7 +617,9 @@ export async function toggleReleaseExpand(releaseId) {
 
   try {
     const tree = await fetchReleaseTree(releaseId);
-    if (tree) {
+    if (classifyReleaseTreeFetch(tree) === "error") {
+      errorReleaseIds.add(releaseId);
+    } else {
       releaseTreeCache.set(releaseId, tree);
       errorReleaseIds.delete(releaseId);
       drainStaleExpandedIds(tree);
@@ -639,7 +651,9 @@ export async function retryReleaseTree(releaseId) {
 
   try {
     const tree = await fetchReleaseTree(releaseId);
-    if (tree) {
+    if (classifyReleaseTreeFetch(tree) === "error") {
+      errorReleaseIds.add(releaseId);
+    } else {
       releaseTreeCache.set(releaseId, tree);
       drainStaleExpandedIds(tree);
     }
@@ -726,13 +740,16 @@ export async function loadReleases() {
       expandedFetches.push(
         fetchReleaseTree(id)
           .then((tree) => {
-            if (tree) {
+            if (classifyReleaseTreeFetch(tree) === "error") {
+              errorReleaseIds.add(id);
+            } else {
               releaseTreeCache.set(id, tree);
+              errorReleaseIds.delete(id);
               drainStaleExpandedIds(tree);
             }
           })
           .catch(() => {
-            /* best-effort */
+            errorReleaseIds.add(id);
           }),
       );
     }

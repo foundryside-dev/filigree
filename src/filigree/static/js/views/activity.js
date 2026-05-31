@@ -67,6 +67,19 @@ function renderEventList(events) {
 }
 
 /**
+ * Decide how to render an activity feed, distinguishing a load failure from a
+ * genuinely empty feed. fetchActivity returns null on a non-OK/network failure
+ * and an array (possibly empty) on success, so a null/undefined result is a
+ * failure that must NOT be shown as "no recent activity".
+ * Returns "error" | "empty" | "list".
+ */
+export function activityRenderState(events) {
+  if (events == null) return "error";
+  if (events.length === 0) return "empty";
+  return "list";
+}
+
+/**
  * Render activity events into any container (for embedding in Insights view).
  * Returns the number of events rendered.
  */
@@ -75,7 +88,13 @@ export async function renderActivitySection(container, limit = 15) {
     '<div style="color:var(--text-muted)" class="text-xs">Loading activity...</div>';
   try {
     const events = await fetchActivity(limit);
-    if (!events || !events.length) {
+    const renderState = activityRenderState(events);
+    if (renderState === "error") {
+      container.innerHTML =
+        '<div class="text-xs" style="color:var(--danger, #f87171)">Could not load activity.</div>';
+      return 0;
+    }
+    if (renderState === "empty") {
       container.innerHTML =
         '<div class="text-xs" style="color:var(--text-muted)">No recent activity.</div>';
       return 0;

@@ -7,6 +7,8 @@ these tests verify the MCP integration layer on top.
 
 from __future__ import annotations
 
+from typing import cast
+
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
 from filigree.registry import (
@@ -216,13 +218,16 @@ class TestReportFindingTool:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 self.resolve_calls += 1
                 canonical_path = path.casefold()
-                return {
-                    "file_id": make_entity_id(f"core:file:{canonical_path.replace('/', ':')}"),
-                    "content_hash": f"hash:{canonical_path}",
-                    "canonical_path": canonical_path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id(f"core:file:{canonical_path.replace('/', ':')}"),
+                        "content_hash": f"hash:{canonical_path}",
+                        "canonical_path": canonical_path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return False

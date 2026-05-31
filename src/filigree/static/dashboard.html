@@ -178,7 +178,7 @@ tailwind.config = {
       <button id="searchClear" onclick="clearSearch()"
               class="hidden absolute right-1.5 top-1/2 -translate-y-1/2 text-muted text-primary-hover text-xs leading-none" title="Clear search" aria-label="Clear search">&times;</button>
     </div>
-    <button onclick="toggleMultiSelect()" class="px-2 py-1 rounded text-xs font-medium bg-overlay text-secondary border border-strong" title="Toggle multi-select mode for batch actions">&#9745; Select</button>
+    <button id="btnMultiSelect" onclick="toggleMultiSelect()" class="px-2 py-1 rounded text-xs font-medium bg-overlay text-secondary border border-strong" title="Toggle multi-select mode for batch actions">&#9745; Select</button>
     <!-- Status pills -->
     <div class="flex gap-1">
       <button id="pillOpen" onclick="toggleStatusPill('open')" class="px-2 py-1 rounded text-xs font-medium bg-accent text-primary">Open</button>

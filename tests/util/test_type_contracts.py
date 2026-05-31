@@ -150,6 +150,30 @@ class TestIssueDictShape:
         assert result["closed_at"] != ""
 
 
+class TestIssuePriorityContract:
+    """Issue.priority is an int 0-4 and explicitly excludes bool.
+
+    bool is an int subclass in Python, so a bare isinstance(_, int) check
+    lets True/False through and they would serialize as priority:true/false
+    into agent-facing JSON, violating the int-only contract.
+    """
+
+    @pytest.mark.parametrize("bad", [True, False])
+    def test_bool_priority_rejected(self, bad: bool) -> None:
+        from filigree.models import Issue
+
+        with pytest.raises(ValueError, match="Invalid priority"):
+            Issue(id="x", title="t", priority=bad)
+
+    @pytest.mark.parametrize("good", [0, 1, 2, 3, 4])
+    def test_int_priority_accepted(self, good: int) -> None:
+        from filigree.models import Issue
+
+        issue = Issue(id="x", title="t", priority=good)
+        assert type(issue.priority) is int
+        assert type(issue.to_dict()["priority"]) is int
+
+
 class TestPaginatedResultShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
         db.create_issue("Test", type="task")
@@ -218,6 +242,34 @@ class TestFileRecordDictShape:
         assert isinstance(result["id"], str)
         assert isinstance(result["path"], str)
         assert isinstance(result["metadata"], dict)
+
+
+class TestFileRecordBackendInvariant:
+    """FileRecord enforces the correlated (registry_backend, content_hash) invariant.
+
+    ``local`` files carry the empty-hash sentinel (the local backend cannot
+    compute a drift hash); ``clarion`` files must carry a non-empty hash. The
+    illegal cross combinations are rejected at construction so a corrupt row
+    or a future mis-wired caller cannot hydrate an inconsistent record.
+    """
+
+    def test_local_with_empty_hash_is_valid(self) -> None:
+        record = FileRecord(id="f1", path="src/a.py", registry_backend="local", content_hash="")
+        assert record.registry_backend == "local"
+        assert record.content_hash == ""
+
+    def test_clarion_with_nonempty_hash_is_valid(self) -> None:
+        record = FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="sha256:abc")
+        assert record.registry_backend == "clarion"
+        assert record.content_hash == "sha256:abc"
+
+    def test_local_with_nonempty_hash_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="content_hash"):
+            FileRecord(id="f1", path="src/a.py", registry_backend="local", content_hash="sha256:abc")
+
+    def test_clarion_with_empty_hash_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="content_hash"):
+            FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="")
 
 
 class TestScanFindingDictShape:

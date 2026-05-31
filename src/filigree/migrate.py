@@ -206,15 +206,22 @@ def migrate_from_beads(beads_db_path: str | Path, tracker: FiligreeDB) -> int:
                 tracker.conn.execute("UPDATE issues SET parent_id = ? WHERE id = ?", (pid, issue_id))
 
         # -- Migrate dependencies (only where both sides were migrated)
-        deps = beads_conn.execute("SELECT * FROM dependencies").fetchall()
-        for dep in deps:
-            if dep["issue_id"] in migrated_ids and dep["depends_on_id"] in migrated_ids:
-                tracker.bulk_insert_dependency(
-                    dep["issue_id"],
-                    dep["depends_on_id"],
-                    dep["type"] or "blocks",
-                    validate=False,
-                )
+        # dependencies is optional in a Beads DB, like events/labels/comments
+        # below; a missing table yields zero migrated rows rather than
+        # aborting (and rolling back) the whole migration.
+        try:
+            deps = beads_conn.execute("SELECT * FROM dependencies").fetchall()
+            for dep in deps:
+                if dep["issue_id"] in migrated_ids and dep["depends_on_id"] in migrated_ids:
+                    tracker.bulk_insert_dependency(
+                        dep["issue_id"],
+                        dep["depends_on_id"],
+                        dep["type"] or "blocks",
+                        validate=False,
+                    )
+        except sqlite3.OperationalError as e:
+            if not _is_missing_table_error(e):
+                raise
 
         # -- Migrate events (only for migrated issues)
         try:

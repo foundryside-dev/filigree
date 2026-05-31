@@ -763,6 +763,75 @@ class TestMigrationRunnerFKPreservation:
             migrations.MIGRATIONS.update(original)
             conn.close()
 
+    def test_fk_restore_failure_suppressed_when_migration_also_fails(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Double failure: the original migration error must win over the
+        restore error.
+
+        When a migration fails AND the finally-block FK restore also fails, the
+        runner logs the restore failure but suppresses it (``if not
+        migration_failed: raise``) so the in-flight ``MigrationError`` — carrying
+        the *real* cause — propagates instead of being masked by the restore
+        error. The sibling ``test_fk_restore_failure_is_reported`` covers the
+        restore-fails-after-success branch; this covers restore-fails-after-failure.
+        """
+        conn = _make_db(tmp_path)
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+        class RestoreFailingConnection:
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self.inner = inner
+                self.restore_attempts = 0
+
+            @property
+            def in_transaction(self) -> bool:
+                return self.inner.in_transaction
+
+            def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+                if sql == "PRAGMA foreign_keys=ON":
+                    self.restore_attempts += 1
+                    raise sqlite3.OperationalError("restore failed")
+                return self.inner.execute(sql, *args)
+
+            def commit(self) -> None:
+                self.inner.commit()
+
+            def rollback(self) -> None:
+                self.inner.rollback()
+
+        from filigree import migrations
+
+        original = migrations.MIGRATIONS.copy()
+
+        def bad_migration(c: sqlite3.Connection) -> None:
+            raise RuntimeError("migration boom")
+
+        migrations.MIGRATIONS[1] = bad_migration  # type: ignore[assignment]
+        wrapped = RestoreFailingConnection(conn)
+        try:
+            with caplog.at_level(logging.ERROR, logger="filigree.migrations"), pytest.raises(MigrationError) as excinfo:
+                apply_pending_migrations(wrapped, 2)  # type: ignore[arg-type]
+
+            # The migration cause wins; the restore error is suppressed.
+            assert isinstance(excinfo.value.cause, RuntimeError)
+            assert "migration boom" in str(excinfo.value.cause)
+            assert "restore failed" not in str(excinfo.value)
+            assert not isinstance(excinfo.value.cause, sqlite3.OperationalError)
+            # The restore was still attempted and logged.
+            assert wrapped.restore_attempts == 1
+            assert "foreign_key_restore_failed" in caplog.text
+        finally:
+            migrations.MIGRATIONS.clear()
+            migrations.MIGRATIONS.update(original)
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # SQLite helper tests

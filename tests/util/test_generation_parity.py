@@ -873,10 +873,11 @@ class TestLoomGenerationParityIssues:
         _assert_issue_loom_shape(cn.json(), path="claim_next")
         assert cn.json()["assignee"] == "tester2"
 
-        # DEPENDENCY REMOVE (b → a)
+        # DEPENDENCY REMOVE (b → a) — both issues exist, edge exists, so
+        # removed=true and issue_found=true (the loom-only field).
         dr = await dashboard_surface.delete(f"/api/loom/issues/{b_id}/dependencies/{a_id}")
         assert dr.status_code == 200, dr.text
-        assert dr.json() == {"removed": True}
+        assert dr.json() == {"removed": True, "issue_found": True}
 
 
 # ---------------------------------------------------------------------------

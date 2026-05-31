@@ -41,6 +41,7 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
+from typing import cast
 
 import pytest
 from click.testing import CliRunner
@@ -758,13 +759,16 @@ class TestMigrateRegistryCommand:
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                return {
-                    "file_id": new_file_id,
-                    "content_hash": "sha256:migrated",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": new_file_id,
+                        "content_hash": "sha256:migrated",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -810,13 +814,16 @@ class TestMigrateRegistryCommand:
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                return {
-                    "file_id": new_file_id,
-                    "content_hash": "sha256:migrated",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": new_file_id,
+                        "content_hash": "sha256:migrated",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -883,13 +890,16 @@ class TestMigrateRegistryCommand:
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                return {
-                    "file_id": new_file_id,
-                    "content_hash": "sha256:migrated",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": new_file_id,
+                        "content_hash": "sha256:migrated",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -1128,13 +1138,16 @@ class TestMigrateRegistryCommand:
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 file_id = existing_target.id if path == "src/conflict_a.py" else f"core:file:{path}"
-                return {
-                    "file_id": file_id,
-                    "content_hash": f"sha256:{path}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": file_id,
+                        "content_hash": f"sha256:{path}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -1296,13 +1309,16 @@ class TestMigrateRegistryCommand:
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                return {
-                    "file_id": f"core:file:migrated@{path}",
-                    "content_hash": "sha256:migrated",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": f"core:file:migrated@{path}",
+                        "content_hash": "sha256:migrated",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -1368,13 +1384,16 @@ class TestMigrateRegistryCommand:
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                return {
-                    "file_id": new_file_id,
-                    "content_hash": "sha256:migrated",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": new_file_id,
+                        "content_hash": "sha256:migrated",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True

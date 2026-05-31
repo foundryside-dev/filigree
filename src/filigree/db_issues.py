@@ -1297,9 +1297,15 @@ class IssuesMixin(DBMixinProtocol):
         rows. Child rows are deleted explicitly in FK-safe order, the issues row
         last. ``children.parent_id``, ``scan_findings.issue_id`` (both ``ON DELETE
         SET NULL``) and ``entity_associations`` (``ON DELETE CASCADE``) resolve
-        automatically on the final delete. ``observations.source_issue_id`` and
-        ``observation_links.source_issue_id`` are text provenance breadcrumbs with
-        no FK — intentionally left untouched.
+        automatically on the final delete. ``observations.source_issue_id``,
+        ``observation_links.source_issue_id``, ``annotation_events.target_id`` and
+        ``annotation_closeout_acknowledgements.carried_to_target_id`` are text
+        provenance/history breadcrumbs with no FK — intentionally left untouched.
+        (``annotation_events`` is an append-only log; ``carried_to_target_id``
+        records a carry-forward that genuinely happened. Both are only
+        prefix-checked on import, never existence-checked, so a dangling pointer
+        round-trips cleanly.) The acknowledgement's own ``target_id`` row IS
+        deleted below, since it keys the closeout to this issue.
 
         Raises:
             KeyError: if the issue does not exist (-> NOT_FOUND at the surface).

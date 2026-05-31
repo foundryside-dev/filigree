@@ -65,7 +65,10 @@ class Issue:
     def __post_init__(self) -> None:
         if self.status_category not in _VALID_STATUS_CATEGORIES:
             raise ValueError(f"Invalid status_category {self.status_category!r}, expected one of {sorted(_VALID_STATUS_CATEGORIES)}")
-        if not isinstance(self.priority, int) or not (0 <= self.priority <= 4):
+        # bool is an int subclass, so a bare isinstance check would let
+        # True/False through and they would serialize as priority:true/false
+        # into agent-facing JSON. Exclude bool explicitly.
+        if isinstance(self.priority, bool) or not isinstance(self.priority, int) or not (0 <= self.priority <= 4):
             raise ValueError(f"Invalid priority {self.priority!r}, expected int 0-4")
 
     def to_dict(self) -> IssueDict:
@@ -123,8 +126,11 @@ class FileRecord:
 
     ``content_hash == ''`` is the intentional sentinel for
     ``registry_backend == 'local'`` because the local backend cannot compute a
-    drift hash. Clarion-backed records must carry a non-empty hash; the
-    Clarion registry client rejects blank hashes before rows are written.
+    drift hash. Clarion-backed records must carry a non-empty hash. This
+    correlated invariant is enforced at construction by ``__post_init__`` — the
+    two illegal cross combinations raise ``ValueError`` — so it holds on every
+    hydration path, not only where the Clarion registry client rejects blank
+    hashes before rows are written.
     """
 
     id: str
@@ -138,6 +144,22 @@ class FileRecord:
     first_seen: ISOTimestamp = _EMPTY_TS
     updated_at: ISOTimestamp = _EMPTY_TS
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # The (registry_backend, content_hash) pair is a correlated invariant,
+        # not two independent fields: ``local`` files carry the empty-hash
+        # sentinel (the local backend cannot compute a drift hash) and
+        # ``clarion`` files must carry a non-empty hash. Reject the two illegal
+        # cross combinations at construction — mirrors ScanFinding's enum guard
+        # and closes the type-level hole the flat dataclass otherwise allows.
+        is_local = self.registry_backend == "local"
+        has_empty_hash = self.content_hash == ""
+        if is_local != has_empty_hash:
+            raise ValueError(
+                f"Invalid file identity: registry_backend={self.registry_backend!r} "
+                f"requires {'an empty' if is_local else 'a non-empty'} content_hash, "
+                f"got content_hash={self.content_hash!r}"
+            )
 
     def to_dict(self) -> FileRecordDict:
         # filigree-7ea6b80f3b: out-of-band corruption flag (see Issue.to_dict).

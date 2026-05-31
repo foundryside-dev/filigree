@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import getdoc
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import Literal, cast, get_args, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -21,14 +21,16 @@ from filigree.registry import (
     CLARION_BATCH_MAX_QUERIES,
     BatchQuery,
     ClarionRegistry,
+    ClarionResolvedFile,
     LocalRegistry,
+    LocalResolvedFile,
     RegistryBriefingBlockedError,
     RegistryFileNotFoundError,
     RegistryResolutionError,
     RegistryUnavailableError,
     ResolvedFile,
 )
-from filigree.types.core import ClarionConfig, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
+from filigree.types.core import ClarionConfig, ContentHash, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
 
 
 def test_local_registry_resolves_file_with_local_identity() -> None:
@@ -183,9 +185,18 @@ def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> No
 
 
 def test_registry_resolved_file_uses_branded_file_identity_types() -> None:
-    hints = get_type_hints(ResolvedFile)
+    # ResolvedFile is a discriminated union (LocalResolvedFile | ClarionResolvedFile),
+    # so the branded identity types live on the members, pinned to the backend.
+    local_hints = get_type_hints(LocalResolvedFile)
+    clarion_hints = get_type_hints(ClarionResolvedFile)
 
-    assert hints["file_id"] == FileId | EntityId
+    assert local_hints["file_id"] is FileId
+    assert local_hints["content_hash"] == Literal[""]
+    assert local_hints["registry_backend"] == Literal["local"]
+
+    assert clarion_hints["file_id"] is EntityId
+    assert clarion_hints["content_hash"] is ContentHash
+    assert clarion_hints["registry_backend"] == Literal["clarion"]
 
 
 def test_filigree_db_composes_local_registry_by_default(tmp_path: Path) -> None:
@@ -453,6 +464,65 @@ def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.Lo
             {"path": ["src/main.py"], "language": ["python"]},
         ]
         assert resolved["file_id"] == "core:file:abc123@src/main.py"
+        retry_records = [
+            record for record in caplog.records if record.message == "Retrying Clarion registry request after transient failure"
+        ]
+        assert len(retry_records) == 1
+        retry_extra = vars(retry_records[0])
+        assert retry_extra["attempt"] == 1
+        assert retry_extra["next_attempt"] == 2
+        assert retry_extra["cause_kind"] == "http_error"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_clarion_registry_batch_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
+    """Batch resolve has the same transient-5xx retry parity as single-file resolve."""
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            requests.append(parsed.path)
+            assert parsed.path == "/api/v1/files/batch"
+            if len(requests) == 1:
+                self.send_error(503, "warming up")
+                return
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            resolved = [
+                {
+                    "requested_path": query["path"],
+                    "entity_id": f"core:file:abc123@{query['path']}",
+                    "content_hash": f"sha256:{query['path']}",
+                    "canonical_path": query["path"],
+                    "language": query.get("language", ""),
+                }
+                for query in payload["queries"]
+            ]
+            body = json.dumps({"resolved": resolved, "not_found": [], "briefing_blocked": [], "errors": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        caplog.set_level(logging.WARNING, logger="filigree.registry")
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        batch = registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
+
+        assert requests == ["/api/v1/files/batch", "/api/v1/files/batch"]
+        assert batch["resolved"]["src/main.py"]["file_id"] == "core:file:abc123@src/main.py"
         retry_records = [
             record for record in caplog.records if record.message == "Retrying Clarion registry request after transient failure"
         ]
@@ -1099,13 +1169,16 @@ def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, mo
 
         def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
             resolutions.append(path)
-            return {
-                "file_id": "core:file:clarion-first@src/fallback.py",
-                "content_hash": "sha256:clarion-first",
-                "canonical_path": path,
-                "language": language,
-                "registry_backend": "clarion",
-            }
+            return cast(
+                ResolvedFile,
+                {
+                    "file_id": "core:file:clarion-first@src/fallback.py",
+                    "content_hash": "sha256:clarion-first",
+                    "canonical_path": path,
+                    "language": language,
+                    "registry_backend": "clarion",
+                },
+            )
 
         def is_displaced(self) -> bool:
             return True

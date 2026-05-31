@@ -5,6 +5,187 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Loom `DELETE /api/loom/issues/{id}/dependencies/{dep_id}` now returns an
+  `issue_found` field** alongside `removed` (`{removed: bool, issue_found:
+  bool}`). The endpoint is idempotent by contract: a DELETE between two
+  valid-prefix ids returns `200 {removed: false}` even when a referenced issue
+  does not exist, so retried DELETEs stay safe — but that absorption (classic
+  and the CLI/MCP surfaces raise NOT_FOUND for a missing issue) could silently
+  mask a typo'd id. `issue_found` is `false` exactly in the missing-issue case
+  and `true` for a genuinely-absent edge between two existing issues, letting
+  callers distinguish the two without parsing the server log (the handler also
+  now logs a warning on the absorbed `KeyError`). The addition is
+  wire-compatible per the loom contract's stability clause; `removed` is
+  unchanged.
+
+### Changed
+
+- **File-identity types now make illegal backend/identity combinations
+  unrepresentable.** The `(registry_backend, file_id, content_hash)` triple is a
+  correlated invariant — `local` files carry a `FileId` and the empty-hash
+  sentinel, `clarion` files carry an `EntityId` and a non-empty drift hash — but
+  `ResolvedFile` and `FileRecord` flattened it into one shape, so a local record
+  with a hash (or a clarion record without one) type-checked. `ResolvedFile` is
+  now a discriminated union (`LocalResolvedFile | ClarionResolvedFile`) keyed on
+  `registry_backend`, pinning `file_id`/`content_hash` to the backend at the
+  registry mint sites; all five keys remain shared, so consumers that read
+  common fields are unchanged. `FileRecord` gained a `__post_init__` validator
+  (mirroring `ScanFinding`'s enum guard) that rejects the two illegal cross
+  combinations at construction — closing the runtime hole on hydration paths
+  that reconstruct records from external payloads.
+
+- **`REVERSIBLE_EVENT_TYPES` is now derived from the `ReversibleEventType`
+  alias** (`get_args(...)`) instead of hand-re-listing the same eleven event
+  names, removing one of three drift-prone copies. The exhaustive `match` in
+  `is_reversible_event_type` is kept deliberately (it forces an `assert_never`
+  undo decision on every new `EventType`); a contract test now pins its True-set
+  directly against `get_args(ReversibleEventType)` so the alias, the tuple, and
+  the classifier cannot drift apart.
+
+### Fixed
+
+- **Scanner run summaries no longer mis-count reports as "clean" when they
+  contain real findings.** `_analyse_files`'s summary loop classified a report
+  as `clean` via a whole-text substring match for the `"No concrete bug found"`
+  sentinel, while ingestion (`parse_findings`) splits the report into
+  `---`-delimited sections and skips only the sentinel section. A report pairing
+  a real finding section with a separate sentinel section was therefore ingested
+  as a finding but tallied `clean` — under-reporting (and masking) findings in
+  the operator-facing summary. The summary loop is now section-aware and
+  consistent with what `parse_findings` ingests; priority buckets are counted
+  per finding-section.
+
+- **MCP `import_jsonl` now codes validation failures `VALIDATION`, not `IO`.**
+  The handler caught `ValueError`/`OSError`/`sqlite3.Error` and coded them all
+  `IO`, so a user-correctable data error (malformed record, unknown type,
+  invalid status/priority, or a foreign-prefix `WrongProjectError`) surfaced as
+  a transient IO failure — misleading callers that switch on `code` per the
+  error-handling contract, and leaking the raw message instead of
+  `safe_message`. It now mirrors `export_jsonl`: `WrongProjectError` →
+  `VALIDATION` with `safe_message`, other `ValueError` → `VALIDATION`,
+  `OSError`/`sqlite3.Error` → `IO`.
+
+- **Restoring a saved filter now shows the correct "Done: Xd" pill label.**
+  `applyFilterState()` called `syncPillUI()` — which reads `#doneTimeBound`'s
+  value to render the Done pill label — before it restored that dropdown's
+  value, so applying a saved filter with a non-default window (e.g. 30 days)
+  could render the pill with the previous/default window (e.g. `Done: 7d`)
+  while the underlying filter used the saved value. The dropdown is now
+  restored before `syncPillUI()`.
+
+- **The dashboard Select (multi-select) button now reflects its active state.**
+  `toggleMultiSelect()` switches the button's styling by looking up
+  `#btnMultiSelect`, but the toolbar Select button carried no `id`, so the
+  lookup returned `null` and the button never showed the accent (active)
+  styling when multi-select mode was on. The button now carries
+  `id="btnMultiSelect"`.
+
+- **Escape now closes a file detail panel, not just an issue detail panel.**
+  The shared side panel is opened for both issue (`state.selectedIssue`) and
+  file (`state.selectedFile`) detail, but the global Escape handler only called
+  `closeDetail()` when an *issue* was selected — pressing Escape over a file
+  panel cleared the search instead of closing the panel. The handler now closes
+  a file panel via `closeFileDetail()` when `state.selectedFile` is set.
+
+- **Opening a file detail panel no longer leaves a stale issue header.**
+  Issue detail writes issue-specific markup into the shared `#detailHeader`, but
+  `openFileDetail` only rewrote `#detailContent` — so opening an issue and then
+  a file showed a panel whose header still identified the previous issue.
+  `openFileDetail` now clears `#detailHeader` before rendering the file panel.
+
+- **Activity feed now distinguishes a load failure from an empty feed.**
+  `fetchActivity` returns `null` on a non-OK response and an array (possibly
+  empty) on success, but `renderActivityShell` rendered `!events || length === 0`
+  identically as "No recent activity." — so a failing `/api/activity` looked
+  like a quiet, healthy-but-empty feed and hid the server problem. The render
+  decision is now a pure `activityRenderState(events)` returning
+  `"error" | "empty" | "list"` (node behavior test), and a `null` result shows
+  a distinct "Could not load activity." state.
+
+- **Release-tree expansion now surfaces load failures instead of "no data".**
+  `fetchReleaseTree` returns `null` on a non-OK response (it does not throw),
+  so `toggleReleaseTree` cached the `null`, its `catch` never fired,
+  `errorReleaseIds` stayed empty, and the panel rendered "No tree data
+  available." for what was actually a failed load — with no retry affordance.
+  A new pure `classifyReleaseTreeFetch(tree)` (node behavior test) marks a
+  `null` result as an error so the existing error/retry state renders.
+
+- **Kanban drag no longer throws when the transitions fetch fails.**
+  `fetchTransitions` returns `null` on an HTTP/network failure (it does not
+  throw), but the drag-start handler normalized that into
+  `state._dragTransitions = transitions || []` and then iterated the *raw*
+  `transitions` (`for (const t of transitions)`), throwing a `TypeError` that
+  the `.catch` could not see — so drag affordances silently stopped working.
+  The target-set computation is now a pure, null-tolerant
+  `computeDragTargets(transitions)` helper (covered by a node behavior test),
+  and the handler consumes its result.
+
+- **Metrics view now renders zero observation counts as `0`, not blank.**
+  `renderObservationStats` passed numeric counts straight to `escHtml`, whose
+  `if (!str) return ""` falsy guard turns `0` into an empty string — so a
+  `stale_count` / `expiring_soon_count` of `0` rendered as a blank cell instead
+  of an explicit `0`. The counts are now stringified before escaping
+  (`escHtml(String(n))`), the locally-scoped fix; `escHtml`'s contract is
+  unchanged. (`renderObservationStats` is now exported so the rendering is
+  covered by a node behavior test.)
+
+- **`migrate_from_beads` no longer aborts when the Beads DB has no
+  `dependencies` table.** The `events`, `labels`, and `comments` reads already
+  tolerated a missing table (`OperationalError` filtered through
+  `_is_missing_table_error`), but the `dependencies` read ran unguarded — a
+  Beads DB with issues but no `dependencies` table raised `OperationalError: no
+  such table: dependencies`, and the outer `BaseException` handler rolled the
+  whole migration back, discarding already-imported issues. The
+  `dependencies` read now uses the same missing-table guard, yielding zero
+  migrated dependency rows instead of aborting.
+
+- **`Issue.__post_init__` now rejects `bool` priorities.** `bool` is an `int`
+  subclass, so the `isinstance(self.priority, int)` range check accepted `True`
+  / `False` and they would serialize as `priority: true` / `priority: false`
+  into agent-facing JSON, violating the int-only contract. (The MCP/HTTP create
+  paths already rejected boolean priority; this closes the model-layer hole for
+  code that constructs `Issue` directly.) The check now excludes `bool`
+  explicitly.
+
+- **Release-tree reads now run the server-mode foreign-prefix guard.** The
+  dashboard `GET /release/{release_id}/tree` handler read straight from the DB
+  without the `_check_read_prefix_in_server_mode` guard that issue and plan
+  reads use, so in multi-project server mode a foreign-prefixed id fell through
+  to the `KeyError` branch and returned `Release not found: {release_id}` —
+  echoing the cross-project id verbatim instead of the safe wording. A probe
+  could thus distinguish "no such release here" from "wrong project" and read
+  back the foreign prefix. The handler now applies the same route-boundary
+  guard before the lookup, returning `404`/`WrongProjectError.safe_message`
+  indistinguishably from a same-project miss. Single-project (ethereal) mode is
+  unaffected — the guard is a no-op when `_project_store` is unset.
+
+- **Scanner pipeline now reports a non-zero exit on *any* ingest failure, not
+  only a total wipeout.** `run_scanner_pipeline` previously returned failure
+  only when every finding POST failed (`api_files_posted == 0 and
+  api_files_failed > 0`), so a partial success (e.g. 5 findings posted, 3
+  dropped) or a failed completion POST that left the scan run un-completed both
+  exited `0` — the orchestrator saw success while findings were silently lost.
+  The guard now fires on `api_files_failed > 0`, symmetric with the
+  analysis-failure guard. (`api_files_failed` aggregates both dropped per-file
+  POSTs and a failed completion POST, so it counts an un-completed run too.)
+
+- **`register_file(_commit=False)` no longer discards a caller's transaction on
+  error.** When the file-record upsert ran inside a caller-owned transaction
+  (`_commit=False`, as the annotation path uses it), the `IntegrityError` and
+  generic error handlers in `register_file` / `_update_existing_file_record`
+  called `self.conn.rollback()` unconditionally — a full connection rollback
+  that would discard the caller's prior uncommitted writes. The write now runs
+  inside a `SAVEPOINT` and rolls back only to that savepoint when the caller
+  owns the transaction (mirroring `create_observation`); the standalone
+  (`_commit=True`) path is unchanged. Concurrent-insert recovery (requery the
+  collision and retry it as an update) is preserved in both modes — the failed
+  INSERT raised because the conflicting row is already visible in the read
+  snapshot, so the requery finds it after the savepoint rollback too.
+
 ## [2.1.1] - 2026-05-30
 
 Upgrade guide: [Upgrading from 2.1.0 to 2.1.1](docs/UPGRADING.md#upgrading-from-210-to-211).

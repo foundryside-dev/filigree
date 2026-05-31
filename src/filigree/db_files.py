@@ -342,6 +342,34 @@ class FilesMixin(DBMixinProtocol):
                 now=now,
                 _commit=_commit,
             )
+        # When the caller owns the transaction (``_commit=False``) a failure here
+        # must undo only our own INSERT — a full ``rollback()`` would discard the
+        # caller's prior uncommitted work. Bracket the INSERT in a savepoint and
+        # roll back to it instead (mirrors ``create_observation``).
+        savepoint_name = "register_file_insert"
+        savepoint_active = False
+
+        def _rollback_savepoint() -> None:
+            nonlocal savepoint_active
+            if not savepoint_active:
+                return
+            try:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            finally:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                savepoint_active = False
+
+        def _release_savepoint() -> None:
+            nonlocal savepoint_active
+            if savepoint_active:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                savepoint_active = False
+
+        if not _commit:
+            if not self.conn.in_transaction:
+                self.conn.execute("BEGIN")
+            self.conn.execute(f"SAVEPOINT {savepoint_name}")
+            savepoint_active = True
         try:
             self.conn.execute(
                 "INSERT INTO file_records "
@@ -365,8 +393,18 @@ class FilesMixin(DBMixinProtocol):
                 self._record_registry_fallback_event(file_id, actor=actor, now=now)
             if _commit:
                 self.conn.commit()
+            else:
+                _release_savepoint()
         except sqlite3.IntegrityError:
-            self.conn.rollback()
+            # Undo our failed INSERT: a full rollback when we own the transaction,
+            # otherwise only to our savepoint so the caller's prior writes survive.
+            # The INSERT raised because the conflicting row is visible in our read
+            # snapshot, so the recovery requery finds it under both rollback modes
+            # — retry the collision as an update.
+            if _commit:
+                self.conn.rollback()
+            else:
+                _rollback_savepoint()
             storage_existing = self.conn.execute(
                 "SELECT * FROM file_records WHERE path IN (?, ?) OR id = ?",
                 (path, stored_path, file_id),
@@ -385,7 +423,10 @@ class FilesMixin(DBMixinProtocol):
                 )
             raise
         except Exception:
-            self.conn.rollback()
+            if _commit:
+                self.conn.rollback()
+            else:
+                _rollback_savepoint()
             raise
         return self.get_file(file_id)
 
@@ -468,6 +509,34 @@ class FilesMixin(DBMixinProtocol):
         updates.append("updated_by = ?")
         params.append(actor)
         params.append(existing["id"])
+        # When the caller owns the transaction (``_commit=False``) a failure here
+        # must undo only our own writes — a full ``rollback()`` would discard the
+        # caller's prior uncommitted work. Bracket our writes in a savepoint and
+        # roll back to it instead (mirrors ``create_observation``).
+        savepoint_name = "update_file_record"
+        savepoint_active = False
+
+        def _rollback_savepoint() -> None:
+            nonlocal savepoint_active
+            if not savepoint_active:
+                return
+            try:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            finally:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                savepoint_active = False
+
+        def _release_savepoint() -> None:
+            nonlocal savepoint_active
+            if savepoint_active:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                savepoint_active = False
+
+        if not _commit:
+            if not self.conn.in_transaction:
+                self.conn.execute("BEGIN")
+            self.conn.execute(f"SAVEPOINT {savepoint_name}")
+            savepoint_active = True
         try:
             self.conn.execute(
                 f"UPDATE file_records SET {', '.join(updates)} WHERE id = ?",
@@ -482,8 +551,13 @@ class FilesMixin(DBMixinProtocol):
                 )
             if _commit:
                 self.conn.commit()
+            else:
+                _release_savepoint()
         except Exception:
-            self.conn.rollback()
+            if _commit:
+                self.conn.rollback()
+            else:
+                _rollback_savepoint()
             raise
         return self.get_file(existing["id"])
 

@@ -343,11 +343,14 @@ export function applyFilterState(filterState, opts = {}) {
   state.statusPills.open = normalized.open;
   state.statusPills.active = normalized.active;
   state.statusPills.done = normalized.closed;
+  // Restore the done time-bound dropdown BEFORE syncPillUI(): syncPillUI() reads
+  // this dropdown's value to render the "Done: Xd" pill label, so the value must
+  // be in place first or the label reflects the previous/default window.
+  const doneEl = document.getElementById("doneTimeBound");
+  if (doneEl) doneEl.value = normalized.doneTimeBound || "7";
   syncPillUI();
   const prioEl = document.getElementById("filterPriority");
   if (prioEl) prioEl.value = normalized.priority;
-  const doneEl = document.getElementById("doneTimeBound");
-  if (doneEl) doneEl.value = normalized.doneTimeBound || "7";
   state.readyFilter = normalized.ready;
   state.blockedFilter = normalized.blocked;
   updateToggleButtons();

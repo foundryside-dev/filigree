@@ -810,10 +810,14 @@ class MetaMixin(DBMixinProtocol):
             msg = f"closeout acknowledgement record #{index} has missing issue target: {target_id}"
             raise ValueError(msg)
 
-        carried_to_target_id = record.get("carried_to_target_id", "")
-        if carried_to_target_id and self.conn.execute("SELECT 1 FROM issues WHERE id = ?", (carried_to_target_id,)).fetchone() is None:
-            msg = f"closeout acknowledgement record #{index} has missing carried issue target: {carried_to_target_id}"
-            raise ValueError(msg)
+        # ``carried_to_target_id`` is a provenance breadcrumb, not a live ref: the
+        # only live-operation reader (get_annotation_closeout_warnings' lookup)
+        # tolerates a non-match, and delete_issue intentionally leaves it dangling
+        # when the carry destination is deleted (same rationale as
+        # observations.source_issue_id). Requiring it to reference a live issue
+        # here made a normal delete-then-export/import round-trip raise. Project
+        # isolation is still enforced by the prefix check in
+        # _assert_import_ids_match_prefix; only the existence requirement is dropped.
 
         source_link = self.conn.execute(
             """

@@ -313,6 +313,12 @@ export async function openFileDetail(fileId) {
   const panel = document.getElementById("detailPanel");
   const content = document.getElementById("detailContent");
 
+  // The side panel is shared with issue detail, which writes issue-specific
+  // markup into #detailHeader. Clear it so a file panel never shows the
+  // previously-open issue's header alongside file content.
+  const header = document.getElementById("detailHeader");
+  if (header) header.innerHTML = "";
+
   content.innerHTML = '<div class="text-xs" style="color:var(--text-muted)">Loading...</div>';
   panel.classList.remove("translate-x-full");
 

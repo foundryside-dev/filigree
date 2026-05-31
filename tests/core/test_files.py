@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -15,6 +16,21 @@ from filigree.registry import BatchQuery, BatchResolution, ResolvedFile, resolve
 from filigree.types.core import make_entity_id, make_file_id
 from tests._fakes.registry import FixedRegistry
 
+
+class _InterceptingConn:
+    """Thin wrapper around a sqlite3.Connection that intercepts execute calls."""
+
+    def __init__(self, real: Any, intercept: Any) -> None:
+        self._real = real
+        self._intercept = intercept
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        return self._intercept(self._real, sql, params)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
 # ---------------------------------------------------------------------------
 # Schema tests
 # ---------------------------------------------------------------------------
@@ -23,13 +39,18 @@ from tests._fakes.registry import FixedRegistry
 class _CasefoldingRegistry:
     def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
         canonical_path = path.casefold()
-        return {
-            "file_id": make_file_id(f"core:file:{canonical_path.replace('/', ':')}"),
-            "content_hash": f"hash:{canonical_path}",
-            "canonical_path": canonical_path,
-            "language": language,
-            "registry_backend": "clarion",
-        }
+        # Test double with a deliberately hand-built identity; cast past the
+        # discriminated ResolvedFile union rather than committing to a member.
+        return cast(
+            ResolvedFile,
+            {
+                "file_id": make_file_id(f"core:file:{canonical_path.replace('/', ':')}"),
+                "content_hash": f"hash:{canonical_path}",
+                "canonical_path": canonical_path,
+                "language": language,
+                "registry_backend": "clarion",
+            },
+        )
 
     def is_displaced(self) -> bool:
         return False
@@ -195,6 +216,122 @@ class TestRegisterFile:
         assert registered.path == "src/race.py"
         assert registered.language == "python"
 
+    def test_register_duplicate_path_race_commit_false_recovers(self, tmp_path: Path) -> None:
+        """A concurrent first-registration race under _commit=False still recovers.
+
+        The IntegrityError requery must find the racer's row even though a
+        savepoint rollback (caller-owned transaction) keeps the read snapshot —
+        otherwise we'd regress the live annotation caller from recover to raise.
+        """
+        db_path = tmp_path / "filigree.db"
+        primary = FiligreeDB(db_path, prefix="test")
+        racer = FiligreeDB(db_path, prefix="test")
+        primary.initialize()
+        racer.initialize()
+        real_conn = primary.conn
+
+        class RaceOnceConnection:
+            def __init__(self) -> None:
+                self.armed = True
+
+            def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+                if self.armed and sql.lstrip().startswith("INSERT INTO file_records"):
+                    self.armed = False
+                    racer.register_file("src/race.py", actor="racer")
+                return real_conn.execute(sql, params)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_conn, name)
+
+        primary._conn = RaceOnceConnection()  # type: ignore[assignment]
+        try:
+            registered = primary.register_file("src/race.py", language="python", actor="scanner", _commit=False)
+            primary.conn.commit()
+        finally:
+            primary.close()
+            racer.close()
+
+        assert registered.path == "src/race.py"
+        # Recovery updated the racer's row rather than inserting a duplicate.
+        verify = FiligreeDB(db_path, prefix="test")
+        try:
+            verify.initialize()
+            count = verify.conn.execute("SELECT count(*) FROM file_records WHERE path = ?", ("src/race.py",)).fetchone()[0]
+        finally:
+            verify.close()
+        assert count == 1
+
+    def test_update_existing_commit_false_preserves_caller_writes_on_failure(self, db: FiligreeDB) -> None:
+        """register_file(_commit=False) must not full-rollback a caller's transaction.
+
+        When the caller owns the transaction, a failure inside the UPDATE path
+        must roll back only register_file's own work (via savepoint), leaving the
+        caller's prior uncommitted writes intact so the caller can commit the rest.
+        """
+        victim = db.register_file("src/victim.py", metadata={"k": "v0"})
+        target = db.register_file("src/target.py", metadata={"k": "v0"})
+
+        real_conn = db._conn
+
+        def _fail_on_event_insert(real: Any, sql: str, params: Any = ()) -> Any:
+            if "INSERT INTO file_events" in sql:
+                raise sqlite3.OperationalError("disk I/O error on event insert")
+            return real.execute(sql, params)
+
+        # Caller owns the transaction and makes a prior uncommitted write.
+        db.conn.execute("BEGIN")
+        db.conn.execute("UPDATE file_records SET file_type = 'CALLER_WRITE' WHERE id = ?", (victim.id,))
+
+        db._conn = _InterceptingConn(real_conn, _fail_on_event_insert)  # type: ignore[assignment]
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+                # metadata diff forces the UPDATE + file_events INSERT path.
+                db.register_file("src/target.py", metadata={"k": "v1"}, _commit=False)
+        finally:
+            db._conn = real_conn
+
+        # Caller commits the rest of its transaction.
+        db.conn.commit()
+
+        # The caller's prior write survived (savepoint rollback, not full rollback).
+        victim_row = db.conn.execute("SELECT file_type FROM file_records WHERE id = ?", (victim.id,)).fetchone()
+        assert victim_row["file_type"] == "CALLER_WRITE"
+        # register_file's own partial UPDATE was undone by the savepoint rollback.
+        target_row = db.conn.execute("SELECT metadata FROM file_records WHERE id = ?", (target.id,)).fetchone()
+        assert json.loads(target_row["metadata"]) == {"k": "v0"}
+
+    def test_register_insert_integrity_error_commit_false_preserves_caller_writes(self, db: FiligreeDB) -> None:
+        """An unrecoverable IntegrityError under _commit=False preserves caller writes.
+
+        When the requery finds no row to recover into (here, a synthetic error
+        with no real collision), register_file must still undo only its own work
+        via the savepoint — leaving the caller's prior writes intact — and
+        re-raise, rather than full-rollback the caller's transaction.
+        """
+        victim = db.register_file("src/victim.py", metadata={"k": "v0"})
+
+        real_conn = db._conn
+
+        def _fail_on_record_insert(real: Any, sql: str, params: Any = ()) -> Any:
+            if "INSERT INTO file_records" in sql:
+                raise sqlite3.IntegrityError("UNIQUE constraint failed: file_records.id")
+            return real.execute(sql, params)
+
+        db.conn.execute("BEGIN")
+        db.conn.execute("UPDATE file_records SET file_type = 'CALLER_WRITE' WHERE id = ?", (victim.id,))
+
+        db._conn = _InterceptingConn(real_conn, _fail_on_record_insert)  # type: ignore[assignment]
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                db.register_file("src/brand-new.py", _commit=False)
+        finally:
+            db._conn = real_conn
+
+        db.conn.commit()
+
+        victim_row = db.conn.execute("SELECT file_type FROM file_records WHERE id = ?", (victim.id,)).fetchone()
+        assert victim_row["file_type"] == "CALLER_WRITE"
+
     def test_register_file_recovers_when_registry_canonicalizes_path(self, tmp_path: Path) -> None:
         db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=_CasefoldingRegistry())
         try:
@@ -215,13 +352,16 @@ class TestRegisterFile:
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 self.calls += 1
-                return {
-                    "file_id": make_entity_id("core:file:stable@src/refresh.py"),
-                    "content_hash": f"sha256:refresh-{self.calls}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id("core:file:stable@src/refresh.py"),
+                        "content_hash": f"sha256:refresh-{self.calls}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True
@@ -574,13 +714,16 @@ class TestProcessScanResults:
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 self.calls += 1
-                return {
-                    "file_id": make_entity_id("core:file:stable@src/refresh.py"),
-                    "content_hash": f"sha256:scan-{self.calls}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id("core:file:stable@src/refresh.py"),
+                        "content_hash": f"sha256:scan-{self.calls}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
                 return resolve_files_batch_via_loop(self, queries, actor=actor)
@@ -637,13 +780,16 @@ class TestProcessScanResults:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 assert self.db is not None
                 transaction_states.append(self.db.conn.in_transaction)
-                return {
-                    "file_id": make_entity_id(f"core:file:{path.replace('/', ':')}"),
-                    "content_hash": f"hash:{path}",
-                    "canonical_path": path,
-                    "language": language,
-                    "registry_backend": "clarion",
-                }
+                return cast(
+                    ResolvedFile,
+                    {
+                        "file_id": make_entity_id(f"core:file:{path.replace('/', ':')}"),
+                        "content_hash": f"hash:{path}",
+                        "canonical_path": path,
+                        "language": language,
+                        "registry_backend": "clarion",
+                    },
+                )
 
             def is_displaced(self) -> bool:
                 return True

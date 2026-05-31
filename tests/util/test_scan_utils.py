@@ -528,6 +528,56 @@ class TestAnalyseFiles:
         assert post_calls[1]["complete_scan_run"] is True
         assert "[1/1] target.py" in capsys.readouterr().err
 
+    async def test_mixed_finding_and_sentinel_report_not_counted_clean(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A report pairing a real finding section with a 'No concrete bug found'
+        section is summarised by its finding (P1), not mis-counted as clean.
+
+        Regression: the stats loop used a whole-text substring check for the
+        sentinel, so any report whose text contained the phrase anywhere was
+        bucketed 'clean' — under-reporting (and masking) findings the API path
+        had already ingested via parse_findings' section-aware split.
+        """
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        mixed_md = SINGLE_FINDING_MD + "\n---\n" + NO_BUG_MD + "\n"
+
+        async def fake_executor(**kwargs: object) -> None:
+            Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(kwargs["output_path"]).write_text(mixed_md, encoding="utf-8")
+
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **_kwargs: (True, ""),
+        )
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["P1"] == 1
+        assert stats.get("clean", 0) == 0
+
     async def test_skip_existing_report_ingests_findings_before_completion(
         self,
         tmp_path: Path,
@@ -706,6 +756,91 @@ class TestAnalyseFiles:
         err = capsys.readouterr().err
         assert "FAIL failed.py: scanner exploded" in err
         assert "[2/2] unknown.py" in err
+
+    async def test_partial_ingest_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # 1 of 2 findings POSTs fails: dropped findings must not be reported as
+        # success. The old guard only fired when *every* post failed.
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "a.py").write_text("x = 1\n")
+        (src / "b.py").write_text("y = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--batch-size", "1", "--scan-run-id", "run-1"],
+        )
+
+        findings_posts = 0
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            nonlocal findings_posts
+            if kwargs.get("complete_scan_run") is True:
+                return True, ""
+            findings_posts += 1
+            if findings_posts == 2:
+                return False, "boom"
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 1
+
+    async def test_completion_post_failure_returns_nonzero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # All per-file POSTs succeed but the completion POST fails: the scan run
+        # is left un-completed, so the pipeline must report failure.
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["scanner", "--root", "src", "--scan-run-id", "run-1"],
+        )
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            if kwargs.get("complete_scan_run") is True:
+                return False, "boom"
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 1
 
 
 # ── severity_map ───────────────────────────────────────────────────────

@@ -84,10 +84,22 @@ def test_legacy_displaced_registry_code_maps_to_current_name() -> None:
 
 
 def test_event_type_reversibility_classifier_is_total() -> None:
-    from filigree.types.events import REVERSIBLE_EVENT_TYPES, EventType, is_reversible_event_type
+    from filigree.types.events import (
+        REVERSIBLE_EVENT_TYPES,
+        EventType,
+        ReversibleEventType,
+        is_reversible_event_type,
+    )
 
     classified = {event_type: is_reversible_event_type(event_type) for event_type in get_args(EventType)}
-    assert {event_type for event_type, reversible in classified.items() if reversible} == set(REVERSIBLE_EVENT_TYPES)
+    reversible_per_match = {event_type for event_type, reversible in classified.items() if reversible}
+    # Pin all three sources of truth against each other: the exhaustive ``match``
+    # in ``is_reversible_event_type``, the ``REVERSIBLE_EVENT_TYPES`` tuple, and
+    # the ``ReversibleEventType`` alias. The tuple is derived from the alias, so
+    # the load-bearing assertion is match-vs-alias.
+    assert reversible_per_match == set(REVERSIBLE_EVENT_TYPES)
+    assert reversible_per_match == set(get_args(ReversibleEventType))
+    assert set(REVERSIBLE_EVENT_TYPES) == set(get_args(ReversibleEventType))
     assert classified["created"] is False
     assert classified["status_changed"] is True
 

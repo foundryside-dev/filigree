@@ -15,7 +15,11 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import FiligreeDB
-from filigree.dashboard_routes.common import _error_response, _get_bool_param
+from filigree.dashboard_routes.common import (
+    _check_read_prefix_in_server_mode,
+    _error_response,
+    _get_bool_param,
+)
 from filigree.db_planning import NotAReleaseError
 from filigree.types.api import ErrorCode
 
@@ -145,6 +149,9 @@ def create_classic_router() -> APIRouter:
     @router.get("/release/{release_id}/tree")
     async def api_release_tree(release_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Release hierarchy tree with progress rollups."""
+        err = _check_read_prefix_in_server_mode(db, release_id)
+        if err is not None:
+            return err
         try:
             tree = db.get_release_tree(release_id)
         except KeyError:

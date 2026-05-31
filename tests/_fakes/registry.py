@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from filigree.registry import BatchQuery, BatchResolution, ResolvedFile, resolve_files_batch_via_loop
 from filigree.types.core import EntityId, FileId, RegistryBackend, make_entity_id, make_file_id
 
@@ -30,13 +32,20 @@ class FixedRegistry:
         return make_file_id(self.file_id)
 
     def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-        return {
-            "file_id": self._resolved_file_id(),
-            "content_hash": self.content_hash,
-            "canonical_path": self.canonical_path or path,
-            "language": language,
-            "registry_backend": self.registry_backend,
-        }
+        # Deliberately polymorphic test double: callers inject arbitrary
+        # backend/identity/hash combinations (including ones the discriminated
+        # ResolvedFile union forbids) to exercise validation paths, so cast past
+        # the union rather than statically committing to a member.
+        return cast(
+            ResolvedFile,
+            {
+                "file_id": self._resolved_file_id(),
+                "content_hash": self.content_hash,
+                "canonical_path": self.canonical_path or path,
+                "language": language,
+                "registry_backend": self.registry_backend,
+            },
+        )
 
     def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
         return resolve_files_batch_via_loop(self, queries, actor=actor)

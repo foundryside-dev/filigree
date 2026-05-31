@@ -402,6 +402,7 @@ document.addEventListener("keydown", (e) => {
 
   if (e.key === "Escape") {
     if (state.selectedIssue) closeDetail();
+    else if (state.selectedFile) closeFileDetail();
     else clearSearch();
     return;
   }

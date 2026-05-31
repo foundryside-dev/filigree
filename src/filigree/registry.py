@@ -39,14 +39,14 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
-from typing import Any, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypeAlias, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import httpx
 
-from filigree.types.core import EntityId, FileId, RegistryBackend, make_content_hash, make_entity_id, make_file_id
+from filigree.types.core import ContentHash, EntityId, FileId, RegistryBackend, make_content_hash, make_entity_id, make_file_id
 
 logger = logging.getLogger(__name__)
 
@@ -70,18 +70,44 @@ CLARION_RESOLVE_FILE_RETRY_BACKOFF_SECONDS = 0.05
 EXPECTED_CLARION_API_VERSION = 1
 
 
-class ResolvedFile(TypedDict):
-    """File identity resolved by the configured registry backend.
+class LocalResolvedFile(TypedDict):
+    """File identity resolved by the local (Filigree-native) registry.
 
-    ``content_hash=""`` is reserved for the local registry sentinel. Displaced
-    registries must supply a non-empty hash token.
+    The local backend mints a ``FileId`` and cannot compute a drift hash, so
+    ``content_hash`` is the empty-string sentinel (pinned to ``Literal[""]`` so
+    a local record carrying a hash will not type-check).
     """
 
-    file_id: FileId | EntityId
-    content_hash: str
+    file_id: FileId
+    content_hash: Literal[""]
     canonical_path: str
     language: str
-    registry_backend: RegistryBackend
+    registry_backend: Literal["local"]
+
+
+class ClarionResolvedFile(TypedDict):
+    """File identity resolved by the Clarion (federated) registry.
+
+    Clarion returns an opaque ``EntityId`` and a non-empty drift hash; the hash
+    is branded ``ContentHash`` (minted via ``make_content_hash``, which rejects
+    blank tokens), so a clarion record cannot carry the empty sentinel.
+    """
+
+    file_id: EntityId
+    content_hash: ContentHash
+    canonical_path: str
+    language: str
+    registry_backend: Literal["clarion"]
+
+
+# Discriminated on ``registry_backend``. The former flat shape let mismatched
+# backend/identity combinations type-check (a ``local`` file with a drift hash,
+# a ``clarion`` file with the empty sentinel). The union pins ``file_id`` and
+# ``content_hash`` to the backend so those illegal combinations are
+# unconstructible at the mint sites. All five keys are shared across both
+# members, so consumers reading common fields (db_files.py) narrow without
+# branching.
+ResolvedFile: TypeAlias = LocalResolvedFile | ClarionResolvedFile
 
 
 class BatchQuery(TypedDict):
@@ -456,7 +482,7 @@ class LocalRegistry:
         language: str = "",
         actor: str = "",
     ) -> ResolvedFile:
-        return ResolvedFile(
+        return LocalResolvedFile(
             file_id=make_file_id(self._file_id_factory()),
             content_hash="",
             canonical_path=path,
@@ -575,7 +601,7 @@ class ClarionRegistry:
             msg = f"Clarion registry response from {url} has invalid entity_id: {exc}"
             raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="invalid_response") from exc
 
-        return ResolvedFile(
+        return ClarionResolvedFile(
             file_id=file_id,
             content_hash=content_hash,
             canonical_path=payload["canonical_path"],
@@ -653,30 +679,52 @@ class ClarionRegistry:
     def _resolve_files_batch_chunk(self, chunk: list[BatchQuery]) -> BatchResolution:
         url = clarion_files_batch_url(self.base_url)
         body = {"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}
-        try:
-            response = self._http_client.post(
-                url,
-                json=body,
-                headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
-                timeout=self.timeout_seconds,
-            )
-            raw = response.text
-            if response.status_code >= 400:
-                reason = response.reason_phrase
-                if response.status_code == 401:
-                    msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
-                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
-                if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
-                    msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
-                    raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
-                if 400 <= response.status_code < 500:
-                    msg = f"Clarion batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
-                    raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
-                msg = f"Clarion batch resolve failed at {url}: HTTP {response.status_code} {reason}"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            msg = f"Clarion batch resolve unreachable at {url}: {exc}"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
+        # Batch resolve is an idempotent read, so it retries transient 5xx and
+        # network failures on the same deadline/backoff budget as the
+        # single-file ``resolve_file`` path (CONTRACT-1 retry parity). Auth and
+        # 4xx outcomes are deterministic and raise immediately without retry.
+        deadline = time.monotonic() + self.timeout_seconds
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Clarion batch resolve unreachable at {url}: retry budget exhausted"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="timeout")
+            try:
+                response = self._http_client.post(
+                    url,
+                    json=body,
+                    headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                    timeout=remaining,
+                )
+                raw = response.text
+                if response.status_code >= 400:
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                        self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
+                        self._sleep_before_retry(deadline)
+                        attempt += 1
+                        continue
+                    reason = response.reason_phrase
+                    if response.status_code == 401:
+                        msg = f"Clarion batch resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                    if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
+                        msg = f"Clarion batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
+                        raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+                    if 400 <= response.status_code < 500:
+                        msg = f"Clarion batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
+                        raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
+                    msg = f"Clarion batch resolve failed at {url}: HTTP {response.status_code} {reason}"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if self._should_retry_read(attempt, deadline):
+                    self._log_retry(url=url, attempt=attempt, cause_kind="network")
+                    self._sleep_before_retry(deadline)
+                    attempt += 1
+                    continue
+                msg = f"Clarion batch resolve unreachable at {url}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
 
         try:
             payload = json.loads(raw)
@@ -730,7 +778,7 @@ class ClarionRegistry:
                 msg = f"Clarion batch resolve at {url} has invalid entity_id for {item['requested_path']!r}: {exc}"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
             record_outcome(item["requested_path"], "resolved")
-            resolved[item["requested_path"]] = ResolvedFile(
+            resolved[item["requested_path"]] = ClarionResolvedFile(
                 file_id=file_id,
                 content_hash=content_hash,
                 canonical_path=item["canonical_path"],
