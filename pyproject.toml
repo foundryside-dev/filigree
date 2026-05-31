@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "filigree"
-version = "2.2.0"
+version = "2.3.0"
 description = "Agent-native issue tracker with convention-based project discovery"
 requires-python = ">=3.11"
 license = "MIT"
