@@ -8,9 +8,12 @@ a missing issue, and force-bool validation.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from filigree.core import FiligreeDB
+from tests._db_factory import make_db
 
 
 def _count(db: FiligreeDB, sql: str, *params: object) -> int:
@@ -181,6 +184,65 @@ class TestDeleteIssueCascade:
         row = db.conn.execute("SELECT source_issue_id FROM observations WHERE id = ?", ("test-obs-prov",)).fetchone()
         assert row is not None
         assert row["source_issue_id"] == target.id
+
+    def test_carried_to_target_breadcrumb_round_trips_after_delete(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """A closeout ack carried forward to a since-deleted issue keeps its
+        dangling carried_to_target_id breadcrumb, and the DB still round-trips
+        through export/import.
+
+        Regression: delete_issue intentionally leaves carried_to_target_id (it is
+        prefix-checked provenance, not a live ref — same rationale as
+        source_issue_id), but the import validator existence-checked it, so a
+        normal delete-then-export/import raised 'missing carried issue target'.
+        """
+        alive = db.create_issue("alive source", type="task")
+        dest = db.create_issue("carry dest", type="task")
+        db.conn.execute(
+            "INSERT INTO annotations (id, file_path, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("ann-cf", "src/x.py", "note", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        # must_consider link on the alive issue — carry_forward_annotation always
+        # creates this alongside the ack, and the import validator requires it.
+        db.conn.execute(
+            "INSERT INTO annotation_links (id, annotation_id, target_type, target_id, relationship, created_at) "
+            "VALUES (?, ?, 'issue', ?, 'must_consider', ?)",
+            ("annlink-cf", "ann-cf", alive.id, "2026-01-01T00:00:00+00:00"),
+        )
+        # ack keyed on the alive issue, carried forward to the issue we delete.
+        db.conn.execute(
+            "INSERT INTO annotation_closeout_acknowledgements "
+            "(annotation_id, target_type, target_id, carried_to_target_id, acknowledged_at) "
+            "VALUES (?, 'issue', ?, ?, ?)",
+            ("ann-cf", alive.id, dest.id, "2026-01-01T00:00:00+00:00"),
+        )
+        db.conn.commit()
+
+        _terminal(db, dest.id)
+        db.delete_issue(dest.id, force=True)
+
+        # Breadcrumb intact: the ack (keyed on the alive issue) survives and its
+        # carried_to pointer still names the now-deleted issue.
+        row = db.conn.execute(
+            "SELECT carried_to_target_id FROM annotation_closeout_acknowledgements WHERE annotation_id = 'ann-cf'"
+        ).fetchone()
+        assert row is not None
+        assert row["carried_to_target_id"] == dest.id
+
+        # Full export/import round-trips despite the dangling breadcrumb.
+        dump = tmp_path / "dump.jsonl"
+        db.export_jsonl(dump)
+        second_dir = tmp_path / "second"
+        second_dir.mkdir()
+        other = make_db(second_dir, prefix="test")
+        try:
+            other.import_jsonl(dump)
+            imported = other.conn.execute(
+                "SELECT carried_to_target_id FROM annotation_closeout_acknowledgements WHERE annotation_id = 'ann-cf'"
+            ).fetchone()
+            assert imported is not None
+            assert imported["carried_to_target_id"] == dest.id
+        finally:
+            other.close()
 
 
 class TestDeleteIssueForceBehaviors:
