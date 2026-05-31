@@ -695,13 +695,24 @@ async def _analyse_files(
         text = read_report_text(fpath, md)
         if text is None:
             continue
-        if "No concrete bug found" in text:
+        # Classify per finding-section, mirroring parse_findings (the ingestion
+        # source of truth): split on the '---' separator, drop empty/sentinel
+        # sections, and require a '## Summary'. A whole-text substring check for
+        # the sentinel mis-counted a report that pairs a real finding section
+        # with a separate "No concrete bug found" section as "clean" — under-
+        # reporting (and masking) findings the API path actually ingested.
+        finding_sections = [
+            section
+            for raw in re.split(r"\n---+\n", text)
+            if (section := raw.strip()) and "No concrete bug found" not in section and re.search(r"##\s*Summary", section)
+        ]
+        if not finding_sections:
             stats["clean"] += 1
-        else:
-            priorities = re.findall(r"Priority:\s*(P\d)", text, re.IGNORECASE)
-            if priorities:
-                for pri in priorities:
-                    stats[pri.upper()] += 1
+            continue
+        for section in finding_sections:
+            pri_m = re.search(r"Priority:\s*(P\d)", section, re.IGNORECASE)
+            if pri_m:
+                stats[pri_m.group(1).upper()] += 1
             else:
                 stats["unknown"] += 1
 

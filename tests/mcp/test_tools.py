@@ -2660,19 +2660,32 @@ class TestExportImportPathTraversal:
             await call_tool("import_jsonl", {"input_path": "valid.jsonl"})
 
     async def test_import_jsonl_expected_exceptions_handled_gracefully(self, mcp_db: FiligreeDB) -> None:
-        """ValueError, OSError, sqlite3.Error must be caught and return structured error."""
+        """ValueError, OSError, sqlite3.Error are caught and coded by class.
+
+        ValueError is a user-correctable validation failure (malformed record,
+        unknown type, foreign-prefix id) and must surface VALIDATION, mirroring
+        _handle_export_jsonl; only OSError/sqlite3.Error are transient IO.
+        """
         import sqlite3
+
+        from filigree.core import WrongProjectError
 
         project_root = mcp_db.db_path.parent.parent
         valid_file = project_root / "valid.jsonl"
         valid_file.write_text("")
 
-        for exc_type in (ValueError, OSError, sqlite3.OperationalError):
-            with patch.object(mcp_db, "import_jsonl", side_effect=exc_type("test error")):
+        cases = [
+            (ValueError("bad record"), ErrorCode.VALIDATION),
+            (WrongProjectError("issue belongs to another project"), ErrorCode.VALIDATION),
+            (OSError("disk gone"), ErrorCode.IO),
+            (sqlite3.OperationalError("db locked"), ErrorCode.IO),
+        ]
+        for exc, expected_code in cases:
+            with patch.object(mcp_db, "import_jsonl", side_effect=exc):
                 result = await call_tool("import_jsonl", {"input_path": "valid.jsonl"})
                 data = _parse(result)
-                assert "error" in data, f"{exc_type.__name__} must be caught gracefully"
-                assert data["code"] == ErrorCode.IO
+                assert "error" in data, f"{type(exc).__name__} must be caught gracefully"
+                assert data["code"] == expected_code, f"{type(exc).__name__} → {expected_code}"
 
 
 class TestRefreshSummaryLogging:

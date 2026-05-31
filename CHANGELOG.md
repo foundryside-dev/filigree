@@ -48,6 +48,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Scanner run summaries no longer mis-count reports as "clean" when they
+  contain real findings.** `_analyse_files`'s summary loop classified a report
+  as `clean` via a whole-text substring match for the `"No concrete bug found"`
+  sentinel, while ingestion (`parse_findings`) splits the report into
+  `---`-delimited sections and skips only the sentinel section. A report pairing
+  a real finding section with a separate sentinel section was therefore ingested
+  as a finding but tallied `clean` — under-reporting (and masking) findings in
+  the operator-facing summary. The summary loop is now section-aware and
+  consistent with what `parse_findings` ingests; priority buckets are counted
+  per finding-section.
+
+- **MCP `import_jsonl` now codes validation failures `VALIDATION`, not `IO`.**
+  The handler caught `ValueError`/`OSError`/`sqlite3.Error` and coded them all
+  `IO`, so a user-correctable data error (malformed record, unknown type,
+  invalid status/priority, or a foreign-prefix `WrongProjectError`) surfaced as
+  a transient IO failure — misleading callers that switch on `code` per the
+  error-handling contract, and leaking the raw message instead of
+  `safe_message`. It now mirrors `export_jsonl`: `WrongProjectError` →
+  `VALIDATION` with `safe_message`, other `ValueError` → `VALIDATION`,
+  `OSError`/`sqlite3.Error` → `IO`.
+
 - **Restoring a saved filter now shows the correct "Done: Xd" pill label.**
   `applyFilterState()` called `syncPillUI()` — which reads `#doneTimeBound`'s
   value to render the Done pill label — before it restored that dropdown's

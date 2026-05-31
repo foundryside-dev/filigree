@@ -898,7 +898,17 @@ async def _handle_import_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
         if result["skipped_types"]:
             resp["skipped_types"] = result["skipped_types"]
         return _text(resp)
-    except (ValueError, OSError, sqlite3.Error) as e:
+    except WrongProjectError as e:
+        # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
+        logging.getLogger(__name__).warning("import_jsonl failed: %s", e, exc_info=True)
+        return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
+    except ValueError as e:
+        # Malformed records / unknown type / invalid status are user-correctable
+        # data errors, not transient IO — mirror _handle_export_jsonl's split so
+        # callers switching on `code` (per CLAUDE.md) don't retry a permanent error.
+        logging.getLogger(__name__).warning("import_jsonl failed: %s", e, exc_info=True)
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
+    except (OSError, sqlite3.Error) as e:
         logging.getLogger(__name__).warning("import_jsonl failed: %s", e, exc_info=True)
         return _text(ErrorResponse(error=str(e), code=ErrorCode.IO))
 

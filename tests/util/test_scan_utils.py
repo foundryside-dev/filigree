@@ -528,6 +528,56 @@ class TestAnalyseFiles:
         assert post_calls[1]["complete_scan_run"] is True
         assert "[1/1] target.py" in capsys.readouterr().err
 
+    async def test_mixed_finding_and_sentinel_report_not_counted_clean(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A report pairing a real finding section with a 'No concrete bug found'
+        section is summarised by its finding (P1), not mis-counted as clean.
+
+        Regression: the stats loop used a whole-text substring check for the
+        sentinel, so any report whose text contained the phrase anywhere was
+        bucketed 'clean' — under-reporting (and masking) findings the API path
+        had already ingested via parse_findings' section-aware split.
+        """
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        mixed_md = SINGLE_FINDING_MD + "\n---\n" + NO_BUG_MD + "\n"
+
+        async def fake_executor(**kwargs: object) -> None:
+            Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(kwargs["output_path"]).write_text(mixed_md, encoding="utf-8")
+
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **_kwargs: (True, ""),
+        )
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["P1"] == 1
+        assert stats.get("clean", 0) == 0
+
     async def test_skip_existing_report_ingests_findings_before_completion(
         self,
         tmp_path: Path,
