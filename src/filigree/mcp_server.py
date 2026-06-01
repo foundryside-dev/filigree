@@ -317,6 +317,7 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
+from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP  # noqa: E402
 from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
@@ -406,6 +407,20 @@ def _apply_tier_metadata(tools: list[Tool]) -> None:
 
 
 _apply_tier_metadata(_all_tools)
+
+
+# ---------------------------------------------------------------------------
+# Served tool surface (namespaced wire names)
+# ---------------------------------------------------------------------------
+# ``_all_tools`` keeps its OLD/canonical names — TIER_MAP, _tool_argument_names,
+# _all_handlers, and get_schema's derivation all key off them. The wire surface
+# served by list_tools() is a one-time projection that renames ONLY ``.name`` to
+# the namespaced ``<entity>_<verb>`` form (RENAME_MAP). model_copy preserves the
+# already-applied tier markers and annotations. Built AFTER _apply_tier_metadata
+# so those carry across the copy. Inbound new names are canonicalized back to the
+# old name at the top of call_tool (NEW_TO_OLD), so every downstream guard and
+# _all_handlers.get keeps operating on the canonical identity.
+_served_tools: list[Tool] = [tool.model_copy(update={"name": RENAME_MAP[tool.name]}) for tool in _all_tools]
 
 
 def _allowed_tool_arguments(tool: Tool) -> set[str]:
@@ -610,12 +625,25 @@ async def get_workflow_prompt(name: str, arguments: dict[str, str] | None = None
 
 @server.list_tools()  # type: ignore[untyped-decorator,no-untyped-call]
 async def list_tools() -> list[Tool]:
-    return _all_tools
+    # Serve namespaced names only. _served_tools is the one-time projection of
+    # _all_tools with .name renamed via RENAME_MAP (tier markers + annotations
+    # preserved). Returned in both normal and schema-mismatch degraded mode —
+    # introspection needs no DB.
+    return _served_tools
 
 
 @server.call_tool()  # type: ignore[untyped-decorator]
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     t0 = time.monotonic()
+
+    # Canonicalize at the very top: callers may use the namespaced wire name
+    # (served by list_tools) OR the legacy old name. Resolve the new name back
+    # to its canonical (old) identity so EVERY downstream guard, dispatch, arg
+    # check, and log line operates on one name. Critically, this keeps the three
+    # ``name != "get_mcp_status"`` degraded-mode exemptions reachable via the new
+    # ``mcp_status_get`` name. Unknown names pass through unchanged to the
+    # NOT_FOUND fast-path below.
+    name = NEW_TO_OLD.get(name, name)
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools

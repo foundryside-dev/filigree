@@ -219,23 +219,23 @@ class TestToolDescriptions:
     async def test_ready_tool_descriptions_name_open_category(self) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        get_ready_description = tools["get_ready"].description or ""
+        get_ready_description = tools["work_ready"].description or ""
         assert "open category" in get_ready_description
         assert "include_context" in get_ready_description
         assert "(open, no blockers)" not in get_ready_description
 
-        get_stats_description = tools["get_stats"].description or ""
+        get_stats_description = tools["stats_get"].description or ""
         assert "status_name_counts" in get_stats_description
         assert "status_category_counts" in get_stats_description
 
-        for tool_name in ("claim_next", "start_next_work"):
+        for tool_name in ("work_claim_next", "work_start_next"):
             description = tools[tool_name].description or ""
             assert "open-category ready issue" in description
 
     async def test_requirement_type_descriptions_name_optional_pack(self) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        for tool_name in ("create_issue", "promote_observation", "batch_promote_observations"):
+        for tool_name in ("issue_create", "observation_promote", "observation_batch_promote"):
             schema = tools[tool_name].inputSchema
             assert isinstance(schema, dict)
             properties = schema.get("properties", {})
@@ -420,12 +420,12 @@ class TestUpdateAndClose:
 class TestDeleteIssue:
     async def test_delete_issue_tool_registered(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
-        assert "delete_issue" in tools
-        schema = tools["delete_issue"].inputSchema
+        assert "issue_delete" in tools
+        schema = tools["issue_delete"].inputSchema
         assert set(schema["properties"]) == {"issue_id", "force", "actor"}
         assert schema["required"] == ["issue_id"]
-        assert "IRREVERSIBLE" in tools["delete_issue"].description
-        assert "undo_last cannot reverse" in tools["delete_issue"].description
+        assert "IRREVERSIBLE" in tools["issue_delete"].description
+        assert "undo_last cannot reverse" in tools["issue_delete"].description
 
     async def test_delete_success_envelope(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Delete me")
@@ -734,8 +734,8 @@ class TestTemplateAndSummary:
     async def test_template_tool_descriptions_explain_alias_contract(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        assert "canonical full workflow definition" in tools["get_template"].description
-        assert "compatibility alias" in tools["get_type_info"].description
+        assert "canonical full workflow definition" in tools["template_get"].description
+        assert "compatibility alias" in tools["type_get"].description
 
     async def test_get_template_unknown(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("get_template", {"type": "nonexistent"})
@@ -749,7 +749,7 @@ class TestTemplateAndSummary:
 
     async def test_session_context_tool_is_available(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        assert "session_context" in {tool.name for tool in tools}
+        assert "session_context_get" in {tool.name for tool in tools}
 
     async def test_session_context_returns_startup_snapshot(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("Ready via MCP session context")
@@ -964,7 +964,7 @@ class TestCreatePlan:
 
     async def test_create_plan_from_file_tool_is_available(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        assert "create_plan_from_file" in {tool.name for tool in tools}
+        assert "plan_create_from_file" in {tool.name for tool in tools}
 
     async def test_create_plan_from_file_reads_project_relative_json(self, mcp_db: FiligreeDB) -> None:
         plan_path = mcp_db.db_path.parent.parent / "plan.json"
@@ -1787,7 +1787,7 @@ class TestActorIdentity:
 class TestResource:
     async def test_get_schema_documents_entity_id_prefixes(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name for tool in await list_tools()}
-        assert "get_schema" in tools
+        assert "schema_get" in tools
 
         result = await call_tool("get_schema", {})
 
@@ -1830,12 +1830,17 @@ class TestResource:
             "annotation": {"annotation_id", "annotation_ids"},
         }
         expected: dict[str, list[str]] = {entity: [] for entity in field_map}
+        # list_tools() serves namespaced names; get_schema derives
+        # accepted_by_tools from _all_tools (canonical/old names). Translate the
+        # served name back to canonical so both sides of the comparison agree.
+        from filigree.mcp_tools.rename import NEW_TO_OLD
+
         for tool in await list_tools():
             props = tool.inputSchema.get("properties", {}) if isinstance(tool.inputSchema, dict) else {}
             prop_names = set(props) if isinstance(props, dict) else set()
             for entity, fields in field_map.items():
                 if prop_names & fields:
-                    expected[entity].append(tool.name)
+                    expected[entity].append(NEW_TO_OLD[tool.name])
 
         data = _parse(await call_tool("get_schema", {}))
         actual = {entity: schema["accepted_by_tools"] for entity, schema in data["entity_id_prefixes"].items()}
@@ -1844,7 +1849,7 @@ class TestResource:
 
     async def test_get_mcp_status_reports_compatible_database(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name for tool in await list_tools()}
-        assert "get_mcp_status" in tools
+        assert "mcp_status_get" in tools
 
         result = await call_tool("get_mcp_status", {})
 
@@ -2811,18 +2816,18 @@ class TestFileTools:
         tools = await list_tools()
         names = {t.name for t in tools}
         assert {
-            "list_files",
-            "get_file",
-            "get_file_timeline",
-            "get_issue_files",
-            "add_file_association",
-            "register_file",
-            "delete_file_record",
+            "file_list",
+            "file_get",
+            "file_timeline_get",
+            "issue_file_list",
+            "file_association_add",
+            "file_register",
+            "file_delete",
         }.issubset(names)
 
     async def test_create_issue_tool_docs_call_out_labels_at_creation(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        create_tool = next(t for t in tools if t.name == "create_issue")
+        create_tool = next(t for t in tools if t.name == "issue_create")
         assert "labels" in create_tool.description.lower()
         labels_schema = (create_tool.inputSchema or {}).get("properties", {}).get("labels", {})
         assert "creation" in (labels_schema.get("description") or "").lower()

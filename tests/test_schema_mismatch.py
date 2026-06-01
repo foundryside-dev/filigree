@@ -154,7 +154,7 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     tools = asyncio.run(mcp_mod.list_tools())
     assert len(tools) > 0, "list_tools should expose the full registry"
     tool_names = {t.name for t in tools}
-    assert {"get_issue", "list_issues", "create_issue"}.issubset(tool_names)
+    assert {"issue_get", "issue_list", "issue_create"}.issubset(tool_names)
 
     # Every call_tool must short-circuit to SCHEMA_MISMATCH — exercise
     # a read, a list, and a write to prove the guard is dispatcher-wide,

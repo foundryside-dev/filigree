@@ -132,11 +132,11 @@ class TestPreviewScanTool:
     async def test_scanner_management_schema_is_exposed(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        assert "list_available_scanners" in tools
-        assert "enable_scanner" in tools
-        assert "disable_scanner" in tools
-        assert "list_available_scanners" in tools["list_scanners"].description
-        assert tools["enable_scanner"].inputSchema["properties"]["scanner"]["type"] == "string"
+        assert "scanner_available_list" in tools
+        assert "scanner_enable" in tools
+        assert "scanner_disable" in tools
+        assert "list_available_scanners" in tools["scanner_list"].description
+        assert tools["scanner_enable"].inputSchema["properties"]["scanner"]["type"] == "string"
 
     async def test_preview_scan(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["preview_target.py"])
@@ -251,7 +251,7 @@ class TestPreviewScanTool:
     async def test_prompt_argument_schema_uses_prompt_pack_enum(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        for tool_name in ("preview_scan", "trigger_scan", "trigger_scan_batch"):
+        for tool_name in ("scan_preview", "scan_trigger", "scan_trigger_batch"):
             schema = tools[tool_name].inputSchema
             prompt_schema = schema["properties"]["prompt"]
             assert "security" in prompt_schema["enum"]
@@ -261,7 +261,7 @@ class TestPreviewScanTool:
             assert "advisory only" in prompt_schema["description"]
             assert "does not restrict scanner file access" in prompt_schema["description"]
 
-        pack_schema = tools["list_prompt_packs"].inputSchema
+        pack_schema = tools["prompt_pack_list"].inputSchema
         assert pack_schema["properties"]["language"]["type"] == "string"
         assert "language-specific" in pack_schema["properties"]["language"]["description"]
 
