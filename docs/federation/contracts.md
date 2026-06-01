@@ -377,20 +377,23 @@ of the external producer contract.
   can never collide with Filigree's own `trigger_scan`-minted ids.
 - **Keep `scan_source` stable across a run.** History groups on
   `(scan_run_id, scan_source)`; a mid-run `scan_source` change splits the run.
-- **Completion warning is benign.** With `complete_scan_run=true` (the
-  default), an unknown run cannot be transitioned to `completed` (no
-  `scan_runs` row), so the response `warnings[]` carries a benign
-  `"Scan run <id> status not updated to 'completed': …"`. **Findings are still
-  ingested.** Consumers MUST NOT treat a populated `warnings[]` as failure —
-  switch on HTTP status and the `stats` counts (`findings_created`, etc.). An
-  enrich-only producer that wants a clean `warnings[]` should send
-  `complete_scan_run=false`, which skips the completion attempt entirely.
+- **No completion warning for an unknown run.** With `complete_scan_run=true`
+  (the default), an unknown run has no `scan_runs` row to transition to
+  `completed`, so Filigree **skips the completion attempt silently** — the
+  response `warnings[]` is clean. (Previously this emitted a benign
+  `"Scan run <id> status not updated to 'completed': …"` on every enrich-only
+  POST; that server-side noise is now suppressed for the no-row case. A run
+  that *does* exist but cannot transition still warns.) Either way **findings
+  are ingested**, and consumers MUST NOT treat a populated `warnings[]` as
+  failure — switch on HTTP status and the `stats` counts (`findings_created`,
+  etc.). `complete_scan_run=false` still skips the completion attempt entirely
+  and is the explicit way to opt out for runs that *do* have a row.
 
 Pinned at the HTTP intake boundary by
 `tests/api/test_files_api.py::TestUnknownScanRunIdContract` (200 + ingest +
-reconstruction, the benign completion warning, and `complete_scan_run=false`
-suppression), and at the core-method level by
-`tests/api/test_files_api.py::TestScanRunsAPI` and
+reconstruction, the suppressed completion warning, and `complete_scan_run=false`),
+and at the core-method level by `tests/core/test_files.py::TestScanRunId`
+(unknown-run/known-run/terminal-run warning distinction) and
 `tests/core/test_files.py::TestGetScanRunsCore`.
 
 **Clarion may drop its "pending Filigree's confirmation" caveat** on

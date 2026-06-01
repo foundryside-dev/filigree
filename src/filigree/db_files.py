@@ -1440,34 +1440,55 @@ class FilesMixin(DBMixinProtocol):
             raise
 
         if scan_run_id and complete_scan_run:
-            try:
-                self.update_scan_run_status(
-                    scan_run_id,
-                    "completed",
-                )
-            except (KeyError, ValueError, sqlite3.Error) as exc:
-                # Check if the scan run is already in a terminal state by
-                # querying directly, rather than relying on error message text.
-                try:
-                    row = self.conn.execute("SELECT status FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
-                    is_terminal = row is not None and row["status"] in ("completed", "failed")
-                except sqlite3.Error:
-                    is_terminal = False
-                if is_terminal:
-                    logger.info(
-                        "Scan run %r already in terminal state, skipping completion: %s",
-                        scan_run_id,
-                        exc,
-                    )
-                else:
-                    logger.warning(
-                        "Failed to mark scan run %r as completed (findings were ingested successfully): %s",
-                        scan_run_id,
-                        exc,
-                    )
-                stats["warnings"].append(f"Scan run {scan_run_id} status not updated to 'completed': {exc}")
+            # §F6 tolerate-unknown: an enrich-only producer (e.g. Clarion
+            # `clarion analyze`) POSTs findings under a scan_run_id Filigree
+            # never created, so there is no scan_runs row to mark completed.
+            # That is the normal path, not an error — skip the completion
+            # attempt silently rather than emit a benign "status not updated"
+            # warning on every such POST (which would train consumers to ignore
+            # warnings[] entirely). Only a run that EXISTS but cannot be
+            # transitioned is a real advisory worth surfacing.
+            run_exists = self.conn.execute("SELECT 1 FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone() is not None
+            if run_exists:
+                self._complete_scan_run_with_warning(scan_run_id, stats)
 
         return stats
+
+    def _complete_scan_run_with_warning(self, scan_run_id: str, stats: ScanIngestResult) -> None:
+        """Mark an existing scan run completed, downgrading failures to a warning.
+
+        The caller has already confirmed a ``scan_runs`` row exists, so a
+        failure here is a real (non-tolerate-unknown) condition: either the run
+        is already terminal (benign, logged at INFO) or a genuine transition
+        failure (logged at WARNING). Either way findings were already ingested,
+        so the failure is surfaced in ``stats['warnings']`` rather than raised.
+        """
+        try:
+            self.update_scan_run_status(
+                scan_run_id,
+                "completed",
+            )
+        except (KeyError, ValueError, sqlite3.Error) as exc:
+            # Check if the scan run is already in a terminal state by
+            # querying directly, rather than relying on error message text.
+            try:
+                row = self.conn.execute("SELECT status FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
+                is_terminal = row is not None and row["status"] in ("completed", "failed")
+            except sqlite3.Error:
+                is_terminal = False
+            if is_terminal:
+                logger.info(
+                    "Scan run %r already in terminal state, skipping completion: %s",
+                    scan_run_id,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Failed to mark scan run %r as completed (findings were ingested successfully): %s",
+                    scan_run_id,
+                    exc,
+                )
+            stats["warnings"].append(f"Scan run {scan_run_id} status not updated to 'completed': {exc}")
 
     def get_scan_runs(self, *, limit: int = 10) -> list[ScanRunRecord]:
         """Query scan run history from the union of scan_runs and scan_findings.

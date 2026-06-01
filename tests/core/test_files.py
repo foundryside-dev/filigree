@@ -1644,6 +1644,46 @@ class TestScanRunId:
         assert findings["c"] == 0
         assert run["status"] == "running"
 
+    def test_unknown_run_completion_emits_no_warning(self, db: FiligreeDB) -> None:
+        """§F6: an enrich-only POST under a scan_run_id with NO scan_runs row
+        skips the completion attempt silently — no "status not updated" warning
+        (there is nothing to complete). Findings still ingest."""
+        result = db.process_scan_results(
+            scan_source="clarion",
+            scan_run_id="never-created-run",
+            findings=[{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
+        )
+        assert result["findings_created"] == 1
+        assert not any("not updated to 'completed'" in w for w in result["warnings"])
+
+    def test_known_run_completes_without_warning(self, db: FiligreeDB) -> None:
+        """A run that EXISTS and is mid-flight transitions to completed cleanly
+        — no warning, and the row lands in 'completed'."""
+        db.create_scan_run(scan_run_id="run-ok", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        db.update_scan_run_status("run-ok", "running")
+        result = db.process_scan_results(
+            scan_source="codex",
+            scan_run_id="run-ok",
+            findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+        )
+        assert not any("not updated to 'completed'" in w for w in result["warnings"])
+        assert db.get_scan_run("run-ok")["status"] == "completed"
+
+    def test_existing_terminal_run_still_warns(self, db: FiligreeDB) -> None:
+        """The real-advisory path is preserved: a run that EXISTS but cannot be
+        transitioned (already terminal) STILL surfaces the completion warning —
+        only the no-row case is suppressed."""
+        db.create_scan_run(scan_run_id="run-done", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        db.update_scan_run_status("run-done", "running")
+        db.update_scan_run_status("run-done", "completed")
+        result = db.process_scan_results(
+            scan_source="codex",
+            scan_run_id="run-done",
+            findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+        )
+        assert result["findings_created"] == 1
+        assert any("not updated to 'completed'" in w for w in result["warnings"])
+
 
 class TestSuggestionField:
     """Tests for suggestion storage and size cap."""

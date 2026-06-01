@@ -246,11 +246,14 @@ class TestUnknownScanRunIdContract:
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
         assert any(r["scan_run_id"] == "clarion-run-never-seen-001" for r in runs)
 
-    async def test_unknown_run_completion_warning_is_benign(self, client: AsyncClient) -> None:
-        """With complete_scan_run=True (default) an unknown run emits a benign
-        completion warning in warnings[] — there is no scan_runs row to mark
-        'completed'. Consumers MUST NOT treat populated warnings[] as failure;
-        findings are still ingested (findings_created reflects the real work)."""
+    async def test_unknown_run_completion_is_silently_skipped(self, client: AsyncClient) -> None:
+        """With complete_scan_run=True (default) an unknown run does NOT emit a
+        completion warning — there is no scan_runs row to mark 'completed', so
+        Filigree skips the completion attempt server-side rather than surfacing
+        a benign "status not updated" warning on every enrich-only POST (which
+        would train consumers to ignore warnings[]). Findings are still ingested
+        and the run is reconstructed in history. Only a run that EXISTS but
+        cannot transition still warns (covered by core-level tests)."""
         resp = await client.post(
             "/api/v1/scan-results",
             json={
@@ -262,7 +265,10 @@ class TestUnknownScanRunIdContract:
         assert resp.status_code == 200
         body = resp.json()
         assert body["findings_created"] == 1
-        assert any("not updated to 'completed'" in w for w in body["warnings"])
+        assert not any("not updated to 'completed'" in w for w in body["warnings"])
+        # The unknown run is still reconstructed from scan_findings in history.
+        runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
+        assert any(r["scan_run_id"] == "clarion-run-warn-001" for r in runs)
 
     async def test_complete_scan_run_false_suppresses_completion_warning(self, client: AsyncClient) -> None:
         """complete_scan_run=False suppresses the completion attempt entirely,
