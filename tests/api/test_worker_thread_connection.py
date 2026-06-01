@@ -6,13 +6,13 @@ DB work inline on the event-loop thread. Both groups historically shared one
 ``sqlite3.Connection`` (opened ``check_same_thread=False``), so a worker-thread
 write could interleave on the connection's single implicit transaction with an
 event-loop write — silently committing partial work or discarding completed
-work. ``_SCAN_RESULTS_LOCK`` only serialises the worker paths against each
-other, not against the event-loop handlers.
+work.
 
 The fix: the worker paths borrow a PRIVATE connection via
 ``FiligreeDB.borrow_for_worker_thread`` so they never share a connection
-cross-thread. These tests pin that mechanism and the connection-scoped
-invariant.
+cross-thread. Writer/writer contention is then mediated by SQLite's own file
+locking (WAL + ``busy_timeout``), with no application-level lock. These tests
+pin that mechanism and the connection-scoped invariant.
 """
 
 from __future__ import annotations

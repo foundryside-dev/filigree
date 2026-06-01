@@ -59,14 +59,15 @@ _MAX_MIN_FINDINGS = 2_147_483_647
 #     a connection cross-thread.
 #
 # clean-stale conforms under this invariant despite using to_thread, because it
-# borrows a private connection. This module-level asyncio.Lock still serialises
-# the two worker WRITE paths against each other: WAL permits a single writer at
-# the file level, so two concurrent worker writers would otherwise contend for
-# the write lock (SQLITE_BUSY churn up to busy_timeout). Event-loop handlers do
-# not take this lock — they run on a different connection and SQLite's file
-# locking (WAL + busy_timeout) mediates writer/writer contention between them
-# and a worker.
-_SCAN_RESULTS_LOCK = asyncio.Lock()
+# borrows a private connection. Writer/writer contention — between two worker
+# paths, or a worker and an event-loop handler — is mediated entirely by
+# SQLite's own file locking: WAL admits a single writer at a time and
+# ``busy_timeout`` (5 s) makes the loser wait for the brief write window rather
+# than raise SQLITE_BUSY. No application-level lock is taken, so the worker
+# paths run fully in parallel right up to that window — the bulk of each call
+# (the Clarion HTTP resolution, which happens BEFORE any write transaction
+# opens) overlaps freely. The shared registry's ``httpx.Client`` is safe for
+# concurrent use, so two workers may resolve against Clarion simultaneously.
 
 
 def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any]) -> ScanIngestResult:
@@ -432,11 +433,11 @@ def create_classic_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -502,11 +503,11 @@ def create_loom_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
@@ -611,11 +612,10 @@ def create_loom_router() -> APIRouter:
         and ``FiligreeDB.borrow_for_worker_thread``) — the same idiom as the
         scan-results handlers. Because it never touches the shared event-loop
         connection, it cannot race the plain-async event-loop write handlers
-        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It still
-        acquires ``_SCAN_RESULTS_LOCK`` to serialise against the scan-results
-        worker WRITE path (WAL allows one writer at the file level; the lock
-        avoids SQLITE_BUSY churn between the two worker writers). See the lock's
-        CONTRACT-E note for the connection-scoped invariant.
+        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It takes no
+        app-level lock against the scan-results worker path; WAL admits one
+        writer at a time and ``busy_timeout`` absorbs the brief overlap. See the
+        module header for the connection-scoped invariant.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -631,14 +631,13 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
-        async with _SCAN_RESULTS_LOCK:
-            result = await asyncio.to_thread(
-                _clean_stale_findings_on_private_conn,
-                db,
-                days=older_than_days,
-                scan_source=scan_source,
-                actor=actor,
-            )
+        result = await asyncio.to_thread(
+            _clean_stale_findings_on_private_conn,
+            db,
+            days=older_than_days,
+            scan_source=scan_source,
+            actor=actor,
+        )
         logger.info(
             "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
             result["findings_fixed"],
@@ -720,11 +719,11 @@ def create_living_surface_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:

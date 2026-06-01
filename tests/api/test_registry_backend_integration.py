@@ -155,12 +155,10 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
     OTHER endpoints (here ``GET /api/scan-runs``) must complete during the
     Clarion HTTP wait.
 
-    Two scan-results POSTs serialize at the module-level ``_SCAN_RESULTS_LOCK``
-    (avoids the shared-sqlite-connection race), so we don't test parallel
-    scan-results — that needs a per-thread DB connection pool, tracked
-    separately. The important property is "the event loop stays responsive,"
-    which this test verifies by interleaving a fast read endpoint with a
-    slow scan-results POST.
+    This test verifies the responsiveness property by interleaving a fast read
+    endpoint with a slow scan-results POST. Parallelism between two concurrent
+    scan-results POSTs is verified separately by
+    ``test_concurrent_loom_scan_results_run_in_parallel``.
     """
     import asyncio
     import http.server
@@ -250,6 +248,132 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
             assert get_elapsed < latency_seconds, (
                 f"GET /api/scan-runs blocked on scan-results event loop: {get_elapsed:.3f}s >= latency {latency_seconds}s"
             )
+        finally:
+            dash_module._db = None
+            db.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> None:
+    """Two concurrent scan-results POSTs overlap their Clarion HTTP round-trips
+    instead of serialising.
+
+    This is the parallelism half of filigree-d4237f486f. The correctness half
+    (no cross-thread shared-connection race) was closed earlier by
+    ``borrow_for_worker_thread``; the residual ``_SCAN_RESULTS_LOCK`` that
+    serialised the two worker WRITE paths has been removed. Each call does its
+    Clarion batch resolution (the slow part) BEFORE opening any write
+    transaction, so with no app-level lock the two resolutions overlap and the
+    tiny write windows serialise only briefly at the WAL writer lock
+    (``busy_timeout`` absorbs the wait — no SQLITE_BUSY/IntegrityError).
+
+    Wall-time math: each POST waits ``latency`` on its Clarion POST. Serialised
+    (the old lock behaviour) the two cannot start their HTTP until the other's
+    whole DB path finishes, so wall time floors at ``2 * latency``. Overlapped,
+    wall time floors at ``~1 * latency`` plus the small write contention. We
+    assert below the serialised floor with CI headroom, which can only hold if
+    the resolutions actually ran concurrently.
+    """
+    import asyncio
+    import http.server
+    import json as jsonmod
+    import threading
+    import time
+    from urllib.parse import urlparse as _urlparse
+
+    latency_seconds = 0.4
+
+    class LatentClarionHandler(http.server.BaseHTTPRequestHandler):
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = jsonmod.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            parsed = _urlparse(self.path)
+            if parsed.path == "/api/v1/_capabilities":
+                self._send_json(
+                    200,
+                    {"registry_backend": True, "file_registry": True, "api_version": 1, "instance_id": "latent"},
+                )
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            time.sleep(latency_seconds)
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b""
+            payload = jsonmod.loads(raw.decode("utf-8")) if raw else {}
+            queries = payload.get("queries", [])
+            resolved = [
+                {
+                    "requested_path": q["path"],
+                    "entity_id": f"core:file:stub@{q['path']}",
+                    "content_hash": f"sha256:{q['path']}",
+                    "canonical_path": q["path"],
+                    "language": q.get("language", ""),
+                }
+                for q in queries
+            ]
+            self._send_json(200, {"resolved": resolved, "not_found": [], "briefing_blocked": [], "errors": []})
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LatentClarionHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            check_same_thread=False,
+            registry_backend="clarion",
+            clarion_config={"base_url": base_url, "timeout_seconds": 5},
+        )
+        db.initialize()
+        try:
+            dash_module._db = db
+            app = create_app()
+            transport = ASGITransport(app=app)
+
+            def scan_body(run: int) -> dict[str, Any]:
+                # Distinct paths per POST so each resolution + write window is
+                # non-trivial and the two POSTs touch different file rows.
+                return {
+                    "scan_source": f"src{run}",
+                    "findings": [{"path": f"src/run{run}_f{i}.py", "rule_id": "R1", "severity": "low", "message": "m"} for i in range(5)],
+                }
+
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                start = time.monotonic()
+                resp_a, resp_b = await asyncio.gather(
+                    client.post("/api/loom/scan-results", json=scan_body(0)),
+                    client.post("/api/loom/scan-results", json=scan_body(1)),
+                )
+                wall = time.monotonic() - start
+
+            # No IntegrityError / SQLITE_BUSY surfaced under concurrent writers.
+            assert resp_a.status_code == 200, resp_a.text
+            assert resp_b.status_code == 200, resp_b.text
+            # Serialised floor is 2 * latency = 0.8s; overlapped floor ~0.4s.
+            # Assert below the serialised floor with headroom for CI jitter.
+            assert wall < 2 * latency_seconds - 0.1, (
+                f"concurrent scan-results did not overlap: {wall:.3f}s "
+                f"(serialised floor {2 * latency_seconds:.3f}s, latency {latency_seconds}s)"
+            )
+            # Both POSTs' files persisted.
+            for run in range(2):
+                for i in range(5):
+                    assert db.get_file_by_path(f"src/run{run}_f{i}.py") is not None
         finally:
             dash_module._db = None
             db.close()

@@ -1035,6 +1035,30 @@ class FiligreeDB(
     def _make_local_registry(self) -> LocalRegistry:
         return LocalRegistry(lambda: self._generate_unique_id("file_records", "f"))
 
+    def _rebind_local_id_factory_to_self(self) -> None:
+        """Repoint any local file-id factory at THIS instance's connection.
+
+        ``LocalRegistry``'s id factory closes over the ``FiligreeDB`` it was
+        built on, minting ids via that instance's ``self.conn``. A clone from
+        :meth:`borrow_for_worker_thread` shares the parent's registry object by
+        reference, so without this rebind a worker-thread clone would mint local
+        file ids through the PARENT's (shared, event-loop) connection — a
+        cross-thread ``sqlite3.Connection`` misuse (``SQLITE_MISUSE``). Rebind
+        the local registry, or the local-fallback half of a Clarion fallback
+        wrapper, so id minting uses this clone's private connection. The shared
+        Clarion ``_primary`` (the ``httpx.Client``) is kept by reference and is
+        never closed by the non-owning clone.
+        """
+        registry = self.registry
+        if isinstance(registry, LocalRegistry):
+            self.registry = self._make_local_registry()
+        elif isinstance(registry, _ClarionLocalFallbackRegistry):
+            self.registry = _ClarionLocalFallbackRegistry(
+                registry._primary,
+                self._make_local_registry(),
+                base_url=registry._base_url,
+            )
+
     def _clarion_base_url(self) -> str | None:
         """Return the configured Clarion base URL, or ``None`` if absent.
 
@@ -1549,16 +1573,28 @@ class FiligreeDB(
         one ``sqlite3.Connection`` interleaves statements on the connection's
         single implicit transaction, so one writer's ``COMMIT``/``ROLLBACK``
         can land mid-transaction in another's (silent partial/lost writes).
-        ``_SCAN_RESULTS_LOCK`` serialises the worker paths against each other
-        but not against the event-loop handlers — only a separate connection
-        closes that race class (the CONTRACT-E follow-up).
+        A separate connection per worker is what closes that race class (the
+        CONTRACT-E follow-up). Worker/worker and worker/event-loop write
+        contention is then mediated entirely by SQLite's own file locking
+        (WAL admits one writer at a time; ``busy_timeout`` makes the loser wait
+        rather than error) — no application-level lock is needed, and the
+        worker paths run fully in parallel up to the brief write window.
 
-        The clone shares all config, the registry client, and the Clarion
+        The clone shares all config, the Clarion HTTP client, and the Clarion
         capability-probe state by reference (read-only on the worker side, so
         no second ADR-014 probe runs) but lazily opens its OWN connection on
         first ``self.conn`` access. ``check_same_thread=True`` on the clone
         turns any stray cross-thread use of that connection into a loud
-        ``ProgrammingError`` rather than silent interleaving.
+        ``ProgrammingError`` rather than silent interleaving. The shared
+        Clarion ``httpx.Client`` is safe for concurrent calls, so two worker
+        clones may resolve against Clarion at the same time.
+
+        The local file-id factory is the one piece NOT shared verbatim: a
+        ``LocalRegistry`` mints ids through the ``FiligreeDB`` it closed over,
+        so the clone gets its factory rebound to itself
+        (:meth:`_rebind_local_id_factory_to_self`) — otherwise worker-thread id
+        minting in local (or Clarion-fallback) mode would reach back into the
+        parent's shared connection and raise ``SQLITE_MISUSE``.
 
         The clone does NOT own the registry: exiting the context tears down
         only the private connection (commit on clean exit, rollback on an
@@ -1572,6 +1608,10 @@ class FiligreeDB(
         clone._conn = None
         clone._check_same_thread = True
         clone._owns_registry = False
+        # The shared registry's local-id factory closes over the PARENT's
+        # connection; rebind it to the clone so worker-thread file-id minting
+        # uses the clone's private connection, not the shared one.
+        clone._rebind_local_id_factory_to_self()
         try:
             yield clone
         finally:
