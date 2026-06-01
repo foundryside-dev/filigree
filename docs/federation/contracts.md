@@ -407,5 +407,6 @@ suppression), and at the core-method level by
 - **ADR-002** (the naming + lifecycle rules): `docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md`.
 - **2.0 work package** (the execution sequence): `docs/plans/2026-04-24-2.0-federation-work-package.md`.
 - **ADR-017 audit** (verifies classic-generation semantics are preserved on the 2.0 branch): `docs/plans/2026-04-24-adr017-audit.md`.
+- **SEI conformance position** (Filigree's obligations + emerging requirements for the SEI lock window): `docs/superpowers/specs/2026-06-01-filigree-roadmap-to-first-class.md` Appendix A.
 - **Clarion ADR-004** (finding exchange format): `/home/john/clarion/docs/clarion/adr/ADR-004-finding-exchange-format.md`.
 - **Clarion ADR-017** (severity + dedup): `/home/john/clarion/docs/clarion/adr/ADR-017-severity-and-dedup.md`.
