@@ -64,8 +64,13 @@ LIVE_AGENT_DOCS = (
 # file, because the surviving occurrence is legitimately something other than a
 # served MCP tool name:
 #   - observe: also a plain English verb ("don't observe things") and the name
-#     of a CLI command (`filigree observe`). We rely on the mcp__filigree__
-#     prefix check below to catch the tool form, not the bare token.
+#     of a CLI command (`filigree observe`). Exempted ONLY in the two files
+#     where the bare token legitimately occurs as English/CLI:
+#     docs/federation/contracts.md (the `cli_commands/observations.py` command
+#     list) and the skill's SKILL.md ("Don't observe things…"). The bare-token
+#     guard stays ACTIVE for `observe` in the other 7 files (mcp.md,
+#     instructions.md, CLAUDE.md, …) so a stale bare `observe` that should be
+#     `observation_create` there is still caught.
 #   - get_workflow_statuses / explain_status: in docs/federation/contracts.md
 #     these appear only as the *target* of a documented historical rename arrow
 #     ("get_workflow_states -> get_workflow_statuses"). Rewriting the arrow's
@@ -76,7 +81,12 @@ LIVE_AGENT_DOCS = (
 #     the MCP tools) and the CLI wrapper `start-next-work`. Those are separate
 #     surfaces from the MCP tools and keep their names.
 _WHOLEWORD_EXCEPTIONS: dict[str, frozenset[str]] = {
-    "observe": frozenset(LIVE_AGENT_DOCS),
+    "observe": frozenset(
+        {
+            "docs/federation/contracts.md",
+            "src/filigree/skills/filigree-workflow/SKILL.md",
+        }
+    ),
     "get_workflow_statuses": frozenset({"docs/federation/contracts.md"}),
     "explain_status": frozenset({"docs/federation/contracts.md"}),
     "start_work": frozenset({"docs/federation/contracts.md"}),
