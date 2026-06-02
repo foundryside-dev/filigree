@@ -20,6 +20,12 @@ Scope / known gaps:
 - Word-boundary matching means a NEW name that *contains* an old token as a
   substring (e.g. ``issue_get`` vs old ``get_issue``) does not false-positive:
   ``get_issue`` is not a whole-word token inside ``issue_get``.
+- ``observe`` is both a ``RENAME_MAP`` key (renamed to ``observation_create``)
+  and a plain English verb. The ``\b``-anchored regex cannot tell the two apart,
+  so a future description that legitimately uses "observe" as prose would
+  false-positive here. There are no such occurrences today; if one is ever
+  needed, the cheap fix is to reword (e.g. "record an observation") or backtick
+  the intended tool name — not to teach this guard to parse English.
 """
 
 from __future__ import annotations
