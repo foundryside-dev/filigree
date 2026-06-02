@@ -18,6 +18,7 @@ import sqlite3
 import sys
 import time
 import weakref
+from collections import Counter
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -63,6 +64,15 @@ server = Server("filigree")
 db: FiligreeDB | None = None
 _filigree_dir: Path | None = None
 _logger: logging.Logger | None = None
+
+# Deprecation telemetry (rollout plan §5.3): count how often callers reach a
+# tool via its DEPRECATED OLD name (keyed by the inbound wire name) so we can
+# PROVE, before old names are removed in Phase 2, that consumers have migrated.
+# Best-effort diagnostics — a plain increment under asyncio is adequate (the
+# GIL makes each ``+= 1`` atomic enough); it is NOT an exact count under high
+# concurrency, and that is acceptable for a migration-readiness signal.
+_deprecated_tool_calls: Counter[str] = Counter()
+
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
 _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_dir", default=None)
 
@@ -202,6 +212,26 @@ def _safe_path(raw: str) -> Path:
     return safe_path(raw, filigree_dir.parent)
 
 
+def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
+    """Record that a caller reached a tool via its deprecated OLD name.
+
+    Best-effort: increment the per-wire-name counter and emit a structured
+    ``deprecated_tool_name`` log event (matching the ``tool_call``/``tool_error``
+    style elsewhere in this module). ``wire_name`` is guaranteed to be a key of
+    ``RENAME_MAP`` by the caller's detection guard.
+    """
+    _deprecated_tool_calls[wire_name] += 1
+    if _logger:
+        _logger.info(
+            "deprecated_tool_name",
+            extra={
+                "tool": wire_name,
+                "canonical": RENAME_MAP[wire_name],
+                "actor": arguments.get("actor") if isinstance(arguments, dict) else None,
+            },
+        )
+
+
 def get_mcp_status_payload() -> dict[str, Any]:
     """Return read-only MCP server health without requiring a usable DB.
 
@@ -299,6 +329,13 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
         "runtime": _runtime_diagnostics(),
+        # Deprecation-readiness signal (plan §5.3): old-name usage counts.
+        # Surfaced only on the healthy path; degraded payloads above report
+        # *why* the connector is degraded, not migration telemetry.
+        "deprecated_tool_name_calls": {
+            "total": sum(_deprecated_tool_calls.values()),
+            "by_name": dict(_deprecated_tool_calls),
+        },
     }
 
 
@@ -644,14 +681,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     # ``mcp_status_get`` name. Unknown names pass through unchanged to the
     # NOT_FOUND fast-path below.
     #
-    # Task 2 (deprecation telemetry) needs the *inbound wire name* to detect
-    # old-name use. We don't bind a local for it here — ruff would flag the
-    # unused assignment — because the wire name is recoverable without it: this
-    # rename is injective, so ``RENAME_MAP.get(name)`` reconstructs the served
-    # (new) name from the canonical one, and an inbound name already in
-    # ``NEW_TO_OLD`` was the new name. Task 2 can hook in just above this line
-    # where the original ``name`` is still in hand.
+    # Deprecation telemetry (plan §5.3): capture the inbound wire name BEFORE
+    # canonicalizing, then detect the deprecated-old-name case. A caller using
+    # the NEW name (``issue_get``) resolves to a different canonical name
+    # (``get_issue``) — not deprecated. A caller using the OLD name
+    # (``get_issue``) resolves to itself AND is a key of ``RENAME_MAP`` (has a
+    # successor) — deprecated. An unknown name resolves to itself but is not in
+    # ``RENAME_MAP``, so it is not recorded (it falls through to the NOT_FOUND
+    # fast-path). Recorded here, before the degraded-mode guards, so old-name
+    # usage is counted regardless of the call's eventual outcome.
+    wire_name = name
     name = NEW_TO_OLD.get(name, name)
+    if name == wire_name and wire_name in RENAME_MAP:
+        _record_deprecated_tool_call(wire_name, arguments)
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools
