@@ -1796,18 +1796,19 @@ class TestResource:
         prefixes = data["entity_id_prefixes"]
         assert prefixes["issue"]["prefix"] == "mcp-"
         assert prefixes["issue"]["primary_key"] == "issue_id"
-        assert "get_issue" in prefixes["issue"]["accepted_by_tools"]
+        # accepted_by_tools emits the served (namespaced) names, matching list_tools().
+        assert "issue_get" in prefixes["issue"]["accepted_by_tools"]
         assert prefixes["observation"]["prefix"] == "mcp-obs-"
         assert prefixes["observation"]["primary_key"] == "observation_id"
-        assert "promote_observation" in prefixes["observation"]["accepted_by_tools"]
-        assert "batch_promote_observations" in prefixes["observation"]["accepted_by_tools"]
+        assert "observation_promote" in prefixes["observation"]["accepted_by_tools"]
+        assert "observation_batch_promote" in prefixes["observation"]["accepted_by_tools"]
         assert prefixes["scan_finding"]["prefix"] == "mcp-sf-"
         assert prefixes["scan_finding"]["primary_key"] == "finding_id"
-        assert "promote_finding" in prefixes["scan_finding"]["accepted_by_tools"]
+        assert "finding_promote" in prefixes["scan_finding"]["accepted_by_tools"]
         assert prefixes["file_record"]["prefix"] == "mcp-f-"
         assert prefixes["file_record"]["primary_key"] == "file_id"
-        assert "get_file" in prefixes["file_record"]["accepted_by_tools"]
-        assert "delete_file_record" in prefixes["file_record"]["accepted_by_tools"]
+        assert "file_get" in prefixes["file_record"]["accepted_by_tools"]
+        assert "file_delete" in prefixes["file_record"]["accepted_by_tools"]
 
     async def test_get_schema_accepted_tools_are_derived_from_live_registry(self, mcp_db: FiligreeDB) -> None:
         field_map = {
@@ -1830,17 +1831,15 @@ class TestResource:
             "annotation": {"annotation_id", "annotation_ids"},
         }
         expected: dict[str, list[str]] = {entity: [] for entity in field_map}
-        # list_tools() serves namespaced names; get_schema derives
-        # accepted_by_tools from _all_tools (canonical/old names). Translate the
-        # served name back to canonical so both sides of the comparison agree.
-        from filigree.mcp_tools.rename import NEW_TO_OLD
-
+        # Both surfaces now emit the served (namespaced) names: list_tools()
+        # serves them, and get_schema's accepted_by_tools is translated through
+        # RENAME_MAP at the emission point. So compare new names directly.
         for tool in await list_tools():
             props = tool.inputSchema.get("properties", {}) if isinstance(tool.inputSchema, dict) else {}
             prop_names = set(props) if isinstance(props, dict) else set()
             for entity, fields in field_map.items():
                 if prop_names & fields:
-                    expected[entity].append(NEW_TO_OLD[tool.name])
+                    expected[entity].append(tool.name)
 
         data = _parse(await call_tool("get_schema", {}))
         actual = {entity: schema["accepted_by_tools"] for entity, schema in data["entity_id_prefixes"].items()}

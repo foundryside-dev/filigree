@@ -14,6 +14,7 @@ import filigree.mcp_server as mcp_mod
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool, list_tools
 from filigree.mcp_tools.rename import RENAME_MAP
+from filigree.registry import RegistryVersionMismatchError
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 from tests.mcp._helpers import _parse
 
@@ -62,7 +63,21 @@ class TestArgValidationThroughNewName:
 
 
 class TestDegradedModeReachability:
-    """The key seam: a new name must still hit the get_mcp_status exemption."""
+    """The key seam: a new name must still hit the get_mcp_status exemptions.
+
+    call_tool exempts ``get_mcp_status`` from THREE degraded-mode guards, each
+    keyed off the canonical name. Canonicalization happens before the guards, so
+    the new ``mcp_status_get`` name resolves to ``get_mcp_status`` and stays
+    exempt. Two of the three exemptions are exercised here:
+
+    * ``_schema_mismatch`` (startup found a v+1 DB), and
+    * ``_registry_startup_error`` (Clarion advertised an incompatible registry
+      API version).
+
+    The third — the per-call runtime-drift gate (live ``PRAGMA user_version``
+    > installed) — needs a forward-migrated DB under a live connection, which is
+    out of scope for these in-process fixtures, so it is not exercised here.
+    """
 
     async def test_mcp_status_reachable_via_new_name_under_schema_mismatch(self, mcp_db: FiligreeDB, monkeypatch) -> None:
         monkeypatch.setattr(
@@ -86,6 +101,30 @@ class TestDegradedModeReachability:
         # A normal tool IS blocked with SCHEMA_MISMATCH, even via the new name.
         blocked = _parse(await call_tool("issue_get", {"issue_id": "anything"}))
         assert blocked["code"] == ErrorCode.SCHEMA_MISMATCH
+
+    async def test_mcp_status_reachable_via_new_name_under_registry_startup_error(self, mcp_db: FiligreeDB, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mcp_mod,
+            "_registry_startup_error",
+            RegistryVersionMismatchError(
+                "incompatible registry api version",
+                url="http://localhost:9111",
+                expected=1,
+                advertised=2,
+            ),
+        )
+
+        # mcp_status_get -> get_mcp_status stays exempt from the registry guard,
+        # so the diagnostic status payload is served (status field +
+        # full diagnostics), NOT the bare CLARION_REGISTRY_VERSION_MISMATCH envelope.
+        status = _parse(await call_tool("mcp_status_get", {}))
+        assert status["status"] == "registry_version_mismatch"
+        assert status["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert "runtime" in status
+
+        # A normal tool IS blocked with the registry-mismatch envelope, via the new name.
+        blocked = _parse(await call_tool("issue_get", {"issue_id": "anything"}))
+        assert blocked["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
 
 
 class TestServedTaggingIntegrity:

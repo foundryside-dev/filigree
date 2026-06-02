@@ -66,13 +66,21 @@ def _tool_property_names(tool: Tool) -> set[str]:
 
 
 def derive_entity_id_tool_acceptance(tools: list[Tool]) -> dict[str, list[str]]:
-    """Map each entity ID family to live tools that accept that family."""
+    """Map each entity ID family to live tools that accept that family.
+
+    Emits the **served (namespaced) wire names** so this discovery surface stays
+    consistent with ``list_tools()``. ``tools`` carries the OLD/canonical names
+    (it is ``_all_tools``), so each is translated through ``RENAME_MAP``.
+    """
+    from filigree.mcp_tools.rename import RENAME_MAP
+
     accepted: dict[str, set[str]] = {entity: set() for entity in _ENTITY_ID_TOOL_FIELDS}
     for tool in tools:
         prop_names = _tool_property_names(tool)
+        served_name = RENAME_MAP.get(tool.name, tool.name)
         for entity, fields in _ENTITY_ID_TOOL_FIELDS.items():
             if prop_names & fields:
-                accepted[entity].add(tool.name)
+                accepted[entity].add(served_name)
     return {entity: sorted(names) for entity, names in accepted.items()}
 
 
@@ -394,19 +402,24 @@ def _build_tool_catalog() -> dict[str, Any]:
     tool modules).
     """
     from filigree.mcp_server import _all_tools, _tool_subsystem
+    from filigree.mcp_tools.rename import RENAME_MAP
     from filigree.mcp_tools.tiers import tier_for
 
+    # _all_tools, _tool_subsystem and tier_for are all keyed off the OLD/canonical
+    # names, so tier/subsystem lookups use tool.name; the catalogue *emits* the
+    # served (namespaced) name so this discovery surface matches list_tools().
     core: list[str] = []
     by_subsystem: dict[str, dict[str, list[str]]] = {}
     counts: dict[str, int] = {"core": 0, "common": 0, "niche": 0}
 
     for tool in _all_tools:
         tier = tier_for(tool.name)
+        served_name = RENAME_MAP.get(tool.name, tool.name)
         counts[tier] += 1
         if tier == "core":
-            core.append(tool.name)
+            core.append(served_name)
         subsystem = _tool_subsystem.get(tool.name, "unknown")
-        by_subsystem.setdefault(subsystem, {}).setdefault(tier, []).append(tool.name)
+        by_subsystem.setdefault(subsystem, {}).setdefault(tier, []).append(served_name)
 
     for tiers_for_subsystem in by_subsystem.values():
         for names in tiers_for_subsystem.values():

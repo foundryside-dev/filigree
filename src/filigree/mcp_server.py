@@ -643,6 +643,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     # ``name != "get_mcp_status"`` degraded-mode exemptions reachable via the new
     # ``mcp_status_get`` name. Unknown names pass through unchanged to the
     # NOT_FOUND fast-path below.
+    #
+    # Task 2 (deprecation telemetry) needs the *inbound wire name* to detect
+    # old-name use. We don't bind a local for it here — ruff would flag the
+    # unused assignment — because the wire name is recoverable without it: this
+    # rename is injective, so ``RENAME_MAP.get(name)`` reconstructs the served
+    # (new) name from the canonical one, and an inbound name already in
+    # ``NEW_TO_OLD`` was the new name. Task 2 can hook in just above this line
+    # where the original ``name`` is still in hand.
     name = NEW_TO_OLD.get(name, name)
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
