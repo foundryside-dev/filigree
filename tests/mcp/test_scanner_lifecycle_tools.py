@@ -135,7 +135,7 @@ class TestPreviewScanTool:
         assert "scanner_available_list" in tools
         assert "scanner_enable" in tools
         assert "scanner_disable" in tools
-        assert "list_available_scanners" in tools["scanner_list"].description
+        assert "scanner_available_list" in tools["scanner_list"].description
         assert tools["scanner_enable"].inputSchema["properties"]["scanner"]["type"] == "string"
 
     async def test_preview_scan(self, mcp_db: FiligreeDB) -> None:
@@ -325,9 +325,9 @@ class TestPreviewScanTool:
 
         assert data["code"] == ErrorCode.NOT_FOUND
         assert data["details"]["bundled"] is True
-        assert data["details"]["enable_with"] == "enable_scanner"
+        assert data["details"]["enable_with"] == "scanner_enable"
         assert data["details"]["cli_enable_command"] == "filigree scanner enable codex"
-        assert "list_available_scanners" in data["details"]["hint"]
+        assert "scanner_available_list" in data["details"]["hint"]
 
     async def test_preview_scan_path_traversal(self, mcp_db: FiligreeDB) -> None:
         _write_scanner_toml(mcp_db)

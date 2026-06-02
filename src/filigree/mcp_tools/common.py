@@ -197,11 +197,11 @@ def _build_transition_error(
         try:
             if not valid_transitions and tracker.get_issue(issue_id).status_category == "done":
                 data["reopen_available"] = True
-                data["hint"] = "Use reopen_issue to return this closed issue to the last non-done status before closure"
+                data["hint"] = "Use issue_reopen to return this closed issue to the last non-done status before closure"
             else:
-                data["hint"] = "Use get_valid_transitions to see allowed state changes"
+                data["hint"] = "Use workflow_transition_list to see allowed state changes"
         except Exception as exc:
-            data["hint"] = "Use get_valid_transitions to see allowed state changes"
+            data["hint"] = "Use workflow_transition_list to see allowed state changes"
             _log_transition_enrichment_failure(issue_id, exc)
         return data
     try:
@@ -212,9 +212,9 @@ def _build_transition_error(
             data["valid_transitions"] = [{"to": t.to, "category": t.category} for t in transitions]
         if not transitions and tracker.get_issue(issue_id).status_category == "done":
             data["reopen_available"] = True
-            data["hint"] = "Use reopen_issue to return this closed issue to the last non-done status before closure"
+            data["hint"] = "Use issue_reopen to return this closed issue to the last non-done status before closure"
         else:
-            data["hint"] = "Use get_valid_transitions to see allowed state changes"
+            data["hint"] = "Use workflow_transition_list to see allowed state changes"
     except Exception as exc:
         # Enrichment is best-effort — must never mask the original error.
         _log_transition_enrichment_failure(issue_id, exc)

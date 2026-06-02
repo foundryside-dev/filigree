@@ -297,8 +297,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Get the pre-computed project summary (same as context.md). Default returns markdown "
                 "for human display; pass format='json' to receive a structured envelope "
-                "{markdown: str, stats: <get_stats output>} so callers doing programmatic orientation "
-                "don't need a follow-up get_stats call. (filigree-cb980eee0d, P3.12.)"
+                "{markdown: str, stats: <stats_get output>} so callers doing programmatic orientation "
+                "don't need a follow-up stats_get call. (filigree-cb980eee0d, P3.12.)"
             ),
             inputSchema={
                 "type": "object",
@@ -392,7 +392,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="compact_events",
-            description="Remove old events for archived issues. Run after archive_closed to reclaim space.",
+            description="Remove old events for archived issues. Run after admin_archive_closed to reclaim space.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -433,7 +433,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="list_labels",
             description=(
                 "List all distinct labels grouped by namespace with counts. "
-                "Use get_label_taxonomy to see reserved namespaces and suggested vocabulary."
+                "Use label_taxonomy_get to see reserved namespaces and suggested vocabulary."
             ),
             inputSchema={
                 "type": "object",

@@ -205,7 +205,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="create_plan_from_file",
             description=(
                 "Create a full milestone->phase->step hierarchy from a project-relative JSON file. "
-                "Uses the same JSON structure as create_plan."
+                "Uses the same JSON structure as plan_create."
             ),
             inputSchema={
                 "type": "object",
@@ -220,8 +220,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="add_plan_step",
             description=(
                 "Add a step to an existing phase in one call. Inherits labels from the phase "
-                "and accepts dependency issue IDs so agents do not have to compose create_issue "
-                "plus add_dependency manually."
+                "and accepts dependency issue IDs so agents do not have to compose issue_create "
+                "plus dependency_add manually."
             ),
             inputSchema={
                 "type": "object",
@@ -245,8 +245,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="retarget_plan_dependency",
             description=(
-                "Replace one dependency edge on a plan step. This wraps remove_dependency + "
-                "add_dependency so agents do not have to hand-edit the plan graph."
+                "Replace one dependency edge on a plan step. This wraps dependency_remove + "
+                "dependency_add so agents do not have to hand-edit the plan graph."
             ),
             inputSchema={
                 "type": "object",
@@ -742,7 +742,7 @@ async def _handle_move_plan_step(arguments: dict[str, Any]) -> list[TextContent]
     dependency_edges = len(before.blocked_by) + len(before.blocks)
     if dependency_edges:
         response["warnings"] = [
-            f"{dependency_edges} active dependencies carried forward; use retarget_plan_dependency if the move changes blockers."
+            f"{dependency_edges} active dependencies carried forward; use plan_dependency_retarget if the move changes blockers."
         ]
     return _text(response)
 

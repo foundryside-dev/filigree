@@ -77,7 +77,7 @@ def _prompt_pack_schema() -> dict[str, Any]:
         "enum": sorted(PROMPT_PACKS),
         "default": "bug-hunt",
         "description": (
-            "Bundled scanner prompt pack. See list_prompt_packs; only applies when the scanner's accepts_prompt field is true. "
+            "Bundled scanner prompt pack. See prompt_pack_list; only applies when the scanner's accepts_prompt field is true. "
             "Prompt packs are advisory only; the selected prompt does not restrict scanner file access. "
             "See scanner risk_metadata.prompt_pack_scope."
         ),
@@ -207,7 +207,7 @@ def register(
                 "one call, one finding, zero ceremony. Returns the flat ScanFinding record plus "
                 "an ``observation_id`` when a paired triage observation was created. "
                 "Paired observations are explicit: pass ``create_observation=true`` when the "
-                "finding should also show up in ``list_observations`` for triage. Pass ``actor`` "
+                "finding should also show up in ``observation_list`` for triage. Pass ``actor`` "
                 "to attribute the report to a specific agent identity "
                 "(otherwise the observation is recorded as ``scanner:agent``). "
                 "Pass ``response_detail='full'`` for the legacy batch-style stats "
@@ -242,7 +242,7 @@ def register(
                         "default": False,
                         "description": (
                             "When true, explicitly create a paired observation so the finding "
-                            "shows up in ``list_observations`` for triage. Default false creates "
+                            "shows up in ``observation_list`` for triage. Default false creates "
                             "only the finding."
                         ),
                     },
@@ -331,7 +331,7 @@ def register(
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "scanner": {"type": "string", "description": "Scanner name (from list_scanners)"},
+                    "scanner": {"type": "string", "description": "Scanner name (from scanner_list)"},
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -385,7 +385,7 @@ def register(
             description=(
                 "List registered scanners from .filigree/scanners/*.toml. Returns available scanner names, "
                 "descriptions, supported file types, prompt support, and risk metadata. If this returns an empty "
-                "items list, call list_available_scanners to see bundled scanners that can be enabled."
+                "items list, call scanner_available_list to see bundled scanners that can be enabled."
             ),
             inputSchema={
                 "type": "object",
@@ -396,7 +396,7 @@ def register(
             name="trigger_scan",
             description=(
                 "Trigger an async bug scan on a file. Registers the file, spawns a detached scanner process, "
-                "and returns immediately with a scan_run_id for correlation. Check scan status with get_scan_status "
+                "and returns immediately with a scan_run_id for correlation. Check scan status with scan_status_get "
                 "or file findings later for results. "
                 "Note: results are POSTed to the dashboard API — ensure the dashboard is running at the target api_url. "
                 "Rate-limited (30s cooldown per scanner+file, DB-persisted)."
@@ -404,7 +404,7 @@ def register(
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "scanner": {"type": "string", "description": "Scanner name (from list_scanners)"},
+                    "scanner": {"type": "string", "description": "Scanner name (from scanner_list)"},
                     "file_path": {"type": "string", "description": "File path to scan (relative to project root)"},
                     "prompt": _prompt_pack_schema(),
                     "api_url": {
@@ -506,18 +506,18 @@ def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any |
             details.update(
                 {
                     "bundled": True,
-                    "enable_with": "enable_scanner",
+                    "enable_with": "scanner_enable",
                     "cli_enable_command": f"filigree scanner enable {scanner_name}",
                     "hint": (
                         "This is a bundled scanner, but it is not enabled in this project. "
-                        "Call list_available_scanners, then enable_scanner to write the managed registration "
+                        "Call scanner_available_list, then scanner_enable to write the managed registration "
                         "(CLI: filigree scanner available, then filigree scanner enable)."
                     ),
                 }
             )
             error = f"Bundled scanner {scanner_name!r} is not enabled in this project"
         else:
-            details["hint"] = "Call list_available_scanners to see bundled scanners that can be enabled."
+            details["hint"] = "Call scanner_available_list to see bundled scanners that can be enabled."
             error = f"Scanner {scanner_name!r} not found"
         return None, ErrorResponse(
             error=error,
@@ -985,7 +985,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         "message": (
             f"Scan triggered with run_id={scan_run_id!r}. "
             f"Results will be POSTed to {api_url}. "
-            f"Poll findings via file_id={file_record.id!r} or status via get_scan_status. "
+            f"Poll findings via file_id={file_record.id!r} or status via scan_status_get. "
             f"Scanner log: {log_rel}"
         ),
     }

@@ -146,7 +146,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Filter by exact status name (use get_valid_transitions for allowed values)",
+                        "description": "Filter by exact status name (use workflow_transition_list for allowed values)",
                     },
                     "status_category": {
                         "type": "string",
@@ -155,7 +155,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "type": {
                         "type": "string",
-                        "description": "Filter by type (use list_types for available types)",
+                        "description": "Filter by type (use type_list for available types)",
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Filter by priority"},
                     "parent_issue_id": {"type": "string", "description": "Filter by parent issue ID"},
@@ -206,7 +206,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="create_issue",
             description=(
                 "Create a new issue. You can set labels at creation time via labels=[...]. "
-                "Use get_template first to see available fields for the type."
+                "Use template_get first to see available fields for the type."
             ),
             inputSchema={
                 "type": "object",
@@ -234,7 +234,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "labels": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Labels to attach during creation (avoids a follow-up add_label call)",
+                        "description": "Labels to attach during creation (avoids a follow-up label_add call)",
                     },
                     "deps": {"type": "array", "items": {"type": "string"}, "description": "Issue IDs this depends on"},
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
@@ -246,7 +246,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="update_issue",
             description=(
                 "Update an issue's status, priority, title, or custom fields. "
-                "Use get_valid_transitions to see allowed status changes. "
+                "Use workflow_transition_list to see allowed status changes. "
                 "Soft transition warnings are returned in data_warnings. "
                 "When actor is present and the issue is held, actor is the default expected holder. "
                 "Pass expected_assignee for coordinator overrides; mismatches return CONFLICT."
@@ -257,7 +257,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "issue_id": {"type": "string", "description": "Issue ID"},
                     "status": {
                         "type": "string",
-                        "description": "New status (use get_valid_transitions for allowed values)",
+                        "description": "New status (use workflow_transition_list for allowed values)",
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 4, "description": "New priority"},
                     "title": {"type": "string", "description": "New title"},
@@ -289,12 +289,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="close_issue",
             description=(
-                "Close an issue. Routes through the same transition validator as update_issue, so the "
+                "Close an issue. Routes through the same transition validator as issue_update, so the "
                 "current status must have a defined transition to the target done state. When status is "
                 "omitted, defaults to the first done-category state for the type (e.g. 'closed'); pass "
                 "status explicitly to land in an alternate done state (e.g. 'wont_fix', 'not_a_bug', "
                 "'cancelled'). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
-                "defined — walk the workflow with update_issue, pass a reachable status, or pass "
+                "defined — walk the workflow with issue_update, pass a reachable status, or pass "
                 "force=true to use the declared reverse/escape edge for cleanup."
             ),
             inputSchema={
@@ -306,7 +306,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "type": "string",
                         "description": (
                             "Target done-category status. Optional; defaults to first done state for the "
-                            "type. Use get_valid_transitions(issue_id) to discover reachable done states."
+                            "type. Use workflow_transition_list(issue_id) to discover reachable done states."
                         ),
                     },
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
@@ -337,7 +337,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Hard-delete an issue and all of its dependent rows (events, comments, labels, "
                 "dependencies, file associations, observation links, annotation links). "
-                "IRREVERSIBLE — events are destroyed, so undo_last cannot reverse it. Writes a "
+                "IRREVERSIBLE — events are destroyed, so admin_undo_last cannot reverse it. Writes a "
                 "deletion tombstone so federation consumers see an issue_deleted record on "
                 "/changes. Refuses by default unless the issue is in a done-category status or "
                 "'archived', has no children, and has no other issues blocked by it. force=true "
@@ -426,7 +426,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Atomically claim an open-category issue, or an unassigned wip-category issue released for handoff, "
                 "by setting assignee (optimistic locking). "
-                "Does NOT change status — use update_issue to advance through workflow after claiming."
+                "Does NOT change status — use issue_update to advance through workflow after claiming."
             ),
             inputSchema={
                 "type": "object",
@@ -445,7 +445,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="release_claim",
             description=(
                 "Release a claimed issue by clearing its assignee, and (by default) revert wip-category "
-                "issues back to an open-category status so they rejoin get_ready discovery rather than "
+                "issues back to an open-category status so they rejoin work_ready discovery rather than "
                 "being orphaned in wip with no assignee. The reverse target is the template-defined open "
                 "predecessor of the current wip status (e.g. in_progress→open for task, fixing→confirmed "
                 "for bug); types with no open predecessor fall back to initial_state. Pass "
@@ -488,12 +488,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Bulk-release every live claim held by ``actor`` in one call — designed for "
                 "end-of-session cleanup. Discovers all issues whose assignee == actor "
                 "(optionally narrowed by ``label`` and/or ``label_prefix``), then releases "
-                "each via release_claim(if_held=True). Done-category issues are skipped "
+                "each via work_release(if_held=True). Done-category issues are skipped "
                 "(their assignee is audit trail, not a live claim). Returns "
                 "BatchResponse[SlimIssue] with succeeded[] (released) and failed[] "
                 "(per-issue errors). Pair this with the ``cluster:*`` label convention: "
                 "tag your scratch with ``cluster:my-session`` at create time, then call "
-                "release_my_claims(actor='my-session', label_prefix='cluster:') at session end."
+                "work_release_mine(actor='my-session', label_prefix='cluster:') at session end."
             ),
             inputSchema={
                 "type": "object",
@@ -518,7 +518,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "revert_status": {
                         "type": "boolean",
                         "default": True,
-                        "description": "Forwarded to release_claim per-item; true reverts wip→open so released issues rejoin discovery.",
+                        "description": "Forwarded to work_release per-item; true reverts wip→open so released issues rejoin discovery.",
                     },
                     "reason": {
                         "type": "string",
@@ -611,7 +611,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="claim_next",
-            description="Claim the highest-priority open-category ready issue by setting assignee. Does NOT change status — use update_issue to advance through workflow after claiming.",
+            description="Claim the highest-priority open-category ready issue by setting assignee. Does NOT change status — use issue_update to advance through workflow after claiming.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -674,7 +674,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="start_next_work",
             description=(
                 "Claim the highest-priority open-category ready issue and atomically transition it to a working status. "
-                "Tie-break ordering: priority asc, created_at asc, issue_id asc (same as claim_next). "
+                "Tie-break ordering: priority asc, created_at asc, issue_id asc (same as work_claim_next). "
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
                 "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches."
@@ -777,7 +777,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "status": {
                         "type": "string",
-                        "description": "New status (use get_valid_transitions for allowed values)",
+                        "description": "New status (use workflow_transition_list for allowed values)",
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 4, "description": "New priority"},
                     "assignee": {"type": "string", "description": "New assignee"},

@@ -2293,7 +2293,7 @@ class TestMCPMutationEnhancements:
         assert data["code"] == ErrorCode.INVALID_TRANSITION
         assert data["valid_transitions"] == []
         assert data["reopen_available"] is True
-        assert "reopen_issue" in data["hint"]
+        assert "issue_reopen" in data["hint"]
 
     async def test_transition_error_survives_enrichment_backend_failure(self, mcp_db: FiligreeDB) -> None:
         """filigree-55c5347992: enrichment lookup failure must not mask invalid_transition."""

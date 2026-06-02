@@ -659,7 +659,7 @@ class TestPreviewScanCommand:
             data = json.loads(result.output)
             assert data["code"] == "NOT_FOUND"
             assert data["details"]["bundled"] is True
-            assert data["details"]["enable_with"] == "enable_scanner"
+            assert data["details"]["enable_with"] == "scanner_enable"
             assert data["details"]["cli_enable_command"] == "filigree scanner enable codex"
             assert "filigree scanner available" in data["details"]["hint"]
         finally:

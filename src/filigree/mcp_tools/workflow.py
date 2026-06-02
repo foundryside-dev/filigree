@@ -129,7 +129,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="get_type_info",
-            description=("compatibility alias for get_template; returns the same canonical full workflow definition."),
+            description=("compatibility alias for template_get; returns the same canonical full workflow definition."),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -156,7 +156,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="validate_issue",
-            description="Validate an issue against its type template. Returns warnings for missing recommended fields. Call get_valid_transitions first to see allowed state changes.",
+            description="Validate an issue against its type template. Returns warnings for missing recommended fields. Call workflow_transition_list first to see allowed state changes.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -456,7 +456,7 @@ async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextCont
     if wf_pack is None:
         return _text(
             ErrorResponse(
-                error=f"Unknown pack: '{args['pack']}'. Use list_packs to see available packs, or list_types to see types.",
+                error=f"Unknown pack: '{args['pack']}'. Use pack_list to see available packs, or type_list to see types.",
                 code=ErrorCode.NOT_FOUND,
             )
         )
