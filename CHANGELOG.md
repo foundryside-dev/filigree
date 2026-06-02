@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SEI conformance: locator→SEI backfill + two-axis freshness (ADR-017).**
+  Filigree can now re-key its opaque Clarion entity bindings from mutable
+  locators (`{plugin}:{kind}:{qualname}`) to durable, opaque SEIs
+  (`clarion:eid:<hex>`). New operator-invoked verb `filigree sei-backfill`
+  (default dry-run; `--execute` applies) resolves every stored
+  `entity_associations.clarion_entity_id` — and every historical
+  `deleted_issues.entity_ids` tombstone (so the `affected_entities` change feed
+  is SEI-only after cutover, REQ-F-01) — through Clarion's
+  `POST /api/v1/identity/resolve:batch` and rewrites it **in place** (column
+  name, wire shape, and opaque storage unchanged). Idempotent and resumable: an
+  already-SEI value is skipped, and Clarion rejects SEI-shaped input with 400
+  (REQ-F-02). Unresolvable locators are flagged ORPHAN and kept verbatim — never
+  dropped — via the additive nullable `entity_associations.migration_orphaned_at`
+  column (**schema v22**). The capability probe now reads `_capabilities.sei`
+  and degrades cleanly against a pre-SEI Clarion ("identity unavailable; nothing
+  to migrate"). Conformance is proven, not asserted: the shared §8 oracle runs
+  in `tests/federation/` against both a Clarion stub (fast lane) and a live
+  `clarion serve` (faithful lane). The production cutover run remains
+  owner-scheduled; this verb is the machinery, not the trigger.
 - **Deprecation telemetry for pre-rename MCP tool names.** Every inbound
   `call_tool` that arrives under an old (pre-ADR-016) tool name is counted so the
   namespacing cutover can be tracked and the alias window eventually closed. The

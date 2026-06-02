@@ -151,6 +151,32 @@ class BatchResolution(TypedDict):
     messages: dict[str, str]
 
 
+class SeiResolution(TypedDict):
+    """Structured outcome of a batched locator→SEI resolve (ADR-038 §7).
+
+    The three channels map Clarion's ``POST /api/v1/identity/resolve:batch``
+    body onto the producer-backfill decision the playbook prescribes:
+
+    - ``resolved`` — keyed by the submitted locator, value is the alive SEI
+      (extracted from Clarion's ``{sei, current_locator, content_hash, alive}``
+      record). The backfill rewrites the stored id to this SEI.
+    - ``orphaned`` — locators Clarion reports as ``alive:false`` (its
+      ``not_found`` channel). The locator no longer resolves; the backfill keeps
+      it verbatim and flags it ORPHAN for human review (never silently dropped).
+    - ``already_migrated`` — locators Clarion *rejected* as SEI-shaped (its
+      ``invalid`` channel; the REQ-F-02 reserved-prefix rejection). The value was
+      already an SEI; the backfill skips it. This is what makes a partially-run
+      backfill safely resumable.
+
+    Filigree never parses the SEI beyond the sanctioned ``clarion:eid:`` prefix
+    check; the string is stored opaquely.
+    """
+
+    resolved: dict[str, str]
+    orphaned: list[str]
+    already_migrated: list[str]
+
+
 # Clarion 1.0 caps batch requests at 256 queries (returns 400 with
 # code=BATCH_TOO_LARGE on overflow). Filigree chunks at this size before
 # sending so it never trips the cap; the constant is exposed so callers
@@ -293,11 +319,25 @@ class ClarionCapabilities(TypedDict):
     file_registry: bool
     api_version: int
     instance_id: str
+    # Stable Entity Identity (Clarion Wave 1 / ADR-038). ``sei_supported``
+    # mirrors Clarion's nested ``sei.supported`` flag; ``sei_version`` mirrors
+    # ``sei.version``. Both default to the pre-SEI shape (False / 0) when Clarion
+    # omits the ``sei`` object, so a consumer probing an older Clarion degrades
+    # gracefully (keeps working on locators) rather than crashing. The
+    # locator→SEI backfill (``filigree sei-backfill``) gates entirely on
+    # ``sei_supported``.
+    sei_supported: bool
+    sei_version: int
 
 
 def clarion_capabilities_url(base_url: str) -> str:
     """Build the Clarion capability-probe URL."""
     return f"{base_url.rstrip('/')}/api/v1/_capabilities"
+
+
+def clarion_identity_resolve_batch_url(base_url: str) -> str:
+    """Build the Clarion batched locator→SEI resolve URL (ADR-038, REQ-F-02)."""
+    return f"{base_url.rstrip('/')}/api/v1/identity/resolve:batch"
 
 
 def _build_clarion_request(
@@ -384,12 +424,42 @@ def probe_clarion_capabilities(base_url: str, *, timeout_seconds: float, auth_to
         msg = f"Clarion capability probe from {url} missing non-empty string 'instance_id'"
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
+    sei_supported, sei_version = _parse_sei_capability(payload, url=url)
+
     return ClarionCapabilities(
         registry_backend=payload["registry_backend"],
         file_registry=payload["file_registry"],
         api_version=payload["api_version"],
         instance_id=payload["instance_id"],
+        sei_supported=sei_supported,
+        sei_version=sei_version,
     )
+
+
+def _parse_sei_capability(payload: dict[str, Any], *, url: str) -> tuple[bool, int]:
+    """Read Clarion's nested ``sei`` capability, tolerating a pre-SEI Clarion.
+
+    A pre-SEI Clarion omits the ``sei`` object entirely; that is not an error —
+    it means "SEI unsupported, degrade to locators" (returns ``(False, 0)``).
+    When the object IS present it must be well-formed (``supported: bool`` plus
+    an integer ``version``); a malformed advertisement is a wire-contract break
+    and raises ``invalid_response`` like every other shape check above.
+    """
+    sei = payload.get("sei")
+    if sei is None:
+        return (False, 0)
+    if not isinstance(sei, dict):
+        msg = f"Clarion capability probe from {url}: 'sei' must be an object, got {type(sei).__name__}"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    supported = sei.get("supported", False)
+    if not isinstance(supported, bool):
+        msg = f"Clarion capability probe from {url}: 'sei.supported' must be a boolean"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    version = sei.get("version", 0)
+    if not isinstance(version, int) or isinstance(version, bool):
+        msg = f"Clarion capability probe from {url}: 'sei.version' must be an integer"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    return (supported, version)
 
 
 def validate_clarion_capabilities(capabilities: ClarionCapabilities, *, base_url: str) -> None:
@@ -830,6 +900,122 @@ class ClarionRegistry:
             errors=errors,
             messages={},
         )
+
+    def resolve_locators_batch(self, locators: list[str]) -> SeiResolution:
+        """Resolve a batch of locators to SEIs via ``POST /api/v1/identity/resolve:batch``.
+
+        Chunks ``locators`` into runs of ``CLARION_BATCH_MAX_QUERIES`` (256 — the
+        per-batch cap Clarion pins on the identity surface, same as files) and
+        merges the per-chunk channels. Whole-batch failures (network, timeout,
+        HTTP 5xx, malformed body, 401 auth) raise ``RegistryUnavailableError``;
+        per-locator outcomes (resolved / orphaned / already-migrated) populate
+        the returned :class:`SeiResolution`. This is the resolve client the
+        operator-invoked ``filigree sei-backfill`` command drives — it lives on
+        the network-allowed registry layer, never in the DB association layer.
+        """
+        aggregate = SeiResolution(resolved={}, orphaned=[], already_migrated=[])
+        if not locators:
+            return aggregate
+        for start in range(0, len(locators), CLARION_BATCH_MAX_QUERIES):
+            chunk = locators[start : start + CLARION_BATCH_MAX_QUERIES]
+            chunk_result = self._resolve_locators_batch_chunk(chunk)
+            aggregate["resolved"].update(chunk_result["resolved"])
+            aggregate["orphaned"].extend(chunk_result["orphaned"])
+            aggregate["already_migrated"].extend(chunk_result["already_migrated"])
+        return aggregate
+
+    def _resolve_locators_batch_chunk(self, chunk: list[str]) -> SeiResolution:
+        url = clarion_identity_resolve_batch_url(self.base_url)
+        body = {"locators": chunk}
+        # Identity resolve is an idempotent read, so it retries transient 5xx /
+        # network failures on the same deadline/backoff budget as the file
+        # resolve paths. Auth and other 4xx outcomes are deterministic and raise
+        # immediately without retry.
+        deadline = time.monotonic() + self.timeout_seconds
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Clarion identity resolve unreachable at {url}: retry budget exhausted"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="timeout")
+            try:
+                response = self._http_client.post(
+                    url,
+                    json=body,
+                    headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                    timeout=remaining,
+                )
+                raw = response.text
+                if response.status_code >= 400:
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                        self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
+                        self._sleep_before_retry(deadline)
+                        attempt += 1
+                        continue
+                    reason = response.reason_phrase
+                    if response.status_code == 401:
+                        msg = f"Clarion identity resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
+                        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                    if 400 <= response.status_code < 500:
+                        msg = f"Clarion identity resolve rejected request at {url}: HTTP {response.status_code} {reason}"
+                        raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
+                    msg = f"Clarion identity resolve failed at {url}: HTTP {response.status_code} {reason}"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if self._should_retry_read(attempt, deadline):
+                    self._log_retry(url=url, attempt=attempt, cause_kind="network")
+                    self._sleep_before_retry(deadline)
+                    attempt += 1
+                    continue
+                msg = f"Clarion identity resolve unreachable at {url}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            msg = f"Clarion identity resolve returned invalid JSON from {url}: {exc}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
+        if not isinstance(payload, dict):
+            msg = f"Clarion identity resolve returned non-object response from {url}: {type(payload).__name__}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        return self._parse_sei_resolution(payload, url=url)
+
+    @staticmethod
+    def _parse_sei_resolution(payload: dict[str, Any], *, url: str) -> SeiResolution:
+        def require_list(field: str) -> list[Any]:
+            value = payload.get(field, [])
+            if not isinstance(value, list):
+                msg = f"Clarion identity resolve at {url}: {field!r} must be a list"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            return value
+
+        resolved: dict[str, str] = {}
+        raw_resolved = payload.get("resolved", {})
+        if not isinstance(raw_resolved, dict):
+            msg = f"Clarion identity resolve at {url}: 'resolved' must be an object"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        for locator, record in raw_resolved.items():
+            if not isinstance(record, dict) or not isinstance(record.get("sei"), str) or not record["sei"]:
+                msg = f"Clarion identity resolve at {url}: resolved entry for {locator!r} missing non-empty string 'sei'"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            resolved[locator] = record["sei"]
+
+        orphaned: list[str] = []
+        for item in require_list("not_found"):
+            if not isinstance(item, str):
+                msg = f"Clarion identity resolve at {url}: 'not_found' item must be a string"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            orphaned.append(item)
+
+        already_migrated: list[str] = []
+        for item in require_list("invalid"):
+            if not isinstance(item, str):
+                msg = f"Clarion identity resolve at {url}: 'invalid' item must be a string"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            already_migrated.append(item)
+
+        return SeiResolution(resolved=resolved, orphaned=orphaned, already_migrated=already_migrated)
 
     def is_displaced(self) -> bool:
         return True

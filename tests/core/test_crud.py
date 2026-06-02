@@ -1392,6 +1392,7 @@ class TestImportJsonl:
                 "content_hash_at_attach": "hash-a",
                 "attached_at": attached["attached_at"],
                 "attached_by": "alice",
+                "migration_orphaned_at": None,
             }
         ]
 

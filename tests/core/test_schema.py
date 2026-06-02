@@ -197,6 +197,7 @@ class TestEntityAssociationsSchema:
             "content_hash_at_attach",
             "attached_at",
             "attached_by",
+            "migration_orphaned_at",
         }
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
@@ -224,7 +225,9 @@ class TestEntityAssociationsSchema:
             ("filigree-test", "t", "2026-05-17T00:00:00+00:00", "2026-05-17T00:00:00+00:00"),
         )
         conn.execute(
-            "INSERT INTO entity_associations VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO entity_associations "
+            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES (?, ?, ?, ?, ?)",
             ("filigree-test", "not-a-clarion-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
         conn.commit()
@@ -240,7 +243,9 @@ class TestEntityAssociationsSchema:
             ("filigree-test", "t", "2026-05-17T00:00:00+00:00", "2026-05-17T00:00:00+00:00"),
         )
         conn.execute(
-            "INSERT INTO entity_associations VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO entity_associations "
+            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES (?, ?, ?, ?, ?)",
             ("filigree-test", "py:func:foo", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
         conn.commit()
@@ -270,6 +275,48 @@ class TestEntityAssociationsSchema:
         columns = _get_table_columns(conn, "entity_associations")
         assert "clarion_entity_id" in columns
         assert "content_hash_at_attach" in columns
+        conn.close()
+
+    def test_migration_v21_to_v22_adds_migration_orphaned_at_column(self, tmp_path: Path) -> None:
+        """Pin the v21->v22 migration in isolation: ALTER adds the nullable
+        ``entity_associations.migration_orphaned_at`` ORPHAN marker (ADR-038 §7).
+        Existing rows read NULL; the opaque ``clarion_entity_id`` is untouched."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v21 DB: drop the marker column and stamp the prior version.
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN migration_orphaned_at")
+        conn.execute("PRAGMA user_version = 21")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "migration_orphaned_at" not in _get_table_columns(conn, "entity_associations")
+
+        # Target v22 explicitly to isolate the v21->v22 migration.
+        applied = apply_pending_migrations(conn, 22)
+        assert applied == 1
+        assert _get_schema_version(conn) == 22
+        assert "migration_orphaned_at" in _get_table_columns(conn, "entity_associations")
+        row = conn.execute("SELECT migration_orphaned_at FROM entity_associations WHERE issue_id = 'iss-1'").fetchone()
+        assert row["migration_orphaned_at"] is None
+        conn.close()
+
+    def test_migration_v21_to_v22_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v21_to_v22
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Column already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v21_to_v22(conn)
+        assert "migration_orphaned_at" in _get_table_columns(conn, "entity_associations")
         conn.close()
 
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
@@ -1857,8 +1904,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_21(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 21
+    def test_current_schema_version_is_22(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 22
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
@@ -1976,7 +2023,9 @@ class TestDeletedIssuesTombstoneSchema:
         conn.commit()
         assert "entity_ids" not in _get_table_columns(conn, "deleted_issues")
 
-        applied = apply_pending_migrations(conn, CURRENT_SCHEMA_VERSION)
+        # Target v21 explicitly to isolate the v20->v21 migration (applying to
+        # CURRENT would also run v21->v22 and report 2).
+        applied = apply_pending_migrations(conn, 21)
         assert applied == 1
         assert _get_schema_version(conn) == 21
         assert "entity_ids" in _get_table_columns(conn, "deleted_issues")

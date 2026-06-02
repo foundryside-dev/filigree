@@ -406,12 +406,20 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
 -- query time so Clarion can detect drift. This preserves the federation
 -- enrich-only rule (loom.md §5).
 
+-- ``migration_orphaned_at`` (v22) supports the locator→SEI backfill (ADR-038
+-- §7). NULL is the healthy/default state. A non-NULL ISO timestamp marks a row
+-- whose stored locator no longer resolved to an alive SEI at backfill time
+-- (Clarion answered ``alive:false``): the locator is kept verbatim — never
+-- silently dropped — and stamped here so an operator can review the orphan.
+-- It is metadata about the migration, not part of the opaque ``clarion_entity_id``
+-- value or its wire shape, both of which are unchanged.
 CREATE TABLE IF NOT EXISTS entity_associations (
     issue_id                TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
     clarion_entity_id       TEXT NOT NULL,
     content_hash_at_attach  TEXT NOT NULL,
     attached_at             TEXT NOT NULL,
     attached_by             TEXT NOT NULL,
+    migration_orphaned_at   TEXT,
     PRIMARY KEY (issue_id, clarion_entity_id)
 );
 
@@ -564,4 +572,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22

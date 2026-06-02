@@ -1362,14 +1362,18 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(entity_associations):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO entity_associations "
-                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, migration_orphaned_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         record["issue_id"],
                         record["clarion_entity_id"],
                         record["content_hash_at_attach"],
                         _normalize_iso_to_utc(record.get("attached_at")) or _now_iso(),
                         record.get("attached_by", ""),
+                        # SEI-backfill ORPHAN marker (v22). NULL = healthy; preserved
+                        # verbatim across a backup/restore so an unreviewed orphan
+                        # survives. Absent in pre-v22 exports → NULL.
+                        record.get("migration_orphaned_at"),
                     ),
                 )
                 count += cursor.rowcount

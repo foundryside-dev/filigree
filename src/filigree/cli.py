@@ -12,7 +12,7 @@ import json as json_mod
 import click
 
 from filigree import __version__
-from filigree.cli_commands import admin, files, issues, meta, observations, planning, scanners, server, workflow
+from filigree.cli_commands import admin, files, issues, meta, observations, planning, scanners, sei, server, workflow
 from filigree.cli_commands import annotations as annotations_cmds
 from filigree.cli_common import _wants_json
 from filigree.types.api import ErrorCode
@@ -61,7 +61,7 @@ def cli(ctx: click.Context, actor: str) -> None:
 
 
 # Register domain command modules
-for _mod in (issues, planning, meta, workflow, admin, server, observations, files, annotations_cmds, scanners):
+for _mod in (issues, planning, meta, workflow, admin, server, observations, files, annotations_cmds, scanners, sei):
     _mod.register(cli)
 
 
