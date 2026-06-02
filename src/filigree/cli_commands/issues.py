@@ -69,12 +69,12 @@ def _transition_error_payload(db: Any, issue_id: str, exc: BaseException) -> dic
         return payload
     if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
         payload["valid_transitions"] = exc.valid_transitions
-        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+        payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
         return payload
     try:
         transitions = db.get_valid_transitions(issue_id)
         payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
-        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+        payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
     except Exception as enrich_exc:
         _log_transition_enrichment_failure(issue_id, enrich_exc)
     return payload
@@ -925,12 +925,12 @@ def _release_impl(
                 payload: dict[str, Any] = {"error": str(e), "code": ErrorCode.INVALID_TRANSITION}
                 if e.valid_transitions is not None:
                     payload["valid_transitions"] = e.valid_transitions
-                    payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                    payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
                 else:
                     try:
                         transitions = db.get_valid_transitions(issue_id)
                         payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
-                        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                        payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
                     except Exception as enrich_exc:
                         _log_transition_enrichment_failure(issue_id, enrich_exc)
                 click.echo(json_mod.dumps(payload))
@@ -1414,12 +1414,12 @@ def start_work(
                     payload: dict[str, Any] = {"error": msg, "code": ErrorCode.INVALID_TRANSITION}
                     if isinstance(e, InvalidTransitionError) and e.valid_transitions is not None:
                         payload["valid_transitions"] = e.valid_transitions
-                        payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                        payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
                     else:
                         try:
                             transitions = db.get_valid_transitions(issue_id)
                             payload["valid_transitions"] = [{"to": t.to, "category": t.category, "ready": t.ready} for t in transitions]
-                            payload["hint"] = "Use get_valid_transitions to see allowed state changes"
+                            payload["hint"] = "Use 'filigree transitions <id>' to see allowed state changes"
                         except Exception as enrich_exc:
                             # Enrichment is best-effort — must never mask the original error.
                             _log_transition_enrichment_failure(issue_id, enrich_exc)
