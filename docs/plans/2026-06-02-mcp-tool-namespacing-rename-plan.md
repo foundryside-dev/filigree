@@ -4,7 +4,13 @@
 (`filigree_finding_list`, …) — breaking wire change*
 **Parent epic:** `filigree-18bd3b8c98` (Toolkit DX)
 **Author:** Claude (opus-4.8), 2026-06-02
-**Status:** DRAFT — methodology for review; not yet scheduled for execution.
+**Status:** Phase 1 LANDED on `release/2.3.0` (additive aliasing) — `list_tools`
+serves the 114 namespaced names (`issue_get`, `work_start`, …), old flat names
+still resolve via `NEW_TO_OLD` as the transition window, `RENAME_MAP` is frozen
+(commit `b1014cb`), rename tests green. **Phase 2 (breaking removal of old-name
+resolution) remains gated** — ships on a major (assumed 3.0) only after
+telemetry shows zero old-name traffic and federation consumers have migrated
+(§6). Tracking issue `filigree-7771610917` stays open for Phase 2.
 
 ---
 
