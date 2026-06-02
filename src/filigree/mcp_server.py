@@ -533,35 +533,35 @@ Filigree data lives in `.filigree/` and is accessed via these MCP tools.
 
 ## Quick start
 1. Read `filigree://context` resource for current project state (vitals, ready work, blockers)
-2. Use `get_ready` to find unblocked tasks sorted by priority
-3. Use `start_work` or `start_next_work` to atomically claim and transition a task into work
-4. Use `get_valid_transitions` to see allowed status changes before manual updates
-5. Work on the task, use `add_comment` to log progress
-6. Use `close_issue` when done — response includes newly-unblocked items
+2. Use `work_ready` to find unblocked tasks sorted by priority
+3. Use `work_start` or `work_start_next` to atomically claim and transition a task into work
+4. Use `workflow_transition_list` to see allowed status changes before manual updates
+5. Work on the task, use `comment_add` to log progress
+6. Use `issue_close` when done — response includes newly-unblocked items
 
 ## Key tools
-- **get_issue / list_issues / search_issues** — read project state
-- **create_issue / update_issue / close_issue** — mutate issues
-- **start_work / start_next_work** — usual path: atomic claim plus transition to work
-- `claim_issue` / `claim_next` — claim-only, niche path with optimistic locking
-- **get_valid_transitions / validate_issue** — workflow-aware status management
-- **list_types / get_type_info / explain_status** — discover type workflows
-- **list_packs / get_workflow_guide** — workflow pack documentation
-- **add_dependency / remove_dependency** — manage blockers
-- **get_plan / create_plan** — milestone/phase/step hierarchies
-- **batch_close / batch_update** — bulk operations (per-issue error handling)
-- **get_changes** — events since a timestamp (session resumption)
-- **get_template** — field schemas for issue types
-- **get_stats / get_summary** — project analytics
-- **get_metrics** — flow metrics (cycle time, lead time, throughput)
-- **get_critical_path** — longest dependency chain among open issues
-- **reload_templates** — refresh templates after editing .filigree/templates/
+- **issue_get / issue_list / issue_search** — read project state
+- **issue_create / issue_update / issue_close** — mutate issues
+- **work_start / work_start_next** — usual path: atomic claim plus transition to work
+- `work_claim` / `work_claim_next` — claim-only, niche path with optimistic locking
+- **workflow_transition_list / issue_validate** — workflow-aware status management
+- **type_list / type_get / workflow_status_explain** — discover type workflows
+- **pack_list / workflow_guide_get** — workflow pack documentation
+- **dependency_add / dependency_remove** — manage blockers
+- **plan_get / plan_create** — milestone/phase/step hierarchies
+- **issue_batch_close / issue_batch_update** — bulk operations (per-issue error handling)
+- **change_list** — events since a timestamp (session resumption)
+- **template_get** — field schemas for issue types
+- **stats_get / summary_get** — project analytics
+- **metrics_get** — flow metrics (cycle time, lead time, throughput)
+- **dependency_critical_path** — longest dependency chain among open issues
+- **admin_reload_templates** — refresh templates after editing .filigree/templates/
 
 ## Conventions
 - Issue IDs: `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`)
 - Priorities: P0 (critical) through P4 (low)
-- Each type has its own status workflow — use `list_types` to discover
-- Use `get_valid_transitions <id>` before status changes
+- Each type has its own status workflow — use `type_list` to discover
+- Use `workflow_transition_list <id>` before status changes
 """
 
 
@@ -594,9 +594,9 @@ def _build_workflow_text() -> str:
             if obs_stats["count"] > 0:
                 lines.append("\n## Observations\n")
                 if obs_stats["stale_count"] > 0:
-                    lines.append(f"- {obs_stats['stale_count']} stale observation(s) (>48h old). Run `list_observations` to triage.")
+                    lines.append(f"- {obs_stats['stale_count']} stale observation(s) (>48h old). Run `observation_list` to triage.")
                 else:
-                    lines.append(f"- {obs_stats['count']} pending observation(s). Use `list_observations` to review.")
+                    lines.append(f"- {obs_stats['count']} pending observation(s). Use `observation_list` to review.")
         except sqlite3.OperationalError:
             logging.getLogger(__name__).debug("observation stats unavailable in MCP prompt", exc_info=True)
 
@@ -618,7 +618,7 @@ def _build_workflow_text() -> str:
         return (
             _WORKFLOW_TEXT_STATIC + "\n\n> **ERROR:** Failed to load workflow types "
             "due to an unexpected error. Run `filigree doctor` to diagnose. "
-            "Use `list_types` and `list_packs` directly.\n"
+            "Use `type_list` and `pack_list` directly.\n"
         )
 
 

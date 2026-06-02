@@ -7,18 +7,21 @@ duplicate the server token (``mcp__filigree__filigree_finding_list``). Server
 identity is the client wrapper's job; the entity token (``finding_`` / ``file_``
 / ``issue_``) does the intra-server disambiguation this rename exists for.
 
-This module is **data + a derived inverse only**. It is intentionally *not* wired
-into the server yet — Phase-1 aliasing (see
-``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5) consumes it to:
+This module is **data + a derived inverse only**, and it **is** consumed by
+``mcp_server`` (Phase-1 aliasing — see
+``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5):
 
-* resolve an inbound new name to its canonical (old) name at the top of
-  ``call_tool`` (``NEW_TO_OLD``), keeping every downstream guard/dispatch valid;
-* rename the served ``Tool.name`` in ``list_tools`` (``RENAME_MAP``).
+* the canonicalize-at-top resolve step in ``call_tool`` maps an inbound new
+  name to its canonical (old) name via ``NEW_TO_OLD``, keeping every downstream
+  guard/dispatch valid;
+* ``list_tools`` renames the served ``Tool.name`` via ``RENAME_MAP``;
+* a deprecation-telemetry counter records inbound calls that arrive under an
+  old name so the cutover can be tracked.
 
-Until then it stands as the frozen, CI-validated source of truth so the agreed
-names cannot drift. Invariants — **total coverage** of the live handler set,
-**injective**, **no-shadow** (no new name equals any current name) — are asserted
-in ``tests/mcp/test_rename_map.py`` against ``mcp_server._all_handlers``.
+It remains the frozen, CI-validated source of truth so the agreed names cannot
+drift. Invariants — **total coverage** of the live handler set, **injective**,
+**no-shadow** (no new name equals any current name) — are asserted in
+``tests/mcp/test_rename_map.py`` against ``mcp_server._all_handlers``.
 """
 
 from __future__ import annotations

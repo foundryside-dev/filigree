@@ -1967,9 +1967,9 @@ class TestPrompt:
     async def test_workflow_prompt_recommends_start_work_flow(self, mcp_db: FiligreeDB) -> None:
         result = await get_workflow_prompt("filigree-workflow", {"include_context": "false"})
         text = result.messages[0].content.text
-        assert "Use `start_work` or `start_next_work`" in text
-        assert "`claim_issue` / `claim_next` — claim-only" in text
-        assert "Use `claim_issue` or `claim_next` to atomically claim a task" not in text
+        assert "Use `work_start` or `work_start_next`" in text
+        assert "`work_claim` / `work_claim_next` — claim-only" in text
+        assert "Use `work_claim` or `work_claim_next` to atomically claim a task" not in text
 
 
 class TestProactiveContext:
