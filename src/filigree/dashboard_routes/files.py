@@ -792,6 +792,11 @@ def create_loom_router() -> APIRouter:
                 "findings_fixed": result["findings_fixed"],
                 "scan_source": scan_source,
                 "older_than_days": older_than_days,
+                # Degradation signal from the best-effort finding→issue cascade.
+                # Mirrors the loom scan-results envelope, which also lifts
+                # ``warnings`` to the top level — so a federation consumer learns
+                # a cascade close partially failed instead of it dying in logs.
+                "warnings": result["warnings"],
             }
         )
 

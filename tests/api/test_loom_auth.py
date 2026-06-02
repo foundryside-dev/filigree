@@ -55,6 +55,25 @@ class TestIsLoomScopedPath:
     def test_non_loom_paths_are_false(self, path: str) -> None:
         assert is_loom_scoped_path(path) is False
 
+    def test_every_living_surface_route_is_loom_scoped(self) -> None:
+        """Drift guard: the LIVING_FEDERATION_ALIASES allowlist must cover every
+        route on the living-surface router. Without this, the next off-/api/loom/
+        federation alias added to ``create_living_surface_router`` would ship
+        UNAUTHENTICATED when a token is set — and the hardcoded-path tests above
+        would not catch it. Derives the expectation from the router itself.
+        """
+        from fastapi.routing import APIRoute
+
+        from filigree.dashboard_routes.files import create_living_surface_router
+
+        routes = [r for r in create_living_surface_router().routes if isinstance(r, APIRoute)]
+        assert len(routes) >= 1  # an empty router must not pass vacuously
+        for route in routes:
+            # The living-surface router mounts under /api (and /api/p/{key} in
+            # server mode) — both forms must be gated.
+            assert is_loom_scoped_path(f"/api{route.path}") is True, route.path
+            assert is_loom_scoped_path(f"/api/p/acme{route.path}") is True, route.path
+
 
 class TestTokenMatches:
     """Constant-time token comparison, robust to non-ASCII input."""
@@ -137,6 +156,24 @@ class TestLoomAuthEnforcement:
         async with _client(app) as c:
             resp = await c.post("/api/scan-results", json={})
         assert resp.status_code == 401
+
+    async def test_whitespace_token_leaves_surface_open_and_warns(
+        self, app_factory: Callable[[str | None], FastAPI], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A whitespace-only FILIGREE_API_TOKEN cannot be a real secret, so auth
+        is NOT installed and the loom surface stays open — but an operator who
+        exported a blank token must not be left believing auth is on. The fix is
+        the warning; assert both the open route AND the log line so a regression
+        in either is caught.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            app = app_factory("   ")  # create_app reads the env var here
+        async with _client(app) as c:
+            resp = await c.get("/api/loom/issues")
+        assert resp.status_code == 200  # open: a blank token gates nothing
+        assert any("FILIGREE_API_TOKEN is set but empty" in r.message for r in caplog.records)
 
 
 class TestLoomAuthScopeBoundary:

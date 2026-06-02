@@ -27,7 +27,8 @@
     "response_shape": {
       "findings_fixed": "int  # count of unseen_in_latest findings moved to 'fixed' by this sweep",
       "scan_source": "str  # echoed back so the caller can log the outcome (Clarion stats.json)",
-      "older_than_days": "int  # echoed back"
+      "older_than_days": "int  # echoed back",
+      "warnings": "list[str]  # operator advisories from the best-effort finding->issue cascade (e.g. a linked-issue close that could not complete); [] on the happy path. Mirrors the loom scan-results envelope's top-level warnings."
     },
     "rationale": "Flat result envelope, not BatchResponse: this is a single retention action returning a count, not a per-item batch. Echoing scan_source/older_than_days lets the federation caller log the outcome without re-deriving its own request."
   },
@@ -51,7 +52,8 @@
         "body": {
           "findings_fixed": 0,
           "scan_source": "clarion",
-          "older_than_days": 30
+          "older_than_days": 30,
+          "warnings": []
         }
       }
     },

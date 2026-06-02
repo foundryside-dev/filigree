@@ -601,11 +601,18 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     # not installed at all and behaviour is identical to the loopback default
     # (ADR-012). Added after CORS so CORS remains inner and still decorates
     # classic/dashboard responses; loom OPTIONS preflight passes through.
-    _api_token = os.environ.get("FILIGREE_API_TOKEN", "").strip()
+    _raw_api_token = os.environ.get("FILIGREE_API_TOKEN")
+    _api_token = (_raw_api_token or "").strip()
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
 
         app.add_middleware(build_auth_middleware(_api_token))
+    elif _raw_api_token is not None:
+        # The var was set but is empty/whitespace, so it cannot be a real
+        # secret and the middleware is NOT installed — the loom surface stays
+        # open. Without this warning an operator who exported a blank token
+        # would believe auth is on when it silently is not.
+        logger.warning("FILIGREE_API_TOKEN is set but empty/whitespace — loom federation auth is NOT enabled")
 
     # Idle-tracking middleware (ethereal mode only — server mode runs indefinitely)
     if not server_mode:

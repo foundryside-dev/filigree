@@ -1448,13 +1448,20 @@ class FilesMixin(DBMixinProtocol):
         # just regressed to ``open``. Runs OUTSIDE the ingest transaction (each
         # reopen owns its own BEGIN IMMEDIATE) and is best-effort — a transition
         # that the issue's workflow forbids must not fail the whole scan ingest.
-        # Not surfaced on the wire (the classic scan-results envelope is a frozen
-        # passthrough of this dict); logged instead for observability.
+        # A failure appends to ``stats["warnings"]``, which IS surfaced on the
+        # wire (the classic envelope is a passthrough of this dict and the loom
+        # adapter lifts ``warnings`` to the top level), and is now also logged
+        # per-failure below so a systemic "every cascade is failing" is visible
+        # in operator logs. The ``logger.info`` further down fires only for
+        # SUCCESSFUL reopens.
+        warnings_before = len(stats["warnings"])
         reopened_issue_ids = [
             issue_id
             for issue_id in sorted(regressed_issue_ids)
             if self._reopen_issue_for_regressed_finding(issue_id, warnings=stats["warnings"])
         ]
+        for warning in stats["warnings"][warnings_before:]:
+            logger.warning("finding→issue reopen cascade: %s", warning)
         if reopened_issue_ids:
             logger.info(
                 "finding→issue cascade: reopened %d issue(s) on regress (scan_source=%r): %s",
@@ -1975,7 +1982,7 @@ class FilesMixin(DBMixinProtocol):
         for warning in warnings:
             logger.warning("clean_stale_findings cascade: %s", warning)
 
-        return {"findings_fixed": len(fixed), "closed_issue_ids": closed_issue_ids}
+        return {"findings_fixed": len(fixed), "closed_issue_ids": closed_issue_ids, "warnings": warnings}
 
     @staticmethod
     def _severity_bucket_sql(open_filter: str) -> str:

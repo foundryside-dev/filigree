@@ -14,6 +14,10 @@ See ``docs`` brief (2026-06-02) and ADR-017 for the freshness model.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from filigree.core import FiligreeDB
 
 
@@ -119,6 +123,30 @@ class TestCloseOnFixed:
         result = db.clean_stale_findings(days=30)
         assert result["findings_fixed"] == 1
         assert result["closed_issue_ids"] == []
+        assert result["warnings"] == []  # happy path: no cascade advisories
+
+    def test_cascade_close_failure_surfaced_in_warnings(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A best-effort cascade close that fails is reported in the returned
+        ``warnings`` (I3) — not just logged — so an HTTP/CLI caller learns the
+        close partially failed. The sweep itself still succeeds.
+        """
+        finding_id = _ingest(db, "fp-failclose")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (finding_id,),
+        )
+        db.conn.commit()
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise ValueError("workflow forbids close")
+
+        monkeypatch.setattr(db, "close_issue", boom)
+        result = db.clean_stale_findings(days=30)
+
+        assert result["findings_fixed"] == 1  # the sweep still happened
+        assert issue.id not in result["closed_issue_ids"]  # cascade close failed
+        assert any(f"cascade close of issue {issue.id} failed" in w for w in result["warnings"])
 
 
 class TestReopenOnRegress:
@@ -189,3 +217,27 @@ class TestReopenOnRegress:
         db.conn.commit()
         db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-open")])
         assert not _is_done(db, issue.id)
+
+    def test_reopen_cascade_failure_is_logged_and_on_the_wire(
+        self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed best-effort reopen is surfaced via ``stats["warnings"]`` (the
+        wire) AND logged per-failure (I2). The prior comment claimed the inverse
+        (not on the wire, logged) — both halves were false; this pins reality so
+        a maintainer cannot regress to the inverted behaviour.
+        """
+        _finding_id, issue_id = self._auto_close(db, "fp-failreopen")
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise ValueError("workflow forbids reopen")
+
+        monkeypatch.setattr(db, "reopen_issue", boom)
+        with caplog.at_level(logging.WARNING, logger="filigree.db_files"):
+            stats = db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-failreopen")])
+
+        # On the wire: the failure rides out in stats["warnings"].
+        assert any(f"cascade reopen of issue {issue_id} failed" in w for w in stats["warnings"])
+        # In the logs: a per-failure warning (so "every cascade is failing" is visible).
+        assert any("reopen cascade" in r.message for r in caplog.records)
+        # The reopen genuinely failed → issue stays closed.
+        assert _is_done(db, issue_id)

@@ -457,7 +457,7 @@ class TestLoomCleanStaleFindingsAPI:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
 
         # Only the old clarion unseen finding was swept.
         assert self._status_by_rule(dashboard_db, "clar_old.py")["C-OLD"] == "fixed"
@@ -484,7 +484,7 @@ class TestLoomCleanStaleFindingsAPI:
         db.conn.commit()
         resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
         assert resp.status_code == 200
-        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
 
     async def test_coalesce_fallback_null_last_seen_at(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Age gate is coalesce(last_seen_at, updated_at): a NULL last_seen_at

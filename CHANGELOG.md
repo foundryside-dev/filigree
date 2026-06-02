@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or receive `401 PERMISSION` (with `WWW-Authenticate: Bearer`). Filigree finally
   honours the token Clarion already sends instead of ignoring it. **Opt-in and
   wire-compatible:** with the env var unset, behaviour is byte-identical to today
-  (loopback boundary, ADR-012) and the middleware is not installed. The classic
+  (loopback boundary, ADR-012) and the middleware is not installed. A set-but-blank
+  (empty or whitespace) token correctly installs no middleware — a blank string
+  cannot be a secret — but now logs a startup warning so an operator who exported
+  one is not left believing auth is on. The classic
   surface, the dashboard UI, `/api/health`, and `/` stay open. Reuses
   `ErrorCode.PERMISSION` (no new error code). Constant-time comparison; a
   non-ASCII token is a clean 401, not a 500. Gates **access** only — binding a
@@ -36,9 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep its linked issue is auto-closed, and when the finding regresses to
   `open` on re-ingest the issue is reopened — but only if the cascade was what
   closed it (gated on the most recent into-done transition's actor in the event
-  history, so a human's reopen + reclose is always honoured). `GET
-  /api/loom/findings` gains an optional `fingerprint` filter. No schema change
-  (reuses existing columns and the event log).
+  history, so a human's reopen + reclose is always honoured). The cascade is
+  best-effort (a workflow-forbidden close/reopen must not fail the sweep or the
+  ingest), and a failure is now surfaced rather than swallowed: `clean_stale_findings`
+  and the `POST /api/loom/findings/clean-stale` response carry a `warnings[]`
+  field (additive and wire-compatible — mirrors the loom scan-results envelope,
+  which already lifts `warnings` to the top level), and reopen-cascade failures
+  on re-ingest ride out in `stats["warnings"]` (both HTTP envelopes) and are
+  logged per-failure so a systemic "every cascade is failing" is visible in
+  operator logs. `GET /api/loom/findings` gains an optional `fingerprint`
+  filter. No schema change (reuses existing columns and the event log).
 
 - **SEI conformance: locator→SEI backfill + two-axis freshness (ADR-017).**
   Filigree can now re-key its opaque Clarion entity bindings from mutable
