@@ -596,6 +596,17 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         allow_headers=["*"],
     )
 
+    # Opt-in bearer-token auth for the loom federation surface (ADR-018).
+    # Active only when FILIGREE_API_TOKEN is set; otherwise the middleware is
+    # not installed at all and behaviour is identical to the loopback default
+    # (ADR-012). Added after CORS so CORS remains inner and still decorates
+    # classic/dashboard responses; loom OPTIONS preflight passes through.
+    _api_token = os.environ.get("FILIGREE_API_TOKEN", "").strip()
+    if _api_token:
+        from filigree.dashboard_auth import build_auth_middleware
+
+        app.add_middleware(build_auth_middleware(_api_token))
+
     # Idle-tracking middleware (ethereal mode only — server mode runs indefinitely)
     if not server_mode:
         from starlette.middleware.base import BaseHTTPMiddleware

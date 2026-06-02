@@ -69,6 +69,15 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
    broad for the 2.1.0 hardening pass. Tracked as a Filigree issue and
    referenced from this ADR.
 
+   **Partial lift (2026-06-03, [ADR-018](ADR-018-loom-bearer-token-auth.md)):**
+   the **access-gate** half of HTTP authentication has since landed — opt-in
+   bearer-token enforcement on the loom federation surface, active only when
+   `FILIGREE_API_TOKEN` is set. That gates *access* but does **not** bind a
+   proven identity into the `actor` field, so the **verified-actor** half of
+   this deferral remains open (`filigree-81d3971467`). The cross-host trigger
+   in the Negative consequences below still governs when the remaining identity
+   work becomes near-term.
+
 ## Consequences
 
 ### Positive

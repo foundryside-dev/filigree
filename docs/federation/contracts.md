@@ -13,6 +13,34 @@ The **living surface** at `/api/*` (no generation prefix) aliases the current re
 
 MCP and CLI reflect the living surface only. They evolve forward with each release; they do not publish pinnable contracts. Callers who need pinned stability use HTTP.
 
+## Authentication (opt-in, loom surface) — ADR-018
+
+By default Filigree's HTTP API performs **no** inbound authentication: it is
+loopback-only and the transport is the trust boundary ([ADR-012](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-012-actor-identity-threat-model.md)).
+
+When an operator sets the **`FILIGREE_API_TOKEN`** environment variable on the
+Filigree server, the **loom federation surface** is gated behind a bearer token
+([ADR-018](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-018-loom-bearer-token-auth.md)):
+
+- **Enforced paths:** `/api/loom/*` and the living-surface federation aliases
+  that route to loom (today: `POST /api/scan-results`), including under the
+  server-mode project mount (`/api/p/{key}/loom/…`).
+- **Not enforced:** the classic surface (`/api/issue/…`, `/api/issues`,
+  `/api/v1/scan-results`), the local dashboard (`/`), and `/api/health`. The
+  classic `/api/v1/scan-results` outlier is **not** gated — federation producers
+  should post to `/api/loom/scan-results` or `/api/scan-results`.
+- **Request:** send `Authorization: Bearer <FILIGREE_API_TOKEN>`. The comparison
+  is constant-time.
+- **Rejection:** a missing/invalid token on an enforced path returns
+  `401` with the standard envelope `{"error": "...", "code": "PERMISSION"}` and a
+  `WWW-Authenticate: Bearer` header.
+- **Default (unset):** identical to prior behaviour — no auth, loopback is the
+  boundary. Adding the token is wire-compatible: consumers that do not configure
+  it are unaffected.
+
+This gates *access* only; it does not bind a verified identity into the `actor`
+audit field (that remains future work — `filigree-81d3971467`).
+
 ## Fixture layout
 
 ```
