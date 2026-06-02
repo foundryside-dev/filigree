@@ -1,6 +1,6 @@
 # Filigree Federation Contracts
 
-This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](../architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
+This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
 
 ## What a "contract" is here
 

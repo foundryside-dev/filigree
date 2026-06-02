@@ -13,6 +13,10 @@ build/
 .coverage
 coverage.json
 htmlcov/
+
+# MkDocs build output (deployed via `mkdocs gh-deploy`, never committed)
+site/
+
 .filigree/*
 !.filigree/.gitkeep
 .claude/
