@@ -545,7 +545,7 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
             "message": (
                 f"Scan triggered with run_id={scan_run_id!r}. "
                 f"Results will be POSTed to {api_url}. "
-                f"Poll findings via file_id={file_record.id!r} or status via get_scan_status. "
+                f"Poll findings via file_id={file_record.id!r} or status via 'filigree get-scan-status'. "
                 f"Scanner log: {log_rel}"
             ),
         }

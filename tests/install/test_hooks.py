@@ -115,7 +115,7 @@ class TestBuildContext:
         db.create_observation("Something to triage")
         result = _build_context(db)
         assert "OBSERVATION" in result.upper()
-        assert "list_observations" in result
+        assert "observation_list" in result
 
     def test_stale_observations_warning_in_context(self, db: FiligreeDB) -> None:
         obs = db.create_observation("Old thing")

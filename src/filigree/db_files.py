@@ -16,7 +16,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
 
-from filigree.db_base import DBMixinProtocol, _escape_like_chars, _now_iso, _safe_json_loads
+from filigree.db_base import (
+    DBMixinProtocol,
+    _escape_like_chars,
+    _in_immediate_tx,
+    _now_iso,
+    _retry_busy,
+    _safe_json_loads,
+)
+from filigree.db_scans import TERMINAL_SCAN_RUN_STATUSES
 from filigree.models import FileRecord, ScanFinding
 from filigree.registry import (
     BatchQuery,
@@ -975,19 +983,32 @@ class FilesMixin(DBMixinProtocol):
             if resolved is not None:
                 _normalize_registry_canonical_path(resolved["canonical_path"], requested_path=path)
                 if resolved["file_id"] != file_id:
-                    msg = (
-                        f"Existing scan file {path!r} resolves to registry id {resolved['file_id']!r}, "
-                        f"but stored file id is {file_id!r}; run migrate-registry before ingesting scan results"
-                    )
-                    raise ValueError(msg)
-                for field, next_value in (
-                    ("content_hash", resolved["content_hash"]),
-                    ("registry_backend", resolved["registry_backend"]),
-                ):
-                    current_value = existing_file[field] or ""
-                    if next_value != current_value:
-                        update_parts.append(f"{field} = ?")
-                        update_params.append(next_value)
+                    # A concurrent ingest committed this path under a different
+                    # id between our pre-resolve and this write. A local-backend
+                    # resolution mints a fresh, arbitrary id per resolve
+                    # (LocalRegistry.resolve_file) — covering both pure-local and
+                    # Clarion-fallback rows — so the already-committed row is
+                    # authoritative and we adopt its id rather than raising. Only
+                    # a stable-id (Clarion) mismatch is genuine registry drift,
+                    # for which migrate-registry is the right remedy.
+                    if resolved["registry_backend"] != "local":
+                        msg = (
+                            f"Existing scan file {path!r} resolves to registry id {resolved['file_id']!r}, "
+                            f"but stored file id is {file_id!r}; run migrate-registry before ingesting scan results"
+                        )
+                        raise ValueError(msg)
+                else:
+                    # Ids match: sync registry-owned columns from the resolution.
+                    # Skipped on a local id-adopt above so we never clobber a
+                    # winner's content_hash / backend with the loser's empties.
+                    for field, next_value in (
+                        ("content_hash", resolved["content_hash"]),
+                        ("registry_backend", resolved["registry_backend"]),
+                    ):
+                        current_value = existing_file[field] or ""
+                        if next_value != current_value:
+                            update_parts.append(f"{field} = ?")
+                            update_params.append(next_value)
             if next_language:
                 update_parts.append("language = ?")
                 update_params.append(next_language)
@@ -1380,64 +1401,25 @@ class FilesMixin(DBMixinProtocol):
             warnings=warnings,
         )
 
-        seen_finding_ids: dict[str, list[str]] = {}
-        counted_file_ids: set[str] = set()
+        # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Clarion HTTP round
+        # trip) BEFORE the writer lock so concurrent ingests overlap. The write
+        # window below then runs under its own BEGIN IMMEDIATE + busy-retry, the
+        # same transaction discipline every other write surface uses; scan-run
+        # completion afterwards is a separate transaction.
         file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor)
 
-        try:
-            for f in findings:
-                file_id = self._upsert_file_record(
-                    path=f["path"],
-                    language=f.get("language", ""),
-                    infer_language="language" not in f,
-                    now=now,
-                    stats=stats,
-                    counted_file_ids=counted_file_ids,
-                    actor=actor,
-                    resolved_file=file_resolutions.get(f["path"]),
-                )
-                f[INGESTED_FILE_ID_KEY] = file_id
-                self._upsert_finding(
-                    f=f,
-                    file_id=file_id,
-                    scan_source=scan_source,
-                    scan_run_id=scan_run_id,
-                    now=now,
-                    stats=stats,
-                    seen_finding_ids=seen_finding_ids,
-                    create_observations=create_observations,
-                    observation_actor=observation_actor,
-                    actor=actor,
-                )
-
-            if mark_unseen:
-                self._mark_unseen_findings(
-                    self.conn,
-                    scan_source=scan_source,
-                    seen_finding_ids=seen_finding_ids,
-                    now=now,
-                    actor=actor,
-                )
-
-            # Accumulate findings_count on the scan_run row per batch.
-            # Counting via SELECT ... WHERE scan_run_id = ? would undercount
-            # because scan_findings.scan_run_id is first-attribution-wins
-            # (see _update_existing_finding), so a re-scan that only re-sees
-            # existing findings would report 0. Incrementing here handles both
-            # the single-call case AND multi-batch case (the orchestrator's
-            # final complete_scan_run=True call may have empty findings).
-            run_observed_delta = stats["findings_created"] + stats["findings_updated"]
-            if scan_run_id and run_observed_delta:
-                self.conn.execute(
-                    "UPDATE scan_runs SET findings_count = findings_count + ? WHERE id = ?",
-                    (run_observed_delta, scan_run_id),
-                )
-
-            self.conn.commit()
-        except Exception:
-            if self.conn.in_transaction:
-                self.conn.rollback()
-            raise
+        self._ingest_resolved_findings(
+            findings=findings,
+            scan_source=scan_source,
+            scan_run_id=scan_run_id,
+            mark_unseen=mark_unseen,
+            create_observations=create_observations,
+            observation_actor=observation_actor,
+            file_resolutions=file_resolutions,
+            now=now,
+            actor=actor,
+            stats=stats,
+        )
 
         if scan_run_id and complete_scan_run:
             # §F6 tolerate-unknown: an enrich-only producer (e.g. Clarion
@@ -1451,8 +1433,104 @@ class FilesMixin(DBMixinProtocol):
             run_exists = self.conn.execute("SELECT 1 FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone() is not None
             if run_exists:
                 self._complete_scan_run_with_warning(scan_run_id, stats)
+            else:
+                # Silent skip is correct ONLY while the invariant "scan_runs rows
+                # are never deleted" holds — a missing row means tolerate-unknown
+                # (enrich-only producer), never a pruned-away real run. If a
+                # future retention/prune path starts deleting scan_runs rows, this
+                # skip would silently swallow a legitimate completion; the debug
+                # breadcrumb makes that case traceable instead of invisible.
+                logger.debug(
+                    "Skipping scan-run completion for %r: no scan_runs row (tolerate-unknown; assumes scan_runs rows are never deleted)",
+                    scan_run_id,
+                )
 
         return stats
+
+    @_retry_busy()
+    @_in_immediate_tx("process_scan_results")
+    def _ingest_resolved_findings(
+        self,
+        *,
+        findings: list[dict[str, Any]],
+        scan_source: str,
+        scan_run_id: str,
+        mark_unseen: bool,
+        create_observations: bool,
+        observation_actor: str,
+        file_resolutions: dict[str, ResolvedFile],
+        now: str,
+        actor: str,
+        stats: ScanIngestResult,
+    ) -> None:
+        """Write window for :meth:`process_scan_results`.
+
+        Upserts each file + finding, sweeps unseen findings, and bumps the
+        scan-run ``findings_count`` — all inside the single ``BEGIN IMMEDIATE``
+        the ``@_in_immediate_tx`` decorator owns (commit on success, rollback on
+        error). ``@_retry_busy`` re-runs the whole method after a rolled-back
+        transient SQLITE_BUSY, so the write-counter fields of ``stats`` are reset
+        on entry to keep a retry from double-counting; ``warnings`` (computed
+        before the writer lock) is deliberately preserved.
+        """
+        stats["files_created"] = 0
+        stats["files_updated"] = 0
+        stats["findings_created"] = 0
+        stats["findings_updated"] = 0
+        stats["observations_created"] = 0
+        stats["observations_failed"] = 0
+        stats["new_finding_ids"] = []
+
+        seen_finding_ids: dict[str, list[str]] = {}
+        counted_file_ids: set[str] = set()
+
+        for f in findings:
+            file_id = self._upsert_file_record(
+                path=f["path"],
+                language=f.get("language", ""),
+                infer_language="language" not in f,
+                now=now,
+                stats=stats,
+                counted_file_ids=counted_file_ids,
+                actor=actor,
+                resolved_file=file_resolutions.get(f["path"]),
+            )
+            f[INGESTED_FILE_ID_KEY] = file_id
+            self._upsert_finding(
+                f=f,
+                file_id=file_id,
+                scan_source=scan_source,
+                scan_run_id=scan_run_id,
+                now=now,
+                stats=stats,
+                seen_finding_ids=seen_finding_ids,
+                create_observations=create_observations,
+                observation_actor=observation_actor,
+                actor=actor,
+            )
+
+        if mark_unseen:
+            self._mark_unseen_findings(
+                self.conn,
+                scan_source=scan_source,
+                seen_finding_ids=seen_finding_ids,
+                now=now,
+                actor=actor,
+            )
+
+        # Accumulate findings_count on the scan_run row per batch.
+        # Counting via SELECT ... WHERE scan_run_id = ? would undercount
+        # because scan_findings.scan_run_id is first-attribution-wins
+        # (see _update_existing_finding), so a re-scan that only re-sees
+        # existing findings would report 0. Incrementing here handles both
+        # the single-call case AND multi-batch case (the orchestrator's
+        # final complete_scan_run=True call may have empty findings).
+        run_observed_delta = stats["findings_created"] + stats["findings_updated"]
+        if scan_run_id and run_observed_delta:
+            self.conn.execute(
+                "UPDATE scan_runs SET findings_count = findings_count + ? WHERE id = ?",
+                (run_observed_delta, scan_run_id),
+            )
 
     def _complete_scan_run_with_warning(self, scan_run_id: str, stats: ScanIngestResult) -> None:
         """Mark an existing scan run completed, downgrading failures to a warning.
@@ -1473,7 +1551,7 @@ class FilesMixin(DBMixinProtocol):
             # querying directly, rather than relying on error message text.
             try:
                 row = self.conn.execute("SELECT status FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
-                is_terminal = row is not None and row["status"] in ("completed", "failed")
+                is_terminal = row is not None and row["status"] in TERMINAL_SCAN_RUN_STATUSES
             except sqlite3.Error:
                 is_terminal = False
             if is_terminal:
@@ -1536,6 +1614,8 @@ class FilesMixin(DBMixinProtocol):
             for row in rows
         ]
 
+    @_retry_busy()
+    @_in_immediate_tx("update_finding")
     def update_finding(
         self,
         finding_id: str,
@@ -1625,40 +1705,36 @@ class FilesMixin(DBMixinProtocol):
         params.append(actor)
         params.extend([finding_id, file_id])
 
-        try:
+        # Writer lock + commit/rollback are owned by @_in_immediate_tx;
+        # @_retry_busy recovers transient SQLITE_BUSY by re-running the method.
+        self.conn.execute(
+            f"UPDATE scan_findings SET {', '.join(updates)} WHERE id = ? AND file_id = ?",
+            params,
+        )
+
+        if normalized_issue_id:
             self.conn.execute(
-                f"UPDATE scan_findings SET {', '.join(updates)} WHERE id = ? AND file_id = ?",
-                params,
+                "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, actor, created_at) VALUES (?, ?, 'bug_in', ?, ?)",
+                (file_id, normalized_issue_id, actor, now),
             )
 
-            if normalized_issue_id:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO file_associations (file_id, issue_id, assoc_type, actor, created_at) "
-                    "VALUES (?, ?, 'bug_in', ?, ?)",
-                    (file_id, normalized_issue_id, actor, now),
-                )
+        # Cascade-dismiss any observation linked to this finding when the
+        # finding reaches a terminal lifecycle state (dismissed, fixed,
+        # promoted to issue) so the agent triage queue doesn't accumulate
+        # zombie scratchpad notes for findings that have already been
+        # triaged elsewhere. (filigree-cb980eee0d, P1.2.) Non-terminal
+        # statuses such as 'open', 'acknowledged', and 'unseen_in_latest'
+        # leave the observation alive for continued triage.
+        should_cascade = (status is not None and status in TERMINAL_FINDING_STATUSES) or normalized_issue_id is not None
+        if should_cascade:
+            self._cascade_dismiss_observations_for_finding(
+                finding_id,
+                actor=actor or "system",
+                reason=dismiss_reason
+                or (f"finding promoted to {normalized_issue_id}" if normalized_issue_id else f"finding marked {status}"),
+                now=now,
+            )
 
-            # Cascade-dismiss any observation linked to this finding when the
-            # finding reaches a terminal lifecycle state (dismissed, fixed,
-            # promoted to issue) so the agent triage queue doesn't accumulate
-            # zombie scratchpad notes for findings that have already been
-            # triaged elsewhere. (filigree-cb980eee0d, P1.2.) Non-terminal
-            # statuses such as 'open', 'acknowledged', and 'unseen_in_latest'
-            # leave the observation alive for continued triage.
-            should_cascade = (status is not None and status in TERMINAL_FINDING_STATUSES) or normalized_issue_id is not None
-            if should_cascade:
-                self._cascade_dismiss_observations_for_finding(
-                    finding_id,
-                    actor=actor or "system",
-                    reason=dismiss_reason
-                    or (f"finding promoted to {normalized_issue_id}" if normalized_issue_id else f"finding marked {status}"),
-                    now=now,
-                )
-
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
         updated = self.conn.execute("SELECT * FROM scan_findings WHERE id = ?", (finding_id,)).fetchone()
         if updated is None:
             msg = f"Finding not found after update: {finding_id}"
@@ -1696,6 +1772,8 @@ class FilesMixin(DBMixinProtocol):
             (finding_id,),
         )
 
+    @_retry_busy()
+    @_in_immediate_tx("clean_stale_findings")
     def clean_stale_findings(
         self,
         *,
@@ -1707,6 +1785,10 @@ class FilesMixin(DBMixinProtocol):
 
         Only affects findings whose ``last_seen_at`` (or ``updated_at`` as
         fallback) is older than the cutoff.  Returns stats about what changed.
+
+        Writer lock + commit/rollback are owned by ``@_in_immediate_tx``;
+        ``@_retry_busy`` recovers transient SQLITE_BUSY by re-running the method
+        (the SELECT/UPDATE/cascade set is idempotent after a rollback).
         """
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
@@ -1722,26 +1804,21 @@ class FilesMixin(DBMixinProtocol):
 
         now = _now_iso()
         where = " AND ".join(clauses)
-        try:
-            fixed_rows = self.conn.execute(
-                f"SELECT id FROM scan_findings WHERE {where}",
-                params,
-            ).fetchall()
-            cursor = self.conn.execute(
-                f"UPDATE scan_findings SET status = 'fixed', updated_at = ?, updated_by = ? WHERE {where}",
-                [now, actor, *params],
+        fixed_rows = self.conn.execute(
+            f"SELECT id FROM scan_findings WHERE {where}",
+            params,
+        ).fetchall()
+        cursor = self.conn.execute(
+            f"UPDATE scan_findings SET status = 'fixed', updated_at = ?, updated_by = ? WHERE {where}",
+            [now, actor, *params],
+        )
+        for row in fixed_rows:
+            self._cascade_dismiss_observations_for_finding(
+                row["id"],
+                actor=actor or "system",
+                reason="stale finding cleanup marked finding fixed",
+                now=now,
             )
-            for row in fixed_rows:
-                self._cascade_dismiss_observations_for_finding(
-                    row["id"],
-                    actor=actor or "system",
-                    reason="stale finding cleanup marked finding fixed",
-                    now=now,
-                )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
         return {"findings_fixed": cursor.rowcount}
 
     @staticmethod

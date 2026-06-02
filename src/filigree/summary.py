@@ -304,13 +304,13 @@ def generate_summary(db: FiligreeDB) -> str:
                 oldest_h = obs_stats["oldest_hours"]
                 age_str = f"{oldest_h:.0f}h ago" if oldest_h is not None else "unknown"
                 lines.append(f"STALE OBSERVATIONS: {stale_n} observation(s) older than 48 hours (oldest: {age_str})")
-                lines.append(f"  Total pending: {obs_stats['count']}. Run `list_observations` to review.")
+                lines.append(f"  Total pending: {obs_stats['count']}. Run `observation_list` to review.")
             else:
                 oldest_h = obs_stats["oldest_hours"]
                 age_str = f"{oldest_h:.0f}h ago" if oldest_h is not None else "unknown"
                 lines.append(f"OBSERVATIONS: {obs_stats['count']} pending (oldest: {age_str})")
-                lines.append("  Use `list_observations` to review, `promote_observation` to create issues,")
-                lines.append("  or `dismiss_observation` to clear.")
+                lines.append("  Use `observation_list` to review, `observation_promote` to create issues,")
+                lines.append("  or `observation_dismiss` to clear.")
             if obs_stats["expiring_soon_count"] > 0:
                 lines.append(f"  ({obs_stats['expiring_soon_count']} expiring within 24h)")
             lines.append("")

@@ -154,9 +154,9 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
         if obs_stats["count"] > 0:
             lines.append("")
             if obs_stats["stale_count"] > 0:
-                lines.append(f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h — run `list_observations` to triage")
+                lines.append(f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h — run `observation_list` to triage")
             else:
-                lines.append(f"OBSERVATIONS: {obs_stats['count']} pending — run `list_observations` to review")
+                lines.append(f"OBSERVATIONS: {obs_stats['count']} pending — run `observation_list` to review")
     except sqlite3.OperationalError:
         logger.debug("observation stats unavailable in session context", exc_info=True)
 

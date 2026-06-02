@@ -27,6 +27,12 @@ _VALID_TRANSITIONS: dict[ScanRunStatus, set[ScanRunStatus]] = {
     "running": {"completed", "failed", "timeout"},
 }
 
+# Terminal states are exactly those that never appear as a transition source —
+# derived from _VALID_TRANSITIONS so the two can't drift. Today: completed,
+# failed, timeout. Consumers deciding "benign already-finished vs actionable
+# transition failure" must use this, not a hand-written tuple.
+TERMINAL_SCAN_RUN_STATUSES: frozenset[str] = VALID_SCAN_RUN_STATUSES - frozenset(_VALID_TRANSITIONS)
+
 
 class ScansMixin(DBMixinProtocol):
     """Scan run lifecycle — create, update status, check cooldown, read logs."""

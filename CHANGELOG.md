@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Deprecation telemetry for pre-rename MCP tool names.** Every inbound
+  `call_tool` that arrives under an old (pre-ADR-016) tool name is counted so the
+  namespacing cutover can be tracked and the alias window eventually closed. The
+  call still succeeds (see the deprecation window below); the telemetry is
+  hardened so a malformed/old-name call cannot break dispatch.
+
+### Changed (BREAKING)
+
+- **MCP tool names are namespaced `<entity>_<verb>` (ADR-016 §7).** All MCP tool
+  wire names were renamed to an entity-prefixed form so they no longer collide
+  across subsystems — e.g. `get_issue` → `issue_get`, `start_work` →
+  `work_start`, `add_comment` → `comment_add`, `list_findings` → `finding_list`,
+  `observe` → `observation_create`. There is **no** `filigree_` prefix: clients
+  already surface tools as `mcp__filigree__<name>`. `list_tools` now serves only
+  the new names; `mcp_tools/rename.py::RENAME_MAP` is the frozen, CI-validated
+  old→new source of truth.
+
+  **Deprecation window (no hard break yet):** `call_tool` canonicalizes an
+  inbound new name back to its handler and *still accepts the old names* at
+  dispatch, emitting deprecation telemetry per old-name call. Integrations
+  should migrate to the new names now; a future release will remove the
+  aliases. **CLI verbs are unchanged** — only the MCP wire surface moved. (See
+  `docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`.)
+
+### Changed
+
+- **Parallel scan-results ingest.** `_SCAN_RESULTS_LOCK` was removed so two
+  concurrent scan-results POSTs overlap their (slow) Clarion HTTP file-identity
+  resolution instead of serialising; resolution runs before the write window, so
+  the two writers contend only briefly at the WAL writer lock. See the two
+  Fixed entries below for the regressions this exposed and how they were closed.
+
+### Fixed
+
+- **Benign scan-run completion warning suppressed for unknown `scan_run_id`.**
+  An enrich-only producer (e.g. `clarion analyze`) POSTs findings under a
+  `scan_run_id` Filigree never created; the completion step no longer emits a
+  "status not updated" warning for that tolerate-unknown case, so consumers are
+  not trained to ignore `warnings[]`. A real run that exists but cannot be
+  transitioned still surfaces the advisory. Terminal-state runs (now including
+  `timeout`, previously misclassified as non-terminal) are likewise treated as
+  benign and logged at INFO rather than WARNING — the benign/actionable split
+  derives from a single `TERMINAL_SCAN_RUN_STATUSES` constant so it cannot drift
+  from the transition table.
+
+- **Agent-facing runtime prose no longer points at pre-rename tool names.**
+  Session-context (`hooks.py`), project summary (`summary.py`), and the
+  `scan trigger` response still told agents to invoke `list_observations` /
+  `promote_observation` / `dismiss_observation` / `get_scan_status` — names
+  `list_tools` no longer serves. These response/hook strings are not part of the
+  static tool surface, so the existing served-prose guard could not see them;
+  they now use the namespaced names and a new CI guard
+  (`test_no_old_names_in_runtime_prose`) fails on any directive ("Use/Run/Call X")
+  that names a tool by an old name, keeping the runtime surface cut over.
+
+- **Concurrent same-path scan-results ingest no longer fails with a spurious
+  `run migrate-registry` 400 in local / Clarion-fallback mode.** Removing
+  `_SCAN_RESULTS_LOCK` (to let Clarion HTTP resolution overlap) exposed a race
+  the lock had masked: `LocalRegistry.resolve_file` mints a *fresh* id per call,
+  so two concurrent POSTs for the same new path pre-resolve to two different
+  ids. The winner commits; the loser's INSERT hits the `path` UNIQUE constraint,
+  re-reads the committed row, finds an id mismatch, and raised
+  `ValueError(...run migrate-registry...)` — surfaced as an HTTP 400 telling the
+  operator to run an unrelated DB migration. The `_upsert_file_record`
+  id-mismatch guard now adopts the committed row's id when the resolution is a
+  `local` backend (the minted id is arbitrary, so the stored row is
+  authoritative); a stable-id (`clarion`) mismatch is genuine registry drift and
+  still raises. Registry-owned column sync is skipped on the adopt path so a
+  winner's Clarion `content_hash`/`registry_backend` is never clobbered by the
+  loser's empties. Adds same-path concurrent-ingest coverage (deterministic
+  white-box plus a barrier-synchronised end-to-end test).
+
+- **Scan write paths now use the project's writer-lock discipline.**
+  `process_scan_results`, `update_finding`, and `clean_stale_findings` ran their
+  writes in lazy `DEFERRED` transactions with no `BEGIN IMMEDIATE` and no
+  busy-retry — unlike every other write surface — so once `_SCAN_RESULTS_LOCK`
+  was removed they relied solely on `busy_timeout` to avoid `SQLITE_BUSY`, an
+  undocumented guard one refactor (e.g. a `BEGIN`-before-`SELECT`) from breaking.
+  They now acquire the writer lock eagerly via `@_in_immediate_tx` and recover
+  transient `SQLITE_BUSY`/`SQLITE_LOCKED` via `@_retry_busy`, matching
+  `create_issue` et al. `process_scan_results` keeps Clarion HTTP resolution and
+  scan-run completion outside the writer lock (the write window is an extracted
+  retry-safe helper), so the parallel-ingest win is preserved. No behaviour or
+  wire change; transaction atomicity is unchanged (the loop already committed
+  once).
+
 ## [2.2.0] - 2026-05-31
 
 ### Added

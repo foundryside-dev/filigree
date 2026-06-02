@@ -115,3 +115,53 @@ class TestStructuredLogEvent:
             await call_tool("issue_get", {"issue_id": issue.id})
 
         assert not [r for r in caplog.records if r.message == "deprecated_tool_name"]
+
+
+class TestTelemetryFailureIsolation:
+    """Regression guard for the blanket ``try/except`` in
+    ``_record_deprecated_tool_call``: telemetry is best-effort and must NEVER
+    break a real tool call. The recording runs *before* the handler's own
+    try/except in ``call_tool``, so a log sink that raises while emitting the
+    ``deprecated_tool_name`` event would otherwise propagate out of
+    ``call_tool`` before the handler ever runs.
+    """
+
+    async def test_logging_failure_does_not_break_old_name_call(
+        self,
+        mcp_db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A raising ``_logger.info`` on the deprecation event must not stop an
+        old-name call from dispatching and returning its normal result.
+
+        Drop the ``try/except`` from ``_record_deprecated_tool_call`` and this
+        test fails: the injected ``RuntimeError`` propagates out of ``call_tool``
+        instead of the parsed issue coming back.
+        """
+
+        class _RaisingOnDeprecation:
+            # Raise ONLY for the deprecation event. The end-of-call ``tool_call``
+            # INFO log (also ``_logger.info``, and deliberately NOT guarded) must
+            # stay benign, or the test would fail for the wrong reason.
+            def info(self, msg: str, *args: object, **kwargs: object) -> None:
+                if msg == "deprecated_tool_name":
+                    raise RuntimeError("structured-log sink is down")
+
+            def error(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def warning(self, *args: object, **kwargs: object) -> None:
+                pass
+
+        monkeypatch.setattr(mcp_mod, "_logger", _RaisingOnDeprecation())
+
+        issue = mcp_db.create_issue("Telemetry sink failure isolation")
+
+        # ``get_issue`` is a deprecated OLD name, so the call routes through
+        # ``_record_deprecated_tool_call`` and trips the raising sink.
+        result = _parse(await call_tool("get_issue", {"issue_id": issue.id}))
+
+        # The call survived the telemetry failure and returned the real issue.
+        assert result["issue_id"] == issue.id
+        # The counter increment runs before the failing log line, so it lands.
+        assert mcp_mod._deprecated_tool_calls["get_issue"] == 1

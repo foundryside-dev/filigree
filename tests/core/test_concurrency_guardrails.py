@@ -190,6 +190,97 @@ def test_meta_writes_use_busy_retry_and_begin_immediate(
     assert attempts["count"] == 3
 
 
+def _seed_finding(db: FiligreeDB) -> dict[str, str]:
+    """Ingest one finding and return its id (for the update_finding case)."""
+    stats = db.process_scan_results(
+        scan_source="ruff",
+        findings=[{"path": "src/seed.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+    )
+    return {"finding_id": stats["new_finding_ids"][0]}
+
+
+@pytest.mark.parametrize(
+    ("operation", "setup", "mutate"),
+    [
+        pytest.param(
+            "update_finding",
+            _seed_finding,
+            lambda db, ctx: db.update_finding(ctx["finding_id"], status="acknowledged", actor="t"),
+            id="update_finding",
+        ),
+        pytest.param(
+            "clean_stale_findings",
+            lambda db: {},
+            lambda db, ctx: db.clean_stale_findings(days=0, actor="t"),
+            id="clean_stale_findings",
+        ),
+        pytest.param(
+            "process_scan_results",
+            lambda db: {},
+            lambda db, ctx: db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": "src/proc.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+            ),
+            id="process_scan_results",
+        ),
+    ],
+)
+def test_finding_writes_use_busy_retry_and_begin_immediate(
+    db: FiligreeDB,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    setup: object,
+    mutate: object,
+) -> None:
+    """I2: the scan write paths now acquire the writer lock via BEGIN IMMEDIATE
+    and retry transient BUSY, like every other write surface (e.g. create_issue).
+
+    Pre-fix these methods used lazy DEFERRED transactions and never called
+    ``_begin_immediate`` for their own operation, so ``attempts`` stays 0 and the
+    final assertion fails (0 != 3).
+    """
+    ctx = setup(db)  # type: ignore[operator]
+    real_begin = db_base._begin_immediate
+    attempts = {"count": 0}
+
+    def flaky_begin(conn: sqlite3.Connection, op: str) -> None:
+        if op == operation and attempts["count"] < 2:
+            attempts["count"] += 1
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise exc
+        if op == operation:
+            attempts["count"] += 1
+        real_begin(conn, op)
+
+    monkeypatch.setattr(db_base, "_begin_immediate", flaky_begin)
+
+    mutate(db, ctx)  # type: ignore[operator]
+
+    assert attempts["count"] == 3
+
+
+def test_process_scan_results_create_observations_runs_in_one_immediate_tx(db: FiligreeDB) -> None:
+    """I2 regression guard: the BEGIN IMMEDIATE write window wraps the whole
+    ingest loop, including the ``create_observations`` path that
+    ``report_finding`` drives in production. If that path opened or committed a
+    transaction of its own it would trip ``_begin_immediate``'s nested-tx guard;
+    asserting an observation lands and the tx is closed proves it stays
+    commit-free inside the single window.
+    """
+    stats = db.process_scan_results(
+        scan_source="ruff",
+        findings=[{"path": "src/obs.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        create_observations=True,
+    )
+
+    assert stats["observations_created"] == 1
+    obs_count = db.conn.execute("SELECT COUNT(*) AS n FROM observations").fetchone()["n"]
+    assert obs_count == 1
+    # The single write window committed cleanly — no transaction left dangling.
+    assert db.conn.in_transaction is False
+
+
 def test_begin_immediate_retries_real_sqlite_busy(tmp_path: Path) -> None:
     """A real locked SQLite writer is retried until the blocker commits."""
     db_path = tmp_path / "filigree.db"

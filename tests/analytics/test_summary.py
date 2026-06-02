@@ -501,7 +501,7 @@ class TestObservationsInSummary:
         summary = generate_summary(db)
         assert "OBSERVATIONS:" in summary
         assert "1 pending" in summary
-        assert "list_observations" in summary
+        assert "observation_list" in summary
 
     def test_stale_observations_warning(self, db: FiligreeDB) -> None:
         obs = db.create_observation("Old thing")
