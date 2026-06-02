@@ -111,7 +111,22 @@ def _promote_finding_on_private_conn(
         finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
         if finding is None:
             return None
-        result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+        try:
+            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+        except KeyError:
+            # promote_finding_to_issue re-reads the finding (``get_finding``)
+            # before it writes. A concurrent hard-delete in the window between
+            # our resolve above and that re-read makes it raise KeyError — the
+            # finding genuinely vanished mid-flight. Re-resolve to confirm: if
+            # it is gone, fold into the "no finding for fingerprint" path (the
+            # route maps ``None`` → 404). If it is still present, the KeyError
+            # came from deeper in the promote (e.g. a just-created issue that
+            # could not be rebuilt — a real invariant violation), so re-raise
+            # and let the route's catch-all surface it as INTERNAL/500 rather
+            # than masking a bug as a benign 404.
+            if worker_db.find_finding_by_fingerprint(scan_source, fingerprint) is None:
+                return None
+            raise
         return {"issue_id": result["issue"].id, "created": result["created"]}
 
 
@@ -676,6 +691,14 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except sqlite3.Error as e:
             return _error_response(f"database error promoting finding: {e}", ErrorCode.IO, 500)
+        except Exception:
+            # Backstop: no app-level catch-all exists, so an unguarded exception
+            # (e.g. a deep KeyError when a just-created issue can't be rebuilt)
+            # would otherwise leak a bare Starlette 500 with no ``{error, code}``
+            # body — breaking the switch-on-code envelope federation consumers
+            # rely on. Mirror the per-route idiom in ``releases.py``.
+            logger.exception("BUG: unexpected error promoting finding (scan_source=%r, fingerprint=%r)", scan_source, fingerprint)
+            return _error_response("Internal error promoting finding", ErrorCode.INTERNAL, 500, exc_info=False)
         if result is None:
             return _error_response("no finding for fingerprint", ErrorCode.NOT_FOUND, 404)
         logger.info(
@@ -739,13 +762,24 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
-        result = await asyncio.to_thread(
-            _clean_stale_findings_on_private_conn,
-            db,
-            days=older_than_days,
-            scan_source=scan_source,
-            actor=actor,
-        )
+        try:
+            result = await asyncio.to_thread(
+                _clean_stale_findings_on_private_conn,
+                db,
+                days=older_than_days,
+                scan_source=scan_source,
+                actor=actor,
+            )
+        except sqlite3.Error as e:
+            return _error_response(f"database error cleaning stale findings: {e}", ErrorCode.IO, 500)
+        except Exception:
+            # Backstop (same rationale as the promote route): without an
+            # app-level catch-all, an unguarded exception here leaks a bare 500
+            # with no envelope, breaking the switch-on-code contract.
+            logger.exception(
+                "BUG: unexpected error cleaning stale findings (scan_source=%r, older_than_days=%d)", scan_source, older_than_days
+            )
+            return _error_response("Internal error cleaning stale findings", ErrorCode.INTERNAL, 500, exc_info=False)
         logger.info(
             "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
             result["findings_fixed"],

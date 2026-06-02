@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
 
+import filigree.dashboard_routes.files as files_routes
+from filigree.core import FiligreeDB
 from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from tests.conftest import PopulatedDB
 
@@ -590,6 +593,30 @@ class TestLoomCleanStaleFindingsAPI:
             for key, val in exp_body.items():
                 assert type(body[key]) is type(val), f"{example['name']}:{key}"
 
+    async def test_db_error_returns_enveloped_io_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A sqlite3.Error during the sweep yields ``{error, code: IO}``, not a bare 500."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        assert resp.status_code == 500
+        assert resp.json()["code"] == "IO"
+
+    async def test_unexpected_error_returns_enveloped_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any unguarded exception still yields a ``{error, code: INTERNAL}`` body."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert set(body.keys()) >= {"error", "code"}
+
 
 class TestLoomPromoteFindingAPI:
     """POST /api/loom/findings/promote — Wardline A2 promote-by-fingerprint.
@@ -702,3 +729,64 @@ class TestLoomPromoteFindingAPI:
         # Re-ingest the same fingerprint → finding regresses → issue reopens.
         await self._ingest(client, "fp-cycle")
         assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) != "done"
+
+    async def test_finding_vanishes_mid_flight_returns_404(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A concurrent hard-delete between resolve and promote → 404, not a bare 500.
+
+        ``get_finding`` inside ``promote_finding_to_issue`` raises KeyError when
+        the row was deleted in the window after our fingerprint resolve. The
+        helper re-resolves, sees the finding is gone, and folds it into the
+        ``None`` → 404 NOT_FOUND path with a proper ``{error, code}`` envelope.
+        """
+        await self._ingest(client)
+        calls = {"n": 0}
+        real_find = FiligreeDB.find_finding_by_fingerprint
+
+        def flaky_find(self: FiligreeDB, scan_source: str, fingerprint: str):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            # First call (resolve) sees the finding; the re-check (after the
+            # simulated delete) sees nothing.
+            return real_find(self, scan_source, fingerprint) if calls["n"] == 1 else None
+
+        def vanished(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            raise KeyError("Finding not found: deleted mid-flight")
+
+        monkeypatch.setattr(FiligreeDB, "find_finding_by_fingerprint", flaky_find)
+        monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", vanished)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_keyerror_with_finding_still_present_is_500_internal(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deep KeyError that is NOT a vanished finding must not be masked as 404.
+
+        If ``promote_finding_to_issue`` raises KeyError while the finding still
+        resolves (e.g. a just-created issue that could not be rebuilt — a real
+        invariant violation), the helper re-raises and the route's catch-all
+        surfaces it as a properly-enveloped INTERNAL/500, not a benign 404.
+        """
+        await self._ingest(client)  # find_finding_by_fingerprint left intact → re-check still finds it
+
+        def deep_bug(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            raise KeyError("Issue not found: just-created issue not rebuildable")
+
+        monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", deep_bug)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert "error" in body
+
+    async def test_unexpected_error_returns_enveloped_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any unguarded exception still yields a ``{error, code: INTERNAL}`` body."""
+        await self._ingest(client)
+
+        def boom(*args: object, **kwargs: object) -> dict[str, object]:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(files_routes, "_promote_finding_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert set(body.keys()) >= {"error", "code"}

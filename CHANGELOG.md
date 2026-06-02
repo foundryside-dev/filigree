@@ -93,6 +93,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Loom finding routes no longer leak a non-enveloped 500 on a concurrent
+  write.** `POST /api/loom/findings/promote` and `/api/loom/findings/clean-stale`
+  caught only `ValueError`/`sqlite3.Error` (promote) or nothing at all
+  (clean-stale), and there is no app-level catch-all — so an unguarded exception
+  (e.g. a `KeyError` when a concurrent writer hard-deletes the finding/issue
+  between resolve and promote) escaped as a bare Starlette 500 with no
+  `{error, code}` body, breaking the switch-on-code envelope federation
+  consumers depend on. Both routes now mirror the per-route guard idiom from the
+  releases routes: an unexpected exception becomes a properly-enveloped
+  `500 INTERNAL`, and clean-stale additionally maps `sqlite3.Error` to
+  `500 IO`. The promote path is more precise about the hard-delete race — it
+  re-resolves the fingerprint and, only if the finding genuinely vanished,
+  returns `404 NOT_FOUND`; a `KeyError` raised while the finding is still
+  present (a real invariant violation, not a vanished row) is surfaced as
+  `INTERNAL` rather than masked as a benign 404.
+
 - **SEI backfill surfaces a corrupt tombstone instead of silently dropping it.**
   A `deleted_issues.entity_ids` blob that is corrupt JSON or not a JSON array
   decoded to `[]`, so the whole tombstone vanished from the backfill with no log,
