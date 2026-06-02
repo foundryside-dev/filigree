@@ -7,8 +7,6 @@ Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, n
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/filigree)](https://pypi.org/project/filigree/)
 [![License: MIT](https://img.shields.io/pypi/l/filigree)](https://github.com/tachyon-beep/filigree/blob/main/LICENSE)
 
-![Filigree Dashboard](docs/images/dashboard-screenshot.png)
-
 ## What Is Filigree?
 
 Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 114 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
@@ -35,6 +33,91 @@ Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/`
 - **Web dashboard** — real-time project overview with Kanban drag-and-drop, Graph v2 dependency exploration, Files/Health views, and optional multi-project server mode
 - **Minimal dependencies** — just Python + SQLite + click (no framework overhead)
 - **Session resumption** — `get_changes --since <timestamp>` to catch up after downtime
+
+## How It Works
+
+Filigree gives one project three ways into a single SQLite database — agents
+through MCP tools, you through the CLI, and a browser through the dashboard.
+Every mutation regenerates `context.md`, which the session hook injects back
+into the agent at startup.
+
+```mermaid
+flowchart TD
+    Agent["AI coding agent<br/>(Claude Code, Codex)"]
+    Human["You + scripts"]
+    Browser["Browser"]
+
+    MCP["MCP server<br/>(114 namespaced tools, stdio)"]
+    CLI["filigree CLI<br/>(--json, --actor)"]
+    Dash["Web dashboard<br/>(localhost:8377)"]
+
+    DB[("SQLite database<br/>.filigree/filigree.db")]
+    Ctx["context.md<br/>(pre-computed orientation)"]
+    Loom["Loom HTTP /api/loom/*<br/>(optional federation)"]
+
+    Agent -->|"calls tools over stdio"| MCP
+    Human -->|"runs commands"| CLI
+    Browser -->|"views, drags Kanban"| Dash
+
+    MCP -->|"reads & writes issues"| DB
+    CLI -->|"reads & writes issues"| DB
+    Dash -->|"reads & writes issues"| DB
+
+    DB -->|"regenerates on every mutation"| Ctx
+    Ctx -->|"injected at session start"| Agent
+
+    DB -.->|"serves federation peers"| Loom
+```
+
+**The work loop** is the same whether you drive it from the CLI or an agent
+drives it through MCP tools: orient at session start, claim an issue atomically,
+do the work, close it — and the next orientation is already regenerated.
+
+```mermaid
+sequenceDiagram
+    participant Dev as You / AI agent
+    participant Fg as Filigree
+    participant DB as .filigree/ (SQLite)
+
+    Note over Dev,Fg: Session start
+    Dev->>Fg: filigree session-context
+    Fg->>DB: read ready / in-progress / critical path
+    DB-->>Dev: project snapshot
+
+    Dev->>Fg: filigree start-next-work --assignee me
+    Fg->>DB: atomic claim + transition to working status
+    DB-->>Dev: claimed issue (optimistic lock prevents double-work)
+
+    Note over Dev: do the work, commit
+
+    Dev->>Fg: filigree close <id>
+    Fg->>DB: transition to terminal status
+    DB->>DB: regenerate context.md
+    DB-->>Dev: next ready work
+```
+
+**Each issue type enforces its own state machine.** Tasks are simple
+(`open → in_progress → closed`); features add review
+(`proposed → approved → building → reviewing → done`); bugs add a triage front
+and a *hard* verification gate, so a fix cannot close without a recorded
+`fix_verification`. The bug lifecycle below shows why "ready" is not the same as
+"startable" — a bug enters at `triage`, which has no single hop into work.
+
+```mermaid
+stateDiagram-v2
+    [*] --> triage
+    triage --> confirmed
+    triage --> wont_fix
+    triage --> not_a_bug
+    confirmed --> fixing
+    fixing --> verifying : requires fix_verification
+    verifying --> closed : hard gate (fix_verification required)
+    verifying --> fixing : kicked back
+    confirmed --> wont_fix
+    wont_fix --> [*]
+    not_a_bug --> [*]
+    closed --> [*]
+```
 
 ## Quick Start
 
