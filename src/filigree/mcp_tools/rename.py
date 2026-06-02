@@ -19,15 +19,22 @@ This module is **data + a derived inverse only**, and it **is** consumed by
   old name so the cutover can be tracked.
 
 It remains the frozen, CI-validated source of truth so the agreed names cannot
-drift. Invariants — **total coverage** of the live handler set, **injective**,
-**no-shadow** (no new name equals any current name) — are asserted in
-``tests/mcp/test_rename_map.py`` against ``mcp_server._all_handlers``.
+drift. ``RENAME_MAP`` is exposed as a read-only ``MappingProxyType`` so the
+table cannot be mutated at runtime, and **injectivity** is enforced by an
+import-time assert below (a structural guard, not test-only). The remaining
+invariants — **total coverage** of the live handler set and **no-shadow** (no
+new name equals any current name) — need the server's handler set and are
+asserted in ``tests/mcp/test_rename_map.py`` against ``mcp_server._all_handlers``.
 """
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping
+from types import MappingProxyType
+
 #: current wire name -> namespaced successor (``<entity>_<verb>``, no prefix).
-RENAME_MAP: dict[str, str] = {
+_RENAME_MAP_DATA: dict[str, str] = {
     # issue (15)
     "get_issue": "issue_get",
     "list_issues": "issue_list",
@@ -160,8 +167,22 @@ RENAME_MAP: dict[str, str] = {
     "reload_templates": "admin_reload_templates",
 }
 
+# Injectivity is load-bearing: NEW_TO_OLD inverts the map by comprehension, so a
+# repeated successor would silently drop a row and mis-resolve an inbound new
+# name. Enforce it at import so the invariant is structural, not test-only — a
+# bare ``assert`` would be stripped under ``python -O``, so raise explicitly.
+if len(set(_RENAME_MAP_DATA.values())) != len(_RENAME_MAP_DATA):
+    _dupes = sorted(name for name, count in Counter(_RENAME_MAP_DATA.values()).items() if count > 1)
+    _msg = f"RENAME_MAP successors must be injective (no two current names may share a namespaced successor); collisions: {_dupes}"
+    raise RuntimeError(_msg)
+
+#: Read-only view of the rename table. Exposed as a ``MappingProxyType`` so the
+#: frozen-source-of-truth contract is enforced structurally — attempts to mutate
+#: it raise ``TypeError`` rather than silently drifting the agreed names.
+RENAME_MAP: Mapping[str, str] = MappingProxyType(_RENAME_MAP_DATA)
+
 #: Derived inverse: namespaced name -> current canonical name. Consumed by the
 #: canonicalize-at-top resolve step in ``call_tool`` (plan §5.1). Built from
-#: ``RENAME_MAP``; the test suite asserts it is a true bijection (no value
-#: collisions silently dropped a row).
+#: ``RENAME_MAP``; the injectivity guard above guarantees no value collision
+#: silently drops a row, making this a true bijection.
 NEW_TO_OLD: dict[str, str] = {new: old for old, new in RENAME_MAP.items()}

@@ -822,6 +822,87 @@ def test_clarion_registry_rejects_malformed_batch_failure_channels(
         thread.join(timeout=1)
 
 
+def _serve_one_payload(payload: dict[str, object]) -> tuple[ThreadingHTTPServer, threading.Thread]:
+    """Spin up a throwaway server that answers every POST with ``payload``."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_clarion_registry_rejects_sei_resolution_missing_requested_locator() -> None:
+    """A locator Clarion drops from every channel must raise, not vanish.
+
+    The backfill treats a missing ``resolved`` entry as "orphan this binding"
+    (writes ``migration_orphaned_at``). If a truncated/buggy response silently
+    omits a submitted locator from ``resolved``/``not_found``/``invalid``, that
+    is indistinguishable from an affirmative orphan unless the parse layer
+    demands every submitted locator be accounted for — exactly as the
+    file-path sibling does."""
+    server, thread = _serve_one_payload({"resolved": {}, "not_found": [], "invalid": []})
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match="missing outcome") as exc_info:
+            registry.resolve_locators_batch(["core:file:abc123@src/dropped.py"])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"resolved": {}, "not_found": ["core:file:other@src/other.py"], "invalid": []},
+            "unexpected",
+        ),
+        (
+            {
+                "resolved": {"core:file:dup@src/dup.py": {"sei": "clarion:sei:9"}},
+                "not_found": ["core:file:dup@src/dup.py"],
+                "invalid": [],
+            },
+            "multiple result channels",
+        ),
+    ],
+)
+def test_clarion_registry_rejects_sei_resolution_with_ambiguous_locator_outcomes(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    """Every submitted locator must appear in exactly one channel — no extras,
+    no locator claimed by two channels at once."""
+    server, thread = _serve_one_payload(payload)
+    try:
+        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+
+        with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
+            registry.resolve_locators_batch(["core:file:dup@src/dup.py"])
+
+        assert exc_info.value.cause_kind == "invalid_response"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_clarion_registry_batch_http_403_briefing_blocked_bypasses_unavailable_fallback() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:

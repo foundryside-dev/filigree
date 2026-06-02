@@ -80,6 +80,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SEI backfill surfaces a corrupt tombstone instead of silently dropping it.**
+  A `deleted_issues.entity_ids` blob that is corrupt JSON or not a JSON array
+  decoded to `[]`, so the whole tombstone vanished from the backfill with no log,
+  counter, or orphan — violating the module's "never silently drops an orphan"
+  contract (and notably less careful than the sibling breadcrumb on the
+  scan-ingest path). `run_sei_backfill` now emits a `logger.warning` naming the
+  issue and increments a new `tombstones_corrupt` report counter (surfaced in the
+  CLI JSON), on both the dry-run and applied paths; the corrupt row is left
+  verbatim for manual inspection, never rewritten. Only Filigree writes that
+  column, so this signals corruption or tampering rather than a normal path.
+
+- **SEI backfill no longer mass-orphans live bindings on an incomplete Clarion
+  response.** `_parse_sei_resolution` accepted whatever `POST
+  /api/v1/identity/resolve:batch` returned without checking that every
+  *submitted* locator was accounted for — unlike its file-path sibling
+  `_parse_batch_response`, which has always enforced exactly-one-channel
+  completeness. A locator a truncated or buggy Clarion dropped from all three
+  channels (`resolved` / `not_found` / `invalid`) read as `None` downstream,
+  which the backfill could not distinguish from an affirmative orphan: it wrote
+  `migration_orphaned_at` on a live, valid binding and reported it "unresolved".
+  The parse layer now threads the submitted locators through and asserts each
+  appears in exactly one channel, raising `invalid_response` (`cause_kind`) on a
+  missing, unexpected, or multiply-claimed locator. An orphan is now only ever a
+  locator Clarion *affirmatively* returned in `not_found`, never one that fell
+  out of the response.
+
 - **Benign scan-run completion warning suppressed for unknown `scan_run_id`.**
   An enrich-only producer (e.g. `clarion analyze`) POSTs findings under a
   `scan_run_id` Filigree never created; the completion step no longer emits a

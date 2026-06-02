@@ -11,6 +11,7 @@ from __future__ import annotations
 import json as json_mod
 import sqlite3
 import sys
+from typing import NoReturn
 
 import click
 
@@ -55,7 +56,7 @@ def sei_backfill_cmd(ctx: click.Context, execute: bool, as_json: bool) -> None:
     _emit_human(report)
 
 
-def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> None:
+def _emit_error(message: str, code: ErrorCode, *, as_json: bool) -> NoReturn:
     if as_json:
         click.echo(json_mod.dumps({"error": message, "code": code}))
     else:

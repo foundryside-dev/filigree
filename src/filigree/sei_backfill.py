@@ -36,15 +36,18 @@ Safety properties (the no-false-green ethos)
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 
 from filigree.db_base import _now_iso
 from filigree.registry import ClarionRegistry, SeiResolution
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
+
+logger = logging.getLogger(__name__)
 
 # The reserved SEI prefix. The ONLY substring of a stored id the backfill is
 # permitted to inspect (ADR-038 / the migration playbook sanction this single
@@ -76,10 +79,10 @@ class OrphanRecord:
     (Clarion rejected it as a malformed locator).
     """
 
-    source: str
+    source: Literal["association", "tombstone"]
     issue_id: str
     locator: str
-    reason: str
+    reason: Literal["unresolved", "invalid"]
 
 
 @dataclass(slots=True)
@@ -93,25 +96,17 @@ class SeiBackfillReport:
     associations_orphaned: int = 0
     associations_merged: int = 0
     tombstones_scanned: int = 0
+    tombstones_corrupt: int = 0
     tombstone_locators_migrated: int = 0
     tombstone_locators_orphaned: int = 0
     tombstone_locators_already_sei: int = 0
     orphans: list[OrphanRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "dry_run": self.dry_run,
-            "associations_scanned": self.associations_scanned,
-            "associations_migrated": self.associations_migrated,
-            "associations_already_sei": self.associations_already_sei,
-            "associations_orphaned": self.associations_orphaned,
-            "associations_merged": self.associations_merged,
-            "tombstones_scanned": self.tombstones_scanned,
-            "tombstone_locators_migrated": self.tombstone_locators_migrated,
-            "tombstone_locators_orphaned": self.tombstone_locators_orphaned,
-            "tombstone_locators_already_sei": self.tombstone_locators_already_sei,
-            "orphans": [{"source": o.source, "issue_id": o.issue_id, "locator": o.locator, "reason": o.reason} for o in self.orphans],
-        }
+        # ``asdict`` recurses into the nested ``OrphanRecord`` dataclasses, so the
+        # JSON shape stays in lockstep with the field declarations above — no
+        # hand-mirrored key list to drift when a counter is added or renamed.
+        return asdict(self)
 
 
 def run_sei_backfill(db: FiligreeDB, *, dry_run: bool = True, actor: str = "") -> SeiBackfillReport:
@@ -200,22 +195,47 @@ def _collect_locators(assoc_rows: list[Any], tomb_rows: list[Any]) -> set[str]:
         if not eid.startswith(SEI_PREFIX):
             locators.add(eid)
     for row in tomb_rows:
-        for loc in _decode_entity_ids(row["entity_ids"]):
+        # Malformed rows are surfaced by the report-owning pass (_plan / _apply);
+        # here we only need the salvageable locators to resolve.
+        locs, _malformed = _decode_entity_ids(row["entity_ids"])
+        for loc in locs:
             if not loc.startswith(SEI_PREFIX):
                 locators.add(loc)
     return locators
 
 
-def _decode_entity_ids(raw: str | None) -> list[str]:
+def _decode_entity_ids(raw: str | None) -> tuple[list[str], bool]:
+    """Decode a ``deleted_issues.entity_ids`` blob into its locator strings.
+
+    Returns ``(locators, malformed)``. ``malformed`` is True only for the two
+    cases that would otherwise make the whole tombstone vanish — corrupt JSON or
+    a non-array value — so a report-owning caller can surface it (warn + counter)
+    rather than silently drop the row, honouring the module's "never silently
+    drops an orphan" contract. A legitimately empty tombstone (NULL / ``"[]"``)
+    is *not* malformed. Only Filigree writes this column, so corruption signals
+    external tampering, not a normal path."""
     if not raw:
-        return []
+        return [], False
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError:
-        return []
+        return [], True
     if not isinstance(decoded, list):
-        return []
-    return [item for item in decoded if isinstance(item, str)]
+        return [], True
+    return [item for item in decoded if isinstance(item, str)], False
+
+
+def _warn_malformed_tombstone(report: SeiBackfillReport, row: Any) -> None:
+    """Surface a tombstone whose ``entity_ids`` could not be parsed as a string
+    array: count it and emit a breadcrumb so it is traceable, not invisible."""
+    report.tombstones_corrupt += 1
+    logger.warning(
+        "deleted_issues.entity_ids for issue %r (seq=%s) is not a JSON array of strings; "
+        "its locators cannot be migrated or orphaned and the row is left verbatim for manual "
+        "inspection (only Filigree writes this column, so this indicates corruption or tampering)",
+        row["issue_id"],
+        row["seq"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +280,10 @@ def _plan(
             report.associations_merged += n - 1 + (1 if sei in present else 0)
 
     for row in tomb_rows:
-        locs = _decode_entity_ids(row["entity_ids"])
+        locs, malformed = _decode_entity_ids(row["entity_ids"])
+        if malformed:
+            _warn_malformed_tombstone(report, row)
+            continue
         if not locs:
             continue
         report.tombstones_scanned += 1
@@ -381,7 +404,10 @@ def _apply_tombstone(
     sei_by_locator: dict[str, str],
     resolution: SeiResolution,
 ) -> None:
-    locs = _decode_entity_ids(row["entity_ids"])
+    locs, malformed = _decode_entity_ids(row["entity_ids"])
+    if malformed:
+        _warn_malformed_tombstone(report, row)
+        return
     if not locs:
         return
     report.tombstones_scanned += 1
@@ -420,7 +446,7 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return out
 
 
-def _orphan_reason(locator: str, resolution: SeiResolution) -> str:
+def _orphan_reason(locator: str, resolution: SeiResolution) -> Literal["unresolved", "invalid"]:
     """Classify why a locator did not migrate, for the operator's review list."""
     if locator in resolution["already_migrated"]:
         return "invalid"

@@ -163,10 +163,15 @@ class SeiResolution(TypedDict):
     - ``orphaned`` — locators Clarion reports as ``alive:false`` (its
       ``not_found`` channel). The locator no longer resolves; the backfill keeps
       it verbatim and flags it ORPHAN for human review (never silently dropped).
-    - ``already_migrated`` — locators Clarion *rejected* as SEI-shaped (its
-      ``invalid`` channel; the REQ-F-02 reserved-prefix rejection). The value was
-      already an SEI; the backfill skips it. This is what makes a partially-run
-      backfill safely resumable.
+    - ``already_migrated`` — locators Clarion *rejected* through its ``invalid``
+      channel (the REQ-F-02 reserved-prefix rejection). The name is a slight
+      misnomer: an id that is *already* an SEI never reaches this channel, because
+      the backfill skips SEI-prefixed values client-side (the ``SEI_PREFIX`` filter,
+      counted as ``associations_already_sei``) *before* any network call — that
+      client-side skip, not this channel, is what makes a partial backfill
+      resumable. In practice this channel therefore carries malformed locators
+      Clarion refused; its sole consumer (``sei_backfill._orphan_reason``)
+      classifies membership here as a ``reason="invalid"`` orphan.
 
     Filigree never parses the SEI beyond the sanctioned ``clarion:eid:`` prefix
     check; the string is stored opaquely.
@@ -979,16 +984,26 @@ class ClarionRegistry:
         if not isinstance(payload, dict):
             msg = f"Clarion identity resolve returned non-object response from {url}: {type(payload).__name__}"
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
-        return self._parse_sei_resolution(payload, url=url)
+        return self._parse_sei_resolution(payload, url=url, requested_locators=chunk)
 
     @staticmethod
-    def _parse_sei_resolution(payload: dict[str, Any], *, url: str) -> SeiResolution:
+    def _parse_sei_resolution(payload: dict[str, Any], *, url: str, requested_locators: list[str]) -> SeiResolution:
         def require_list(field: str) -> list[Any]:
             value = payload.get(field, [])
             if not isinstance(value, list):
                 msg = f"Clarion identity resolve at {url}: {field!r} must be a list"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
             return value
+
+        def record_outcome(locator: str, channel: str) -> None:
+            existing = outcomes.get(locator)
+            if existing is not None:
+                msg = f"Clarion identity resolve at {url}: locator {locator!r} appears in multiple result channels: {existing}, {channel}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            outcomes[locator] = channel
+
+        requested_locator_set = set(requested_locators)
+        outcomes: dict[str, str] = {}
 
         resolved: dict[str, str] = {}
         raw_resolved = payload.get("resolved", {})
@@ -999,6 +1014,7 @@ class ClarionRegistry:
             if not isinstance(record, dict) or not isinstance(record.get("sei"), str) or not record["sei"]:
                 msg = f"Clarion identity resolve at {url}: resolved entry for {locator!r} missing non-empty string 'sei'"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            record_outcome(locator, "resolved")
             resolved[locator] = record["sei"]
 
         orphaned: list[str] = []
@@ -1006,6 +1022,7 @@ class ClarionRegistry:
             if not isinstance(item, str):
                 msg = f"Clarion identity resolve at {url}: 'not_found' item must be a string"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            record_outcome(item, "not_found")
             orphaned.append(item)
 
         already_migrated: list[str] = []
@@ -1013,7 +1030,24 @@ class ClarionRegistry:
             if not isinstance(item, str):
                 msg = f"Clarion identity resolve at {url}: 'invalid' item must be a string"
                 raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            record_outcome(item, "invalid")
             already_migrated.append(item)
+
+        # Completeness, mirroring the file-path sibling (_parse_batch_response):
+        # every submitted locator must appear in exactly one channel. A locator
+        # Clarion silently drops from all channels would otherwise read as None
+        # downstream and destructively orphan a live binding — so an omission is
+        # rejected, not inferred. An orphan is only one Clarion *affirmatively*
+        # reported in 'not_found'.
+        unexpected = sorted(set(outcomes) - requested_locator_set)
+        if unexpected:
+            joined = ", ".join(repr(loc) for loc in unexpected)
+            msg = f"Clarion identity resolve at {url}: response included unexpected locator(s): {joined}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        missing = sorted(requested_locator_set - set(outcomes))
+        if missing:
+            msg = f"Clarion identity resolve at {url}: missing outcome for requested locator(s): {', '.join(repr(loc) for loc in missing)}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
         return SeiResolution(resolved=resolved, orphaned=orphaned, already_migrated=already_migrated)
 
