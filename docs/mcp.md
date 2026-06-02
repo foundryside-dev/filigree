@@ -79,14 +79,14 @@ Workflow guide with optional live project context. Agents use this to understand
 
 | Tool | Description |
 |------|-------------|
-| `get_issue` | Full issue details with deps, labels, children, ready status |
-| `list_issues` | Filter by status, type, priority, parent, assignee |
-| `create_issue` | Create with type, priority, deps, labels, fields |
-| `update_issue` | Update status, priority, title, assignee, fields |
-| `close_issue` | Close with optional reason |
-| `delete_issue` | Hard-delete an issue + dependents (irreversible); writes a tombstone surfaced as `issue_deleted` on `/changes`. Refuses non-terminal/parented/depended-on issues unless `force` |
-| `reopen_issue` | Reopen a closed issue to the last non-done status before closure |
-| `undo_last` | Undo most recent reversible action |
+| `issue_get` | Full issue details with deps, labels, children, ready status |
+| `issue_list` | Filter by status, type, priority, parent, assignee |
+| `issue_create` | Create with type, priority, deps, labels, fields |
+| `issue_update` | Update status, priority, title, assignee, fields |
+| `issue_close` | Close with optional reason |
+| `issue_delete` | Hard-delete an issue + dependents (irreversible); writes a tombstone surfaced as `issue_deleted` on `/changes`. Refuses non-terminal/parented/depended-on issues unless `force` |
+| `issue_reopen` | Reopen a closed issue to the last non-done status before closure |
+| `admin_undo_last` | Undo most recent reversible action |
 
 #### Relationship naming
 
@@ -97,14 +97,14 @@ read `parent_issue_id`. Dependency edges use directional names:
 `from_issue_id` is the issue that is blocked, and `to_issue_id` is the issue
 that blocks it.
 
-#### `get_issue`
+#### `issue_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 | `include_transitions` | boolean | no | Include valid next states in response |
 
-#### `list_issues`
+#### `issue_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -116,7 +116,7 @@ that blocks it.
 | `limit` | integer | no | Max results (default 100) |
 | `offset` | integer | no | Skip first N results |
 
-#### `create_issue`
+#### `issue_create`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -125,13 +125,13 @@ that blocks it.
 | `priority` | 0-4 | no | Priority (default: 2) |
 | `description` | string | no | Issue description |
 | `notes` | string | no | Additional notes |
-| `labels` | string[] | no | Labels to attach during creation (no separate `add_label` call needed) |
+| `labels` | string[] | no | Labels to attach during creation (no separate `label_add` call needed) |
 | `deps` | string[] | no | Dependency issue IDs |
 | `parent_issue_id` | string | no | Parent issue ID |
 | `fields` | object | no | Custom fields from template schema |
 | `actor` | string | no | Agent identity for audit trail |
 
-#### `update_issue`
+#### `issue_update`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -157,7 +157,7 @@ is held, the observed assignee must match `actor`. Coordinator flows that
 intentionally edit another actor's held issue can pass `expected_assignee` with
 the observed holder; mismatches return `CONFLICT` and name both holders.
 
-#### `close_issue`
+#### `issue_close`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -172,18 +172,18 @@ the observed holder; mismatches return `CONFLICT` and name both holders.
 `transition_forced`; normal close validation remains forward-only.
 
 When an issue has active `critical=true` annotations linked with
-`relationship="must_consider"`, `close_issue` still closes the issue but returns
+`relationship="must_consider"`, `issue_close` still closes the issue but returns
 an `annotation_warnings` array. Each warning contains the `annotation_id`,
 file anchor, computed `anchor_state`, and suggested follow-up tools.
 
-#### `reopen_issue`
+#### `issue_reopen`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 | `actor` | string | no | Agent identity for audit trail |
 
-#### `undo_last`
+#### `admin_undo_last`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -194,28 +194,28 @@ file anchor, computed `anchor_state`, and suggested follow-up tools.
 
 | Tool | Description |
 |------|-------------|
-| `get_ready` | Unassigned open-category issues with no blockers, sorted by priority |
-| `get_blocked` | Blocked issues with their blocker lists, optionally hydrated with blocker context |
-| `get_critical_path` | Longest dependency chain |
+| `work_ready` | Unassigned open-category issues with no blockers, sorted by priority |
+| `work_blocked` | Blocked issues with their blocker lists, optionally hydrated with blocker context |
+| `dependency_critical_path` | Longest dependency chain |
 
-`get_ready` returns the slim issue shape plus a `startable` flag on each item.
+`work_ready` returns the slim issue shape plus a `startable` flag on each item.
 `startable` is `true` when the issue can be transitioned into a working state in
-one hop (what `start_work` does by default); it is `false` for issues that are
+one hop (what `work_start` does by default); it is `false` for issues that are
 *ready* but not directly *startable* — notably `triage` bugs, which must walk
 `triage → confirmed → fixing`. Non-startable items also carry `next_action`, the
 intermediate status to move through first (e.g. `"confirmed"`). Pass
 `include_context=true` to additionally add `parent_issue_id` and `parent_title`.
-`get_blocked` returns blocker IDs by default. Pass `include_blockers=true` to
+`work_blocked` returns blocker IDs by default. Pass `include_blockers=true` to
 add slim blocker records under `blockers[]` while preserving `blocked_by`.
-`get_critical_path` takes no required parameters.
+`dependency_critical_path` takes no required parameters.
 
-#### `get_ready`
+#### `work_ready`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `include_context` | boolean | no | Include parent issue ID/title on each ready item |
 
-#### `get_blocked`
+#### `work_blocked`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -225,10 +225,10 @@ add slim blocker records under `blockers[]` while preserving `blocked_by`.
 
 | Tool | Description |
 |------|-------------|
-| `add_dependency` | Add blocker: `from_issue_id` depends on `to_issue_id` |
-| `remove_dependency` | Remove blocker relationship |
+| `dependency_add` | Add blocker: `from_issue_id` depends on `to_issue_id` |
+| `dependency_remove` | Remove blocker relationship |
 
-#### `add_dependency` / `remove_dependency`
+#### `dependency_add` / `dependency_remove`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -240,12 +240,12 @@ add slim blocker records under `blockers[]` while preserving `blocked_by`.
 
 | Tool | Description |
 |------|-------------|
-| `add_comment` | Add comment to an issue |
-| `get_comments` | Get all comments on an issue |
-| `add_label` | Add label to an issue |
-| `remove_label` | Remove label from an issue |
+| `comment_add` | Add comment to an issue |
+| `comment_list` | Get all comments on an issue |
+| `label_add` | Add label to an issue |
+| `label_remove` | Remove label from an issue |
 
-#### `add_comment`
+#### `comment_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -258,13 +258,13 @@ Returns the updated `PublicIssue`, preserving top-level `comment_id` for
 compatibility and adding `comment: {comment_id, author, text, created_at}` so
 callers can confirm the exact inserted comment without a follow-up read.
 
-#### `get_comments`
+#### `comment_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 
-#### `add_label` / `remove_label`
+#### `label_add` / `label_remove`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -277,11 +277,11 @@ callers can confirm the exact inserted comment without a follow-up read.
 
 | Tool | Description |
 |------|-------------|
-| `search_issues` | Search by title and description (FTS5) |
-| `get_summary` | Pre-computed project summary (same as `context.md`) |
-| `get_stats` | Project statistics with explicit status-name and status-category count maps |
+| `issue_search` | Search by title and description (FTS5) |
+| `summary_get` | Pre-computed project summary (same as `context.md`) |
+| `stats_get` | Project statistics with explicit status-name and status-category count maps |
 
-#### `search_issues`
+#### `issue_search`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -289,7 +289,7 @@ callers can confirm the exact inserted comment without a follow-up read.
 | `limit` | integer | no | Max results (default 100) |
 | `offset` | integer | no | Skip first N results |
 
-#### `get_stats`
+#### `stats_get`
 
 Returns `by_status` (counts by literal workflow status name such as `open` or
 `in_progress`) and `by_category` (template categories `open`/`wip`/`done`),
@@ -303,14 +303,14 @@ major.
 
 | Tool | Description |
 |------|-------------|
-| `get_plan` | Milestone plan tree with progress |
-| `create_plan` | Create milestone/phase/step hierarchy in one call |
-| `add_plan_step` | Add a step to an existing phase |
-| `retarget_plan_dependency` | Swap one step dependency for another |
-| `move_plan_step` | Move an existing step to another phase |
-| `label_plan_tree` | Apply a label to a milestone subtree |
+| `plan_get` | Milestone plan tree with progress |
+| `plan_create` | Create milestone/phase/step hierarchy in one call |
+| `plan_step_add` | Add a step to an existing phase |
+| `plan_dependency_retarget` | Swap one step dependency for another |
+| `plan_step_move` | Move an existing step to another phase |
+| `plan_label_tree` | Apply a label to a milestone subtree |
 
-#### `get_plan`
+#### `plan_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -321,11 +321,11 @@ Returns the plan tree with progress fields. Slim responses keep milestone,
 phase, and step records compact; full responses include full issue payloads
 with descriptions, fields, labels, blockers, and timestamps.
 
-Plan-editing operations preserve dependency edges. `move_plan_step` returns a
+Plan-editing operations preserve dependency edges. `plan_step_move` returns a
 `warnings[]` entry when active dependencies are carried forward across the move;
-use `retarget_plan_dependency` when a moved step's blockers should change.
+use `plan_dependency_retarget` when a moved step's blockers should change.
 
-#### `create_plan`
+#### `plan_create`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -339,20 +339,20 @@ Step deps within a phase use integer indices. Cross-phase deps use `"phase_idx.s
 
 | Tool | Description |
 |------|-------------|
-| `start_work` | Atomically claim and transition an issue into work (single-hop; `advance` walks multi-hop types) |
-| `start_next_work` | Claim highest-priority ready issue and transition it into work (skips non-startable candidates) |
-| `claim_issue` | Claim only, with optimistic locking |
-| `claim_next` | Claim highest-priority ready issue only |
-| `release_claim` | Release a claim, optionally idempotently with `if_held` |
-| `release_my_claims` | Bulk-release every live claim held by one actor |
-| `heartbeat_work` | Refresh claim liveness for active work |
-| `get_stale_claims` | List assigned work with expired leases or old legacy assignments |
-| `reclaim_issue` | Transfer a stale claim when the expected holder still owns it |
+| `work_start` | Atomically claim and transition an issue into work (single-hop; `advance` walks multi-hop types) |
+| `work_start_next` | Claim highest-priority ready issue and transition it into work (skips non-startable candidates) |
+| `work_claim` | Claim only, with optimistic locking |
+| `work_claim_next` | Claim highest-priority ready issue only |
+| `work_release` | Release a claim, optionally idempotently with `if_held` |
+| `work_release_mine` | Bulk-release every live claim held by one actor |
+| `work_heartbeat` | Refresh claim liveness for active work |
+| `work_stale_list` | List assigned work with expired leases or old legacy assignments |
+| `work_reclaim` | Transfer a stale claim when the expected holder still owns it |
 
-#### `start_work`
+#### `work_start`
 
 A `triage` bug (and any type with no single-hop wip target) is *ready* but not
-directly *startable*: without `advance`, `start_work` returns `INVALID_TRANSITION`
+directly *startable*: without `advance`, `work_start` returns `INVALID_TRANSITION`
 naming the intermediate status to move through first.
 
 | Parameter | Type | Required | Description |
@@ -363,7 +363,7 @@ naming the intermediate status to move through first.
 | `advance` | boolean | no | Walk soft transitions to the nearest wip state (e.g. `triage → confirmed → fixing`) when no single-hop wip target exists. Missing required fields surface as warnings, not blocks; hard edges are never auto-walked. Ignored when `target_status` is given. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
-#### `start_next_work`
+#### `work_start_next`
 
 Candidates that are ready but not single-hop startable (e.g. `triage` bugs) are
 skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
@@ -378,7 +378,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `advance` | boolean | no | Walk soft transitions to wip so multi-hop types (e.g. `triage` bugs) become startable instead of skipped. Default `false`. |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
-#### `claim_issue`
+#### `work_claim`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -386,7 +386,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `assignee` | string | yes | Who is claiming |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
-#### `claim_next`
+#### `work_claim_next`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -396,7 +396,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `priority_max` | 0-4 | no | Maximum priority |
 | `actor` | string | no | Agent identity (defaults to assignee) |
 
-#### `release_claim`
+#### `work_release`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -406,7 +406,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `expected_assignee` | string | no | Only release when the current assignee matches this value; defaults to `actor` in `if_held` mode |
 | `reason` | string | no | Audit reason recorded on the release event |
 
-#### `release_my_claims`
+#### `work_release_mine`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -418,7 +418,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `reason` | string | no | Audit reason recorded on each release event |
 | `response_detail` | enum | no | `slim` or `full` |
 
-#### `heartbeat_work`
+#### `work_heartbeat`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -427,7 +427,7 @@ skipped. Pass `advance=true` to make them startable via the multi-hop soft walk.
 | `expected_assignee` | string | no | Only heartbeat when the current assignee matches this value |
 | `lease_hours` | integer | no | Lease duration from this heartbeat (default 48) |
 
-#### `get_stale_claims`
+#### `work_stale_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -439,7 +439,7 @@ Returns a `ListResponse[IssueDict]` containing assigned, non-done issues whose
 threshold. Pass `expires_within_hours` to also surface active leases that are
 close enough to expiry for proactive heartbeating.
 
-#### `reclaim_issue`
+#### `work_reclaim`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -454,27 +454,27 @@ close enough to expiry for proactive heartbeating.
 
 | Tool | Description |
 |------|-------------|
-| `batch_update` | Update multiple issues with the same changes |
-| `batch_close` | Close multiple with per-item error reporting |
-| `batch_add_label` | Add the same label to multiple issues |
-| `batch_add_comment` | Add the same comment to multiple issues |
-| `batch_dismiss_observations` | Dismiss multiple observations at once |
-| `batch_link_observations` | Link multiple observations to one issue with a shared disposition |
-| `batch_promote_observations` | Promote multiple observations to separate issues |
-| `batch_update_findings` | Update status on multiple scan findings |
+| `issue_batch_update` | Update multiple issues with the same changes |
+| `issue_batch_close` | Close multiple with per-item error reporting |
+| `label_batch_add` | Add the same label to multiple issues |
+| `comment_batch_add` | Add the same comment to multiple issues |
+| `observation_batch_dismiss` | Dismiss multiple observations at once |
+| `observation_batch_link` | Link multiple observations to one issue with a shared disposition |
+| `observation_batch_promote` | Promote multiple observations to separate issues |
+| `finding_batch_update` | Update status on multiple scan findings |
 
 All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed, newly_unblocked?}`) and accept an optional `response_detail: "slim" | "full"` (default `"slim"`). In `"slim"` mode `succeeded` is a list of compact records (`SlimIssue` for issue ops, IDs for label/comment/observation/finding ops); in `"full"` mode each batch tool upgrades `succeeded` to the full record type:
 
 | Tool | Slim `succeeded[i]` | Full `succeeded[i]` |
 |------|---------------------|---------------------|
-| `batch_update`, `batch_close` | `SlimIssue` | `IssueDict` |
-| `batch_add_label`, `batch_add_comment` | `issue_id: str` | `IssueDict` |
-| `batch_dismiss_observations` | `observation_id: str` | `ObservationDict` (snapshot pre-dismissal) |
-| `batch_link_observations` | `ObservationLink` | `ObservationLink` |
-| `batch_promote_observations` | `SlimIssue` | `PublicIssue` |
-| `batch_update_findings` | `finding_id: str` | `ScanFindingDict` |
+| `issue_batch_update`, `issue_batch_close` | `SlimIssue` | `IssueDict` |
+| `label_batch_add`, `comment_batch_add` | `issue_id: str` | `IssueDict` |
+| `observation_batch_dismiss` | `observation_id: str` | `ObservationDict` (snapshot pre-dismissal) |
+| `observation_batch_link` | `ObservationLink` | `ObservationLink` |
+| `observation_batch_promote` | `SlimIssue` | `PublicIssue` |
+| `finding_batch_update` | `finding_id: str` | `ScanFindingDict` |
 
-#### `batch_update`
+#### `issue_batch_update`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -487,7 +487,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
-#### `batch_close`
+#### `issue_batch_close`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -497,7 +497,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
-#### `batch_add_label`
+#### `label_batch_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -507,7 +507,7 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 | `actor` | string | no | Agent identity for audit trail |
 | `expected_assignee` | string | no | Override expected holder for coordinator writes |
 
-#### `batch_add_comment`
+#### `comment_batch_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -521,20 +521,20 @@ All batch tools return the unified `BatchResponse` envelope (`{succeeded, failed
 
 | Tool | Description |
 |------|-------------|
-| `list_types` | All registered types with pack info |
-| `get_template` | Canonical full workflow definition for a type |
-| `get_type_info` | Compatibility alias for `get_template` |
-| `get_valid_transitions` | Valid next states with readiness indicators |
-| `validate_issue` | Validate against template (warnings for missing fields) |
-| `list_packs` | Enabled workflow packs |
-| `get_workflow_guide` | Pack documentation |
-| `get_workflow_statuses` | Statuses by category (open/wip/done) |
-| `get_schema` | Entity ID prefixes and accepted tool families |
-| `get_mcp_status` | Read-only MCP server/schema compatibility diagnostic |
-| `explain_status` | Status transitions and required fields |
-| `reload_templates` | Refresh templates from disk |
+| `type_list` | All registered types with pack info |
+| `template_get` | Canonical full workflow definition for a type |
+| `type_get` | Compatibility alias for `template_get` |
+| `workflow_transition_list` | Valid next states with readiness indicators |
+| `issue_validate` | Validate against template (warnings for missing fields) |
+| `pack_list` | Enabled workflow packs |
+| `workflow_guide_get` | Pack documentation |
+| `workflow_status_list` | Statuses by category (open/wip/done) |
+| `schema_get` | Entity ID prefixes and accepted tool families |
+| `mcp_status_get` | Read-only MCP server/schema compatibility diagnostic |
+| `workflow_status_explain` | Status transitions and required fields |
+| `admin_reload_templates` | Refresh templates from disk |
 
-`get_schema.entity_id_prefixes.*.accepted_by_tools` is derived from the live MCP
+`schema_get.entity_id_prefixes.*.accepted_by_tools` is derived from the live MCP
 tool registry. The docs headline tool count is pinned by tests against the same
 registry so new tools cannot silently drift from the published reference.
 
@@ -543,15 +543,15 @@ runtime contract behind these tools: initial states, status categories,
 hard/soft transition enforcement, `data_warnings[]`, close/reopen target
 selection, and claim handoff behavior.
 
-#### `get_type_info`
+#### `type_get`
 
-Compatibility alias for `get_template`; returns the same canonical workflow definition.
+Compatibility alias for `template_get`; returns the same canonical workflow definition.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `type` | string | yes | Issue type name |
 
-#### `get_template`
+#### `template_get`
 
 Canonical workflow-discovery tool for issue types. Returns pack, states,
 forward transitions, reverse transitions, initial state, and fields schema.
@@ -560,7 +560,7 @@ forward transitions, reverse transitions, initial state, and fields schema.
 |-----------|------|----------|-------------|
 | `type` | string | yes | Issue type name |
 
-#### `get_valid_transitions`
+#### `workflow_transition_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -569,26 +569,26 @@ forward transitions, reverse transitions, initial state, and fields schema.
 Returns `ListResponse[TransitionDetail]` (`{items, has_more}`), with
 `has_more=false` because transition sets are finite and unpaginated.
 
-#### `validate_issue`
+#### `issue_validate`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 
-#### `get_workflow_guide`
+#### `workflow_guide_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `pack` | string | yes | Pack name (e.g., `core`, `planning`) |
 
-#### `explain_status`
+#### `workflow_status_explain`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `type` | string | yes | Issue type name |
 | `status` | string | yes | Status name |
 
-#### `get_mcp_status`
+#### `mcp_status_get`
 
 No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, and `runtime`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
 
@@ -596,24 +596,24 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 
 | Tool | Description |
 |------|-------------|
-| `get_metrics` | Cycle time, lead time, throughput |
-| `get_changes` | Events since a timestamp |
-| `get_issue_events` | Event history for one issue |
+| `metrics_get` | Cycle time, lead time, throughput |
+| `change_list` | Events since a timestamp |
+| `issue_event_list` | Event history for one issue |
 
-#### `get_metrics`
+#### `metrics_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `days` | integer | no | Lookback window (default 30) |
 
-#### `get_changes`
+#### `change_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `since` | ISO timestamp | yes | Get events after this time |
 | `limit` | integer | no | Max events (default 100) |
 
-#### `get_issue_events`
+#### `issue_event_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -624,10 +624,10 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 
 | Tool | Description |
 |------|-------------|
-| `export_jsonl` | Export all data to JSONL |
-| `import_jsonl` | Import from JSONL |
-| `archive_closed` | Archive old closed issues |
-| `compact_events` | Compact event history |
+| `admin_export_jsonl` | Export all data to JSONL |
+| `admin_import_jsonl` | Import from JSONL |
+| `admin_archive_closed` | Archive old closed issues |
+| `admin_compact_events` | Compact event history |
 
 #### End-of-session cleanup
 
@@ -637,38 +637,38 @@ agent's artifacts.
 
 1. Finish, hand off, or comment on the active issue before cleanup; task-scope
    defects should become tracked work, not expiring observations.
-2. Preview and release live claims with `release_my_claims(actor=..., label=...,
+2. Preview and release live claims with `work_release_mine(actor=..., label=...,
    dry_run=true)`, then repeat with `dry_run=false` and a `reason` once the
    preview is right. Use `label_prefix` only when the prefix is unique enough
    for the session. A claim held by another actor is a `CONFLICT`, not a
    release-if-held no-op; investigate it before retrying as a coordinator.
-3. List pending notes with `list_observations(actor=...)`, then use
-   `promote_observations_to_issue`, `batch_link_observations`, or
-   `batch_dismiss_observations` so observations are either tracked, attached as
+3. List pending notes with `observation_list(actor=...)`, then use
+   `observation_promote_to_issue`, `observation_batch_link`, or
+   `observation_batch_dismiss` so observations are either tracked, attached as
    evidence, or intentionally dropped.
-4. Review scan scratch with `list_findings`; use `promote_finding`,
-   `dismiss_finding`, or `batch_update_findings` before deleting file records.
-5. Remove synthetic file records with `delete_file_record`. Prefer the default
+4. Review scan scratch with `finding_list`; use `finding_promote`,
+   `finding_dismiss`, or `finding_batch_update` before deleting file records.
+5. Remove synthetic file records with `file_delete`. Prefer the default
    refusal mode first; use `force=true` only after associated issues/findings
    are handled.
-6. Archive closed scratch with `archive_closed(days_old=0, label=...)` after the
-   label scope is confirmed. `compact_events` is a separate storage-maintenance
+6. Archive closed scratch with `admin_archive_closed(days_old=0, label=...)` after the
+   label scope is confirmed. `admin_compact_events` is a separate storage-maintenance
    step for already archived issues.
 
-#### `export_jsonl`
+#### `admin_export_jsonl`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `output_path` | string | yes | File path for JSONL output |
 
-#### `import_jsonl`
+#### `admin_import_jsonl`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `input_path` | string | yes | File path to read JSONL from |
 | `merge` | boolean | no | Skip existing records (default false) |
 
-#### `archive_closed`
+#### `admin_archive_closed`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -676,7 +676,7 @@ agent's artifacts.
 | `actor` | string | no | Agent identity for audit trail |
 | `label` | string | no | Only archive closed issues currently carrying this label |
 
-#### `compact_events`
+#### `admin_compact_events`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -686,15 +686,15 @@ agent's artifacts.
 
 | Tool | Description |
 |------|-------------|
-| `list_files` | List tracked files with filtering, sorting, and pagination |
-| `get_file` | Get file detail + associations + findings summary |
-| `get_file_timeline` | Get merged file timeline events |
-| `get_issue_files` | List files associated with an issue |
-| `add_file_association` | Associate file and issue (`bug_in`, `task_for`, `scan_finding`, `mentioned_in`) |
-| `register_file` | Register/get file record by project-relative path |
-| `delete_file_record` | Delete a file record, refusing associations/open findings unless forced |
+| `file_list` | List tracked files with filtering, sorting, and pagination |
+| `file_get` | Get file detail + associations + findings summary |
+| `file_timeline_get` | Get merged file timeline events |
+| `issue_file_list` | List files associated with an issue |
+| `file_association_add` | Associate file and issue (`bug_in`, `task_for`, `scan_finding`, `mentioned_in`) |
+| `file_register` | Register/get file record by project-relative path |
+| `file_delete` | Delete a file record, refusing associations/open findings unless forced |
 
-#### `list_files`
+#### `file_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -708,7 +708,7 @@ agent's artifacts.
 | `sort` | enum | no | `updated_at`, `first_seen`, `path`, `language` |
 | `direction` | enum | no | `asc`/`desc` |
 
-#### `get_file`
+#### `file_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -716,7 +716,7 @@ agent's artifacts.
 
 Response includes: `file`, `associations`, `recent_findings`, `summary`.
 
-#### `get_file_timeline`
+#### `file_timeline_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -726,13 +726,13 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `event_type` | enum | no | `finding`, `association`, `file_metadata_update`, `issue_event` |
 | `include_issue_events` | boolean | no | Merge events from issues currently associated with the file |
 
-#### `get_issue_files`
+#### `issue_file_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
 
-#### `add_file_association`
+#### `file_association_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -741,7 +741,7 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `assoc_type` | enum | yes | `bug_in`, `task_for`, `scan_finding`, `mentioned_in` |
 | `actor` | string | no | Actor identity recorded on the association |
 
-#### `register_file`
+#### `file_register`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -751,7 +751,7 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `metadata` | object | no | Optional metadata map |
 | `actor` | string | no | Actor identity recorded on the file record or metadata event |
 
-#### `delete_file_record`
+#### `file_delete`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -760,9 +760,9 @@ Response includes: `file`, `associations`, `recent_findings`, `summary`.
 | `actor` | string | no | Actor identity echoed in the deletion result |
 
 Finding records include `created_by` and `updated_by`. Finding timeline events
-include the relevant actor; `update_finding`, `batch_update_findings`, and
-`dismiss_finding` accept `actor` for triage attribution.
-`dismiss_finding` defaults to `status="false_positive"` and accepts
+include the relevant actor; `finding_update`, `finding_batch_update`, and
+`finding_dismiss` accept `actor` for triage attribution.
+`finding_dismiss` defaults to `status="false_positive"` and accepts
 `false_positive`, `fixed`, `unseen_in_latest`, or `acknowledged`. A `reason`
 is stored on the finding metadata as `dismiss_reason`. File summaries and safe
 file deletion treat `fixed` and `false_positive` as terminal; stale
@@ -777,12 +777,12 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 
 | Tool | Description |
 |------|-------------|
-| `add_entity_association` | Attach a Clarion entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
-| `remove_entity_association` | Remove the binding identified by `(issue_id, entity_id)` |
-| `list_entity_associations` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
-| `list_associations_by_entity` | Reverse lookup: return every issue in this project bound to a given Clarion entity (the surface Clarion's `issues_for` calls) |
+| `entity_association_add` | Attach a Clarion entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
+| `entity_association_remove` | Remove the binding identified by `(issue_id, entity_id)` |
+| `entity_association_list` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
+| `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given Clarion entity (the surface Clarion's `issues_for` calls) |
 
-#### `add_entity_association`
+#### `entity_association_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -791,20 +791,20 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | `content_hash` | string | yes | Snapshot of Clarion's current content hash for drift detection at query time |
 | `actor` | string | no | Actor identity recorded as `attached_by` on first attach |
 
-#### `remove_entity_association`
+#### `entity_association_remove`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
 | `entity_id` | string | yes | Clarion entity ID |
 
-#### `list_entity_associations`
+#### `entity_association_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
 
-#### `list_associations_by_entity`
+#### `entity_association_list_by_entity`
 
 Project isolation is by DB file — every row in this query already
 belongs to the project hosting this database, so no project filter
@@ -824,15 +824,15 @@ file-anchored notes with provenance and drift detection.
 
 | Tool | Description |
 |------|-------------|
-| `observe` | Record a quick scratchpad note, optionally anchored to a file |
-| `list_observations` | List active observations with file filters and pagination |
-| `dismiss_observation` | Dismiss one observation with audit trail |
-| `link_observation` | Link one observation to an existing issue as `evidence`, `duplicate`, `superseded`, or `related` |
-| `promote_observation` | Promote one observation to a tracked issue |
-| `batch_dismiss_observations` | Dismiss multiple observations in one call |
-| `batch_link_observations` | Link multiple observations to one existing issue |
-| `batch_promote_observations` | Promote multiple observations in one call |
-| `promote_observations_to_issue` | Promote multiple observations into one issue with all source IDs preserved |
+| `observation_create` | Record a quick scratchpad note, optionally anchored to a file |
+| `observation_list` | List active observations with file filters and pagination |
+| `observation_dismiss` | Dismiss one observation with audit trail |
+| `observation_link` | Link one observation to an existing issue as `evidence`, `duplicate`, `superseded`, or `related` |
+| `observation_promote` | Promote one observation to a tracked issue |
+| `observation_batch_dismiss` | Dismiss multiple observations in one call |
+| `observation_batch_link` | Link multiple observations to one existing issue |
+| `observation_batch_promote` | Promote multiple observations in one call |
+| `observation_promote_to_issue` | Promote multiple observations into one issue with all source IDs preserved |
 
 #### Annotations
 
@@ -846,20 +846,20 @@ to `summary`; pass `full` to include provenance, links, and audit events.
 
 | Tool | Description |
 |------|-------------|
-| `annotate_file` | Create a file annotation and capture checksum/git/diff provenance |
-| `list_annotations` | Filter annotations by file, link target, actor, intent, status, or anchor state |
-| `get_annotation` | Get one annotation with full provenance, links, and audit events |
-| `update_annotation` | Update note/context/intent/critical/status |
-| `resolve_annotation` | Resolve an annotation with audit trail |
-| `supersede_annotation` | Supersede one annotation with another |
-| `promote_annotation` | Create an issue or observation and add a `promoted_to` link |
-| `carry_forward_annotation` | Add a `must_consider` link to a new issue and acknowledge an existing source warning |
-| `link_annotation` / `unlink_annotation` | Manage typed target links |
-| `get_file_annotations` | List annotations for a file |
-| `get_issue_annotations` | List annotations linked to an issue or epic |
-| `list_attention_annotations` | List active critical `must_consider` annotations |
+| `annotation_create` | Create a file annotation and capture checksum/git/diff provenance |
+| `annotation_list` | Filter annotations by file, link target, actor, intent, status, or anchor state |
+| `annotation_get` | Get one annotation with full provenance, links, and audit events |
+| `annotation_update` | Update note/context/intent/critical/status |
+| `annotation_resolve` | Resolve an annotation with audit trail |
+| `annotation_supersede` | Supersede one annotation with another |
+| `annotation_promote` | Create an issue or observation and add a `promoted_to` link |
+| `annotation_carry_forward` | Add a `must_consider` link to a new issue and acknowledge an existing source warning |
+| `annotation_link` / `annotation_unlink` | Manage typed target links |
+| `file_annotation_list` | List annotations for a file |
+| `issue_annotation_list` | List annotations linked to an issue or epic |
+| `annotation_attention_list` | List active critical `must_consider` annotations |
 
-##### `annotate_file`
+##### `annotation_create`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -877,7 +877,7 @@ V1 link targets are `issue`, `file`, `finding`, and `observation`.
 Relationships are `relevant_to`, `must_consider`, `evidence_for`, `explains`,
 `created_from`, and `promoted_to`.
 
-`carry_forward_annotation` requires the annotation to already be linked to
+`annotation_carry_forward` requires the annotation to already be linked to
 `from_target_id` as `must_consider`; otherwise it returns a `VALIDATION` error
 instead of acknowledging an unrelated issue.
 
@@ -885,32 +885,32 @@ instead of acknowledging an unrelated issue.
 
 | Tool | Description |
 |------|-------------|
-| `list_scanners` | List registered scanners |
-| `list_available_scanners` | List bundled scanners that can be enabled |
-| `enable_scanner` | Enable a bundled scanner registration |
-| `disable_scanner` | Disable a scanner registration |
-| `list_prompt_packs` | List bundled scanner review-focus prompt packs |
-| `trigger_scan` | Trigger async file scan (single file) |
-| `trigger_scan_batch` | Trigger a scanner across multiple files in one call |
-| `get_scan_status` | Live status + log tail for a `scan_run_id` |
-| `preview_scan` | Preview the command a scan would execute, without spawning a process |
-| `report_finding` | Report a single agent-discovered finding, with explicit opt-in paired observation creation |
+| `scanner_list` | List registered scanners |
+| `scanner_available_list` | List bundled scanners that can be enabled |
+| `scanner_enable` | Enable a bundled scanner registration |
+| `scanner_disable` | Disable a scanner registration |
+| `prompt_pack_list` | List bundled scanner review-focus prompt packs |
+| `scan_trigger` | Trigger async file scan (single file) |
+| `scan_trigger_batch` | Trigger a scanner across multiple files in one call |
+| `scan_status_get` | Live status + log tail for a `scan_run_id` |
+| `scan_preview` | Preview the command a scan would execute, without spawning a process |
+| `finding_report` | Report a single agent-discovered finding, with explicit opt-in paired observation creation |
 
-#### `list_scanners`
+#### `scanner_list`
 
 No parameters. Returns scanners registered in `.filigree/scanners/*.toml` in
 the unified list envelope:
 `{items: [{name, description, file_types, accepts_prompt, prompt_pack_aware, prompt_packs_endpoint, applicable_prompts, bundled_name, bundled_match, managed, sandbox_class, sandbox_summary, ...}], has_more: bool}`.
-If the list is empty, call `list_available_scanners` to see bundled scanners
+If the list is empty, call `scanner_available_list` to see bundled scanners
 that can be enabled.
 
-#### `list_available_scanners`
+#### `scanner_available_list`
 
 No parameters. Returns bundled scanners that can be enabled in the current
 project, including `command_available`, `command_path`, `enabled`,
 `language_focus`, `applicable_prompts`, and the managed TOML `path`.
 
-#### `enable_scanner`
+#### `scanner_enable`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -923,7 +923,7 @@ packaged runner command is not on `PATH`, the response includes
 `command_available=false` and a warning with the `uv tool install --upgrade
 filigree` remediation.
 
-#### `disable_scanner`
+#### `scanner_disable`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -933,7 +933,7 @@ filigree` remediation.
 Removes a scanner registration. Custom non-bundled scanner names can be removed
 without `force`; bundled scanner names with custom content require `force=true`.
 
-#### `list_prompt_packs`
+#### `prompt_pack_list`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -943,31 +943,31 @@ Returns bundled scanner prompt packs in the unified list envelope:
 `{items: [{name, description, instructions, components, when_to_use, audience, language, expected_relative_cost, prompt_pack_scope}], has_more: bool}`.
 Prompt packs are advisory review-focus hints; they do not restrict scanner file
 access or reported findings. Some packs are language-specific; prefer a
-scanner's `applicable_prompts` field, or call `list_prompt_packs` with the
+scanner's `applicable_prompts` field, or call `prompt_pack_list` with the
 scanner's `language_focus`, when selecting a pack.
 
-#### `trigger_scan`
+#### `scan_trigger`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scanner` | string | yes | Scanner name (from list_scanners) |
+| `scanner` | string | yes | Scanner name (from scanner_list) |
 | `file_path` | string | yes | File path to scan (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `prompt_pack_list`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
 Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, message}`.
 If the scanner name is a bundled scanner that is not enabled in this project,
 the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
-"enable_scanner"`, `cli_enable_command`, and a hint pointing at
-`list_available_scanners` / `enable_scanner`.
+"scanner_enable"`, `cli_enable_command`, and a hint pointing at
+`scanner_available_list` / `scanner_enable`.
 
-#### `trigger_scan_batch`
+#### `scan_trigger_batch`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_paths` | string[] | yes | File paths to scan (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `prompt_pack_list`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
 Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
@@ -975,26 +975,26 @@ Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
 `api_url_source`, and scanner risk/sandbox metadata. Same 30s rate-limit applies
 per scanner+file.
 
-#### `get_scan_status`
+#### `scan_status_get`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scan_run_id` | string | yes | Scan run ID returned by `trigger_scan` / `trigger_scan_batch` |
+| `scan_run_id` | string | yes | Scan run ID returned by `scan_trigger` / `scan_trigger_batch` |
 | `log_lines` | integer | no | Tail size (1–500, default 50) |
 
 Returns scan status with a live PID check and a tail of the scanner's log.
 
-#### `preview_scan`
+#### `scan_preview`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `scanner` | string | yes | Scanner name |
 | `file_path` | string | yes | File path (relative to project root) |
-| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `list_prompt_packs`; advisory only) |
+| `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `prompt_pack_list`; advisory only) |
 
 Returns the exact command that *would* be executed, without spawning anything. Useful for debugging scanner config.
 
-#### `report_finding`
+#### `finding_report`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1017,19 +1017,19 @@ create a linked triage observation; full responses then include
 `observation_id` when one was created.
 
 **Workflow:**
-1. `list_scanners` — discover registered scanners
-2. If none are registered, `list_available_scanners` then `enable_scanner`
-3. `list_prompt_packs` — choose an advisory review lens, if needed
-4. `trigger_scan` or `trigger_scan_batch` — fire-and-forget, get `scan_run_id`(s)
-5. `get_scan_status` — poll for completion / tail logs
-6. Check results via `list_findings` / `get_finding` or `GET /api/loom/files/{file_id}/findings`
+1. `scanner_list` — discover registered scanners
+2. If none are registered, `scanner_available_list` then `scanner_enable`
+3. `prompt_pack_list` — choose an advisory review lens, if needed
+4. `scan_trigger` or `scan_trigger_batch` — fire-and-forget, get `scan_run_id`(s)
+5. `scan_status_get` — poll for completion / tail logs
+6. Check results via `finding_list` / `finding_get` or `GET /api/loom/files/{file_id}/findings`
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
 **Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Loom generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
-**Scanner registration:** Use `list_available_scanners`, `enable_scanner`, and `disable_scanner` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
+**Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 
-**Prompt packs:** Use `list_prompt_packs` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `preview_scan`, `trigger_scan`, or `trigger_scan_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. Pack records include `language`, `expected_relative_cost`, `instructions`, and `prompt_pack_scope`; scanner records include `applicable_prompts` so agents do not need to infer language fit from names. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
+**Prompt packs:** Use `prompt_pack_list` or `filigree scanner prompts` to list bundled review lenses. Agents can pass `prompt` to `scan_preview`, `scan_trigger`, or `scan_trigger_batch` to focus review without embedding long scanner instructions in their own prompt. Bundled packs include `security`, `pytorch`, `quality-engineering`, `solution-architecture`, `systems-thinking`, `system-interactions`, `python-engineering`, `css`, `javascript`, `typescript`, `react`, `rust`, `go`, `terraform`, `sql`, `comprehensive`, and `major-refactor`. Pack records include `language`, `expected_relative_cost`, `instructions`, and `prompt_pack_scope`; scanner records include `applicable_prompts` so agents do not need to infer language fit from names. The prompt pack only nudges model focus; file access is governed by the scanner CLI sandbox.
 
 For end-to-end issue/file/finding workflows (including dashboard UI and troubleshooting), see [File Traceability Playbook](file-traceability.md).

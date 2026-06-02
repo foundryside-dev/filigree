@@ -21,10 +21,12 @@ def test_mcp_docs_use_issue_id_and_prefer_start_work() -> None:
     text = _read_doc("docs/mcp.md")
     assert "| `id` | string | yes | Issue ID |" not in text
     assert "| `issue_id` | string | yes | Issue ID |" in text
-    assert "| `start_work` | Atomically claim and transition" in text
-    assert "| `start_next_work` | Claim highest-priority ready issue and transition" in text
-    assert "| `claim_issue` | Claim only" in text
-    assert "| `claim_next` | Claim highest-priority ready issue only" in text
+    # MCP tool names were namespaced old->new (ADR-016 §7); mcp.md serves the
+    # new names, so these table rows now carry the namespaced forms.
+    assert "| `work_start` | Atomically claim and transition" in text
+    assert "| `work_start_next` | Claim highest-priority ready issue and transition" in text
+    assert "| `work_claim` | Claim only" in text
+    assert "| `work_claim_next` | Claim highest-priority ready issue only" in text
 
 
 def test_registry_backend_contract_docs_reference_clarion_and_runbook() -> None:

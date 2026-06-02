@@ -2553,7 +2553,9 @@ class TestInstructionsUpdate:
         from filigree.install import FILIGREE_INSTRUCTIONS
 
         assert "INVALID_TRANSITION" in FILIGREE_INSTRUCTIONS
-        assert "get_valid_transitions" in FILIGREE_INSTRUCTIONS
+        # MCP tool namespaced old->new (ADR-016 §7): get_valid_transitions is
+        # now served as workflow_transition_list.
+        assert "workflow_transition_list" in FILIGREE_INSTRUCTIONS
 
 
 class TestSafePath:

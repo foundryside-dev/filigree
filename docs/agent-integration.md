@@ -11,7 +11,7 @@ filigree install --claude-code    # Set up MCP for Claude Code
 filigree install --codex          # Set up MCP for Codex via runtime autodiscovery
 ```
 
-Once installed, agents call MCP tools like `get_ready`, `start_work`, and `close_issue` natively. See [MCP Server Reference](mcp.md) for the full tool list.
+Once installed, agents call MCP tools like `work_ready`, `work_start`, and `issue_close` natively. See [MCP Server Reference](mcp.md) for the full tool list.
 
 ## Background Subagents
 
@@ -29,13 +29,13 @@ The `--json` flag returns machine-readable responses in the unified 2.0 envelope
 The recommended pattern for agents working with filigree 2.0:
 
 1. **Orient** — read `filigree://context` resource for project state
-2. **Find work** — `get_ready` to find unblocked work sorted by priority
-3. **Start** — `start_work` (specific issue) or `start_next_work` (highest-priority ready) atomically claims and transitions to the issue type's reachable working status in one step
-4. **Work** — do the task, `add_comment` to log progress
-5. **Close** — `close_issue` when done (response includes newly-unblocked items)
+2. **Find work** — `work_ready` to find unblocked work sorted by priority
+3. **Start** — `work_start` (specific issue) or `work_start_next` (highest-priority ready) atomically claims and transitions to the issue type's reachable working status in one step
+4. **Work** — do the task, `comment_add` to log progress
+5. **Close** — `issue_close` when done (response includes newly-unblocked items)
 6. **Repeat** — loop back to step 2
 
-The atomic primitives `claim_issue` / `claim_next` still exist for niche use (reserve without transitioning), but `start_work` / `start_next_work` are the usual path in 2.0.
+The atomic primitives `work_claim` / `work_claim_next` still exist for niche use (reserve without transitioning), but `work_start` / `work_start_next` are the usual path in 2.0.
 
 ## Response Shapes
 
@@ -49,7 +49,7 @@ The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, 
 
 ## Schema-Mismatch (Warm-but-Degraded MCP)
 
-When the installed `filigree` is older than the project's database, the MCP server still launches in warm-but-degraded mode. Most tool calls return an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance; `get_mcp_status` remains available as a safe read-only diagnostic. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
+When the installed `filigree` is older than the project's database, the MCP server still launches in warm-but-degraded mode. Most tool calls return an `ErrorResponse` with `code: SCHEMA_MISMATCH` and upgrade guidance; `mcp_status_get` remains available as a safe read-only diagnostic. Surface that message to the user — do not retry. The fix is `uv tool install --upgrade filigree` (or whatever installed it).
 
 ## Session Resumption
 
@@ -62,7 +62,7 @@ filigree changes --since 2026-02-14T10:00:00 --json
 Via MCP:
 
 ```
-get_changes(since="2026-02-14T10:00:00")
+change_list(since="2026-02-14T10:00:00")
 ```
 
 Returns all events since the timestamp — status changes, new issues, closed items, dependency changes. The agent can reconstruct what happened while it was offline and adjust its plan accordingly.
@@ -71,7 +71,7 @@ Returns all events since the timestamp — status changes, new issues, closed it
 
 ### Atomic Start
 
-When multiple agents are active, **`start_work` prevents double-work**. It uses optimistic locking on `assignee` *and* atomically advances the status — both land or neither does. If another agent already claimed the issue, the operation fails with `code: CONFLICT` rather than silently overwriting.
+When multiple agents are active, **`work_start` prevents double-work**. It uses optimistic locking on `assignee` *and* atomically advances the status — both land or neither does. If another agent already claimed the issue, the operation fails with `code: CONFLICT` rather than silently overwriting.
 
 ```bash
 # Agent 1 starts successfully
@@ -87,14 +87,14 @@ filigree --actor agent-2 start-work proj-a3f9b2e1c0 --assignee agent-2
 Via MCP:
 
 ```
-start_work(issue_id="...", assignee="agent-1")            # Claim + transition atomically
-start_next_work(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
-claim_issue(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
-release_claim(issue_id="...")                             # Clear assignee without changing status
-release_claim(issue_id="...", actor="agent-1", if_held=True)  # Unassigned no-op; held-by-other returns CONFLICT
-heartbeat_work(issue_id="...", actor="agent-1")           # Refresh claim liveness
-get_stale_claims(stale_after_hours=48, expires_within_hours=2)  # Find abandoned, expired, or soon-expiring claims
-reclaim_issue(issue_id="...", assignee="agent-2", expected_assignee="agent-1", reason="missed heartbeat")
+work_start(issue_id="...", assignee="agent-1")            # Claim + transition atomically
+work_start_next(assignee="agent-1", priority_max=1)       # Highest-priority ready, with filters
+work_claim(issue_id="...", assignee="agent-2")           # Niche: reserve without transitioning
+work_release(issue_id="...")                             # Clear assignee without changing status
+work_release(issue_id="...", actor="agent-1", if_held=True)  # Unassigned no-op; held-by-other returns CONFLICT
+work_heartbeat(issue_id="...", actor="agent-1")           # Refresh claim liveness
+work_stale_list(stale_after_hours=48, expires_within_hours=2)  # Find abandoned, expired, or soon-expiring claims
+work_reclaim(issue_id="...", assignee="agent-2", expected_assignee="agent-1", reason="missed heartbeat")
 ```
 
 Active claims carry `claimed_at`, `last_heartbeat_at`, and `claim_expires_at`
@@ -104,7 +104,7 @@ fresh holder is not overwritten.
 
 ### Tie-Break Ordering
 
-`start_next_work` (and the underlying `claim_next`) selects the next issue by:
+`work_start_next` (and the underlying `work_claim_next`) selects the next issue by:
 
 1. `priority` ascending (0 = critical first)
 2. `created_at` ascending (oldest first within a priority tier)
@@ -131,8 +131,8 @@ filigree close proj-a3f9b2e1c0 --actor agent-beta     # after the verb (override
 Via MCP, every write tool accepts an `actor` parameter:
 
 ```
-create_issue(title="Fix auth", actor="agent-alpha")
-close_issue(issue_id="proj-a3f9b2e1c0", actor="agent-beta")
+issue_create(title="Fix auth", actor="agent-alpha")
+issue_close(issue_id="proj-a3f9b2e1c0", actor="agent-beta")
 ```
 
 Event history is queryable per-issue or globally:
@@ -151,7 +151,7 @@ Filigree generates a `context.md` file on every mutation, stored at `.filigree/c
 - Blocked issues with their blocker details
 - Recent activity
 
-Agents read this via the `filigree://context` MCP resource or `get_summary` tool at session start. Because it's pre-computed, there's no query overhead — the agent gets instant orientation.
+Agents read this via the `filigree://context` MCP resource or `summary_get` tool at session start. Because it's pre-computed, there's no query overhead — the agent gets instant orientation.
 
 ## Exit Codes (CLI)
 
@@ -173,7 +173,7 @@ A typical multi-agent setup with filigree:
 Team Lead (foreground, MCP)
 ├── Reads context.md at session start
 ├── Creates and prioritises issues
-├── Monitors progress via get_stats
+├── Monitors progress via stats_get
 │
 Worker Agent 1 (background, CLI --json)
 ├── start-next-work --assignee worker-1 --type=task
