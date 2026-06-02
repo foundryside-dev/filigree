@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in bearer-token auth for the loom federation surface (ADR-018; HTTP
+  generation: `loom`).** When the operator sets `FILIGREE_API_TOKEN`, requests to
+  `/api/loom/*` and the living federation alias `POST /api/scan-results` (incl.
+  server-mode `/api/p/{key}/…` mounts) must carry `Authorization: Bearer <token>`
+  or receive `401 PERMISSION` (with `WWW-Authenticate: Bearer`). Filigree finally
+  honours the token Clarion already sends instead of ignoring it. **Opt-in and
+  wire-compatible:** with the env var unset, behaviour is byte-identical to today
+  (loopback boundary, ADR-012) and the middleware is not installed. The classic
+  surface, the dashboard UI, `/api/health`, and `/` stay open. Reuses
+  `ErrorCode.PERMISSION` (no new error code). Constant-time comparison; a
+  non-ASCII token is a clean 401, not a 500. Gates **access** only — binding a
+  verified identity into `actor` remains future work (`filigree-81d3971467`).
+
 - **Promote-by-fingerprint HTTP route + finding→issue status cascade (Wardline
   A2).** New `POST /api/loom/findings/promote` turns a single true-positive into
   a tracked issue keyed on `(scan_source, fingerprint)` — the HTTP surface a
