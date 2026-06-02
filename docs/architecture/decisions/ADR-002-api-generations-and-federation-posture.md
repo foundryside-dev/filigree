@@ -7,7 +7,7 @@
 
 ## Summary
 
-Filigree 2.0 reframes the product from "standalone issue tracker with an HTTP API" to "standalone issue tracker **plus** a loosely-coupled component of the Loom federation." This release introduces **named API generations** at the HTTP surface — `classic` (historical, at `/api/v1/*`) and `loom` (new, at `/api/loom/*`) — with **lifecycles decoupled from filigree's code-version cadence**. MCP and CLI reflect the living / current-recommended surface only; HTTP is where pinned generations live. The federation posture is **cooperation, not mandate**: every `loom`-generation endpoint must be fully functional in the absence of other federation components.
+Filigree 2.0 reframes the product from "standalone issue tracker with an HTTP API" to "standalone issue tracker **plus** a loosely-coupled component of the Loom federation." This release introduces **named API generations** at the HTTP surface — `classic` (historical, at `/api/*` — mostly un-prefixed, with one `/api/v1/` outlier, `POST /api/v1/scan-results`) and `loom` (new, at `/api/loom/*`) — with **lifecycles decoupled from filigree's code-version cadence**. MCP and CLI reflect the living / current-recommended surface only; HTTP is where pinned generations live. The federation posture is **cooperation, not mandate**: every `loom`-generation endpoint must be fully functional in the absence of other federation components.
 
 ## Context
 
@@ -140,7 +140,7 @@ Retirement is therefore a **deliberate engineering decision**, never a drift-by-
 
 ### Committed
 
-- **The `classic` generation at `/api/v1/*` is a stability contract.** No more breaks at these URLs. Any 1.x caller on `/api/v1/*` continues to work through 2.0 and onward, unchanged.
+- **The `classic` generation (the `/api/*` surface, including the `/api/v1/scan-results` outlier) is a stability contract.** No more breaks at these URLs. Any 1.x caller on the classic paths continues to work through 2.0 and onward, unchanged.
 - **The `loom` generation is the 2.0 introduction.** It is the new recommended target for integrations; `classic` remains fully supported but is not where new federation capabilities land.
 - **Fixture publication discipline.** For each generation, we publish representative request/response fixtures in `tests/fixtures/contracts/<generation>/` and reference them in CHANGELOG. Clarion's ADR-017 ask becomes the default practice.
 - **A new surface-inventory discipline.** Changes to MCP/CLI/HTTP must declare which generation (for HTTP) or "living" (for MCP/CLI) they target, in commit messages and CHANGELOG entries.
@@ -212,7 +212,7 @@ Considered, kept as fallback. Rejected as the default because:
 
 See the 2.0 federation work package (`docs/plans/2026-04-24-2.0-federation-work-package.md`) for the concrete task breakdown. Summary:
 
-1. **Landing the `classic` generation as frozen** — no code change to `/api/v1/*` paths themselves; an audit + fixture-pinning exercise.
+1. **Landing the `classic` generation as frozen** — no code change to the classic `/api/*` paths themselves; an audit + fixture-pinning exercise.
 2. **Landing the `loom` generation** — new `/api/loom/*` routes, shape adapters, response types, contract fixtures.
 3. **Living surface wiring** — `/api/*` unversioned routes alias `loom`.
 4. **MCP/CLI forward-migration to the living shape** — `issue_ids`, `issue_id`, `BatchResponse`, `ListResponse`, `start_work`, etc.

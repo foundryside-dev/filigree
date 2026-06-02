@@ -89,6 +89,19 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
 - A malicious caller on the trusted transport can still impersonate any
   actor. Filigree 2.x is not the right tool for adversarial multi-tenant
   deployments.
+- **The §5 deferral is conditioned on the loopback-transport boundary
+  actually holding — it is not open-ended.** As of 2026-06 the Loom
+  federation is co-located on a single host: peers bind loopback (Clarion
+  `127.0.0.1:9111`, Filigree `127.0.0.1:8377`; the registry-backend runbook
+  spawns Clarion on a free loopback port same-host). While that topology
+  holds, "the trust boundary is the transport" (§Decision 3) is true and
+  transport-bound identity stays legitimately 2.2+. **The trigger that voids
+  the premise and re-opens this ADR is any federation peer binding
+  off-loopback (cross-host).** At that point inbound HTTP authentication
+  (transport-bound identity, tracked as `filigree-81d3971467`) becomes
+  near-term, and the first thing to settle is the contract mismatch tracked
+  in `filigree-30cd35bcb9` — Clarion sends an `Authorization: Bearer` token
+  that Filigree currently ignores because loopback is the boundary.
 
 ### Neutral
 
