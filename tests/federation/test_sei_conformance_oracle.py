@@ -283,6 +283,29 @@ def test_pk_collision_merges_to_single_row(tmp_path: Path) -> None:
         db.close()
 
 
+def test_dry_run_merge_count_matches_apply_for_already_sei_survivor(tmp_path: Path) -> None:
+    """A locator that collapses onto a row already at its target SEI is a merge
+    the applied run performs (the locator row is deleted). The dry-run must
+    report it too — otherwise the preview undercounts a destructive collapse on
+    a resumed/partial backfill (false-green on a row deletion)."""
+    loc = "py:func:mod::f_alias"
+    sei = "clarion:eid:00000000000000000000000000000007"
+    with clarion_stub(sei_supported=True, sei_by_locator={loc: sei}) as (base_url, _state):
+        db = _clarion_db(tmp_path, base_url)
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, sei, content_hash="h1")  # already SEI (survivor)
+        db.add_entity_association(issue.id, loc, content_hash="h2")  # collapses onto it
+
+        preview = run_sei_backfill(db, dry_run=True, actor="op")
+        applied = run_sei_backfill(db, dry_run=False, actor="op")
+
+        assert applied.associations_merged == 1
+        assert preview.associations_merged == applied.associations_merged
+        rows = db.list_entity_associations(issue.id)
+        assert [r["clarion_entity_id"] for r in rows] == [sei]
+        db.close()
+
+
 def test_deleted_issue_tombstones_are_rewritten(tmp_path: Path) -> None:
     """REQ-F-01: historical ``deleted_issues.entity_ids`` arrays are rewritten
     locator→SEI (orphans kept verbatim) so the changes feed is SEI-only."""

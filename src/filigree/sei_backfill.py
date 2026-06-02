@@ -233,10 +233,12 @@ def _plan(
     # Pre-tally which SEIs more than one of an issue's locators would collapse to,
     # so the dry-run reports merges the applied run will perform.
     targets_per_issue: dict[str, dict[str, int]] = {}
+    already_sei_per_issue: dict[str, set[str]] = {}
     for row in assoc_rows:
         eid = row["clarion_entity_id"]
         if eid.startswith(SEI_PREFIX):
             report.associations_already_sei += 1
+            already_sei_per_issue.setdefault(row["issue_id"], set()).add(eid)
             continue
         report.associations_scanned += 1
         sei = sei_by_locator.get(eid)
@@ -247,10 +249,15 @@ def _plan(
         report.associations_migrated += 1
         counts = targets_per_issue.setdefault(row["issue_id"], {})
         counts[sei] = counts.get(sei, 0) + 1
-    for counts in targets_per_issue.values():
-        for n in counts.values():
-            if n > 1:
-                report.associations_merged += n - 1
+    # Among the rows of an issue that end at one SEI, all but one survive — the
+    # rest are deleted as merges. ``n`` locators alone leave ``n - 1`` merges; an
+    # already-SEI row at that target is a pre-existing extra survivor, so every
+    # one of the ``n`` locators collides and is merged (``n`` merges). Counting it
+    # keeps the dry-run preview faithful to the destructive applied run.
+    for issue_id, counts in targets_per_issue.items():
+        present = already_sei_per_issue.get(issue_id, set())
+        for sei, n in counts.items():
+            report.associations_merged += n - 1 + (1 if sei in present else 0)
 
     for row in tomb_rows:
         locs = _decode_entity_ids(row["entity_ids"])
