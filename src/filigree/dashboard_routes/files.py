@@ -91,6 +91,50 @@ def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_sou
         return worker_db.clean_stale_findings(days=days, scan_source=scan_source, actor=actor)
 
 
+def _promote_finding_on_private_conn(
+    db: FiligreeDB,
+    *,
+    scan_source: str,
+    fingerprint: str,
+    priority: int | None,
+    labels: list[str] | None,
+    actor: str,
+) -> dict[str, Any] | None:
+    """Resolve ``(scan_source, fingerprint)`` → finding and promote it.
+
+    Runs on a private worker-thread connection (CONTRACT-E) — the resolve and
+    the promote (an issue write) share the SAME borrowed connection so it is
+    never used cross-thread. Returns ``{"issue_id", "created"}`` or ``None``
+    when no finding matches the fingerprint.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
+        if finding is None:
+            return None
+        result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+        return {"issue_id": result["issue"].id, "created": result["created"]}
+
+
+def _parse_promote_priority(raw: Any) -> tuple[int | None, str | None]:
+    """Normalize an optional ``"P2"``/``"2"``/``2`` priority to an int 0-4.
+
+    Returns ``(priority, None)`` on success (``priority`` is ``None`` when the
+    field was omitted), or ``(None, error_message)`` on a malformed value.
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if text[:1] in ("P", "p"):
+        text = text[1:]
+    try:
+        value = int(text)
+    except ValueError:
+        return None, f"priority must be P0-P4 or 0-4, got {raw!r}"
+    if not 0 <= value <= 4:
+        return None, f"priority must be in 0-4, got {raw!r}"
+    return value, None
+
+
 def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONResponse:
     if isinstance(exc, RegistryBriefingBlockedError):
         return _error_response(str(exc), ErrorCode.BRIEFING_BLOCKED, 403)
@@ -559,8 +603,9 @@ def create_loom_router() -> APIRouter:
 
         Loom-only (no classic dashboard counterpart at this path).
         Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
-        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``.
-        Drops MCP's ``total`` field per the unified envelope.
+        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``, plus
+        ``fingerprint`` (lets a scanner confirm a finding's issue link without
+        re-promoting). Drops MCP's ``total`` field per the unified envelope.
         """
         params = request.query_params
         pagination = _parse_pagination(params)
@@ -568,7 +613,7 @@ def create_loom_router() -> APIRouter:
             return pagination
         limit, offset = pagination
         filters: dict[str, Any] = {}
-        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id"):
+        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "fingerprint"):
             val = params.get(key)
             if val is not None:
                 filters[key] = val
@@ -578,6 +623,69 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         items = [scan_finding_to_loom(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
+
+    @router.post("/findings/promote")
+    async def api_loom_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Promote a finding to a tracked issue, keyed by ``(scan_source, fingerprint)``.
+
+        This is the HTTP surface Wardline's ``file_finding`` posts to (A2): an
+        agent holding only a scanner fingerprint turns one true-positive into a
+        tracked issue. Idempotent — re-promoting a fingerprint whose finding
+        already links an issue returns that issue with ``created=false`` (no
+        duplicate). Returns 404 when the fingerprint was never ingested under
+        ``scan_source``. See the 2026-06-02 promote-by-fingerprint brief.
+
+        Request: ``{scan_source (req), fingerprint (req), priority?, labels?}``.
+        ``priority`` accepts ``"P2"``/``2``; omit to derive from severity.
+        Response: ``{"issue_id": "<id>", "created": true|false}``.
+
+        Concurrency: promote is a WRITE (issue create + finding link), so it
+        runs via ``asyncio.to_thread`` on a PRIVATE worker-thread connection
+        (see ``_promote_finding_on_private_conn`` and CONTRACT-E in the module
+        header), never touching the shared event-loop connection.
+        """
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        fingerprint = body.get("fingerprint", "")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            return _error_response("fingerprint is required and must be a string", ErrorCode.VALIDATION, 400)
+        priority, priority_err = _parse_promote_priority(body.get("priority"))
+        if priority_err is not None:
+            return _error_response(priority_err, ErrorCode.VALIDATION, 400)
+        labels = body.get("labels")
+        if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
+            return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        try:
+            result = await asyncio.to_thread(
+                _promote_finding_on_private_conn,
+                db,
+                scan_source=scan_source,
+                fingerprint=fingerprint,
+                priority=priority,
+                labels=labels,
+                actor=actor,
+            )
+        except ValueError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        except sqlite3.Error as e:
+            return _error_response(f"database error promoting finding: {e}", ErrorCode.IO, 500)
+        if result is None:
+            return _error_response("no finding for fingerprint", ErrorCode.NOT_FOUND, 404)
+        logger.info(
+            "promote-by-fingerprint: issue=%s created=%s (scan_source=%r, actor=%r)",
+            result["issue_id"],
+            result["created"],
+            scan_source,
+            actor,
+        )
+        return JSONResponse(result)
 
     @router.post("/findings/clean-stale")
     async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:

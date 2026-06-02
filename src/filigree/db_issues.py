@@ -1190,7 +1190,7 @@ class IssuesMixin(DBMixinProtocol):
 
     @_retry_busy()
     @_in_immediate_tx("reopen_issue")
-    def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
+    def reopen_issue(self, issue_id: str, *, actor: str = "", _skip_begin: bool = False) -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
 
         The target comes from the most recent ``status_changed`` event whose

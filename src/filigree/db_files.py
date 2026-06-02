@@ -25,7 +25,7 @@ from filigree.db_base import (
     _safe_json_loads,
 )
 from filigree.db_scans import TERMINAL_SCAN_RUN_STATUSES
-from filigree.models import FileRecord, ScanFinding
+from filigree.models import FileRecord, Issue, ScanFinding
 from filigree.registry import (
     BatchQuery,
     BatchResolution,
@@ -70,6 +70,13 @@ TERMINAL_FINDING_STATUSES: frozenset[str] = frozenset({"fixed", "false_positive"
 if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING_STATUSES):
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
+
+# Actor recorded on a finding→issue cascade close/reopen. The reopen path only
+# auto-reopens an issue whose most recent into-done transition was made by this
+# actor (see ``_issue_last_closed_by_cascade``), so a human's terminal decision
+# is never silently overturned — even after a human reopen + reclose, which a
+# stored field marker would not survive.
+_FINDING_CASCADE_MARKER = "finding-cascade"
 
 
 def _validate_string(value: object, field_name: str) -> str:
@@ -1133,11 +1140,18 @@ class FilesMixin(DBMixinProtocol):
         now: str,
         stats: ScanIngestResult,
         seen_finding_ids: dict[str, list[str]],
+        regressed_issue_ids: set[str],
         create_observations: bool,
         observation_actor: str = "",
         actor: str = "",
     ) -> None:
-        """Upsert a single finding (dedup on file_id + scan_source + rule_id + line_start)."""
+        """Upsert a single finding (dedup on file_id + scan_source + rule_id + line_start).
+
+        ``regressed_issue_ids`` collects the linked issue ids of findings whose
+        stored status was ``fixed``/``unseen_in_latest`` and that re-appear in
+        this batch (``_update_existing_finding`` flips them back to ``open``).
+        The caller reopens those issues post-commit (the finding→issue cascade).
+        """
         severity = f.get("severity", "info")
         path = f["path"]
         rule_id = f.get("rule_id", "")
@@ -1160,7 +1174,7 @@ class FilesMixin(DBMixinProtocol):
             # it follows the finding across line moves, so identity is keyed on
             # (scan_source, fingerprint) alone, not file/rule/line.
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
                 (scan_source, fingerprint),
             ).fetchone()
         else:
@@ -1168,13 +1182,18 @@ class FilesMixin(DBMixinProtocol):
             # without a fingerprint never collides with a fingerprint-bearing
             # row that happens to share the same site (matches the partial index).
             existing_finding = self.conn.execute(
-                "SELECT id, seen_count, scan_run_id, issue_id FROM scan_findings "
+                "SELECT id, seen_count, scan_run_id, issue_id, status FROM scan_findings "
                 "WHERE file_id = ? AND scan_source = ? AND rule_id = ? "
                 "AND coalesce(line_start, -1) = ? AND fingerprint = ''",
                 (file_id, scan_source, rule_id, dedup_line),
             ).fetchone()
 
         if existing_finding is not None:
+            # Capture the pre-update status before _update_existing_finding flips
+            # fixed/unseen_in_latest → open, so the caller can reopen the linked
+            # issue post-commit (finding→issue regress cascade).
+            prior_status = existing_finding["status"]
+            linked_issue_id = existing_finding["issue_id"]
             self._update_existing_finding(
                 existing_finding=existing_finding,
                 f=f,
@@ -1187,6 +1206,8 @@ class FilesMixin(DBMixinProtocol):
                 actor=actor,
             )
             seen_finding_ids.setdefault(file_id, []).append(existing_finding["id"])
+            if linked_issue_id and prior_status in ("fixed", "unseen_in_latest"):
+                regressed_issue_ids.add(str(linked_issue_id))
         else:
             finding_id = self._generate_unique_id("scan_findings", "sf")
             self.conn.execute(
@@ -1400,6 +1421,7 @@ class FilesMixin(DBMixinProtocol):
             observations_failed=0,
             warnings=warnings,
         )
+        regressed_issue_ids: set[str] = set()
 
         # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Clarion HTTP round
         # trip) BEFORE the writer lock so concurrent ingests overlap. The write
@@ -1419,7 +1441,27 @@ class FilesMixin(DBMixinProtocol):
             now=now,
             actor=actor,
             stats=stats,
+            regressed_issue_ids=regressed_issue_ids,
         )
+
+        # Post-commit finding→issue cascade: reopen issues whose linked finding
+        # just regressed to ``open``. Runs OUTSIDE the ingest transaction (each
+        # reopen owns its own BEGIN IMMEDIATE) and is best-effort — a transition
+        # that the issue's workflow forbids must not fail the whole scan ingest.
+        # Not surfaced on the wire (the classic scan-results envelope is a frozen
+        # passthrough of this dict); logged instead for observability.
+        reopened_issue_ids = [
+            issue_id
+            for issue_id in sorted(regressed_issue_ids)
+            if self._reopen_issue_for_regressed_finding(issue_id, warnings=stats["warnings"])
+        ]
+        if reopened_issue_ids:
+            logger.info(
+                "finding→issue cascade: reopened %d issue(s) on regress (scan_source=%r): %s",
+                len(reopened_issue_ids),
+                scan_source,
+                ", ".join(reopened_issue_ids),
+            )
 
         if scan_run_id and complete_scan_run:
             # §F6 tolerate-unknown: an enrich-only producer (e.g. Clarion
@@ -1462,6 +1504,7 @@ class FilesMixin(DBMixinProtocol):
         now: str,
         actor: str,
         stats: ScanIngestResult,
+        regressed_issue_ids: set[str],
     ) -> None:
         """Write window for :meth:`process_scan_results`.
 
@@ -1480,6 +1523,9 @@ class FilesMixin(DBMixinProtocol):
         stats["observations_created"] = 0
         stats["observations_failed"] = 0
         stats["new_finding_ids"] = []
+        # Reset on every entry so a @_retry_busy re-run after a rolled-back
+        # transient SQLITE_BUSY does not double-accumulate regressed issues.
+        regressed_issue_ids.clear()
 
         seen_finding_ids: dict[str, list[str]] = {}
         counted_file_ids: set[str] = set()
@@ -1504,6 +1550,7 @@ class FilesMixin(DBMixinProtocol):
                 now=now,
                 stats=stats,
                 seen_finding_ids=seen_finding_ids,
+                regressed_issue_ids=regressed_issue_ids,
                 create_observations=create_observations,
                 observation_actor=observation_actor,
                 actor=actor,
@@ -1772,19 +1819,100 @@ class FilesMixin(DBMixinProtocol):
             (finding_id,),
         )
 
+    def _close_issue_for_fixed_finding(self, issue_id: str, *, warnings: list[str]) -> bool:
+        """Close an issue whose linked finding just went ``fixed`` (best-effort).
+
+        Runs in its own transaction (``close_issue`` owns ``@_in_immediate_tx``),
+        so the caller MUST invoke it AFTER its own write commits. The close is
+        attributed to the cascade actor (``_FINDING_CASCADE_MARKER``) so the
+        reopen path can tell a cascade close from a human one purely from event
+        history. Returns True iff this call closed the issue.
+        """
+        try:
+            issue = self.get_issue(issue_id)
+        except KeyError:
+            return False  # issue hard-deleted; finding.issue_id was SET NULL
+        if self._resolve_status_category(issue.type, issue.status) == "done":
+            return False  # already terminal (human or a prior cascade) — leave it
+        try:
+            # force=True uses the template's declared escape edge: a freshly
+            # promoted bug sits at ``triage``, from which the normal workflow has
+            # no single-hop edge to a done state. The cascade is exactly the
+            # "intentionally leaves the normal workflow" case force=True exists for.
+            self.close_issue(
+                issue_id,
+                reason="linked scan finding resolved (finding→issue cascade)",
+                actor=_FINDING_CASCADE_MARKER,
+                force=True,
+            )
+        except (KeyError, ValueError, sqlite3.Error) as exc:
+            warnings.append(f"cascade close of issue {issue_id} failed: {exc}")
+            return False
+        return True
+
+    def _issue_last_closed_by_cascade(self, issue: Issue) -> bool:
+        """True iff the most recent transition *into* a done state was the cascade.
+
+        Derived from the ``status_changed`` event history rather than a stored
+        field, so a human reopen + reclose (which leaves no sticky marker to
+        clear) is always honoured: the most recent into-done event would then
+        carry the human's actor, not the cascade's.
+        """
+        rows = self.conn.execute(
+            "SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = 'status_changed' ORDER BY created_at DESC, id DESC",
+            (issue.id,),
+        ).fetchall()
+        for row in rows:
+            new_status = row["new_value"]
+            if not new_status:
+                continue
+            try:
+                category = self._resolve_status_category(issue.type, new_status)
+            except (KeyError, ValueError):
+                continue
+            if category == "done":
+                return bool(row["actor"] == _FINDING_CASCADE_MARKER)
+        return False
+
+    def _reopen_issue_for_regressed_finding(self, issue_id: str, *, warnings: list[str]) -> bool:
+        """Reopen a cascade-closed issue whose linked finding regressed (best-effort).
+
+        Only reopens issues the cascade closed — gated on the most recent
+        into-done transition being the cascade actor (see
+        :meth:`_issue_last_closed_by_cascade`) — so a human's terminal decision
+        is never overturned. Runs in its own transaction; call AFTER the ingest
+        transaction commits.
+        """
+        try:
+            issue = self.get_issue(issue_id)
+        except KeyError:
+            return False  # issue hard-deleted; finding.issue_id was SET NULL
+        if self._resolve_status_category(issue.type, issue.status) != "done":
+            return False  # already open — nothing to reopen
+        if not self._issue_last_closed_by_cascade(issue):
+            return False  # human-closed (or reclosed) → respect the decision
+        try:
+            self.reopen_issue(issue_id, actor=_FINDING_CASCADE_MARKER)
+        except (KeyError, ValueError, sqlite3.Error) as exc:
+            warnings.append(f"cascade reopen of issue {issue_id} failed: {exc}")
+            return False
+        return True
+
     @_retry_busy()
     @_in_immediate_tx("clean_stale_findings")
-    def clean_stale_findings(
+    def _sweep_stale_findings_to_fixed(
         self,
         *,
-        days: int = 30,
-        scan_source: str | None = None,
-        actor: str = "",
-    ) -> CleanStaleResult:
-        """Move ``unseen_in_latest`` findings older than *days* to ``fixed``.
+        days: int,
+        scan_source: str | None,
+        actor: str,
+    ) -> list[tuple[str, str | None]]:
+        """Transaction body for :meth:`clean_stale_findings`.
 
-        Only affects findings whose ``last_seen_at`` (or ``updated_at`` as
-        fallback) is older than the cutoff.  Returns stats about what changed.
+        Moves ``unseen_in_latest`` findings older than *days* to ``fixed`` and
+        dismisses their linked observations, all in one ``BEGIN IMMEDIATE``.
+        Returns ``(finding_id, issue_id)`` for each fixed finding so the caller
+        can cascade-close the linked issues post-commit.
 
         Writer lock + commit/rollback are owned by ``@_in_immediate_tx``;
         ``@_retry_busy`` recovers transient SQLITE_BUSY by re-running the method
@@ -1805,10 +1933,10 @@ class FilesMixin(DBMixinProtocol):
         now = _now_iso()
         where = " AND ".join(clauses)
         fixed_rows = self.conn.execute(
-            f"SELECT id FROM scan_findings WHERE {where}",
+            f"SELECT id, issue_id FROM scan_findings WHERE {where}",
             params,
         ).fetchall()
-        cursor = self.conn.execute(
+        self.conn.execute(
             f"UPDATE scan_findings SET status = 'fixed', updated_at = ?, updated_by = ? WHERE {where}",
             [now, actor, *params],
         )
@@ -1819,7 +1947,35 @@ class FilesMixin(DBMixinProtocol):
                 reason="stale finding cleanup marked finding fixed",
                 now=now,
             )
-        return {"findings_fixed": cursor.rowcount}
+        return [(row["id"], row["issue_id"]) for row in fixed_rows]
+
+    def clean_stale_findings(
+        self,
+        *,
+        days: int = 30,
+        scan_source: str | None = None,
+        actor: str = "",
+    ) -> CleanStaleResult:
+        """Move ``unseen_in_latest`` findings older than *days* to ``fixed``.
+
+        Only affects findings whose ``last_seen_at`` (or ``updated_at`` as
+        fallback) is older than the cutoff. After the sweep commits, any fixed
+        finding linked to a still-open issue cascade-closes that issue (the
+        finding→issue cascade); each close runs in its own transaction and is
+        best-effort, so a forbidden workflow transition is logged rather than
+        failing the sweep.
+        """
+        fixed = self._sweep_stale_findings_to_fixed(days=days, scan_source=scan_source, actor=actor)
+
+        warnings: list[str] = []
+        closed_issue_ids: list[str] = []
+        for _finding_id, issue_id in fixed:
+            if issue_id and self._close_issue_for_fixed_finding(str(issue_id), warnings=warnings):
+                closed_issue_ids.append(str(issue_id))
+        for warning in warnings:
+            logger.warning("clean_stale_findings cascade: %s", warning)
+
+        return {"findings_fixed": len(fixed), "closed_issue_ids": closed_issue_ids}
 
     @staticmethod
     def _severity_bucket_sql(open_filter: str) -> str:
@@ -1932,6 +2088,26 @@ class FilesMixin(DBMixinProtocol):
             raise KeyError(msg)
         return self._build_scan_finding(row).to_dict()
 
+    def find_finding_by_fingerprint(self, scan_source: str, fingerprint: str) -> ScanFindingDict | None:
+        """Resolve a finding by its ``(scan_source, fingerprint)`` identity.
+
+        Returns the finding dict, or ``None`` when no fingerprint-bearing
+        finding matches. Uses the unique partial index
+        ``idx_scan_findings_fingerprint (scan_source, fingerprint)
+        WHERE fingerprint <> ''``. An empty *fingerprint* never matches (those
+        rows are excluded from the index) and returns ``None``; callers that
+        want to reject a blank fingerprint should validate before calling.
+        """
+        if not fingerprint:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM scan_findings WHERE scan_source = ? AND fingerprint = ?",
+            (scan_source, fingerprint),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._build_scan_finding(row).to_dict()
+
     def list_findings_global(
         self,
         *,
@@ -1941,6 +2117,7 @@ class FilesMixin(DBMixinProtocol):
         scan_run_id: str | None = None,
         file_id: str | None = None,
         issue_id: str | None = None,
+        fingerprint: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1962,6 +2139,7 @@ class FilesMixin(DBMixinProtocol):
             "scan_run_id": scan_run_id,
             "file_id": file_id,
             "issue_id": issue_id,
+            "fingerprint": fingerprint,
         }
         clauses: list[str] = []
         params: list[Any] = []
@@ -2055,7 +2233,7 @@ class FilesMixin(DBMixinProtocol):
                 warnings.append(f"Finding {finding_id} referenced missing issue {linked_issue_id}; creating a new issue")
             else:
                 warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
-                return {"issue": issue, "warnings": warnings}
+                return {"issue": issue, "created": False, "warnings": warnings}
 
         existing_issue_row = self.conn.execute(
             "SELECT id FROM issues WHERE json_valid(fields) AND json_extract(fields, '$.source_finding_id') = ?",
@@ -2068,7 +2246,7 @@ class FilesMixin(DBMixinProtocol):
             except (KeyError, ValueError, sqlite3.Error):
                 warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id}, but relinking failed")
             warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id} (returning existing)")
-            return {"issue": issue, "warnings": warnings}
+            return {"issue": issue, "created": False, "warnings": warnings}
 
         file_path = self._file_path_for_finding(finding["file_id"])
         if not file_path:
@@ -2117,7 +2295,7 @@ class FilesMixin(DBMixinProtocol):
         except (KeyError, ValueError, sqlite3.Error):
             warnings.append(f"Created issue {issue.id}, but linking finding {finding_id} failed")
 
-        result: dict[str, Any] = {"issue": self.get_issue(issue.id)}
+        result: dict[str, Any] = {"issue": self.get_issue(issue.id), "created": True}
         if warnings:
             result["warnings"] = warnings
         return result

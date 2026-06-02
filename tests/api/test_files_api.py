@@ -589,3 +589,116 @@ class TestLoomCleanStaleFindingsAPI:
             assert set(body.keys()) == set(exp_body.keys()), example["name"]
             for key, val in exp_body.items():
                 assert type(body[key]) is type(val), f"{example['name']}:{key}"
+
+
+class TestLoomPromoteFindingAPI:
+    """POST /api/loom/findings/promote — Wardline A2 promote-by-fingerprint.
+
+    HTTP surface over the idempotent core ``promote_finding_to_issue``, keyed on
+    ``(scan_source, fingerprint)`` (Wardline only knows its fingerprint and only
+    speaks HTTP). See the 2026-06-02 promote-by-fingerprint brief.
+    """
+
+    async def _ingest(self, client: AsyncClient, fingerprint: str = "fp-http") -> None:
+        resp = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "fingerprint": fingerprint}],
+            },
+        )
+        assert resp.status_code == 200
+
+    async def test_promote_returns_issue_id_created(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["created"] is True
+        assert body["issue_id"]
+        assert set(body.keys()) == {"issue_id", "created"}
+
+    async def test_promote_is_idempotent(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        first = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        second = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert first.json()["created"] is True
+        assert second.status_code == 200
+        assert second.json()["created"] is False
+        assert second.json()["issue_id"] == first.json()["issue_id"]
+
+    async def test_unknown_fingerprint_404(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-nope"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_unknown_scan_source_404(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "other", "fingerprint": "fp-http"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_missing_fingerprint_400(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_blank_fingerprint_400_not_404(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "  "})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_missing_scan_source_400(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"fingerprint": "fp-http"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    @pytest.mark.parametrize("bad", ["P9", "Z", "5", "-1"])
+    async def test_bad_priority_400(self, client: AsyncClient, bad: str) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/loom/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "priority": bad},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_priority_label_applied(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client, "fp-prio")
+        resp = await client.post(
+            "/api/loom/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-prio", "priority": "P2"},
+        )
+        assert resp.status_code == 200
+        issue = dashboard_db.db.get_issue(resp.json()["issue_id"])
+        assert issue.priority == 2
+
+    async def test_fingerprint_filter_on_get_findings(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-a")
+        await self._ingest(client, "fp-b")
+        resp = await client.get("/api/loom/findings?scan_source=wardline&fingerprint=fp-b")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        assert items[0]["fingerprint"] == "fp-b"
+
+    async def test_end_to_end_cascade_over_wire(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Promote → stale-fix → reopen-on-regress, all via HTTP (the A2 oracle)."""
+        await self._ingest(client, "fp-cycle")
+        promoted = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-cycle"})
+        issue_id = promoted.json()["issue_id"]
+
+        # Drive the finding stale, then sweep it fixed via the HTTP clean-stale.
+        dashboard_db.db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE fingerprint = 'fp-cycle'",
+            (_OLD_TS,),
+        )
+        dashboard_db.db.conn.commit()
+        swept = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
+        assert swept.status_code == 200
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) == "done"
+
+        # Re-ingest the same fingerprint → finding regresses → issue reopens.
+        await self._ingest(client, "fp-cycle")
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) != "done"

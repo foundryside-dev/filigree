@@ -216,3 +216,4 @@ class CleanStaleResult(TypedDict):
     """Shape returned by ``clean_stale_findings()``."""
 
     findings_fixed: int
+    closed_issue_ids: list[str]

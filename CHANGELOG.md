@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Promote-by-fingerprint HTTP route + finding→issue status cascade (Wardline
+  A2).** New `POST /api/loom/findings/promote` turns a single true-positive into
+  a tracked issue keyed on `(scan_source, fingerprint)` — the HTTP surface a
+  scanner (e.g. Wardline) needs when it knows only its own fingerprint and
+  speaks HTTP. Idempotent: re-promoting a fingerprint whose finding already
+  links an issue returns `{"issue_id", "created": false}` with no duplicate; an
+  un-ingested fingerprint returns `404 NOT_FOUND`. `priority` accepts `"P2"` or
+  `2`. Backed by new read-only `find_finding_by_fingerprint` and a `created`
+  flag on `promote_finding_to_issue`; runs on a private worker-thread connection
+  (CONTRACT-E). A finding→issue **status cascade** now keeps the filed issue
+  honest: when a fingerprint-linked finding goes `fixed` via the clean-stale
+  sweep its linked issue is auto-closed, and when the finding regresses to
+  `open` on re-ingest the issue is reopened — but only if the cascade was what
+  closed it (gated on the most recent into-done transition's actor in the event
+  history, so a human's reopen + reclose is always honoured). `GET
+  /api/loom/findings` gains an optional `fingerprint` filter. No schema change
+  (reuses existing columns and the event log).
+
 - **SEI conformance: locator→SEI backfill + two-axis freshness (ADR-017).**
   Filigree can now re-key its opaque Clarion entity bindings from mutable
   locators (`{plugin}:{kind}:{qualname}`) to durable, opaque SEIs

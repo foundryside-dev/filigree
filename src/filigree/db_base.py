@@ -377,6 +377,20 @@ class DBMixinProtocol(Protocol):
         _skip_begin: bool = False,
     ) -> Issue: ...
 
+    def close_issue(
+        self,
+        issue_id: str,
+        *,
+        reason: str = "",
+        actor: str = "",
+        status: str | None = None,
+        fields: dict[str, Any] | None = None,
+        expected_assignee: str | None = None,
+        force: bool = False,
+    ) -> Issue: ...
+
+    def reopen_issue(self, issue_id: str, *, actor: str = "", _skip_begin: bool = False) -> Issue: ...
+
     def list_issues(
         self,
         *,
