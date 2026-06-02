@@ -68,9 +68,9 @@ _logger: logging.Logger | None = None
 # Deprecation telemetry (rollout plan §5.3): count how often callers reach a
 # tool via its DEPRECATED OLD name (keyed by the inbound wire name) so we can
 # PROVE, before old names are removed in Phase 2, that consumers have migrated.
-# Best-effort diagnostics — a plain increment under asyncio is adequate (the
-# GIL makes each ``+= 1`` atomic enough); it is NOT an exact count under high
-# concurrency, and that is acceptable for a migration-readiness signal.
+# The count is exact: ``call_tool`` runs as an asyncio coroutine on the single
+# event-loop thread, and there is no ``await`` between the Counter read and
+# write, so each ``+= 1`` is uninterruptible — the GIL is not relied upon.
 _deprecated_tool_calls: Counter[str] = Counter()
 
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
@@ -219,17 +219,24 @@ def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> N
     ``deprecated_tool_name`` log event (matching the ``tool_call``/``tool_error``
     style elsewhere in this module). ``wire_name`` is guaranteed to be a key of
     ``RENAME_MAP`` by the caller's detection guard.
+
+    Runs before the handler's try/except in ``call_tool``, so it is wrapped in a
+    blanket guard: telemetry must NEVER break a real tool call.
     """
-    _deprecated_tool_calls[wire_name] += 1
-    if _logger:
-        _logger.info(
-            "deprecated_tool_name",
-            extra={
-                "tool": wire_name,
-                "canonical": RENAME_MAP[wire_name],
-                "actor": arguments.get("actor") if isinstance(arguments, dict) else None,
-            },
-        )
+    try:
+        _deprecated_tool_calls[wire_name] += 1
+        if _logger:
+            _logger.info(
+                "deprecated_tool_name",
+                extra={
+                    "tool": wire_name,
+                    "canonical": RENAME_MAP[wire_name],
+                    "actor": arguments.get("actor"),
+                },
+            )
+    except Exception:
+        # Telemetry is best-effort; never break a tool call.
+        pass
 
 
 def get_mcp_status_payload() -> dict[str, Any]:
