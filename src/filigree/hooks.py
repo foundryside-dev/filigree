@@ -25,9 +25,8 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     FiligreeDB,
     ForeignDatabaseError,
-    find_filigree_anchor,
     find_filigree_command,
-    find_filigree_root,
+    find_filigree_conf,
     get_mode,
 )
 from filigree.install import (
@@ -268,7 +267,7 @@ def generate_session_context() -> str | None:
     Returns ``None`` when there is no filigree project (silent exit).
     """
     try:
-        project_root, conf_path = find_filigree_anchor()
+        conf_path = find_filigree_conf()
     except ForeignDatabaseError as exc:
         # Surface the remediation message rather than swallowing it as a
         # silent "no project" exit (filigree-acbacc5b3e).
@@ -276,6 +275,7 @@ def generate_session_context() -> str | None:
     except FileNotFoundError:
         return None
 
+    project_root = conf_path.parent
     filigree_dir = project_root / FILIGREE_DIR_NAME
 
     # Check instruction freshness (best-effort — don't let failures block context)
@@ -286,10 +286,7 @@ def generate_session_context() -> str | None:
         logger.warning("Instructions freshness check failed for %s", project_root, exc_info=True)
 
     try:
-        # Honour the conf's ``db`` field when present so a relocated DB is
-        # opened from its declared path; legacy installs (no conf) keep the
-        # ``.filigree/filigree.db`` default (filigree-4e28325279).
-        db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
+        db = FiligreeDB.from_conf(conf_path)
     except (sqlite3.Error, ValueError, OSError):
         logger.warning("Database init failed for %s", filigree_dir, exc_info=True)
         context = (
@@ -346,6 +343,18 @@ def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def _find_agent_filigree_dir() -> Path:
+    """Resolve the metadata dir for implicit agent startup hooks.
+
+    Agent hooks run automatically when a coding agent opens a folder. Require
+    the authoritative ``.filigree.conf`` anchor so a legacy ancestor
+    ``.filigree/`` directory is not treated as consent to attach to that
+    project.
+    """
+    conf_path = find_filigree_conf()
+    return conf_path.parent / FILIGREE_DIR_NAME
+
+
 def ensure_dashboard_running(port: int | None = None) -> str:
     """Ensure the filigree dashboard is running.
 
@@ -354,7 +363,7 @@ def ensure_dashboard_running(port: int | None = None) -> str:
     In server mode: just verifies the daemon is reachable.
     """
     try:
-        filigree_dir = find_filigree_root()
+        filigree_dir = _find_agent_filigree_dir()
     except ForeignDatabaseError as exc:
         # Don't silently spawn a dashboard against an ancestor's database
         # (filigree-acbacc5b3e). ``ForeignDatabaseError`` subclasses

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from filigree.core import DB_FILENAME, FiligreeDB
+from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_conf
 from filigree.hooks import (
     CONTEXT_TITLE_MAX_LEN,
     READY_CAP,
@@ -31,6 +31,22 @@ from filigree.install import (
     install_skills,
 )
 from tests.conftest import PopulatedDB
+
+
+def _write_conf_for_db(db: FiligreeDB) -> Path:
+    db_path = Path(db.db_path)
+    project_root = db_path.parent.parent if db_path.parent.name == FILIGREE_DIR_NAME else db_path.parent
+    conf_path = project_root / CONF_FILENAME
+    write_conf(
+        conf_path,
+        {
+            "version": 1,
+            "project_name": project_root.name,
+            "prefix": db.prefix,
+            "db": os.path.relpath(db_path, project_root),
+        },
+    )
+    return conf_path
 
 
 class TestBuildContext:
@@ -144,15 +160,31 @@ class TestBuildContext:
 
 class TestGenerateSessionContext:
     def test_returns_none_without_filigree_dir(self, tmp_path: Path) -> None:
-        with patch("filigree.hooks.find_filigree_anchor", side_effect=FileNotFoundError):
+        with patch("filigree.hooks.find_filigree_conf", side_effect=FileNotFoundError):
             assert generate_session_context() is None
+
+    def test_returns_none_from_unconfigured_folder_under_legacy_ancestor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Agent startup must not latch onto a legacy ancestor without .filigree.conf."""
+        legacy_dir = tmp_path / FILIGREE_DIR_NAME
+        legacy_dir.mkdir()
+        db = FiligreeDB(legacy_dir / DB_FILENAME, prefix="filigree")
+        db.initialize()
+        db.close()
+        workdir = tmp_path / "scratch" / "leaf"
+        workdir.mkdir(parents=True)
+
+        monkeypatch.chdir(workdir)
+
+        assert generate_session_context() is None
 
     def test_returns_context_string(self, tmp_path: Path, db: FiligreeDB) -> None:
         """Smoke test that generate_session_context returns a string when a project exists."""
-        # We mock find_filigree_anchor to return the project root + no conf
-        # (legacy install), which routes DB init through ``from_filigree_dir``.
-        db_dir = Path(db.db_path).parent
-        with patch("filigree.hooks.find_filigree_anchor", return_value=(db_dir.parent, None)):
+        conf_path = _write_conf_for_db(db)
+        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
             result = generate_session_context()
         assert result is not None
         assert "Filigree Project Snapshot" in result
@@ -187,7 +219,7 @@ class TestExecutableResolution:
         mock_proc.pid = 11111
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc) as mock_popen,
             patch("filigree.hooks.find_filigree_command", return_value=[expected_bin]),
@@ -213,7 +245,7 @@ class TestEnsureDashboardSubprocessVerification:
         mock_proc.pid = 12345
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -232,7 +264,7 @@ class TestEnsureDashboardSubprocessVerification:
         mock_proc.pid = 99999
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -254,7 +286,7 @@ class TestEnsureDashboardSubprocessVerification:
         logfile = tmp_path / "ephemeral.log"
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -294,7 +326,7 @@ class TestEnsureDashboardStartupRace:
         mock_proc.pid = 77777
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", return_value="ethereal"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch(
@@ -325,7 +357,7 @@ class TestEnsureDashboardGetModeError:
         mock_proc.pid = 11111
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", side_effect=ValueError("Unknown mode 'bogus'")),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
@@ -345,7 +377,7 @@ class TestEnsureDashboardGetModeError:
         mock_proc.pid = 11111
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", side_effect=ValueError("Unknown mode 'bogus'")),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
@@ -381,7 +413,7 @@ class TestEnsureDashboardMetadataWriteFailure:
         mock_proc.wait.return_value = 0
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", return_value="ethereal"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
@@ -410,7 +442,7 @@ class TestEnsureDashboardMetadataWriteFailure:
         mock_proc.wait.return_value = 0
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", return_value="ethereal"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
@@ -440,7 +472,7 @@ class TestEnsureDashboardMetadataWriteFailure:
         mock_proc.wait.side_effect = [_subprocess.TimeoutExpired(cmd="x", timeout=2.0), 0]
 
         with (
-            patch("filigree.hooks.find_filigree_root", return_value=tmp_path),
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
             patch("filigree.hooks.get_mode", return_value="ethereal"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
@@ -606,20 +638,20 @@ class TestCheckInstructionsFreshness:
 class TestGenerateSessionContextFreshness:
     def test_context_includes_freshness_messages(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should include update messages when instructions are stale."""
-        db_dir = Path(db.db_path).parent
-        project_root = db_dir.parent
+        conf_path = _write_conf_for_db(db)
+        project_root = conf_path.parent
         # Create a stale CLAUDE.md in the project root
         claude_md = project_root / "CLAUDE.md"
         claude_md.write_text("<!-- filigree:instructions:v0.0.0:00000000 -->\nold\n<!-- /filigree:instructions -->\n")
-        with patch("filigree.hooks.find_filigree_anchor", return_value=(db_dir.parent, None)):
+        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
             result = generate_session_context()
         assert result is not None
         assert "Updated filigree instructions in CLAUDE.md" in result
 
     def test_context_without_stale_instructions(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should not include update messages when everything is fresh."""
-        db_dir = Path(db.db_path).parent
-        with patch("filigree.hooks.find_filigree_anchor", return_value=(db_dir.parent, None)):
+        conf_path = _write_conf_for_db(db)
+        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
             result = generate_session_context()
         assert result is not None
         assert "Updated" not in result
@@ -676,6 +708,28 @@ class TestSessionContextDashboardUrl:
 
 
 class TestEnsureDashboardEthereal:
+    def test_returns_empty_from_unconfigured_folder_under_legacy_ancestor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Agent dashboard hook must not attach to a legacy ancestor."""
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="filigree")
+        db.initialize()
+        db.close()
+        workdir = tmp_path / "scratch" / "leaf"
+        workdir.mkdir(parents=True)
+        monkeypatch.chdir(workdir)
+
+        def _forbid_popen(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("dashboard hook should not spawn for a legacy ancestor")
+
+        monkeypatch.setattr("filigree.hooks.subprocess.Popen", _forbid_popen)
+
+        assert ensure_dashboard_running() == ""
+
     def test_starts_dashboard_on_deterministic_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """In ethereal mode, dashboard starts on project-specific port."""
         filigree_dir = tmp_path / ".filigree"
@@ -685,6 +739,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
 
@@ -715,6 +770,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         (filigree_dir / "ephemeral.pid").write_text(str(os.getpid()))
         (filigree_dir / "ephemeral.port").write_text("9173")
@@ -735,6 +791,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         (filigree_dir / "ephemeral.pid").write_text("99999")
         (filigree_dir / "ephemeral.port").write_text("9173")
@@ -766,6 +823,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.hooks._is_port_listening", lambda *a: False)
@@ -787,6 +845,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.ephemeral.find_available_port", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("denied")))
@@ -804,6 +863,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
 
@@ -829,6 +889,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
 
@@ -855,6 +916,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.server.register_project", lambda _p: None)
         monkeypatch.setattr("filigree.hooks._is_port_listening", lambda *a: False)
@@ -868,6 +930,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         def _raise_registration(_path: Path) -> None:
             raise ValueError("bad schema")
@@ -889,6 +952,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.server.register_project", lambda _p: None)
@@ -928,6 +992,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.server.register_project", lambda _p: None)
@@ -951,6 +1016,7 @@ class TestEnsureDashboardEthereal:
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        _write_conf_for_db(db)
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("filigree.server.register_project", lambda _p: None)
@@ -972,9 +1038,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        conf_path = _write_conf_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_anchor", return_value=(db_dir.parent, None)),
+            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
             patch("filigree.hooks._check_instructions_freshness", side_effect=OSError("disk full")),
             patch("filigree.hooks.logger") as mock_logger,
         ):
@@ -991,9 +1058,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
+        conf_path = _write_conf_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_anchor", return_value=(db_dir.parent, None)),
+            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
             patch("filigree.hooks._check_instructions_freshness", side_effect=RuntimeError("boom")),
             pytest.raises(RuntimeError, match="boom"),
         ):

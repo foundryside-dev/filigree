@@ -433,9 +433,12 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
     closer-first: a child anchor wins over an ancestor regardless of type.
 
     Pure read — never writes. Use this when discovery must work on read-only
-    mounts (inspection commands, MCP startup, ``filigree doctor``). To force
-    a backfill, run ``filigree init`` (or another explicit write path) on
-    a writable copy of the project.
+    mounts (inspection commands, ``filigree doctor``, and explicit
+    legacy-compatible code paths). Implicit agent startup surfaces use the
+    stricter :func:`find_filigree_conf` path so a legacy ancestor is not
+    treated as a project attachment signal. To force a backfill, run
+    ``filigree init`` (or another explicit write path) on a writable copy of
+    the project.
 
     When *start* sits inside a git linked worktree, discovery is redirected
     to the main worktree root so the worktree's ``.git`` file is not
