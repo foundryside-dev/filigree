@@ -1119,6 +1119,7 @@ class IssuesMixin(DBMixinProtocol):
         fields: dict[str, Any] | None = None,
         expected_assignee: str | None = None,
         force: bool = False,
+        _skip_begin: bool = False,
     ) -> Issue:
         """Close an issue.
 
@@ -1186,6 +1187,7 @@ class IssuesMixin(DBMixinProtocol):
             actor=actor,
             expected_assignee=expected_assignee,
             backward=use_reverse_transition,
+            _skip_begin=_skip_begin,
         )
 
     @_retry_busy()

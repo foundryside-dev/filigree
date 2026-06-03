@@ -1826,35 +1826,48 @@ class FilesMixin(DBMixinProtocol):
             (finding_id,),
         )
 
-    def _close_issue_for_fixed_finding(self, issue_id: str, *, warnings: list[str]) -> bool:
+    def _close_issue_for_fixed_finding(self, finding_id: str, issue_id: str, *, warnings: list[str]) -> bool:
         """Close an issue whose linked finding just went ``fixed`` (best-effort).
 
-        Runs in its own transaction (``close_issue`` owns ``@_in_immediate_tx``),
-        so the caller MUST invoke it AFTER its own write commits. The close is
-        attributed to the cascade actor (``_FINDING_CASCADE_MARKER``) so the
-        reopen path can tell a cascade close from a human one purely from event
-        history. Returns True iff this call closed the issue.
+        Returns True iff this call closed the issue.
         """
         try:
-            issue = self.get_issue(issue_id)
-        except KeyError:
-            return False  # issue hard-deleted; finding.issue_id was SET NULL
-        if self._resolve_status_category(issue.type, issue.status) == "done":
-            return False  # already terminal (human or a prior cascade) — leave it
-        try:
-            # force=True uses the template's declared escape edge: a freshly
-            # promoted bug sits at ``triage``, from which the normal workflow has
-            # no single-hop edge to a done state. The cascade is exactly the
-            # "intentionally leaves the normal workflow" case force=True exists for.
-            self.close_issue(
-                issue_id,
-                reason="linked scan finding resolved (finding→issue cascade)",
-                actor=_FINDING_CASCADE_MARKER,
-                force=True,
-            )
+            return self._close_issue_for_fixed_finding_tx(finding_id, issue_id)
         except (KeyError, ValueError, sqlite3.Error) as exc:
             warnings.append(f"cascade close of issue {issue_id} failed: {exc}")
             return False
+
+    @_retry_busy()
+    @_in_immediate_tx("close_issue_for_fixed_finding")
+    def _close_issue_for_fixed_finding_tx(self, finding_id: str, issue_id: str) -> bool:
+        """Atomically verify the finding is still fixed before closing its issue.
+
+        The stale sweep and scan ingest intentionally commit before their
+        best-effort issue cascades. This transaction closes the post-commit
+        race: if ingest reopened the same finding after the sweep, the status
+        check observes ``open`` under the writer lock and skips the stale close.
+        """
+        finding = self.conn.execute(
+            "SELECT status FROM scan_findings WHERE id = ? AND issue_id = ?",
+            (finding_id, issue_id),
+        ).fetchone()
+        if finding is None or finding["status"] != "fixed":
+            return False
+
+        issue = self.get_issue(issue_id)
+        if self._resolve_status_category(issue.type, issue.status) == "done":
+            return False  # already terminal (human or a prior cascade) — leave it
+        # force=True uses the template's declared escape edge: a freshly
+        # promoted bug sits at ``triage``, from which the normal workflow has no
+        # single-hop edge to a done state. The cascade is exactly the
+        # "intentionally leaves the normal workflow" case force=True exists for.
+        self.close_issue(
+            issue_id,
+            reason="linked scan finding resolved (finding→issue cascade)",
+            actor=_FINDING_CASCADE_MARKER,
+            force=True,
+            _skip_begin=True,
+        )
         return True
 
     def _issue_last_closed_by_cascade(self, issue: Issue) -> bool:
@@ -1976,8 +1989,8 @@ class FilesMixin(DBMixinProtocol):
 
         warnings: list[str] = []
         closed_issue_ids: list[str] = []
-        for _finding_id, issue_id in fixed:
-            if issue_id and self._close_issue_for_fixed_finding(str(issue_id), warnings=warnings):
+        for finding_id, issue_id in fixed:
+            if issue_id and self._close_issue_for_fixed_finding(finding_id, str(issue_id), warnings=warnings):
                 closed_issue_ids.append(str(issue_id))
         for warning in warnings:
             logger.warning("clean_stale_findings cascade: %s", warning)

@@ -162,3 +162,88 @@ def test_sei_backfill_maps_sqlite_error_to_io_envelope(
     payload = json.loads(result.output)
     assert payload["code"] == "IO"
     assert "database is locked" in payload["error"]
+
+
+def test_sei_backfill_maps_out_of_sync_error_to_code_3_and_envelope(
+    cli_in_project: tuple[CliRunner, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ClarionOutOfSyncError maps to exit code 3 and the CLARION_OUT_OF_SYNC envelope."""
+    runner, _project = cli_in_project
+    from filigree.sei_backfill import ClarionOutOfSyncError
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise ClarionOutOfSyncError("Clarion DB is out of sync")
+
+    monkeypatch.setattr("filigree.cli_commands.sei.run_sei_backfill", _boom)
+    result = runner.invoke(cli, ["sei-backfill", "--json"])
+
+    assert result.exit_code == 3
+    payload = json.loads(result.output)
+    assert payload["code"] == "CLARION_OUT_OF_SYNC"
+    assert "Clarion DB is out of sync" in payload["error"]
+    assert payload["remediation_command"] == "clarion analyze"
+
+
+def test_sei_backfill_sync_check_missing_db(
+    cli_in_project: tuple[CliRunner, Path],
+) -> None:
+    """If db.project_root is set but .clarion/clarion.db is missing, it raises ClarionOutOfSyncError."""
+    runner, project = cli_in_project
+    (project / ".git").mkdir(exist_ok=True)
+    with clarion_stub(sei_supported=True) as (base_url, _state):
+        _switch_to_clarion_mode(project, base_url)
+        # Run command — since `.clarion/clarion.db` does not exist, it should raise ClarionOutOfSyncError, exit with code 3.
+        result = runner.invoke(cli, ["sei-backfill", "--json"])
+        assert result.exit_code == 3
+        payload = json.loads(result.output)
+        assert payload["code"] == "CLARION_OUT_OF_SYNC"
+        assert "Clarion database not found" in payload["error"]
+
+
+def test_sei_backfill_sync_check_hash_mismatch(
+    cli_in_project: tuple[CliRunner, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If .clarion/clarion.db exists but analyzed_at_commit does not match git HEAD, it raises ClarionOutOfSyncError."""
+    runner, project = cli_in_project
+    (project / ".git").mkdir(exist_ok=True)
+
+    # 1. Create a dummy .clarion/clarion.db
+    clarion_dir = project / ".clarion"
+    clarion_dir.mkdir(parents=True, exist_ok=True)
+    clarion_db_path = clarion_dir / "clarion.db"
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(clarion_db_path))
+    conn.execute("CREATE TABLE runs (status TEXT, analyzed_at_commit TEXT, started_at TEXT)")
+    # Insert a run with a mismatched commit hash
+    conn.execute("INSERT INTO runs VALUES ('completed', 'mismatched_commit_hash', '2026-01-01T00:00:00Z')")
+    conn.commit()
+    conn.close()
+
+    # 2. Mock git rev-parse HEAD to return a fixed commit hash
+    import subprocess
+
+    class MockCompletedProcess:
+        def __init__(self) -> None:
+            self.stdout = "expected_git_head_commit_hash\n"
+            self.stderr = ""
+            self.returncode = 0
+
+    def mock_run(*args: object, **kwargs: object) -> MockCompletedProcess:
+        return MockCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    with clarion_stub(sei_supported=True) as (base_url, _state):
+        _switch_to_clarion_mode(project, base_url)
+
+        result = runner.invoke(cli, ["sei-backfill", "--json"])
+        assert result.exit_code == 3
+        payload = json.loads(result.output)
+        assert payload["code"] == "CLARION_OUT_OF_SYNC"
+        assert "out of sync with git HEAD" in payload["error"]
+        assert "mismatched_commit_hash" in payload["error"]
+        assert "expected_git_head_commit_hash" in payload["error"]

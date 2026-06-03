@@ -475,6 +475,7 @@ def _create_project_router() -> APIRouter:
 
     # Living surface — un-prefixed loom aliases; per-endpoint adoption.
     router.include_router(files.create_living_surface_router())
+    router.include_router(analytics.create_living_surface_router())
 
     return router
 

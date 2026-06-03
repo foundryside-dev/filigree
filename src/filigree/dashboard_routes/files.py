@@ -68,6 +68,10 @@ _MAX_MIN_FINDINGS = 2_147_483_647
 # (the Clarion HTTP resolution, which happens BEFORE any write transaction
 # opens) overlaps freely. The shared registry's ``httpx.Client`` is safe for
 # concurrent use, so two workers may resolve against Clarion simultaneously.
+# The post-commit clean-stale finding→issue close cascade re-checks that the
+# finding is still ``fixed`` inside its own writer transaction before closing
+# the issue, so a concurrent re-ingest cannot leave an open finding on a newly
+# cascade-closed issue.
 
 
 def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any]) -> ScanIngestResult:
@@ -745,8 +749,10 @@ def create_loom_router() -> APIRouter:
         connection, it cannot race the plain-async event-loop write handlers
         (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It takes no
         app-level lock against the scan-results worker path; WAL admits one
-        writer at a time and ``busy_timeout`` absorbs the brief overlap. See the
-        module header for the connection-scoped invariant.
+        writer at a time and ``busy_timeout`` absorbs the brief overlap. Its
+        post-commit issue close cascade revalidates that each finding is still
+        ``fixed`` under a writer transaction before closing the linked issue.
+        See the module header for the connection-scoped invariant.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):

@@ -38,11 +38,12 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from filigree.db_base import _now_iso
-from filigree.registry import ClarionRegistry, SeiResolution
+from filigree.registry import ClarionRegistry, RegistryResolutionError, RegistryUnavailableError, SeiResolution
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
@@ -65,6 +66,10 @@ class SeiBackfillError(RuntimeError):
     honest answer is "identity unavailable; nothing to migrate", per the
     oracle's ``capability_absent`` scenario.
     """
+
+
+class ClarionOutOfSyncError(SeiBackfillError):
+    """The local Clarion database is not synchronized or online."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,12 +161,53 @@ def _require_sei_capable(db: FiligreeDB) -> None:
             "There is no authority to resolve locators against; nothing to migrate."
         )
         raise SeiBackfillError(msg)
-    capabilities = db.clarion_capabilities
+
+    # 1. Reachability & capabilities checks
+    try:
+        capabilities = db.clarion_capabilities
+        if capabilities is None:
+            capabilities = db.reprobe_clarion_capabilities()
+    except (RegistryUnavailableError, RegistryResolutionError) as e:
+        raise ClarionOutOfSyncError(f"Clarion server is unreachable: {e}") from e
+
     if capabilities is None:
-        # Capabilities are probed at init for clarion-mode projects; re-probe in
-        # case the probe was skipped. A failure here surfaces as a registry error.
-        capabilities = db.reprobe_clarion_capabilities()
-    if capabilities is None or not capabilities.get("sei_supported", False):
+        raise ClarionOutOfSyncError("Clarion server returned empty capabilities or is offline.")
+
+    # 2. Local database sync checks (only run if db.project_root is not None and .git directory exists)
+    if db.project_root is not None and (db.project_root / ".git").exists():
+        clarion_db_path = db.project_root / ".clarion" / "clarion.db"
+        if not clarion_db_path.is_file():
+            raise ClarionOutOfSyncError("Local Clarion database not found.")
+
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=db.project_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            git_head = res.stdout.strip()
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            raise ClarionOutOfSyncError(f"Failed to resolve git HEAD commit: {e}") from e
+
+        try:
+            clarion_conn = sqlite3.connect(f"file:{clarion_db_path}?mode=ro", uri=True)
+            clarion_conn.row_factory = sqlite3.Row
+            row = clarion_conn.execute(
+                "SELECT analyzed_at_commit FROM runs WHERE status = 'completed' ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            clarion_conn.close()
+        except sqlite3.Error as e:
+            raise ClarionOutOfSyncError(f"Failed to query local Clarion database: {e}") from e
+
+        if row is None or not row["analyzed_at_commit"] or row["analyzed_at_commit"] != git_head:
+            last_commit = row["analyzed_at_commit"] if (row and row["analyzed_at_commit"]) else "none"
+            raise ClarionOutOfSyncError(
+                f"Clarion database is out of sync with git HEAD (latest run commit: {last_commit}, git HEAD: {git_head})."
+            )
+
+    if not capabilities.get("sei_supported", False):
         msg = (
             "Connected Clarion has not shipped SEI (_capabilities.sei.supported is false/absent). "
             "Identity is unavailable; keep working on locators — nothing to migrate yet."
@@ -207,13 +253,13 @@ def _collect_locators(assoc_rows: list[Any], tomb_rows: list[Any]) -> set[str]:
 def _decode_entity_ids(raw: str | None) -> tuple[list[str], bool]:
     """Decode a ``deleted_issues.entity_ids`` blob into its locator strings.
 
-    Returns ``(locators, malformed)``. ``malformed`` is True only for the two
-    cases that would otherwise make the whole tombstone vanish — corrupt JSON or
-    a non-array value — so a report-owning caller can surface it (warn + counter)
-    rather than silently drop the row, honouring the module's "never silently
-    drops an orphan" contract. A legitimately empty tombstone (NULL / ``"[]"``)
-    is *not* malformed. Only Filigree writes this column, so corruption signals
-    external tampering, not a normal path."""
+    Returns ``(locators, malformed)``. ``malformed`` is True for shapes that
+    cannot be rewritten losslessly — corrupt JSON, a non-array value, or an
+    array containing non-string values — so a report-owning caller can surface
+    it (warn + counter) rather than silently drop data, honouring the module's
+    "never silently drops an orphan" contract. A legitimately empty tombstone
+    (NULL / ``"[]"``) is *not* malformed. Only Filigree writes this column, so
+    corruption signals external tampering, not a normal path."""
     if not raw:
         return [], False
     try:
@@ -222,7 +268,9 @@ def _decode_entity_ids(raw: str | None) -> tuple[list[str], bool]:
         return [], True
     if not isinstance(decoded, list):
         return [], True
-    return [item for item in decoded if isinstance(item, str)], False
+    if not all(isinstance(item, str) for item in decoded):
+        return [], True
+    return decoded, False
 
 
 def _warn_malformed_tombstone(report: SeiBackfillReport, row: Any) -> None:

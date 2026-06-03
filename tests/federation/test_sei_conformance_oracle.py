@@ -470,8 +470,8 @@ def _insert_raw_tombstone(db: FiligreeDB, issue_id: str, raw_entity_ids: str) ->
 @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "applied"])
 @pytest.mark.parametrize(
     "raw_entity_ids",
-    ["{not valid json", '{"not": "an array"}', '"a-bare-string"', "42"],
-    ids=["corrupt_json", "object", "bare_string", "number"],
+    ["{not valid json", '{"not": "an array"}', '"a-bare-string"', "42", '["py:func:mod::kept", 42]'],
+    ids=["corrupt_json", "object", "bare_string", "number", "mixed_array"],
 )
 def test_malformed_tombstone_entity_ids_is_surfaced_not_silently_dropped(
     tmp_path: Path,

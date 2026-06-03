@@ -113,6 +113,37 @@ class TestCloseOnFixed:
         # Not re-closed by the cascade (it was already done before the sweep).
         assert issue.id not in result["closed_issue_ids"]
 
+    def test_reingest_between_sweep_and_cascade_does_not_close_issue(
+        self,
+        db: FiligreeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If a finding reappears after the stale sweep commits but before the
+        best-effort issue cascade runs, the cascade must not close the linked
+        issue based on the stale fixed snapshot."""
+        finding_id = _ingest(db, "fp-clean-reingest-race")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (finding_id,),
+        )
+        db.conn.commit()
+        original_sweep = db._sweep_stale_findings_to_fixed
+
+        def sweep_then_reingest(*, days: int, scan_source: str | None, actor: str) -> list[tuple[str, str | None]]:
+            fixed = original_sweep(days=days, scan_source=scan_source, actor=actor)
+            db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-clean-reingest-race")])
+            return fixed
+
+        monkeypatch.setattr(db, "_sweep_stale_findings_to_fixed", sweep_then_reingest)
+
+        result = db.clean_stale_findings(days=30)
+
+        assert result["findings_fixed"] == 1
+        assert result["closed_issue_ids"] == []
+        assert db.get_finding(finding_id)["status"] == "open"
+        assert not _is_done(db, issue.id)
+
     def test_unlinked_finding_no_cascade(self, db: FiligreeDB) -> None:
         finding_id = _ingest(db)  # never promoted → no issue link
         db.conn.execute(

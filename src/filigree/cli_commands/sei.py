@@ -17,7 +17,7 @@ import click
 
 from filigree.cli_common import get_db
 from filigree.registry import RegistryResolutionError, RegistryUnavailableError
-from filigree.sei_backfill import SeiBackfillError, SeiBackfillReport, run_sei_backfill
+from filigree.sei_backfill import ClarionOutOfSyncError, SeiBackfillError, SeiBackfillReport, run_sei_backfill
 from filigree.types.api import ErrorCode
 
 
@@ -42,6 +42,10 @@ def sei_backfill_cmd(ctx: click.Context, execute: bool, as_json: bool) -> None:
     with get_db() as db:
         try:
             report = run_sei_backfill(db, dry_run=dry_run, actor=ctx.obj["actor"])
+        except ClarionOutOfSyncError as e:
+            # Clarion database is out of sync or offline. Output JSON and exit 3.
+            click.echo(json_mod.dumps({"error": str(e), "code": "CLARION_OUT_OF_SYNC", "remediation_command": "clarion analyze"}))
+            sys.exit(3)
         except SeiBackfillError as e:
             # Clean precondition refusal (not Clarion-backed / SEI unsupported).
             _emit_error(str(e), ErrorCode.VALIDATION, as_json=as_json)

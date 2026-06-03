@@ -71,7 +71,7 @@ jobs:
   docs:
     name: Docs (build + deploy)
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, typecheck, frontend, test]
     permissions:
       contents: write
     steps:

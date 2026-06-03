@@ -32,6 +32,12 @@ def test_ci_runs_dashboard_javascript_quality_gate() -> None:
     assert "format:check" in package_json["scripts"]
 
 
+def test_docs_deploy_waits_for_all_ci_quality_gates() -> None:
+    workflow = _read(".github/workflows/ci.yml")
+
+    assert "needs: [lint, typecheck, frontend, test]" in workflow
+
+
 def test_make_ci_runs_javascript_and_coverage_floor_gates() -> None:
     makefile = _read("Makefile")
 
