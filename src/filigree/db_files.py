@@ -284,9 +284,9 @@ class FilesMixin(DBMixinProtocol):
     def _record_registry_fallback_event(self, file_id: str, *, actor: str, now: str) -> None:
         self.conn.execute(
             "INSERT INTO file_events "
-            "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'clarion', 'local', ?, ?)",
-            (file_id, actor, now),
+            "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'clarion', 'local', ?, ?, ?)",
+            (file_id, actor, self._verified_actor, now),
         )
 
     # -- File registration ---------------------------------------------------
@@ -565,9 +565,9 @@ class FilesMixin(DBMixinProtocol):
             for field, old_val, new_val in changes:
                 self.conn.execute(
                     "INSERT INTO file_events "
-                    "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
-                    (existing["id"], field, old_val, new_val, actor, now),
+                    "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?, ?)",
+                    (existing["id"], field, old_val, new_val, actor, self._verified_actor, now),
                 )
             if _commit:
                 self.conn.commit()

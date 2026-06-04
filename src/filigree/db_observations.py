@@ -367,8 +367,8 @@ class ObservationsMixin(DBMixinProtocol):
 
             self.conn.execute(
                 "INSERT INTO observations (id, summary, detail, file_id, file_path, line, "
-                "source_issue_id, source_finding_id, priority, actor, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source_issue_id, source_finding_id, priority, actor, verified_actor, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     obs_id,
                     summary_stripped,
@@ -380,6 +380,7 @@ class ObservationsMixin(DBMixinProtocol):
                     source_finding_id,
                     priority,
                     actor,
+                    self._verified_actor,
                     now,
                     expires,
                 ),
@@ -449,10 +450,9 @@ class ObservationsMixin(DBMixinProtocol):
             "actor": actor,
             "created_at": now,
             "expires_at": ISOTimestamp(expires),
-            # v23->v24 (ADR-012): create path does not stamp transport identity
-            # yet (later tasks own that); surface None so the create-return shape
-            # matches the SELECT * read paths.
-            "verified_actor": None,
+            # v23->v24 (ADR-012): stamp the transport-verified identity so the
+            # create-return shape matches the SELECT * read paths.
+            "verified_actor": self._verified_actor,
         }
 
     def list_observations(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from filigree.core import FiligreeDB
 
 
@@ -84,3 +86,55 @@ def test_comment_verified_author_null_when_unset(db: FiligreeDB) -> None:
     db.add_comment(issue_id, "hello", author="agent-x")
     comments = db.get_comments(issue_id)
     assert comments[0]["verified_author"] is None
+
+
+def test_observation_stamps_and_exposes_verified_actor(db: FiligreeDB) -> None:
+    db.set_verified_actor("alice")
+    obs = db.create_observation(summary="smell in foo.py", actor="agent-x")
+    assert obs["verified_actor"] == "alice"
+    # Read-back via list also carries it.
+    listed = db.list_observations()
+    assert listed[0]["verified_actor"] == "alice"
+
+
+def test_observation_verified_actor_null_when_unset(db: FiligreeDB) -> None:
+    obs = db.create_observation(summary="another smell", actor="agent-x")
+    assert obs["verified_actor"] is None
+
+
+def test_file_event_stamps_verified_actor(db: FiligreeDB) -> None:
+    db.set_verified_actor("alice")
+    # Re-registering a file with changed metadata emits a file_metadata_update
+    # file_event (Site B of the two stamped INSERTs).
+    db.register_file("foo.py")
+    db.register_file("foo.py", metadata={"k": "v"})
+    row = db.conn.execute("SELECT verified_actor FROM file_events WHERE event_type = 'file_metadata_update'").fetchone()
+    assert row is not None
+    assert row["verified_actor"] == "alice"
+
+
+def test_file_event_verified_actor_null_when_unset(db: FiligreeDB) -> None:
+    db.register_file("bar.py")
+    db.register_file("bar.py", metadata={"k": "v"})
+    row = db.conn.execute("SELECT verified_actor FROM file_events WHERE event_type = 'file_metadata_update'").fetchone()
+    assert row is not None
+    assert row["verified_actor"] is None
+
+
+def test_annotation_event_stamps_verified_actor(db: FiligreeDB, tmp_path: Path) -> None:
+    db.project_root = tmp_path
+    (tmp_path / "foo.py").write_text("one\ntwo\nthree\n")
+    db.set_verified_actor("alice")
+    db.annotate_file("foo.py", "smell here", line_start=1, actor="agent-x")
+    row = db.conn.execute("SELECT verified_actor FROM annotation_events ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert row["verified_actor"] == "alice"
+
+
+def test_annotation_event_verified_actor_null_when_unset(db: FiligreeDB, tmp_path: Path) -> None:
+    db.project_root = tmp_path
+    (tmp_path / "bar.py").write_text("one\ntwo\nthree\n")
+    db.annotate_file("bar.py", "smell here", line_start=1, actor="agent-x")
+    row = db.conn.execute("SELECT verified_actor FROM annotation_events ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert row["verified_actor"] is None
