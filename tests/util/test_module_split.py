@@ -77,6 +77,16 @@ def test_issue_and_file_mcp_tools_do_not_import_mcp_server_private_globals() -> 
         assert "from filigree.mcp_server import" not in text, rel
 
 
+def test_mcp_tools_do_not_import_transport_runtime_globals() -> None:
+    """MCP tool modules should get runtime state from the injected MCP context."""
+    root = Path(__file__).resolve().parents[2]
+    tools_dir = root / "src/filigree/mcp_tools"
+    for path in sorted(tools_dir.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        assert "from filigree.mcp_server import" not in text, str(path.relative_to(root))
+        assert "import filigree.mcp_server" not in text, str(path.relative_to(root))
+
+
 def test_file_mixin_delegates_finding_issue_cascade_policy() -> None:
     """Cross-domain finding→issue policy should live in the cascade service."""
     root = Path(__file__).resolve().parents[2]

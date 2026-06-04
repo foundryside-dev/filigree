@@ -47,6 +47,20 @@ async def client(test_db: FiligreeDB) -> AsyncClient:
 
 
 class TestObservationIngest:
+    async def test_loom_list_does_not_sweep_expired_observations(self, test_db: FiligreeDB, client: AsyncClient) -> None:
+        obs = test_db.create_observation("expired HTTP scratchpad")
+        test_db.conn.execute("UPDATE observations SET expires_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", obs["id"]))
+        test_db.conn.commit()
+
+        resp = await client.get("/api/loom/observations")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["items"] == []
+        row = test_db.conn.execute("SELECT id FROM observations WHERE id = ?", (obs["id"],)).fetchone()
+        assert row is not None
+        audit_row = test_db.conn.execute("SELECT obs_id FROM dismissed_observations WHERE obs_id = ?", (obs["id"],)).fetchone()
+        assert audit_row is None
+
     async def test_classic_ingest_success(self, client: AsyncClient) -> None:
         payload = {
             "summary": "Classic test observation",

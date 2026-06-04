@@ -232,6 +232,7 @@ class ObservationsMixin(DBMixinProtocol):
         summary: str,
         *,
         detail: str = "",
+        file_id: str = "",
         file_path: str = "",
         line: int | None = None,
         source_issue_id: str = "",
@@ -254,6 +255,7 @@ class ObservationsMixin(DBMixinProtocol):
         avoid committing partial work.
         """
         summary = _require_string(summary, "summary")
+        file_id = _require_string(file_id, "file_id")
         file_path = _require_string(file_path, "file_path")
         for field_name, value in (
             ("detail", detail),
@@ -276,7 +278,7 @@ class ObservationsMixin(DBMixinProtocol):
             if line > MAX_SQLITE_INTEGER:
                 raise ValueError(f"line must be <= {MAX_SQLITE_INTEGER}, got {line}")
 
-        file_id: str | None = None
+        linked_file_id: str | None = file_id or None
         # Track whether THIS call created a new file_record so we can compensate
         # by deleting it if the later observation INSERT fails — otherwise the
         # file_record is orphaned (register_file commits independently).
@@ -285,6 +287,10 @@ class ObservationsMixin(DBMixinProtocol):
             file_path = _normalize_scan_path(file_path)
             if not _is_project_relative_scan_path(file_path):
                 raise ValueError("file_path must be project-relative")
+        elif linked_file_id:
+            row = self.conn.execute("SELECT path FROM file_records WHERE id = ?", (linked_file_id,)).fetchone()
+            if row is not None:
+                file_path = row["path"] or ""
 
         now = _now_iso()
         summary_stripped = summary.strip()
@@ -302,20 +308,20 @@ class ObservationsMixin(DBMixinProtocol):
             # Live duplicate — return existing row
             return cast(ObservationDict, dict(existing))
 
-        if file_path:
+        if file_path and linked_file_id is None:
             if auto_commit:
                 # Standalone call — register_file commits, which is fine.
                 existing_fr = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
                 fr = self.register_file(file_path)
-                file_id = fr.id
+                linked_file_id = fr.id
                 if existing_fr is None:
-                    created_file_id = file_id
+                    created_file_id = linked_file_id
             else:
                 # Inside an outer transaction — register_file would commit
                 # prematurely.  Look up the file_id without side effects;
                 # the caller is responsible for ensuring the file exists.
                 row = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
-                file_id = row["id"] if row else None
+                linked_file_id = row["id"] if row else None
 
         savepoint_name = "create_observation_mutation"
         savepoint_active = False
@@ -367,7 +373,7 @@ class ObservationsMixin(DBMixinProtocol):
                     obs_id,
                     summary_stripped,
                     detail,
-                    file_id,
+                    linked_file_id,
                     file_path,
                     line,
                     source_issue_id,
@@ -434,7 +440,7 @@ class ObservationsMixin(DBMixinProtocol):
             "id": obs_id,
             "summary": summary_stripped,
             "detail": detail,
-            "file_id": file_id,
+            "file_id": linked_file_id,
             "file_path": file_path,
             "line": line,
             "source_issue_id": source_issue_id,

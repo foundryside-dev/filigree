@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "23 9 * * 1"
   workflow_call:
   workflow_dispatch:
     inputs:
@@ -59,6 +61,9 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -95,9 +100,10 @@ jobs:
 
   live-clarion:
     name: Live Clarion Integration
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.require_live_clarion }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_live_clarion) }}
     runs-on: ubuntu-latest
     env:
+      CLARION_STAGING_BASE_URL: ${{ secrets.CLARION_STAGING_BASE_URL }}
       FILIGREE_REQUIRE_LIVE_CLARION: "1"
     steps:
       - uses: actions/checkout@v6
@@ -106,10 +112,16 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - run: uv sync --group dev
-      - run: >
-          uv run pytest
-          tests/integration/test_clarion_phase_d_e2e.py
-          tests/federation/test_sei_oracle_live_clarion.py
+      - name: Run live Clarion checks
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            uv run pytest tests/integration/test_clarion_staging_smoke.py
+          else
+            uv run pytest \
+              tests/integration/test_clarion_staging_smoke.py \
+              tests/integration/test_clarion_phase_d_e2e.py \
+              tests/federation/test_sei_oracle_live_clarion.py
+          fi
 
   docs:
     name: Docs (build + deploy)

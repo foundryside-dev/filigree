@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -99,6 +103,80 @@ class TestDependencyOperations:
         db.remove_dependency(a.id, b.id)
         refreshed = db.get_issue(a.id)
         assert b.id not in refreshed.blocked_by
+
+    def test_concurrent_remove_dependency_records_one_removal_event(self, tmp_path: Path) -> None:
+        class BarrierConnection(sqlite3.Connection):
+            delete_barrier: threading.Barrier | None = None
+
+            def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+                normalized = " ".join(sql.split()).upper()
+                if normalized.startswith("DELETE FROM DEPENDENCIES WHERE ISSUE_ID = ? AND DEPENDS_ON_ID = ?"):
+                    with contextlib.suppress(threading.BrokenBarrierError):
+                        self.delete_barrier.wait(timeout=0.5)
+                return super().execute(sql, parameters)
+
+        def open_db(db_path: Path, barrier: threading.Barrier) -> FiligreeDB:
+            conn = sqlite3.connect(
+                str(db_path),
+                isolation_level="DEFERRED",
+                check_same_thread=False,
+                factory=BarrierConnection,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.delete_barrier = barrier
+            tracker = FiligreeDB(db_path, prefix="test", check_same_thread=False)
+            tracker._conn = conn
+            return tracker
+
+        db_path = tmp_path / "filigree.db"
+        seed = FiligreeDB(db_path, prefix="test")
+        seed.initialize()
+        a = seed.create_issue("A")
+        b = seed.create_issue("B")
+        seed.add_dependency(a.id, b.id)
+        seed.close()
+
+        barrier = threading.Barrier(2)
+        removers = [open_db(db_path, barrier), open_db(db_path, barrier)]
+        results: list[bool] = []
+        errors: list[BaseException] = []
+
+        def remove(tracker: FiligreeDB, actor: str) -> None:
+            try:
+                results.append(tracker.remove_dependency(a.id, b.id, actor=actor))
+            except BaseException as exc:  # pragma: no cover - assertion path reports the exception
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=remove, args=(removers[0], "racer-1")),
+            threading.Thread(target=remove, args=(removers[1], "racer-2")),
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            assert all(not thread.is_alive() for thread in threads)
+            assert errors == []
+            assert sorted(results) == [False, True]
+
+            check = FiligreeDB(db_path, prefix="test")
+            check.initialize()
+            try:
+                events = check.conn.execute(
+                    "SELECT actor FROM events WHERE issue_id = ? AND event_type = 'dependency_removed'",
+                    (a.id,),
+                ).fetchall()
+                assert len(events) == 1
+            finally:
+                check.close()
+        finally:
+            for tracker in removers:
+                tracker.close()
 
     def test_get_blocked(self, db: FiligreeDB) -> None:
         a = db.create_issue("Blocked")

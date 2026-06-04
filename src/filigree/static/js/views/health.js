@@ -4,7 +4,7 @@
 
 import { fetchFiles, fetchFileStats, fetchHotspots, fetchScanRuns } from "../api.js";
 import { SEVERITY_COLORS, state } from "../state.js";
-import { escHtml, escJsSingle, relativeTime } from "../ui.js";
+import { escHtml, escJsSingleAttr, relativeTime } from "../ui.js";
 
 export function healthOverviewUnavailableReason({ hotspots, fileData, stats, scanRunData }) {
   if (stats === null || stats === undefined) return "Code quality statistics are unavailable.";
@@ -108,7 +108,7 @@ function renderHotspotsWidget(hotspots, onClickFile) {
       const barWidth = ((h.score / maxScore) * 100).toFixed(1);
 
       return (
-        `<div class="flex items-center gap-2 mb-2 cursor-pointer bg-overlay-hover rounded px-2 py-1" onclick="${onClickFile ? onClickFile(f.id) : `switchView('files');setTimeout(()=>openFileDetail('${escJsSingle(f.id)}'),100)`}" role="button" tabindex="0">` +
+        `<div class="flex items-center gap-2 mb-2 cursor-pointer bg-overlay-hover rounded px-2 py-1" onclick="${onClickFile ? onClickFile(f.id) : `switchView('files');setTimeout(()=>openFileDetail('${escJsSingleAttr(f.id)}'),100)`}" role="button" tabindex="0">` +
         `<span class="text-xs truncate w-48" style="color:var(--text-primary)" title="${escHtml(f.path)}">${escHtml(f.path)}</span>` +
         `<div class="flex-1 h-3 rounded overflow-hidden flex" style="background:var(--surface-base);max-width:${barWidth}%">` +
         segments +

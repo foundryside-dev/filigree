@@ -21,6 +21,8 @@ from filigree.mcp_tools.common import (
     _validate_actor,
     _validate_int_range,
     _validate_str,
+    get_db,
+    refresh_summary,
 )
 from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.types.api import ErrorCode, ErrorResponse
@@ -300,7 +302,6 @@ def _db_error(exc: Exception, fallback: str) -> list[TextContent]:
 
 
 async def _handle_annotate_file(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AnnotateFileArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -310,7 +311,7 @@ async def _handle_annotate_file(arguments: dict[str, Any]) -> list[TextContent]:
     if not isinstance(links, list):
         return _text(ErrorResponse(error="links must be a list", code=ErrorCode.VALIDATION))
     try:
-        result = _get_db().annotate_file(
+        result = get_db().annotate_file(
             args["file_path"],
             args["note"],
             line_start=args.get("line_start"),
@@ -322,14 +323,13 @@ async def _handle_annotate_file(arguments: dict[str, Any]) -> list[TextContent]:
             actor=actor,
             session_ref=args.get("session_ref", ""),
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, RegistryResolutionError, RegistryUnavailableError, ValueError) as exc:
         return _db_error(exc, "Could not create annotation")
 
 
 async def _handle_list_annotations(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListAnnotationsArgs)
     response_detail, detail_err = _annotation_response_detail(args.get("response_detail"))
@@ -340,7 +340,7 @@ async def _handle_list_annotations(arguments: dict[str, Any]) -> list[TextConten
         return page_err
     try:
         return _text(
-            _get_db().list_annotations(
+            get_db().list_annotations(
                 file_path=args.get("file_path"),
                 file_id=args.get("file_id"),
                 issue_id=args.get("issue_id"),
@@ -362,24 +362,22 @@ async def _handle_list_annotations(arguments: dict[str, Any]) -> list[TextConten
 
 
 async def _handle_get_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetAnnotationArgs)
     try:
-        return _text(_get_db().get_annotation(args["annotation_id"]))
+        return _text(get_db().get_annotation(args["annotation_id"]))
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not get annotation")
 
 
 async def _handle_update_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, UpdateAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().update_annotation(
+        result = get_db().update_annotation(
             args["annotation_id"],
             note=args.get("note"),
             context_summary=args.get("context_summary"),
@@ -388,49 +386,46 @@ async def _handle_update_annotation(arguments: dict[str, Any]) -> list[TextConte
             status=args.get("status"),
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not update annotation")
 
 
 async def _handle_resolve_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, ResolveAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().resolve_annotation(args["annotation_id"], reason=args.get("reason", ""), actor=actor)
-        _refresh_summary()
+        result = get_db().resolve_annotation(args["annotation_id"], reason=args.get("reason", ""), actor=actor)
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not resolve annotation")
 
 
 async def _handle_supersede_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, SupersedeAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().supersede_annotation(
+        result = get_db().supersede_annotation(
             args["annotation_id"],
             replacement_annotation_id=args["replacement_annotation_id"],
             reason=args.get("reason", ""),
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not supersede annotation")
 
 
 async def _handle_promote_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, PromoteAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -440,7 +435,7 @@ async def _handle_promote_annotation(arguments: dict[str, Any]) -> list[TextCont
     if not isinstance(keep_active, bool):
         return _text(ErrorResponse(error="keep_active must be a boolean", code=ErrorCode.VALIDATION))
     try:
-        result = _get_db().promote_annotation(
+        result = get_db().promote_annotation(
             args["annotation_id"],
             target_type=args.get("target_type", "issue"),
             title=args.get("title"),
@@ -448,77 +443,73 @@ async def _handle_promote_annotation(arguments: dict[str, Any]) -> list[TextCont
             keep_active=keep_active,
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not promote annotation")
 
 
 async def _handle_carry_forward_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, CarryForwardAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().carry_forward_annotation(
+        result = get_db().carry_forward_annotation(
             args["annotation_id"],
             from_target_id=args["from_target_id"],
             to_target_id=args["to_target_id"],
             reason=args["reason"],
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not carry forward annotation")
 
 
 async def _handle_link_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, LinkAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().link_annotation(
+        result = get_db().link_annotation(
             args["annotation_id"],
             target_type=args["target_type"],
             target_id=args["target_id"],
             relationship=args["relationship"],
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not link annotation")
 
 
 async def _handle_unlink_annotation(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, UnlinkAnnotationArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
     try:
-        result = _get_db().unlink_annotation(
+        result = get_db().unlink_annotation(
             args["annotation_id"],
             target_type=args["target_type"],
             target_id=args["target_id"],
             relationship=args.get("relationship"),
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(result)
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not unlink annotation")
 
 
 async def _handle_get_file_annotations(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetFileAnnotationsArgs)
     response_detail, detail_err = _annotation_response_detail(args.get("response_detail"))
@@ -530,13 +521,12 @@ async def _handle_get_file_annotations(arguments: dict[str, Any]) -> list[TextCo
     if (err := _validate_str(args.get("file_path"), "file_path")) is not None:
         return err
     try:
-        return _text(_get_db().get_file_annotations(args["file_path"], response_detail=response_detail, limit=limit, offset=offset))
+        return _text(get_db().get_file_annotations(args["file_path"], response_detail=response_detail, limit=limit, offset=offset))
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not list file annotations")
 
 
 async def _handle_get_issue_annotations(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetIssueAnnotationsArgs)
     response_detail, detail_err = _annotation_response_detail(args.get("response_detail"))
@@ -546,13 +536,12 @@ async def _handle_get_issue_annotations(arguments: dict[str, Any]) -> list[TextC
     if page_err is not None:
         return page_err
     try:
-        return _text(_get_db().get_issue_annotations(args["issue_id"], response_detail=response_detail, limit=limit, offset=offset))
+        return _text(get_db().get_issue_annotations(args["issue_id"], response_detail=response_detail, limit=limit, offset=offset))
     except (KeyError, ValueError) as exc:
         return _db_error(exc, "Could not list issue annotations")
 
 
 async def _handle_list_attention_annotations(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListAttentionAnnotationsArgs)
     response_detail, detail_err = _annotation_response_detail(args.get("response_detail"))
@@ -565,7 +554,7 @@ async def _handle_list_attention_annotations(arguments: dict[str, Any]) -> list[
     if not isinstance(critical, bool):
         return _text(ErrorResponse(error="critical must be a boolean", code=ErrorCode.VALIDATION))
     try:
-        result = _get_db().list_attention_annotations(
+        result = get_db().list_attention_annotations(
             target_id=args.get("target_id"),
             file_path=args.get("file_path"),
             critical=critical,

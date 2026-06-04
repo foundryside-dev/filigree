@@ -12,7 +12,18 @@ from mcp.types import TextContent, Tool
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.label_payloads import label_namespace_from_public, label_namespace_item_to_public
-from filigree.mcp_tools.common import _list_response, _parse_args, _text, _validate_actor, _validate_int_range, _validate_str
+from filigree.mcp_tools.common import (
+    _list_response,
+    _parse_args,
+    _text,
+    _validate_actor,
+    _validate_int_range,
+    _validate_str,
+    get_db,
+    refresh_summary,
+    resolve_request_filigree_dir,
+    safe_path,
+)
 from filigree.mcp_tools.payloads import comment_to_mcp, event_to_mcp, undo_result_to_mcp
 from filigree.types.api import (
     AddCommentResult,
@@ -496,7 +507,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 
 async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddCommentArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -505,7 +515,7 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
@@ -522,7 +532,7 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(e, ClaimConflictError):
             return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     issue = tracker.get_issue(args["issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
     response["comment_id"] = comment_id
@@ -531,10 +541,9 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_comments(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetCommentsArgs)
-    tracker = _get_db()
+    tracker = get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
@@ -544,7 +553,6 @@ async def _handle_get_comments(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddLabelArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -553,7 +561,7 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
@@ -570,7 +578,7 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(e, ClaimConflictError):
             return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     # Mutual-exclusivity displacement was previously silent — surface it as
     # label_result='replaced' with a replaced_labels list, plus a
     # data_warnings entry so callers iterating warnings see it too
@@ -589,7 +597,6 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, RemoveLabelArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -598,7 +605,7 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     expected_assignee = args.get("expected_assignee")
     if expected_assignee is not None and not isinstance(expected_assignee, str):
         return _text(ErrorResponse(error="expected_assignee must be a string", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         tracker.get_issue(args["issue_id"])
     except KeyError:
@@ -615,7 +622,7 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
         if isinstance(e, ClaimConflictError):
             return _text(claim_conflict_envelope(e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     status = "removed" if removed else "not_found"
     issue = tracker.get_issue(args["issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
@@ -625,7 +632,6 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, BatchAddLabelArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -637,7 +643,7 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
@@ -654,7 +660,7 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
         return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in label_succeeded],
@@ -669,7 +675,6 @@ async def _handle_batch_add_label(arguments: dict[str, Any]) -> list[TextContent
 
 
 async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, BatchRemoveLabelArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -681,7 +686,7 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
@@ -698,7 +703,7 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
         return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in label_succeeded],
@@ -713,7 +718,6 @@ async def _handle_batch_remove_label(arguments: dict[str, Any]) -> list[TextCont
 
 
 async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, BatchAddCommentArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -725,7 +729,7 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
@@ -742,7 +746,7 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
         return _text(ErrorResponse(error=e.safe_message, code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(tracker.get_issue(str(row["id"]))) for row in comment_succeeded],
@@ -759,8 +763,6 @@ async def _handle_batch_add_comment(arguments: dict[str, Any]) -> list[TextConte
 async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
     from datetime import datetime
 
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetChangesArgs)
     since = args["since"]
     since_normalized = since.replace("Z", "+00:00") if since.endswith("Z") else since
@@ -770,7 +772,7 @@ async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(
             ErrorResponse(error=f"Invalid ISO timestamp: {since!r}. Expected format: 2026-01-15T10:30:00", code=ErrorCode.VALIDATION)
         )
-    tracker = _get_db()
+    tracker = get_db()
     limit = args.get("limit", 100)
     limit_err = _validate_int_range(limit, "limit", min_val=1)
     if limit_err:
@@ -825,13 +827,12 @@ async def _handle_get_changes(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
     from filigree.summary import generate_summary
 
     fmt = arguments.get("format", "markdown")
     if fmt not in {"markdown", "json"}:
         return _text(ErrorResponse(error=f"Invalid format: {fmt!r}. Use 'markdown' or 'json'.", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     summary = generate_summary(tracker)
     if fmt == "json":
         # Bundle markdown + structured stats so a single call powers
@@ -842,38 +843,34 @@ async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_session_context(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.hooks import _build_context
-    from filigree.mcp_server import _get_db, _resolve_request_filigree_dir
 
-    tracker = _get_db()
-    return _text(_build_context(tracker, _resolve_request_filigree_dir(tracker)))
+    tracker = get_db()
+    return _text(_build_context(tracker, resolve_request_filigree_dir(tracker)))
 
 
 async def _handle_get_stats(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
-    tracker = _get_db()
+    tracker = get_db()
     return _text(tracker.get_stats())
 
 
 async def _handle_get_metrics(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.analytics import get_flow_metrics
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetMetricsArgs)
     days_err = _validate_int_range(args.get("days", 30), "days", min_val=1)
     if days_err is not None:
         return days_err
-    tracker = _get_db()
+    tracker = get_db()
     return _text(get_flow_metrics(tracker, days=args.get("days", 30)))
 
 
 async def _handle_export_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _safe_path
 
     args = _parse_args(arguments, ExportJsonlArgs)
-    tracker = _get_db()
+    tracker = get_db()
     try:
-        safe = _safe_path(args["output_path"])
+        safe = safe_path(args["output_path"])
         count = tracker.export_jsonl(safe)
         return _text(JsonlTransferResponse(status="ok", records=count, path=str(safe)))
     except ValueError as e:
@@ -883,17 +880,16 @@ async def _handle_export_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_import_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary, _safe_path
 
     args = _parse_args(arguments, ImportJsonlArgs)
-    tracker = _get_db()
+    tracker = get_db()
     try:
-        safe = _safe_path(args["input_path"])
+        safe = safe_path(args["input_path"])
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     try:
         result = tracker.import_jsonl(safe, merge=args.get("merge", False))
-        _refresh_summary()
+        refresh_summary()
         resp = JsonlTransferResponse(status="ok", records=result["count"], path=str(safe))
         if result["skipped_types"]:
             resp["skipped_types"] = result["skipped_types"]
@@ -914,7 +910,6 @@ async def _handle_import_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_archive_closed(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, ArchiveClosedArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -945,7 +940,7 @@ async def _handle_archive_closed(arguments: dict[str, Any]) -> list[TextContent]
                 code=ErrorCode.VALIDATION,
             )
         )
-    tracker = _get_db()
+    tracker = get_db()
     try:
         archived = tracker.archive_closed(
             days_old=days_old,
@@ -954,49 +949,46 @@ async def _handle_archive_closed(arguments: dict[str, Any]) -> list[TextContent]
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     return _text(ArchiveClosedResponse(status="ok", archived_count=len(archived), archived_ids=archived))
 
 
 async def _handle_compact_events(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, CompactEventsArgs)
     keep_recent = args.get("keep_recent", 50)
     keep_err = _validate_int_range(keep_recent, "keep_recent", min_val=0)
     if keep_err:
         return keep_err
-    tracker = _get_db()
+    tracker = get_db()
     deleted = tracker.compact_events(keep_recent=keep_recent)
     return _text(CompactEventsResponse(status="ok", events_deleted=deleted))
 
 
 async def _handle_undo_last(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, UndoLastArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         result = tracker.undo_last(args["issue_id"], actor=actor)
         if result["undone"]:
-            _refresh_summary()
+            refresh_summary()
         return _text(undo_result_to_mcp(result))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
 
 
 async def _handle_get_issue_events(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetIssueEventsArgs)
     limit = args.get("limit", 50)
     limit_err = _validate_int_range(limit, "limit", min_val=1)
     if limit_err is not None:
         return limit_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         events = tracker.get_issue_events(args["issue_id"], limit=limit + 1)
     except KeyError:
@@ -1008,14 +1000,13 @@ async def _handle_get_issue_events(arguments: dict[str, Any]) -> list[TextConten
 
 
 async def _handle_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListLabelsArgs)
     top = args.get("top", 10)
     top_err = _validate_int_range(top, "top", min_val=0)
     if top_err is not None:
         return top_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         result = tracker.list_labels(
             namespace=label_namespace_from_public(args.get("namespace")),
@@ -1033,9 +1024,8 @@ async def _handle_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_label_taxonomy(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         result = tracker.get_label_taxonomy()
     except (sqlite3.Error, ValueError) as exc:

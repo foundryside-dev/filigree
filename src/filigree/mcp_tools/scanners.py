@@ -11,13 +11,12 @@ import shutil
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from mcp.types import TextContent, Tool
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.core import VALID_SEVERITIES
-from filigree.db_files import INGESTED_FILE_ID_KEY, _normalize_scan_path
 from filigree.mcp_tools.common import (
     _list_response,
     _parse_args,
@@ -25,11 +24,16 @@ from filigree.mcp_tools.common import (
     _text,
     _validate_actor,
     _validate_int_range,
+    get_db,
+    get_filigree_dir,
+    refresh_summary,
+    safe_path,
 )
 from filigree.mcp_tools.payloads import finding_to_mcp
 from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
+from filigree.scanner_reporting import report_scanner_finding
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
 from filigree.scanners import (
@@ -40,7 +44,6 @@ from filigree.scanners import (
     validate_scanner_name,
 )
 from filigree.types.api import ErrorCode, ErrorResponse
-from filigree.types.files import ScanIngestResult
 from filigree.types.inputs import (
     DisableScannerArgs,
     EnableScannerArgs,
@@ -148,108 +151,6 @@ def _available_scanner_items(filigree_dir: Path) -> list[dict[str, Any]]:
             }
         )
     return items
-
-
-def _report_finding_observation_ids(
-    tracker: Any,
-    *,
-    file_id: str,
-    finding_id: str,
-) -> list[str]:
-    """Find observation IDs paired with a given finding.
-
-    Uses the ``source_finding_id`` foreign-key set on the observation at
-    creation time. Previously this matched on summary + line + the literal
-    ``scanner:agent`` actor; that meant changing the observation actor (e.g.
-    to attribute a real agent identity per F3) would break the lookup. The
-    FK is the durable correlation.
-    """
-    observations = tracker.list_observations(file_id=file_id, limit=10000)
-    return [observation["id"] for observation in observations if observation.get("source_finding_id") == finding_id]
-
-
-def _reported_finding_record(
-    tracker: Any,
-    result: ScanIngestResult,
-    *,
-    file_id: str | None,
-    rule_id: str,
-    line_start: int | None,
-    message: str,
-    severity: str,
-) -> dict[str, Any] | None:
-    for finding_id in result.get("new_finding_ids", []):
-        try:
-            return cast(dict[str, Any], tracker.get_finding(finding_id))
-        except KeyError:
-            continue
-
-    matching_findings = cast(
-        list[dict[str, Any]],
-        tracker.list_findings_global(scan_source="agent", file_id=file_id, limit=10000)["findings"],
-    )
-    return next(
-        (
-            item
-            for item in matching_findings
-            if item["rule_id"] == rule_id
-            and item.get("line_start") == line_start
-            and item.get("message") == message
-            and item.get("severity") == severity
-        ),
-        None,
-    )
-
-
-def _normalize_report_finding_line_attribution(tracker: Any, finding: dict[str, Any]) -> list[str]:
-    """Clear impossible MCP-supplied line attribution before strict ingest validation."""
-    project_root = getattr(tracker, "project_root", None)
-    if project_root is None:
-        return []
-
-    path = finding.get("path")
-    if not isinstance(path, str):
-        return []
-
-    try:
-        root = Path(project_root).resolve()
-        target = (root / _normalize_scan_path(path)).resolve()
-        target.relative_to(root)
-    except (OSError, ValueError):
-        return []
-
-    if not target.is_file():
-        return []
-
-    try:
-        with target.open("rb") as handle:
-            line_count = sum(1 for _ in handle)
-    except OSError as exc:
-        _logger.debug("Could not count lines for MCP report target %s: %s", target, exc, exc_info=True)
-        return []
-
-    warnings: list[str] = []
-    line_label = "line" if line_count == 1 else "lines"
-    rule_id = finding.get("rule_id", "")
-
-    line_start = finding.get("line_start")
-    if isinstance(line_start, int) and not isinstance(line_start, bool) and line_start > line_count:
-        finding.pop("line_start", None)
-        finding.pop("line_end", None)
-        warnings.append(
-            f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length "
-            f"({path} has {line_count} {line_label}); line attribution cleared"
-        )
-        return warnings
-
-    line_end = finding.get("line_end")
-    if isinstance(line_end, int) and not isinstance(line_end, bool) and line_end > line_count:
-        finding.pop("line_end", None)
-        warnings.append(
-            f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length "
-            f"({path} has {line_count} {line_label}); line_end cleared"
-        )
-    return warnings
 
 
 def register(
@@ -607,9 +508,8 @@ def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any |
 
 
 async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_filigree_dir
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     scanners_dir = filigree_dir / "scanners" if filigree_dir else None
     if scanners_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
@@ -635,18 +535,16 @@ async def _handle_list_prompt_packs(arguments: dict[str, Any]) -> list[TextConte
 
 
 async def _handle_list_available_scanners(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_filigree_dir
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
     return _text(_list_response(_available_scanner_items(filigree_dir), has_more=False))
 
 
 async def _handle_enable_scanner(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_filigree_dir
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
@@ -691,9 +589,8 @@ async def _handle_enable_scanner(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_filigree_dir
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
@@ -736,8 +633,6 @@ async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent
 
 async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]:
     """Report a single agent-discovered finding via process_scan_results."""
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ReportFindingArgs)
     file_path = args.get("file_path", "")
     rule_id = args.get("rule_id", "")
@@ -783,17 +678,15 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
             ErrorResponse(error="'response_detail' must be 'slim' or 'full'", code=ErrorCode.VALIDATION),
         )
 
-    tracker = _get_db()
-    mcp_line_warnings = _normalize_report_finding_line_attribution(tracker, finding)
+    tracker = get_db()
     try:
-        result = tracker.process_scan_results(
-            scan_source="agent",
-            findings=[finding],
-            scan_run_id="",
-            create_observations=create_observation,
+        outcome = report_scanner_finding(
+            tracker,
+            finding,
+            create_observation=create_observation,
             observation_actor=actor,
+            refresh_summary=lambda _tracker: refresh_summary(),
         )
-        _refresh_summary()
     except RegistryResolutionError as exc:
         _logger.error("report_finding registry resolution failed: %s", exc)
         return _registry_error_text(exc, action="reporting finding")
@@ -806,33 +699,15 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     except sqlite3.Error as exc:
         _logger.error("report_finding storage failure: %s", exc)
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))
+    except LookupError as exc:
+        return _text(ErrorResponse(error=str(exc), code=ErrorCode.IO))
 
-    if mcp_line_warnings:
-        result["warnings"].extend(mcp_line_warnings)
-
-    reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
-    reported_line_start = finding.get("line_start")
-    lookup_line_start = reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
-    finding_record = _reported_finding_record(
-        tracker,
-        result,
-        file_id=reported_file_id if isinstance(reported_file_id, str) else None,
-        rule_id=rule_id,
-        line_start=lookup_line_start,
-        message=message,
-        severity=severity,
-    )
-    if finding_record is None:
-        return _text(ErrorResponse(error="Reported finding was not found after ingestion", code=ErrorCode.IO))
-
-    observation_ids = (
-        _report_finding_observation_ids(tracker, file_id=finding_record["file_id"], finding_id=finding_record["id"])
-        if create_observation
-        else []
-    )
+    result = outcome.result
+    finding_record = outcome.finding_record
+    observation_ids = outcome.observation_ids
     response: dict[str, Any] = {
         **finding_to_mcp(finding_record),
-        "finding_result": "created" if result["findings_created"] else "updated",
+        "finding_result": outcome.status,
     }
     if observation_ids:
         response["observation_id"] = observation_ids[0]
@@ -854,14 +729,12 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
 async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     from datetime import UTC, datetime
 
-    from filigree.mcp_server import _get_db, _get_filigree_dir, _safe_path
-
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
     args = _parse_args(arguments, TriggerScanArgs)
-    tracker = _get_db()
+    tracker = get_db()
     scanner_name = args.get("scanner")
     if not isinstance(scanner_name, str):
         return _text(ErrorResponse(error="scanner must be a string", code=ErrorCode.VALIDATION))
@@ -892,7 +765,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(url_err)
 
     try:
-        target = _safe_path(file_path)
+        target = safe_path(file_path)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
 
@@ -1105,14 +978,12 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextContent]:
     from datetime import UTC, datetime
 
-    from filigree.mcp_server import _get_db, _get_filigree_dir, _safe_path
-
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
     args = _parse_args(arguments, TriggerScanBatchArgs)
-    tracker = _get_db()
+    tracker = get_db()
     scanner_name = args.get("scanner")
     if not isinstance(scanner_name, str):
         return _text(ErrorResponse(error="scanner must be a string", code=ErrorCode.VALIDATION))
@@ -1171,7 +1042,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     seen_canonical: set[str] = set()
     for fp in file_paths:
         try:
-            target = _safe_path(fp)
+            target = safe_path(fp)
         except ValueError as e:
             skipped.append({"file_path": fp, "reason": str(e)})
             continue
@@ -1455,7 +1326,6 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
 
 
 async def _handle_get_scan_status(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetScanStatusArgs)
     scan_run_id = args.get("scan_run_id", "")
@@ -1467,7 +1337,7 @@ async def _handle_get_scan_status(arguments: dict[str, Any]) -> list[TextContent
     if err_resp is not None:
         return err_resp
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         status = tracker.get_scan_status(scan_run_id, log_lines=log_lines)
     except KeyError:
@@ -1479,9 +1349,8 @@ async def _handle_get_scan_status(arguments: dict[str, Any]) -> list[TextContent
 
 
 async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_filigree_dir, _safe_path
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
@@ -1494,7 +1363,7 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(prompt_err)
 
     try:
-        target = _safe_path(file_path)
+        target = safe_path(file_path)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
 

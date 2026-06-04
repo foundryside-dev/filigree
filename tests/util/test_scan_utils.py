@@ -215,6 +215,123 @@ class TestRunScannerPipeline:
         assert post_calls
         assert {call["api_url"] for call in post_calls} == {"http://localhost:9444"}
 
+    async def test_default_api_token_env_is_threaded_to_ingest_posts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+        post_calls: list[dict[str, Any]] = []
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setenv("FILIGREE_API_TOKEN", "scanner-callback-token")
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", "src", "--file", "src/target.py", "--scan-run-id", "run-1"])
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **kwargs: post_calls.append(kwargs) or (True, ""),
+        )
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 0
+        assert post_calls
+        assert {call["api_token"] for call in post_calls} == {"scanner-callback-token"}
+
+    async def test_default_api_token_env_prefers_specific_federation_token(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+        post_calls: list[dict[str, Any]] = []
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "specific-scanner-token")
+        monkeypatch.setenv("FILIGREE_API_TOKEN", "legacy-scanner-token")
+        monkeypatch.setattr(sys, "argv", ["scanner", "--root", "src", "--file", "src/target.py", "--scan-run-id", "run-1"])
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **kwargs: post_calls.append(kwargs) or (True, ""),
+        )
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 0
+        assert post_calls
+        assert {call["api_token"] for call in post_calls} == {"specific-scanner-token"}
+
+    async def test_custom_api_token_env_is_threaded_to_ingest_posts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_root = tmp_path / "project"
+        src = project_root / "src"
+        src.mkdir(parents=True)
+        (src / "target.py").write_text("x = 1\n")
+        post_calls: list[dict[str, Any]] = []
+
+        monkeypatch.chdir(project_root)
+        monkeypatch.setenv("SCANNER_CALLBACK_TOKEN", "custom-scanner-token")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scanner",
+                "--root",
+                "src",
+                "--file",
+                "src/target.py",
+                "--scan-run-id",
+                "run-1",
+                "--api-token-env",
+                "SCANNER_CALLBACK_TOKEN",
+            ],
+        )
+        monkeypatch.setattr(
+            "filigree.scanner_scripts.scan_utils.post_to_api",
+            lambda **kwargs: post_calls.append(kwargs) or (True, ""),
+        )
+
+        async def fake_executor(**kwargs: object) -> None:
+            output_path = Path(kwargs["output_path"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(SINGLE_FINDING_MD, encoding="utf-8")
+
+        rc = await run_scanner_pipeline(
+            executor=fake_executor,
+            scan_source="test",
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert rc == 0
+        assert post_calls
+        assert {call["api_token"] for call in post_calls} == {"custom-scanner-token"}
+
     async def test_rejects_invalid_prompt_pack(
         self,
         tmp_path: Path,
@@ -1188,6 +1305,31 @@ class TestPostToApi:
             assert payload["scan_run_id"] == "run-42"
             assert payload["findings"] == findings
             assert req.get_header("Content-type") == "application/json"
+
+    def test_sends_bearer_authorization_when_api_token_configured(self) -> None:
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen()) as mock_open:
+            post_to_api(
+                api_url="http://localhost:8377",
+                scan_source="codex",
+                scan_run_id="run-42",
+                findings=[],
+                api_token="scanner-callback-token",  # noqa: S106 - test fixture
+            )
+
+        req = mock_open.call_args[0][0]
+        assert req.get_header("Authorization") == "Bearer scanner-callback-token"
+
+    def test_omits_authorization_when_api_token_unset(self) -> None:
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen()) as mock_open:
+            post_to_api(
+                api_url="http://localhost:8377",
+                scan_source="codex",
+                scan_run_id="run-42",
+                findings=[],
+            )
+
+        req = mock_open.call_args[0][0]
+        assert req.get_header("Authorization") is None
 
     def test_http_error_returns_false(self) -> None:
         import urllib.error

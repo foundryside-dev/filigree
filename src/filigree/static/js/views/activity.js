@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { fetchActivity } from "../api.js";
-import { escHtml, escJsSingle } from "../ui.js";
+import { escHtml, escJsSingleAttr } from "../ui.js";
 
 // Render a list of activity events into HTML.
 function renderEventList(events) {
@@ -32,7 +32,7 @@ function renderEventList(events) {
       return (
         separator +
         '<div class="flex items-center gap-3 py-2 cursor-pointer bg-overlay-hover overflow-hidden" style="border-bottom:1px solid var(--surface-raised);flex-wrap:nowrap" onclick="openDetail(\'' +
-        escJsSingle(e.issue_id) +
+        escJsSingleAttr(e.issue_id) +
         "')" +
         ">" +
         '<span class="shrink-0 w-24" style="color:var(--text-muted)">' +

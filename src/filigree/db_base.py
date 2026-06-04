@@ -475,6 +475,7 @@ class DBMixinProtocol(Protocol):
         summary: str,
         *,
         detail: str = "",
+        file_id: str = "",
         file_path: str = "",
         line: int | None = None,
         source_issue_id: str = "",

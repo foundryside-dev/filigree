@@ -138,6 +138,18 @@ class TestPreviewScanTool:
         assert "scanner_available_list" in tools["scanner_list"].description
         assert tools["scanner_enable"].inputSchema["properties"]["scanner"]["type"] == "string"
 
+    async def test_preview_scan_rejects_missing_scanner(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("preview_scan", {"file_path": "preview_target.py"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "scanner" in data["error"]
+
+    async def test_preview_scan_rejects_missing_file_path(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("preview_scan", {"scanner": "test-scanner"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "file_path" in data["error"]
+
     async def test_preview_scan(self, mcp_db: FiligreeDB) -> None:
         files = _make_target_files(mcp_db, ["preview_target.py"])
         _write_scanner_toml(mcp_db)
@@ -1189,8 +1201,8 @@ class TestTriggerScanCooldownReservation:
     @pytest.mark.parametrize(
         ("arguments", "expected_error"),
         [
-            ({"file_path": "trigger_bad.py"}, "scanner must be a string"),
-            ({"scanner": "test-scanner"}, "file_path must be a string"),
+            ({"file_path": "trigger_bad.py"}, "scanner is required"),
+            ({"scanner": "test-scanner"}, "file_path is required"),
             ({"scanner": ["bad"], "file_path": "trigger_bad.py"}, "scanner must be a string"),
             ({"scanner": "test-scanner", "file_path": 123}, "file_path must be a string"),
             ({"scanner": "test-scanner", "file_path": "trigger_bad.py", "prompt": ["bad"]}, "prompt must be a string"),

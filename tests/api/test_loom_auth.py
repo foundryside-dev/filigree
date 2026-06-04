@@ -33,6 +33,8 @@ class TestIsLoomScopedPath:
             "/api/p/acme/loom/issues",  # server-mode project mount
             "/api/scan-results",  # living-surface federation alias
             "/api/p/acme/scan-results",  # alias under server-mode mount
+            "/api/observations",  # living-surface observation ingest alias
+            "/api/p/acme/observations",  # observation alias under server-mode mount
             "/api/v1/scan-results",  # classic scanner callback alias
             "/mcp",  # dashboard-mounted MCP streamable HTTP endpoint
             "/mcp/session",  # MCP subpaths inherit the same bearer boundary
@@ -66,10 +68,15 @@ class TestIsLoomScopedPath:
         """
         from fastapi.routing import APIRoute
 
-        from filigree.dashboard_routes.files import create_living_surface_router
+        from filigree.dashboard_routes import analytics, files
 
-        routes = [r for r in create_living_surface_router().routes if isinstance(r, APIRoute)]
-        assert len(routes) >= 1  # an empty router must not pass vacuously
+        routes = [
+            r
+            for router in (files.create_living_surface_router(), analytics.create_living_surface_router())
+            for r in router.routes
+            if isinstance(r, APIRoute)
+        ]
+        assert len(routes) >= 2  # an empty/missing router must not pass vacuously
         for route in routes:
             # The living-surface router mounts under /api (and /api/p/{key} in
             # server mode) — both forms must be gated.
@@ -102,6 +109,7 @@ def app_factory(dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch) -> I
     """
 
     def _make(token: str | None) -> FastAPI:
+        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
         if token is None:
             monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
         else:
@@ -159,6 +167,23 @@ class TestLoomAuthEnforcement:
             resp = await c.post("/api/scan-results", json={})
         assert resp.status_code == 401
 
+    async def test_living_alias_observations_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        """The living federation alias POST /api/observations is gated."""
+        app = app_factory(TOKEN)
+        async with _client(app) as c:
+            resp = await c.post("/api/observations", json={})
+        assert resp.status_code == 401
+
+    async def test_living_alias_observations_correct_token(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        app = app_factory(TOKEN)
+        async with _client(app) as c:
+            resp = await c.post(
+                "/api/observations",
+                headers={"Authorization": f"Bearer {TOKEN}"},
+                json={"summary": "auth-protected living observation"},
+            )
+        assert resp.status_code == 201
+
     async def test_classic_v1_scan_results_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         """The legacy scanner callback alias must share scan-ingest auth."""
         app = app_factory(TOKEN)
@@ -172,6 +197,28 @@ class TestLoomAuthEnforcement:
         async with _client(app) as c:
             resp = await c.post("/mcp", json={})
         assert resp.status_code == 401
+
+    async def test_specific_federation_token_env_var_enforces_scope(
+        self,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", TOKEN)
+        dash_module._db = dashboard_db.db
+        try:
+            app = create_app()
+            async with _client(app) as c:
+                unauth = await c.post("/api/observations", json={"summary": "must be gated"})
+                authed = await c.post(
+                    "/api/observations",
+                    headers={"Authorization": f"Bearer {TOKEN}"},
+                    json={"summary": "specific env token accepted"},
+                )
+        finally:
+            dash_module._db = None
+        assert unauth.status_code == 401
+        assert authed.status_code == 201
 
     async def test_whitespace_token_leaves_surface_open_and_warns(
         self, app_factory: Callable[[str | None], FastAPI], caplog: pytest.LogCaptureFixture
@@ -206,6 +253,31 @@ class TestLoomAuthScopeBoundary:
         async with _client(app) as c:
             resp = await c.get("/api/health")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["auth"]["federation"]["enabled"] is True
+        assert data["auth"]["federation"]["token_env"] == dash_module.LEGACY_API_ENV_VAR
+        assert data["auth"]["classic_api"]["enabled"] is False
+        assert data["auth"]["dashboard_ui"]["enabled"] is False
+        assert data["auth"]["mcp_http"]["enabled"] is True
+
+    async def test_health_reports_specific_federation_token_source(
+        self,
+        dashboard_db: PopulatedDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", TOKEN)
+        dash_module._db = dashboard_db.db
+        try:
+            app = create_app()
+            async with _client(app) as c:
+                resp = await c.get("/api/health")
+        finally:
+            dash_module._db = None
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["auth"]["federation"]["enabled"] is True
+        assert data["auth"]["federation"]["token_env"] == dash_module.FEDERATION_API_ENV_VAR
 
     async def test_root_open_when_token_set(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         app = app_factory(TOKEN)

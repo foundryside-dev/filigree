@@ -682,6 +682,7 @@ def create_loom_router() -> APIRouter:
             offset=offset,
             file_path=params.get("file_path", ""),
             file_id=params.get("file_id", ""),
+            sweep=False,
         )
         has_more = len(observations) > limit
         if has_more:

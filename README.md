@@ -167,6 +167,17 @@ filigree doctor                  # Verify installation health
 
 The session hook runs `filigree session-context` at startup, giving the agent a snapshot of in-progress work, ready tasks, and the critical path. The skill pack (`filigree-workflow`) teaches agents triage patterns, team coordination, and sprint planning step by step.
 
+### Dashboard Authentication Scope
+
+The dashboard is local-first and assumes loopback/local filesystem trust by default. Setting `FILIGREE_FEDERATION_API_TOKEN` enables bearer-token authentication only for federation and agent-ingest surfaces; the older `FILIGREE_API_TOKEN` is still accepted as a backward-compatible fallback. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled.
+
+| Route class | Authentication |
+|-------------|----------------|
+| Dashboard UI (`/`) | Open under the local loopback trust boundary |
+| Classic dashboard API (`/api/issues`, `/api/issue/{id}`, `/api/health`) | Open under the local loopback trust boundary |
+| Federation and scanner ingest (`/api/loom/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
+| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
+
 ## Why Filigree?
 
 Filigree is designed for a specific niche: local-first, agent-driven development. It is not a replacement for GitHub Issues or Jira.
@@ -236,7 +247,9 @@ Full definitions: [Workflow Templates — Priority Scale](docs/workflows.md#prio
 
 ## Development
 
-Requires Python 3.11+. Developed on 3.13.
+Requires Python 3.11+. Developed on 3.13. Node.js 24 is also required for the
+Node-backed static dashboard pytest tests and dashboard JavaScript quality
+gates.
 
 ```bash
 git clone https://github.com/tachyon-beep/filigree.git

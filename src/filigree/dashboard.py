@@ -63,6 +63,8 @@ from filigree.types.api import SchemaVersionMismatchError
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 8377
+FEDERATION_API_ENV_VAR = "FILIGREE_FEDERATION_API_TOKEN"
+LEGACY_API_ENV_VAR = "FILIGREE_API_TOKEN"
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,46 @@ _EXPECTED_PROJECT_CONFIG_ERRORS = (ProjectNotInitialisedError, ValueError, TypeE
 _db: FiligreeDB | None = None
 _config: dict[str, Any] = {}
 _DASHBOARD_STATE_ATTR = "filigree_dashboard_state"
+
+
+def _resolve_federation_api_token() -> tuple[str, str | None]:
+    """Resolve the opt-in bearer token for federation/MCP HTTP surfaces."""
+    empty_envs: list[str] = []
+    for env_name in (FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        token = raw.strip()
+        if token:
+            return token, env_name
+        empty_envs.append(env_name)
+
+    for env_name in empty_envs:
+        logger.warning("%s is set but empty/whitespace — loom federation auth is NOT enabled from that variable", env_name)
+    return "", None
+
+
+def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
+    return {
+        "federation": {
+            "enabled": federation_enabled,
+            "token_env": token_env,
+            "protected_paths": ["/api/loom/*", "/api/scan-results", "/api/observations", "/api/v1/scan-results"],
+        },
+        "mcp_http": {
+            "enabled": federation_enabled,
+            "token_env": token_env,
+            "protected_paths": ["/mcp", "/mcp/*"],
+        },
+        "classic_api": {
+            "enabled": False,
+            "note": "Classic dashboard API routes remain open; federation scanner aliases are listed under federation.",
+        },
+        "dashboard_ui": {
+            "enabled": False,
+            "note": "The local dashboard UI remains open under the loopback trust boundary.",
+        },
+    }
 
 
 @dataclass
@@ -200,13 +242,17 @@ class ProjectStore:
         self._evicted_dbs: list[FiligreeDB] = []
         self._evicted_at: dict[FiligreeDB, float] = {}
         self._evicted_close_grace_seconds = 60.0
-        # Serialises ALL reads and writes of (_projects, _dbs, _evicted_dbs):
-        # - get_db lazy-open and cache lookup (filigree-732f6b31e4: serialise
-        #   first opens; filigree-e43edbc067: removed unlocked fast path so a
-        #   reader can never hand out a handle that reload just popped).
+        # Serialises reads and writes of (_projects, _dbs, _evicted_dbs):
+        # - get_db cache lookup/publish and project-map snapshots
+        #   (filigree-e43edbc067: removed unlocked fast path so a reader can
+        #   never hand out a handle that reload just popped).
         # - reload's atomic state swap (filigree-e43edbc067).
         # - close_all drain.
         self._lock = threading.Lock()
+        # Per-project open locks keep concurrent first opens for the same key
+        # serialized without making unrelated projects wait behind slow DB
+        # initialization.
+        self._db_open_locks: dict[str, Any] = {}
 
     def _pop_drainable_evicted_locked(self, *, force: bool = False) -> list[FiligreeDB]:
         now = time.monotonic()
@@ -294,54 +340,93 @@ class ProjectStore:
     def get_db(self, key: str) -> FiligreeDB:
         """Return (lazily opening) the DB for *key*. Raises ``KeyError``.
 
-        The lock guards the whole operation: membership check, cache lookup,
-        and lazy open all happen under the same lock that ``reload()`` uses
-        for its atomic state swap. This means a reader either observes the
-        old (consistent) ``(_projects, _dbs)`` pair or the new pair, never a
-        torn view where ``_projects[key]`` points at a new path while
-        ``_dbs[key]`` is still the handle for the old path.
-        (filigree-e43edbc067)
+        The global lock guards membership checks, cache lookup/publish, and
+        reload's atomic state swap. Slow DB initialization happens outside
+        that global lock, behind a per-project open lock, so unrelated project
+        requests are not serialized behind the first open for another key.
+        Before publishing a newly opened DB, the current project-map path is
+        rechecked so reload cannot produce a torn ``(_projects, _dbs)`` pair.
+        (filigree-e43edbc067, filigree-732f6b31e4)
         """
-        self._drain_evicted_dbs()
-        with self._lock:
-            if key not in self._projects:
-                raise KeyError(key)
-            cached = self._dbs.get(key)
-            if cached is not None:
-                return cached
-            info = self._projects[key]
-            filigree_path = Path(info["path"])
-            db: FiligreeDB | None = None
-            try:
-                db = _open_db_for_filigree_dir(filigree_path, check_same_thread=False)
-                self._dbs[key] = db
-            except SchemaVersionMismatchError as exc:
-                # Operator-visible expected condition (project DB written by a
-                # newer filigree); log at WARNING and re-raise so the FastAPI
-                # exception handler converts it to a 409 SCHEMA_MISMATCH for
-                # this project only — other projects in the server keep
-                # working.
-                logger.warning(
-                    "Project DB schema mismatch for key=%r path=%s: installed=v%d database=v%d",
-                    key,
-                    filigree_path,
-                    exc.installed,
-                    exc.database,
-                )
-                if db is not None:
-                    db.close()
-                raise
-            except _EXPECTED_PROJECT_CONFIG_ERRORS as exc:
-                logger.warning("Invalid project configuration for key=%r path=%s: %s", key, filigree_path, exc)
-                if db is not None:
-                    db.close()
-                raise
-            except Exception:
-                logger.error("Failed to open project DB for key=%r path=%s", key, filigree_path, exc_info=True)
-                if db is not None:
-                    db.close()
-                raise
-            return self._dbs[key]
+        while True:
+            self._drain_evicted_dbs()
+            with self._lock:
+                info = self._projects.get(key)
+                if info is None:
+                    raise KeyError(key)
+                cached = self._dbs.get(key)
+                if cached is not None:
+                    return cached
+                open_lock = self._db_open_locks.get(key)
+                if open_lock is None:
+                    open_lock = threading.Lock()
+                    self._db_open_locks[key] = open_lock
+
+            with open_lock:
+                with self._lock:
+                    info = self._projects.get(key)
+                    if info is None:
+                        raise KeyError(key)
+                    cached = self._dbs.get(key)
+                    if cached is not None:
+                        return cached
+                    filigree_path = Path(info["path"])
+
+                db: FiligreeDB | None = None
+                try:
+                    db = _open_db_for_filigree_dir(filigree_path, check_same_thread=False)
+                except SchemaVersionMismatchError as exc:
+                    # Operator-visible expected condition (project DB written by a
+                    # newer filigree); log at WARNING and re-raise so the FastAPI
+                    # exception handler converts it to a 409 SCHEMA_MISMATCH for
+                    # this project only — other projects in the server keep
+                    # working.
+                    logger.warning(
+                        "Project DB schema mismatch for key=%r path=%s: installed=v%d database=v%d",
+                        key,
+                        filigree_path,
+                        exc.installed,
+                        exc.database,
+                    )
+                    if db is not None:
+                        db.close()
+                    raise
+                except _EXPECTED_PROJECT_CONFIG_ERRORS as exc:
+                    logger.warning("Invalid project configuration for key=%r path=%s: %s", key, filigree_path, exc)
+                    if db is not None:
+                        db.close()
+                    raise
+                except Exception:
+                    logger.error("Failed to open project DB for key=%r path=%s", key, filigree_path, exc_info=True)
+                    if db is not None:
+                        db.close()
+                    raise
+
+                if db is None:  # pragma: no cover - _open_db_for_filigree_dir returns or raises
+                    msg = f"Project DB open returned no handle for key={key!r} path={filigree_path}"
+                    raise RuntimeError(msg)
+                cached_after_open: FiligreeDB | None = None
+                stale_open = False
+                missing_after_open = False
+                with self._lock:
+                    current_info = self._projects.get(key)
+                    if current_info is None:
+                        missing_after_open = True
+                    elif current_info.get("path") != str(filigree_path):
+                        stale_open = True
+                    else:
+                        cached_after_open = self._dbs.get(key)
+                        if cached_after_open is None:
+                            self._dbs[key] = db
+                            return db
+
+                db.close()
+                if cached_after_open is not None:
+                    return cached_after_open
+                if missing_after_open:
+                    raise KeyError(key)
+                if stale_open:
+                    continue
 
     def list_projects(self) -> list[dict[str, str]]:
         """Return ``[{key, name, path}]`` for the frontend."""
@@ -644,22 +729,21 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     )
 
     # Opt-in bearer-token auth for the loom federation surface (ADR-018).
-    # Active only when FILIGREE_API_TOKEN is set; otherwise the middleware is
+    # Active only when FILIGREE_FEDERATION_API_TOKEN (or legacy
+    # FILIGREE_API_TOKEN) is set; otherwise the middleware is
     # not installed at all and behaviour is identical to the loopback default
     # (ADR-012). Added after CORS so CORS remains inner and still decorates
     # classic/dashboard responses; loom OPTIONS preflight passes through.
-    _raw_api_token = os.environ.get("FILIGREE_API_TOKEN")
-    _api_token = (_raw_api_token or "").strip()
+    _api_token, _api_token_env = _resolve_federation_api_token()
+    app.state.auth_scope = _dashboard_auth_scope(federation_enabled=bool(_api_token), token_env=_api_token_env)
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
 
         app.add_middleware(build_auth_middleware(_api_token))
-    elif _raw_api_token is not None:
-        # The var was set but is empty/whitespace, so it cannot be a real
-        # secret and the middleware is NOT installed — the loom surface stays
-        # open. Without this warning an operator who exported a blank token
-        # would believe auth is on when it silently is not.
-        logger.warning("FILIGREE_API_TOKEN is set but empty/whitespace — loom federation auth is NOT enabled")
+        logger.info(
+            "federation bearer auth enabled via %s; dashboard UI and classic API routes remain open",
+            _api_token_env,
+        )
 
     # Idle-tracking middleware (ethereal mode only — server mode runs indefinitely)
     if not server_mode:
@@ -718,9 +802,10 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                     "mode": "server",
                     "projects": len(dashboard_state.project_store.list_projects()),
                     "version": __version__,
+                    "auth": app.state.auth_scope,
                 }
             )
-        return JSONResponse({"status": "ok", "mode": "ethereal", "version": __version__})
+        return JSONResponse({"status": "ok", "mode": "ethereal", "version": __version__, "auth": app.state.auth_scope})
 
     @app.get("/api/projects")
     async def api_projects() -> JSONResponse:

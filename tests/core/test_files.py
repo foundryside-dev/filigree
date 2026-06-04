@@ -1066,6 +1066,36 @@ class TestProcessScanResults:
         assert "[codex]" in obs[0]["summary"]
         assert obs[0]["priority"] == 1  # high -> P1
 
+    def test_create_observations_link_canonical_file_id_when_registry_normalizes_path(self, tmp_path: Path) -> None:
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=_CasefoldingRegistry())
+        db.initialize()
+        try:
+            result = db.process_scan_results(
+                scan_source="codex",
+                create_observations=True,
+                findings=[
+                    {
+                        "path": "SRC/Main.py",
+                        "rule_id": "logic-error",
+                        "severity": "high",
+                        "message": "Off-by-one in pagination loop",
+                        "line_start": 42,
+                    },
+                ],
+            )
+
+            assert result["observations_created"] == 1
+            finding = db.conn.execute("SELECT file_id FROM scan_findings").fetchone()
+            observation = db.conn.execute("SELECT file_id, file_path FROM observations").fetchone()
+            file_record = db.conn.execute("SELECT id, path FROM file_records").fetchone()
+            assert finding is not None
+            assert observation is not None
+            assert file_record is not None
+            assert observation["file_id"] == finding["file_id"] == file_record["id"]
+            assert observation["file_path"] == file_record["path"] == "src/main.py"
+        finally:
+            db.close()
+
     def test_create_observations_does_not_backfill_existing(self, db: FiligreeDB) -> None:
         finding = {
             "path": "src/main.py",

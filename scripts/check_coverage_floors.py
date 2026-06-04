@@ -15,17 +15,17 @@ from pathlib import Path
 TOTAL_FLOOR = 85.0
 
 FILE_FLOORS = {
-    "src/filigree/dashboard_auth.py": 45.0,
+    "src/filigree/dashboard_auth.py": 90.0,
     "src/filigree/dashboard_routes/files.py": 75.0,
     "src/filigree/db_annotations.py": 60.0,
-    "src/filigree/mcp_server.py": 70.0,
+    "src/filigree/mcp_server.py": 75.0,
     "src/filigree/mcp_tools/annotations.py": 45.0,
     "src/filigree/mcp_tools/issues.py": 75.0,
     "src/filigree/mcp_tools/observations.py": 70.0,
-    "src/filigree/registry.py": 75.0,
+    "src/filigree/registry.py": 80.0,
     "src/filigree/scanner_scripts/claude_bug_hunt.py": 45.0,
     "src/filigree/scanner_scripts/codex_bug_hunt.py": 45.0,
-    "src/filigree/scanner_scripts/scan_utils.py": 80.0,
+    "src/filigree/scanner_scripts/scan_utils.py": 85.0,
     "src/filigree/scanner_runtime.py": 80.0,
 }
 

@@ -1230,9 +1230,11 @@ class FilesMixin(DBMixinProtocol):
             stats["new_finding_ids"].append(finding_id)
             seen_finding_ids.setdefault(file_id, []).append(finding_id)
             if create_observations:
+                stored_file = self.conn.execute("SELECT path FROM file_records WHERE id = ?", (file_id,)).fetchone()
+                observation_path = stored_file["path"] if stored_file is not None else path
                 obs_summary = scan_finding_observation_summary(
                     scan_source,
-                    path,
+                    observation_path,
                     f.get("line_start"),
                     f.get("message", ""),
                 )
@@ -1243,7 +1245,8 @@ class FilesMixin(DBMixinProtocol):
                     self.create_observation(
                         obs_summary,
                         detail=obs_detail,
-                        file_path=path,
+                        file_id=file_id,
+                        file_path=observation_path,
                         line=f.get("line_start"),
                         # Link the observation back to the finding so
                         # dismiss_finding / promote_finding can cascade-clean

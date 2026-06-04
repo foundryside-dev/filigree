@@ -20,6 +20,9 @@ from filigree.mcp_tools.common import (
     _text,
     _validate_actor,
     _validate_int_range,
+    get_db,
+    refresh_summary,
+    safe_path,
 )
 from filigree.mcp_tools.payloads import critical_path_node_to_mcp, plan_tree_to_mcp, slim_plan_tree_to_mcp
 from filigree.types.api import (
@@ -349,13 +352,12 @@ def _parent_titles_by_id(tracker: Any, issues: list[Any]) -> dict[str, str]:
 
 
 async def _handle_add_dependency(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddDependencyArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         added = tracker.add_dependency(
             args["from_issue_id"],
@@ -364,7 +366,7 @@ async def _handle_add_dependency(arguments: dict[str, Any]) -> list[TextContent]
         )
     except (ValueError, KeyError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     status = "added" if added else "already_exists"
     issue = tracker.get_issue(args["from_issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
@@ -374,13 +376,12 @@ async def _handle_add_dependency(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_remove_dependency(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, RemoveDependencyArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         removed = tracker.remove_dependency(
             args["from_issue_id"],
@@ -391,7 +392,7 @@ async def _handle_remove_dependency(arguments: dict[str, Any]) -> list[TextConte
         return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     status = "removed" if removed else "not_found"
     issue = tracker.get_issue(args["from_issue_id"])
     response: dict[str, Any] = dict(issue_to_public(issue))
@@ -401,14 +402,13 @@ async def _handle_remove_dependency(arguments: dict[str, Any]) -> list[TextConte
 
 
 async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetReadyArgs)
     include_context = args.get("include_context", False)
     if not isinstance(include_context, bool):
         return _text(ErrorResponse(error="include_context must be a boolean", code=ErrorCode.VALIDATION))
 
-    tracker = _get_db()
+    tracker = get_db()
     issues = tracker.get_ready()
     parent_titles = _parent_titles_by_id(tracker, issues) if include_context else {}
     items = []
@@ -427,12 +427,11 @@ async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_blocked(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     include_blockers = arguments.get("include_blockers", False)
     if not isinstance(include_blockers, bool):
         return _text(ErrorResponse(error="include_blockers must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issues = tracker.get_blocked()
         blockers_by_id = {}
@@ -463,13 +462,12 @@ async def _handle_get_blocked(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_plan(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, GetPlanArgs)
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     try:
         plan_tree = tracker.get_plan(args["milestone_id"])
         total = plan_tree["total_steps"]
@@ -578,7 +576,6 @@ def _validate_plan_payload_shape(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _create_plan_from_payload(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     shape_err = _validate_plan_payload_shape(arguments)
     if shape_err:
@@ -605,14 +602,14 @@ async def _create_plan_from_payload(arguments: dict[str, Any]) -> list[TextConte
             if dep_err:
                 return dep_err
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         plan = tracker.create_plan(
             cast(MilestoneInput, dict(milestone)),
             [cast(PhaseInput, dict(p)) for p in args["phases"]],
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(plan_tree_to_mcp(plan))
     except (KeyError, IndexError, TypeError, ValueError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
@@ -625,7 +622,6 @@ async def _handle_create_plan(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_create_plan_from_file(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _safe_path
 
     args = _parse_args(arguments, CreatePlanFromFileArgs)
     file_path = args.get("file_path")
@@ -637,7 +633,7 @@ async def _handle_create_plan_from_file(arguments: dict[str, Any]) -> list[TextC
             )
         )
     try:
-        plan_path = _safe_path(file_path)
+        plan_path = safe_path(file_path)
         raw = plan_path.read_text()
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
@@ -660,7 +656,6 @@ async def _handle_create_plan_from_file(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_add_plan_step(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, AddPlanStepArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -670,7 +665,7 @@ async def _handle_add_plan_step(arguments: dict[str, Any]) -> list[TextContent]:
     if priority_err:
         return priority_err
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         step = tracker.add_plan_step(
             args["phase_id"],
@@ -686,18 +681,17 @@ async def _handle_add_plan_step(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
     except (TypeError, ValueError) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     return _text(issue_to_public(step))
 
 
 async def _handle_retarget_plan_dependency(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, RetargetPlanDependencyArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.retarget_plan_dependency(
             args["step_id"],
@@ -709,7 +703,7 @@ async def _handle_retarget_plan_dependency(arguments: dict[str, Any]) -> list[Te
         return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     response: dict[str, Any] = dict(issue_to_public(issue))
     response["dependency_result"] = "retargeted"
     response["dependency"] = {
@@ -721,13 +715,12 @@ async def _handle_retarget_plan_dependency(arguments: dict[str, Any]) -> list[Te
 
 
 async def _handle_move_plan_step(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, MovePlanStepArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         before = tracker.get_issue(args["step_id"])
         issue = tracker.move_plan_step(args["step_id"], args["phase_id"], actor=actor)
@@ -735,7 +728,7 @@ async def _handle_move_plan_step(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error=str(e), code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     response: dict[str, Any] = dict(issue_to_public(issue))
     response["move_result"] = "moved"
     response["changed_fields"] = ["parent_id"]
@@ -748,7 +741,6 @@ async def _handle_move_plan_step(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_label_plan_tree(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, LabelPlanTreeArgs)
     detail = parse_response_detail(args.get("response_detail"))
@@ -770,7 +762,7 @@ async def _handle_label_plan_tree(arguments: dict[str, Any]) -> list[TextContent
                 code=ErrorCode.VALIDATION,
             )
         )
-    tracker = _get_db()
+    tracker = get_db()
     try:
         milestone = tracker.get_issue(milestone_id)
         if milestone.type != "milestone":
@@ -781,7 +773,7 @@ async def _handle_label_plan_tree(arguments: dict[str, Any]) -> list[TextContent
                 )
             )
         succeeded, failed = tracker.label_subtree(milestone_id, label=label)
-        _refresh_summary()
+        refresh_summary()
         if detail == "full":
             full_result: BatchResponse[PublicIssue] = BatchResponse(
                 succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in succeeded],
@@ -802,20 +794,19 @@ async def _handle_label_plan_tree(arguments: dict[str, Any]) -> list[TextContent
 
 
 async def _handle_label_subtree(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, LabelSubtreeArgs)
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     try:
         succeeded, failed = tracker.label_subtree(args["parent_id"], label=args["label"])
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['parent_id']}", code=ErrorCode.NOT_FOUND))
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(tracker.get_issue(row["id"])) for row in succeeded],
@@ -830,9 +821,8 @@ async def _handle_label_subtree(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_critical_path(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
-    tracker = _get_db()
+    tracker = get_db()
     path = [cast(CriticalPathMcpNode, critical_path_node_to_mcp(node)) for node in tracker.get_critical_path()]
     response = CriticalPathResponse(path=path, length=len(path))
     if not path:

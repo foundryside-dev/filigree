@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from mcp.types import TextContent
 
 from filigree.issue_payloads import issue_to_ready, issue_to_slim
+from filigree.mcp_runtime import McpRuntimeContext, McpToolMetadata, get_runtime_context
 from filigree.models import Issue
 from filigree.registry_errors import RegistryPublicError, registry_error_response
 
@@ -39,27 +40,35 @@ def _parse_args(arguments: dict[str, Any], cls: type[_T]) -> _T:
 
 
 def get_db() -> FiligreeDB:
-    from filigree.mcp_server import _get_db
-
-    return _get_db()
+    return get_runtime_context().get_db()
 
 
 def refresh_summary() -> None:
-    from filigree.mcp_server import _refresh_summary
-
-    _refresh_summary()
+    get_runtime_context().refresh_summary()
 
 
 def get_filigree_dir() -> Path | None:
-    from filigree.mcp_server import _get_filigree_dir
-
-    return _get_filigree_dir()
+    return get_runtime_context().get_filigree_dir()
 
 
 def safe_path(path: str) -> Path:
-    from filigree.mcp_server import _safe_path
+    return get_runtime_context().safe_path(path)
 
-    return _safe_path(path)
+
+def runtime_context() -> McpRuntimeContext:
+    return get_runtime_context()
+
+
+def get_mcp_status_payload() -> dict[str, Any]:
+    return get_runtime_context().get_status_payload()
+
+
+def tool_metadata() -> McpToolMetadata:
+    return get_runtime_context().get_tool_metadata()
+
+
+def resolve_request_filigree_dir(db: FiligreeDB) -> Path:
+    return get_runtime_context().resolve_request_filigree_dir(db)
 
 
 # Hard cap on list/search results (issues, observations) to keep MCP response

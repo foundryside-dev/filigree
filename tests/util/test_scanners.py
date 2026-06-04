@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from filigree.bundled_scanners import BUNDLED_SCANNERS
 from filigree.scanners import ScannerConfig, list_scanners, load_scanner, validate_scanner_command
 
 # ── list_scanners ────────────────────────────────────────────────────
@@ -233,6 +234,14 @@ class TestLoadScanner:
             project_root="/home/user/project",
         )
         assert "{project_root}/evil.py" in cmd
+
+
+class TestBundledScanners:
+    def test_managed_scanners_expose_api_token_env(self) -> None:
+        for scanner in BUNDLED_SCANNERS.values():
+            assert "--api-token-env" in scanner.args
+            index = scanner.args.index("--api-token-env")
+            assert scanner.args[index + 1] == "FILIGREE_FEDERATION_API_TOKEN"
 
 
 # ── validate_scanner_command ─────────────────────────────────────────

@@ -374,6 +374,11 @@ def _clarion_headers(*, auth_token: str | None, has_body: bool = False) -> dict[
     return headers
 
 
+def _clarion_follow_redirects(*, auth_token: str | None) -> bool:
+    """Disable redirects when a bearer token would be attached."""
+    return not bool(auth_token)
+
+
 def clarion_files_batch_url(base_url: str) -> str:
     """Build the Clarion batch-resolve URL."""
     return f"{base_url.rstrip('/')}/api/v1/files/batch"
@@ -392,7 +397,7 @@ def probe_clarion_capabilities(base_url: str, *, timeout_seconds: float, auth_to
     url = clarion_capabilities_url(base_url)
     _validate_clarion_token_origin(url, auth_token=auth_token)
     try:
-        with httpx.Client(trust_env=False, follow_redirects=True) as client:
+        with httpx.Client(trust_env=False, follow_redirects=_clarion_follow_redirects(auth_token=auth_token)) as client:
             response = client.get(url, headers=_clarion_headers(auth_token=auth_token), timeout=timeout_seconds)
         raw = response.text
         if response.status_code >= 400:
@@ -591,7 +596,16 @@ class ClarionRegistry:
         if self.auth_token is not None and not isinstance(self.auth_token, str):
             msg = f"clarion.auth_token must be a string or None, got {type(self.auth_token).__name__}"
             raise ValueError(msg)
-        object.__setattr__(self, "_http_client", httpx.Client(trust_env=False, follow_redirects=True))
+        _validate_clarion_token_origin(self.base_url, auth_token=self.auth_token)
+        object.__setattr__(
+            self,
+            "_http_client",
+            httpx.Client(trust_env=False, follow_redirects=_clarion_follow_redirects(auth_token=self.auth_token)),
+        )
+
+    def _headers_for_request(self, url: str, *, has_body: bool = False) -> dict[str, str]:
+        _validate_clarion_token_origin(url, auth_token=self.auth_token)
+        return _clarion_headers(auth_token=self.auth_token, has_body=has_body)
 
     def resolve_file(
         self,
@@ -611,7 +625,7 @@ class ClarionRegistry:
             try:
                 response = self._http_client.get(
                     url,
-                    headers=_clarion_headers(auth_token=self.auth_token),
+                    headers=self._headers_for_request(url),
                     timeout=remaining,
                 )
                 raw = response.text
@@ -750,7 +764,7 @@ class ClarionRegistry:
                 response = self._http_client.post(
                     url,
                     json=body,
-                    headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                    headers=self._headers_for_request(url, has_body=True),
                     timeout=remaining,
                 )
                 raw = response.text
@@ -928,7 +942,7 @@ class ClarionRegistry:
                 response = self._http_client.post(
                     url,
                     json=body,
-                    headers=_clarion_headers(auth_token=self.auth_token, has_body=True),
+                    headers=self._headers_for_request(url, has_body=True),
                     timeout=remaining,
                 )
                 raw = response.text

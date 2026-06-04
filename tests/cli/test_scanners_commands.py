@@ -1020,7 +1020,7 @@ class TestReportFindingCommand:
         finally:
             os.chdir(original)
 
-    def test_report_finding_rejects_out_of_range_line_start_for_existing_file(self, initialized_project: Path) -> None:
+    def test_report_finding_normalizes_out_of_range_line_start_for_existing_file(self, initialized_project: Path) -> None:
         (initialized_project / "src").mkdir()
         (initialized_project / "src/foo.py").write_text("x = 1\n")
         payload = json.dumps(
@@ -1038,10 +1038,14 @@ class TestReportFindingCommand:
         os.chdir(str(initialized_project))
         try:
             result = runner.invoke(cli, ["report-finding", "--json", "--response-detail", "full"], input=payload)
-            assert result.exit_code == 1
+            assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert data["code"] == "VALIDATION"
-            assert "line_start 389 exceeds file length" in data["error"]
+            assert data["status"] == "created"
+            assert "line_start 389 exceeds file length" in data["warnings"][0]
+            with get_db() as db:
+                finding = db.get_finding(data["finding_id"])
+            assert finding["line_start"] is None
+            assert finding["line_end"] is None
         finally:
             os.chdir(original)
 

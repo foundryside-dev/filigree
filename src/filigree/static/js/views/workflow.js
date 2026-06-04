@@ -4,7 +4,7 @@
 
 import { fetchPlan, fetchTypeInfo, fetchTypes } from "../api.js";
 import { CATEGORY_COLORS, state, THEME_COLORS } from "../state.js";
-import { escHtml, escJsSingle } from "../ui.js";
+import { escHtml, escJsSingleAttr } from "../ui.js";
 
 // Types hidden from the workflow dropdown (internal planning types).
 const WORKFLOW_HIDDEN = { phase: 1, step: 1, work_package: 1, deliverable: 1 };
@@ -335,7 +335,7 @@ export async function loadPlanView(milestoneId) {
         steps
           .map((s) => {
             const catColor = CATEGORY_COLORS[s.status_category || "open"] || "#64748B";
-            const safeId = escJsSingle(s.id);
+            const safeId = escJsSingleAttr(s.id);
             return (
               '<div class="flex items-center gap-2 py-1 ml-4 cursor-pointer" onclick="openDetail(\'' +
               safeId +

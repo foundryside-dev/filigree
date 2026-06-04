@@ -48,6 +48,7 @@ from filigree.core import (
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
+from filigree.mcp_runtime import McpRuntimeContext, McpToolMetadata, set_runtime_context
 from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backward compat
     _MAX_LIST_RESULTS,
     _text,
@@ -484,6 +485,23 @@ _tool_input_schemas: dict[str, dict[str, Any]] = {
 }
 
 
+def _runtime_tool_metadata() -> McpToolMetadata:
+    return McpToolMetadata(tools=tuple(_all_tools), tool_subsystem=dict(_tool_subsystem))
+
+
+set_runtime_context(
+    McpRuntimeContext(
+        get_db=_get_db,
+        get_filigree_dir=_get_filigree_dir,
+        safe_path=_safe_path,
+        refresh_summary=_refresh_summary,
+        get_status_payload=get_mcp_status_payload,
+        get_tool_metadata=_runtime_tool_metadata,
+        resolve_request_filigree_dir=_resolve_request_filigree_dir,
+    )
+)
+
+
 def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse | None:
     if not isinstance(arguments, dict):
         return ErrorResponse(error=f"Arguments for {tool_name} must be an object", code=ErrorCode.VALIDATION)
@@ -572,6 +590,13 @@ def _validate_schema_value(value: object, schema: dict[str, Any], path: str) -> 
             return f"{path} must be <= {maximum}"
 
     if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    child_path = f"{path}.{key}" if path else key
+                    return f"{child_path} is required"
+
         properties = schema.get("properties")
         if isinstance(properties, dict):
             if schema.get("additionalProperties") is False:

@@ -25,11 +25,8 @@ from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches,
 from filigree.cli_commands.files import finding_group
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
-from filigree.db_files import INGESTED_FILE_ID_KEY
 from filigree.mcp_tools.scanners import (
     _load_scanner_or_error,
-    _report_finding_observation_ids,
-    _reported_finding_record,
     _validate_localhost_url,
 )
 from filigree.paths import safe_path
@@ -37,6 +34,7 @@ from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.registry_errors import registry_error_response
 from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
+from filigree.scanner_reporting import report_scanner_finding
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
 from filigree.scanners import (
@@ -1185,7 +1183,6 @@ def report_finding_cmd(
     if finding.get("category"):
         finding_record["metadata"] = {"category": finding["category"]}
 
-    observation_ids: list[str] = []
     create_paired_observation = create_observation and not no_observation
     observation_actor = ""
     if create_paired_observation:
@@ -1201,14 +1198,13 @@ def report_finding_cmd(
                 return
     with get_db() as tracker:
         try:
-            result = tracker.process_scan_results(
-                scan_source="agent",
-                findings=[finding_record],
-                scan_run_id="",
-                create_observations=create_paired_observation,
+            outcome = report_scanner_finding(
+                tracker,
+                finding_record,
+                create_observation=create_paired_observation,
                 observation_actor=observation_actor,
+                refresh_summary=refresh_summary,
             )
-            refresh_summary(tracker)
         except RegistryResolutionError as exc:
             _logger.warning("report_finding registry resolution failed: %s", exc)
             _emit_registry_error(exc, action="reporting finding", as_json=as_json)
@@ -1228,32 +1224,16 @@ def report_finding_cmd(
             _logger.error("report_finding storage failure: %s", exc)
             _emit_error(f"Failed to report finding: {exc}", ErrorCode.IO, as_json=as_json)
             return
-        reported_file_id = finding_record.get(INGESTED_FILE_ID_KEY)
-        reported_line_start = finding_record.get("line_start")
-        lookup_line_start = (
-            reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
-        )
-        ingested_finding = _reported_finding_record(
-            tracker,
-            result,
-            file_id=reported_file_id if isinstance(reported_file_id, str) else None,
-            rule_id=rule_id,
-            line_start=lookup_line_start,
-            message=message,
-            severity=severity,
-        )
-        if ingested_finding is None:
-            _emit_error("Reported finding was not found after ingestion", ErrorCode.IO, as_json=as_json)
+        except LookupError as exc:
+            _emit_error(str(exc), ErrorCode.IO, as_json=as_json)
             return
-        if create_paired_observation:
-            observation_ids = _report_finding_observation_ids(
-                tracker,
-                file_id=ingested_finding["file_id"],
-                finding_id=ingested_finding["id"],
-            )
+
+    result = outcome.result
+    ingested_finding = outcome.finding_record
+    observation_ids = outcome.observation_ids
 
     response: dict[str, Any] = {
-        "status": "created" if result["findings_created"] else "updated",
+        "status": outcome.status,
     }
     response["finding_id"] = ingested_finding["id"]
     if observation_ids:

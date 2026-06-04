@@ -5,7 +5,7 @@
 import { fetchTransitions, patchIssue } from "../api.js";
 import { getFilteredIssues } from "../filters.js";
 import { CATEGORY_COLORS, PRIORITY_COLORS, state, TYPE_COLORS, TYPE_ICONS } from "../state.js";
-import { escHtml, escJsSingle, issueIdChip, relativeTime, showToast } from "../ui.js";
+import { escHtml, escJsSingleAttr, issueIdChip, relativeTime, showToast } from "../ui.js";
 
 // --- Callbacks for functions not yet available at import time ---
 
@@ -174,7 +174,7 @@ function renderListMode(items) {
       const isSelected = state.selectedCards.has(i.id);
 
       return (
-        `<tr class="cursor-pointer bg-overlay-hover ${borderClass}" onclick="openDetail('${escJsSingle(i.id)}')" style="border-bottom:1px solid var(--border-default)">` +
+        `<tr class="cursor-pointer bg-overlay-hover ${borderClass}" onclick="openDetail('${escJsSingleAttr(i.id)}')" style="border-bottom:1px solid var(--border-default)">` +
         `<td class="py-2 px-2 text-xs" style="color:${PRIORITY_COLORS[i.priority] || "#6B7280"}">${i.priority}</td>` +
         `<td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${icon} ${escHtml(i.type || "")}</td>` +
         `<td class="py-2 px-2"><span class="text-xs px-1.5 py-0.5 rounded" style="background:${catColor};color:#fff">${escHtml(i.status || "")}</span></td>` +
@@ -182,7 +182,7 @@ function renderListMode(items) {
         `<td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${escHtml(i.assignee || "\u2014")}</td>` +
         `<td class="py-2 px-2 text-xs" style="color:var(--text-muted)">${escHtml(updated)}</td>` +
         `<td class="py-2 px-2 text-xs text-right" style="color:var(--text-muted)">${blocks || ""}</td>` +
-        `<td class="py-2 px-1 text-center" onclick="event.stopPropagation();toggleCardSelect(event,'${escJsSingle(i.id)}')">` +
+        `<td class="py-2 px-1 text-center" onclick="event.stopPropagation();toggleCardSelect(event,'${escJsSingleAttr(i.id)}')">` +
         `<input type="checkbox" ${isSelected ? "checked" : ""} style="accent-color:var(--accent)" class="cursor-pointer"></td>` +
         "</tr>"
       );
@@ -296,7 +296,7 @@ export function renderClusterCard(epic) {
   }
 
   return (
-    `<div class="rounded p-3 cursor-pointer ${epic.is_ready ? "ready-border" : ""}" style="background:var(--surface-raised);border:1px solid var(--border-default)" aria-expanded="${expanded}" onclick="toggleEpicExpand('${epic.id}')">` +
+    `<div class="rounded p-3 cursor-pointer ${epic.is_ready ? "ready-border" : ""}" style="background:var(--surface-raised);border:1px solid var(--border-default)" aria-expanded="${expanded}" onclick="toggleEpicExpand('${escJsSingleAttr(epic.id)}')">` +
     '<div class="flex items-center justify-between mb-1">' +
     `<span class="text-xs">${TYPE_ICONS[epic.type] || ""} <span class="font-medium" style="color:var(--text-primary)">${escHtml(epic.title.slice(0, 40))}</span></span>` +
     `<span class="text-xs" style="color:var(--text-muted)">[${total}]</span>` +
@@ -341,7 +341,7 @@ function renderFilteredClusterCard(parent, children) {
   }
 
   return (
-    `<div class="rounded p-3 cursor-pointer" style="background:var(--surface-raised);border:1px solid var(--border-default)" aria-expanded="${expanded}" onclick="toggleEpicExpand('${escJsSingle(parent.id)}')">` +
+    `<div class="rounded p-3 cursor-pointer" style="background:var(--surface-raised);border:1px solid var(--border-default)" aria-expanded="${expanded}" onclick="toggleEpicExpand('${escJsSingleAttr(parent.id)}')">` +
     '<div class="flex items-center justify-between mb-1">' +
     `<span class="text-xs">${TYPE_ICONS[parent.type] || ""} <span class="font-medium" style="color:var(--text-primary)">${escHtml(parent.title.slice(0, 40))}</span></span>` +
     `<span class="text-xs" style="color:var(--text-muted)">[${total}]</span>` +
@@ -385,7 +385,7 @@ export function renderCard(issue) {
   }
 
   const changedClass = state.changedIds.has(issue.id) ? "changed-flash" : "";
-  const safeIssueId = escJsSingle(issue.id);
+  const safeIssueId = escJsSingleAttr(issue.id);
 
   const checkbox = state.multiSelectMode
     ? `<input type="checkbox" ${state.selectedCards.has(issue.id) ? "checked" : ""} onclick="toggleCardSelect(event,'${safeIssueId}')" class="mr-1" style="accent-color:var(--accent)" aria-label="Select ${escHtml(issue.title.slice(0, 40))}">`

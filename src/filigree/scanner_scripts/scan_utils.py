@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────
 
 DEFAULT_SCANNER_API_URL = "http://localhost:8377"
+DEFAULT_SCANNER_API_TOKEN_ENV = "FILIGREE_FEDERATION_API_TOKEN"  # noqa: S105 - env var name, not a token value
+LEGACY_SCANNER_API_TOKEN_ENV = "FILIGREE_API_TOKEN"  # noqa: S105 - env var name, not a token value
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -343,6 +345,13 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
 # ── API posting ─────────────────────────────────────────────────────────
 
 
+def _resolve_api_token_from_env(api_token_env: str) -> str | None:
+    api_token = os.environ.get(api_token_env, "").strip()
+    if api_token or api_token_env != DEFAULT_SCANNER_API_TOKEN_ENV:
+        return api_token or None
+    return os.environ.get(LEGACY_SCANNER_API_TOKEN_ENV, "").strip() or None
+
+
 def post_to_api(
     *,
     api_url: str,
@@ -351,6 +360,7 @@ def post_to_api(
     findings: list[dict[str, Any]],
     create_observations: bool = False,
     complete_scan_run: bool = True,
+    api_token: str | None = None,
 ) -> tuple[bool, str]:
     """POST findings to filigree's scan API.
 
@@ -362,6 +372,7 @@ def post_to_api(
         create_observations: If True, auto-promote findings to observations for triage.
         complete_scan_run: If False, don't mark the scan run as completed.
             Use for batch scans where multiple POSTs share a scan_run_id.
+        api_token: Optional bearer token for token-gated scanner callback endpoints.
 
     Returns:
         ``(True, "")`` on success, ``(False, error_detail)`` on failure.
@@ -379,10 +390,13 @@ def post_to_api(
     if not complete_scan_run:
         payload["complete_scan_run"] = False
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
     req = urllib.request.Request(  # noqa: S310
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
@@ -579,6 +593,7 @@ async def _analyse_files(
     scan_source: str,
     executor: Any,
     prompt_template: str,
+    api_token: str | None = None,
     cache_warmup: bool = True,
 ) -> dict[str, int]:
     """Run analysis on all files in batches. Returns summary stats."""
@@ -630,6 +645,7 @@ async def _analyse_files(
             findings=findings,
             create_observations=True,
             complete_scan_run=False,
+            api_token=api_token,
         )
         if ok:
             api_successes += 1
@@ -711,6 +727,7 @@ async def _analyse_files(
             scan_run_id=scan_run_id,
             findings=[],
             complete_scan_run=True,
+            api_token=api_token,
         )
         if not ok:
             print(f"  API error completing scan run: {err_detail}", file=sys.stderr)
@@ -797,6 +814,11 @@ async def run_scanner_pipeline(
     parser.add_argument("--dry-run", action="store_true", help="List files with count and token estimate")
     parser.add_argument("--max-files", type=int, default=50, help="Maximum files to scan (default: 50)")
     parser.add_argument("--api-url", default=None, help="Filigree dashboard URL")
+    parser.add_argument(
+        "--api-token-env",
+        default=DEFAULT_SCANNER_API_TOKEN_ENV,
+        help=f"Environment variable carrying the Filigree API bearer token (default: {DEFAULT_SCANNER_API_TOKEN_ENV})",
+    )
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
     parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
@@ -871,6 +893,11 @@ async def run_scanner_pipeline(
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    api_token_env = args.api_token_env.strip()
+    if not api_token_env:
+        print("Error: --api-token-env must be a non-empty environment variable name", file=sys.stderr)
+        return 1
+    api_token = _resolve_api_token_from_env(api_token_env)
 
     model_display = f", model={args.model}" if args.model else ""
     print(f"Analysing {len(files)} files (batch={args.batch_size}{model_display}) ...", file=sys.stderr)
@@ -895,6 +922,7 @@ async def run_scanner_pipeline(
         scan_source=scan_source,
         executor=executor,
         prompt_template=template,
+        api_token=api_token,
         cache_warmup=not args.no_cache_warmup,
     )
 

@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import threading
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import getdoc
@@ -997,6 +998,105 @@ def test_clarion_registry_sends_bearer_authorization_when_token_provided() -> No
     assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
 
 
+def test_clarion_registry_rejects_token_for_untrusted_origin_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_client(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("token-bearing non-loopback registry must not create an HTTP client")
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
+
+    with pytest.raises(ValueError, match="loopback Clarion origins"):
+        ClarionRegistry(
+            "https://example.invalid",
+            timeout_seconds=1,
+            auth_token="test-loom-token",  # noqa: S106 - test fixture
+        )
+
+
+def test_clarion_registry_rejects_non_string_auth_token_before_creating_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_client(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("invalid auth_token must not create an HTTP client")
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
+
+    with pytest.raises(ValueError, match="auth_token must be a string"):
+        ClarionRegistry(
+            "http://127.0.0.1:8765",
+            timeout_seconds=1,
+            auth_token=cast(str, object()),
+        )
+
+
+def test_filigree_db_skip_probe_still_rejects_clarion_token_for_untrusted_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "test-loom-token")
+
+    with pytest.raises(ValueError, match="loopback Clarion origins"):
+        FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="clarion",
+            clarion_config={
+                "base_url": "https://example.invalid",
+                "timeout_seconds": 1,
+                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+            },
+            skip_clarion_capability_probe=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("url_builder_name", "operation"),
+    [
+        ("clarion_file_read_url", lambda registry: registry.resolve_file("src/x.py", language="python")),
+        ("clarion_files_batch_url", lambda registry: registry.resolve_files_batch([BatchQuery(path="src/x.py", language="python")])),
+        ("clarion_identity_resolve_batch_url", lambda registry: registry.resolve_locators_batch(["core:file:abc123@src/x.py"])),
+    ],
+)
+def test_clarion_registry_rechecks_token_origin_for_concrete_request_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    url_builder_name: str,
+    operation: Callable[[ClarionRegistry], object],
+) -> None:
+    class FailClient:
+        def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            raise AssertionError("token-bearing non-loopback request must not reach the network")
+
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            raise AssertionError("token-bearing non-loopback request must not reach the network")
+
+    registry = ClarionRegistry(
+        "http://127.0.0.1:1",
+        timeout_seconds=1,
+        auth_token="test-loom-token",  # noqa: S106 - test fixture
+    )
+    object.__setattr__(registry, "_http_client", FailClient())
+    monkeypatch.setattr("filigree.registry." + url_builder_name, lambda *_args, **_kwargs: "https://example.invalid/api/v1/files")
+
+    with pytest.raises(ValueError, match="loopback Clarion origins"):
+        operation(registry)
+
+
+def test_clarion_registry_disables_redirects_when_auth_token_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            observed.update(kwargs)
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
+
+    ClarionRegistry(
+        "http://127.0.0.1:8765",
+        timeout_seconds=1,
+        auth_token="test-loom-token",  # noqa: S106 - test fixture
+    )
+
+    assert observed["trust_env"] is False
+    assert observed["follow_redirects"] is False
+
+
 def test_clarion_capability_probe_rejects_token_for_untrusted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_client(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("token-bearing non-loopback probe must not reach the network")
@@ -1048,9 +1148,76 @@ def test_clarion_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.M
 
     assert capabilities["registry_backend"] is True
     assert observed["trust_env"] is False
-    assert observed["follow_redirects"] is True
+    assert observed["follow_redirects"] is False
     assert observed["headers"] == {"Authorization": "Bearer test-loom-token"}
     assert observed["timeout"] == 2
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_message"),
+    [
+        (b"{", "invalid JSON"),
+        (b"[]", "non-object response"),
+        (json.dumps({"registry_backend": True, "api_version": 1}).encode(), "missing boolean field 'file_registry'"),
+        (
+            json.dumps({"registry_backend": True, "file_registry": True, "api_version": True}).encode(),
+            "missing integer field 'api_version'",
+        ),
+    ],
+)
+def test_clarion_capability_probe_rejects_invalid_response_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    response: bytes,
+    expected_message: str,
+) -> None:
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def get(self, _url: str, *, headers: dict[str, str], timeout: float) -> httpx.Response:
+            assert headers == {}
+            assert timeout == 1
+            return httpx.Response(200, content=response)
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
+
+    with pytest.raises(RegistryUnavailableError, match=expected_message) as exc_info:
+        probe_clarion_capabilities("http://127.0.0.1:8765", timeout_seconds=1)
+
+    assert exc_info.value.cause_kind == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_message"),
+    [
+        (lambda registry: registry.resolve_file("src/bad-json.py", language="python"), "returned invalid JSON"),
+        (lambda registry: registry.resolve_locators_batch(["core:file:abc123@src/bad-json.py"]), "returned invalid JSON"),
+    ],
+)
+def test_clarion_registry_read_paths_reject_invalid_json_payloads(
+    operation: Callable[[ClarionRegistry], object],
+    expected_message: str,
+) -> None:
+    class FakeClient:
+        def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            return httpx.Response(200, content=b"{")
+
+        def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+            return httpx.Response(200, content=b"{")
+
+    registry = ClarionRegistry("http://127.0.0.1:8765", timeout_seconds=1)
+    object.__setattr__(registry, "_http_client", FakeClient())
+
+    with pytest.raises(RegistryUnavailableError, match=expected_message) as exc_info:
+        operation(registry)
+
+    assert exc_info.value.cause_kind == "invalid_response"
 
 
 def test_clarion_registry_maps_401_to_registry_unavailable_with_auth_cause_kind() -> None:

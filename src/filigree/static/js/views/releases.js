@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { fetchReleases, fetchReleaseTree } from "../api.js";
-import { escHtml, escJsSingle } from "../ui.js";
+import { escHtml, escJsSingleAttr } from "../ui.js";
 
 // --- Module-level state ---
 
@@ -108,7 +108,7 @@ function renderTreeNode(node, level, releaseId) {
   const maxLevel = Math.min(level, 3);
   const indent = maxLevel * 24; // 24px per level (ml-6 equivalent)
   const nodeId = node.issue.id;
-  const safeId = escJsSingle(nodeId);
+  const safeId = escJsSingleAttr(nodeId);
   const isLeaf = !node.children || node.children.length === 0;
   const isCollapsed = !expandedNodeIds.has(nodeId);
   const hasChildren = !isLeaf;
@@ -140,7 +140,7 @@ function renderTreeNode(node, level, releaseId) {
       "onclick=\"event.stopPropagation();window._toggleReleaseTreeNode('" +
       safeId +
       "','" +
-      escJsSingle(releaseId) +
+      escJsSingleAttr(releaseId) +
       "')\" " +
       'aria-label="' +
       (isCollapsed ? "Expand" : "Collapse") +
@@ -219,7 +219,7 @@ function renderTree(tree, releaseId) {
     '<button class="text-xs px-2 py-1 rounded bg-overlay bg-overlay-hover" ' +
     'style="min-height:44px" ' +
     "onclick=\"window._collapseAllReleaseTree('" +
-    escJsSingle(releaseId) +
+    escJsSingleAttr(releaseId) +
     "')\">Collapse all</button>";
   html += "</div>";
 
@@ -435,7 +435,7 @@ function formatTargetDate(isoDate) {
 // --- Blocker link rendering ---
 
 function renderBlockerLink(ref) {
-  const safeId = escJsSingle(ref.id);
+  const safeId = escJsSingleAttr(ref.id);
   if (ref.type === "release") {
     // Release blockers scroll to the card on this page, falling back to detail view
     return (
@@ -470,7 +470,7 @@ function renderReleaseCard(release) {
   const isExpanded = expandedReleaseIds.has(release.id);
   const isLoading = loadingReleaseIds.has(release.id);
   const isBlocked = release.blocked_by && release.blocked_by.length > 0;
-  const safeId = escJsSingle(release.id);
+  const safeId = escJsSingleAttr(release.id);
   const pct = release.progress?.pct ?? 0;
   const textColor = isBlocked ? "color:var(--text-secondary)" : "color:var(--text-primary)";
 

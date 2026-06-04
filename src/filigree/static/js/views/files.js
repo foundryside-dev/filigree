@@ -12,7 +12,7 @@ import {
 } from "../api.js";
 import { updateHash } from "../router.js";
 import { SEVERITY_COLORS, state } from "../state.js";
-import { escHtml, escJsSingle, showCreateForm, showToast } from "../ui.js";
+import { escHtml, escJsSingleAttr, showCreateForm, showToast } from "../ui.js";
 import { renderHealthOverview } from "./health.js";
 
 function formatLineRange(f, prefix = "L") {
@@ -93,8 +93,8 @@ export async function loadFiles() {
       '<div id="filesOverviewContent" class="px-4 pb-3"></div>';
 
     const overviewCallbacks = {
-      onClickFile: (fileId) => `openFileDetail('${escJsSingle(fileId)}')`,
-      onClickScan: (source) => `filterFilesByScanSourceInline('${escJsSingle(source)}')`,
+      onClickFile: (fileId) => `openFileDetail('${escJsSingleAttr(fileId)}')`,
+      onClickScan: (source) => `filterFilesByScanSourceInline('${escJsSingleAttr(source)}')`,
     };
 
     // Guard against concurrent loads but allow re-render on subsequent loadFiles()
@@ -221,7 +221,7 @@ export async function loadFiles() {
         const s = f.summary || {};
         const border = healthBorderClass(s);
         const assocCount = f.associations_count || 0;
-        const safeFileId = escJsSingle(f.id);
+        const safeFileId = escJsSingleAttr(f.id);
         const updated = f.updated_at ? new Date(f.updated_at).toLocaleDateString() : "\u2014";
         const closedCount = (s.total_findings || 0) - (s.open_findings || 0);
         return (
@@ -409,7 +409,7 @@ function renderFileDetail(data) {
         a.issue_status === "closed" || a.issue_status === "done"
           ? "var(--status-done)"
           : "var(--status-wip)";
-      const safeIssueId = escJsSingle(a.issue_id);
+      const safeIssueId = escJsSingleAttr(a.issue_id);
       html +=
         `<div class="flex items-center gap-2 py-1 cursor-pointer bg-overlay-hover rounded px-2" onclick="openDetail('${safeIssueId}')" role="button" tabindex="0">` +
         `<span class="w-2 h-2 rounded-full" style="background:${statusColor}"></span>` +
@@ -421,7 +421,7 @@ function renderFileDetail(data) {
   }
 
   // Link to Issue button
-  const safeFileId = escJsSingle(f.id);
+  const safeFileId = escJsSingleAttr(f.id);
   html +=
     '<div class="mt-4 pt-3" style="border-top:1px solid var(--border-default)">' +
     `<button onclick="showLinkIssueModal('${safeFileId}')" class="text-xs bg-overlay px-3 py-1 rounded bg-overlay-hover" style="color:var(--text-primary)">Link to Issue</button>` +
@@ -441,7 +441,7 @@ function renderFindingListItem(f) {
   const lines = formatLineRange(f);
   const selected = _selectedFinding && _selectedFinding.id === f.id;
   const selClass = selected ? "border-l-2 border-l-sky-400" : "";
-  const safeFindingId = escJsSingle(f.id);
+  const safeFindingId = escJsSingleAttr(f.id);
   return (
     `<div class="flex items-center gap-2 px-3 py-2 cursor-pointer text-xs bg-overlay-hover rounded mb-1 ${selClass}" style="background:var(--surface-overlay);border:1px solid var(--border-default)" onclick="selectFinding('${safeFindingId}')" role="button" tabindex="0">` +
     `<span class="px-1.5 py-0.5 rounded shrink-0 ${c.bg} ${c.text}" style="border:1px solid;${c.border}">${escHtml(f.severity)}</span>` +
@@ -544,7 +544,7 @@ async function loadFindingsTab(fileId, offset) {
     let listHtml = _findingsAccum.map(renderFindingListItem).join("");
     if (data.has_more) {
       const nextOffset = (offset || 0) + 20;
-      listHtml += `<button onclick="loadMoreFindings('${escJsSingle(fileId)}', ${nextOffset})" class="text-xs mt-2 px-3 py-1 rounded bg-overlay bg-overlay-hover w-full text-center" style="color:var(--accent)">Load more...</button>`;
+      listHtml += `<button onclick="loadMoreFindings('${escJsSingleAttr(fileId)}', ${nextOffset})" class="text-xs mt-2 px-3 py-1 rounded bg-overlay bg-overlay-hover w-full text-center" style="color:var(--accent)">Load more...</button>`;
     }
 
     container.innerHTML =
@@ -689,7 +689,7 @@ async function loadTimelineTab(fileId, offset) {
 
     if (data.has_more) {
       const nextOffset = (offset || 0) + 20;
-      html += `<button onclick="loadMoreTimeline('${escJsSingle(fileId)}', ${nextOffset})" class="text-xs mt-2 px-3 py-1 rounded bg-overlay bg-overlay-hover" style="color:var(--accent)">Load more...</button>`;
+      html += `<button onclick="loadMoreTimeline('${escJsSingleAttr(fileId)}', ${nextOffset})" class="text-xs mt-2 px-3 py-1 rounded bg-overlay bg-overlay-hover" style="color:var(--accent)">Load more...</button>`;
     }
 
     container.innerHTML = html;
@@ -834,7 +834,7 @@ export function showLinkIssueModal(fileId) {
     '<option value="task_for">task_for</option>' +
     '<option value="mentioned_in">mentioned_in</option>' +
     "</select></div>" +
-    `<button onclick="submitLinkIssue('${escJsSingle(fileId)}')" class="text-xs bg-accent text-white px-3 py-1 rounded bg-accent-hover">Link</button>` +
+    `<button onclick="submitLinkIssue('${escJsSingleAttr(fileId)}')" class="text-xs bg-accent text-white px-3 py-1 rounded bg-accent-hover">Link</button>` +
     ' <button onclick="document.getElementById(\'linkIssueModal\').remove()" class="text-xs text-muted text-primary-hover">Cancel</button>' +
     "</div>";
   document.body.appendChild(modal);

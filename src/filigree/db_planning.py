@@ -285,25 +285,31 @@ class PlanningMixin(DBMixinProtocol):
     def remove_dependency(self, issue_id: str, depends_on_id: str, *, actor: str = "") -> bool:
         self._check_id_prefix(issue_id)
         self._check_id_prefix(depends_on_id)
-        self.get_issue(issue_id)  # raises KeyError if not found
-        self.get_issue(depends_on_id)  # raises KeyError if not found
+        _begin_immediate(self.conn, "remove_dependency")
         try:
+            self.get_issue(issue_id)  # raises KeyError if not found
+            self.get_issue(depends_on_id)  # raises KeyError if not found
             # Read dep_type before deleting so undo can restore it
             row = self.conn.execute(
                 "SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
                 (issue_id, depends_on_id),
             ).fetchone()
             if row is None:
+                self.conn.rollback()
                 return False  # Nothing to remove
             dep_type = row["type"] or "blocks"
-            self.conn.execute(
+            cursor = self.conn.execute(
                 "DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
                 (issue_id, depends_on_id),
             )
+            if cursor.rowcount != 1:
+                self.conn.rollback()
+                return False
             self._record_event(issue_id, "dependency_removed", actor=actor, old_value=f"{dep_type}:{depends_on_id}")
             self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if self.conn.in_transaction:
+                self.conn.rollback()
             raise
         return True
 
