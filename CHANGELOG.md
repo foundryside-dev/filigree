@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - Unreleased
+
+3.0.0 is a **major release**. It opens a SemVer-major boundary to land the
+deferred breaking wire-surface changes that could not ship mid-2.x without
+breaking federation consumers (Clarion / Wardline / Shuttle): subsystem
+namespacing of the ~115 MCP tool names (ADR-016), removal of the deprecated
+`get_stats` alias keys, entity-association de-Clarionization, and the
+`TransitionMode` enum. **Those breaking items are tracked as a checklist in the
+release PR and land incrementally on this branch — the entries below are the
+work already merged.** Consumers should not pin to 3.0.0 until the breaking
+checklist is complete and a coordinated consumer-migration window is published.
+
 ### Added
 
 - **`scanned_paths` on `POST /api/loom/scan-results` (and the classic/living
@@ -44,6 +56,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regressing in the same ingest now blocks the close). The guard lives in the
   shared close transaction, so the age-gated `clean-stale` sweep gets the same
   protection.
+
+- **Entity-association surface polish (ADR-029).** The forward (issue→entity)
+  read projection only badges a content-axis freshness state it actually owns;
+  the identity axis remains Clarion's (`unknown`, never a fabricated `active`),
+  per ADR-017's two-axis model. `add_entity_association` now declares
+  `_skip_begin` on both the protocol stub and its `@_in_immediate_tx`
+  implementation so the stub-signature contract test and the mypy override check
+  agree.
+
+### Changed
+
+- **Accessibility: ARIA labels on icon-only dashboard buttons.** Icon-only
+  controls across the app, detail, graph, health, ready, releases, and workflow
+  views now carry `aria-label`s so screen-reader users get a meaningful name.
+
+- **Performance: dropped a redundant open-blockers query in the issue batch
+  fetch** (`db_issues`), removing a per-issue round trip from the batch path.
+
+### Security
+
+- **Bidirectional back-pointer verification for git-worktree discovery.**
+  Worktree-aware anchor discovery previously redirected to a main worktree on
+  the strength of a worktree's `.git` pointer alone. A spoofed `.git` file
+  (shipped in an untrusted clone, aimed at a victim project's
+  `worktrees/<name>` admin dir) or a stale pointer (admin dir renamed, worktree
+  removed but the `.git` file left behind) could silently latch discovery onto
+  the wrong project's database. Discovery now verifies that the admin dir's
+  `gitdir` back-pointer resolves back to *this* `.git` file before redirecting;
+  on mismatch or read failure the `.git` entry stands as a project boundary.
+
+### Dependencies
+
+- **Bumped `starlette` 0.52.1 → 1.0.1** (major). Full test suite green against
+  the 1.0 line; no application-level ASGI changes were required.
 
 ## [2.3.0] - 2026-06-02
 
