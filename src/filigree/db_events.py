@@ -46,6 +46,7 @@ class EventsMixin(DBMixinProtocol):
             issue_id=row["issue_id"],
             event_type=row["event_type"],
             actor=row["actor"],
+            verified_actor=row["verified_actor"],
             old_value=row["old_value"],
             new_value=row["new_value"],
             comment=row["comment"],
@@ -60,6 +61,7 @@ class EventsMixin(DBMixinProtocol):
             issue_id=row["issue_id"],
             event_type=row["event_type"],
             actor=row["actor"],
+            verified_actor=row["verified_actor"],
             old_value=row["old_value"],
             new_value=row["new_value"],
             comment=row["comment"],
@@ -96,9 +98,9 @@ class EventsMixin(DBMixinProtocol):
         # Ensure same-second emissions get distinct sequence numbers; heartbeat
         # bursts and batch ops sharing _now_iso() persist as separate audit rows.
         self.conn.execute(
-            "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",
-            (issue_id, event_type, actor, old_value, new_value, comment, _now_iso(), issue_id),
+            "INSERT INTO events (issue_id, event_type, actor, verified_actor, old_value, new_value, comment, created_at, event_seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?), -1) + 1)",
+            (issue_id, event_type, actor, self._verified_actor, old_value, new_value, comment, _now_iso(), issue_id),
         )
 
     def get_recent_events(self, limit: int = 20) -> list[EventRecordWithTitle]:
@@ -277,6 +279,7 @@ class EventsMixin(DBMixinProtocol):
                     issue_id=r["issue_id"],
                     event_type="issue_deleted",
                     actor=r["deleted_by"] or "",
+                    verified_actor=None,
                     old_value=None,
                     new_value=None,
                     comment="",

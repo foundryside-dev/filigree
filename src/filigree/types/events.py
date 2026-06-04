@@ -113,6 +113,7 @@ class EventRecord(TypedDict):
     issue_id: str
     event_type: EventType
     actor: str
+    verified_actor: str | None
     old_value: str | None
     new_value: str | None
     comment: str
