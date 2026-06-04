@@ -148,9 +148,7 @@ def report_scanner_finding(
 
     reported_file_id = normalized_finding.get(INGESTED_FILE_ID_KEY)
     reported_line_start = normalized_finding.get("line_start")
-    lookup_line_start = (
-        reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
-    )
+    lookup_line_start = reported_line_start if isinstance(reported_line_start, int) and not isinstance(reported_line_start, bool) else None
     finding_record = reported_finding_record(
         tracker,
         result,
