@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from filigree.core import FiligreeDB
@@ -80,6 +82,23 @@ class TestTransitionValidation:
         assert result.missing_fields == ()
         assert len(result.warnings) >= 1
         assert "not in the standard workflow" in result.warnings[0]
+
+    def test_undefined_transition_message_inlines_allowed_states(self, registry: TemplateRegistry) -> None:
+        """The rejection warning lists the reachable states inline instead of
+        deferring to a tool/method the caller must go invoke."""
+        result = registry.validate_transition("bug", "triage", "closed", {})
+        warning = result.warnings[0]
+        assert "confirmed" in warning
+        assert "wont_fix" in warning
+        assert "get_valid_transitions" not in warning
+
+    def test_undefined_transition_message_terminal_state_degrades(self, registry: TemplateRegistry) -> None:
+        """A state with no forward transitions degrades cleanly — no dangling
+        'Allowed from X:' with an empty list."""
+        result = registry.validate_transition("bug", "closed", "fixing", {})
+        warning = result.warnings[0]
+        assert "No forward transitions" in warning
+        assert "Allowed from" not in warning
 
     def test_empty_string_treated_as_missing(self, registry: TemplateRegistry) -> None:
         result = registry.validate_transition("bug", "verifying", "closed", {"fix_verification": ""})
@@ -244,3 +263,19 @@ class TestValidateIssueUpcoming:
         # Default type 'task' is known, but let's just check it returns valid
         result = db.validate_issue(issue.id)
         assert result.valid is True
+
+
+def test_transition_messages_do_not_defer_to_get_valid_transitions() -> None:
+    """Regression guard: transition rejection messages must inline the allowed
+    states, not tell the caller to go run ``get_valid_transitions()`` — a method
+    reference whose tool name was renamed to ``workflow_transition_list``. See
+    planning artifact 'Inline error facts instead of deferring to other commands'.
+    """
+    import filigree.db_issues as db_issues_mod
+    import filigree.templates as templates_mod
+
+    for mod in (db_issues_mod, templates_mod):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "get_valid_transitions() to see" not in src, (
+            f"{Path(mod.__file__).name} still defers to get_valid_transitions() in a message; inline the allowed states instead"
+        )

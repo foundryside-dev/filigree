@@ -700,6 +700,13 @@ def close(
                 if isinstance(e, ClaimConflictError):
                     envelope = claim_conflict_envelope(e)
                     error_item["details"] = envelope["details"]
+                elif isinstance(e, InvalidTransitionError):
+                    # Surface the structured next-step hint like update/release do,
+                    # instead of dropping it in the generic ValueError arm.
+                    enriched = _transition_error_payload(db, issue_id, e)
+                    for key in ("valid_transitions", "hint", "details"):
+                        if key in enriched:
+                            error_item[key] = enriched[key]
                 errors.append(error_item)
                 if not as_json:
                     click.echo(msg, err=True)
@@ -712,8 +719,9 @@ def close(
             if len(issue_ids) == 1 and errors and not succeeded:
                 err = errors[0]
                 error_payload: dict[str, Any] = {"error": err["error"], "code": err["code"]}
-                if "details" in err:
-                    error_payload["details"] = err["details"]
+                for key in ("details", "valid_transitions", "hint"):
+                    if key in err:
+                        error_payload[key] = err[key]
                 click.echo(json_mod.dumps(error_payload))
                 refresh_summary(db)
                 sys.exit(1)

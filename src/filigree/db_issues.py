@@ -35,6 +35,7 @@ from filigree.types.api import (
     InvalidTransitionError,
     IssueDeletionRefusedError,
     TransitionHint,
+    allowed_transitions_clause,
     classify_value_error,
 )
 from filigree.types.core import StatusCategory
@@ -875,7 +876,7 @@ class IssuesMixin(DBMixinProtocol):
                     else:
                         msg = (
                             f"Transition '{current.status}' -> '{status}' is not allowed for type "
-                            f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
+                            f"'{current.type}'. {allowed_transitions_clause(current.status, [h['to'] for h in valid_transitions])}"
                         )
                     raise InvalidTransitionError(
                         current.type,
@@ -1627,7 +1628,7 @@ class IssuesMixin(DBMixinProtocol):
                     else:
                         msg = (
                             f"Transition '{row['status']}' -> '{target}' is not allowed for type "
-                            f"'{row['type']}'. Use get_valid_transitions() to see allowed transitions."
+                            f"'{row['type']}'. {allowed_transitions_clause(row['status'], [h['to'] for h in valid_transitions])}"
                         )
                     raise InvalidTransitionError(
                         row["type"],

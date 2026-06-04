@@ -999,14 +999,18 @@ class TemplateRegistry:
                 from filigree.types.api import InvalidTransitionError
 
                 raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
-            # Transition not in table: REJECTED for known types
+            # Transition not in table: REJECTED for known types. Inline the
+            # reachable states (facts, no tool name) instead of deferring.
+            from filigree.types.api import allowed_transitions_clause
+
+            allowed = [opt.to for opt in self.get_valid_transitions(type_name, from_state, fields)]
             return TransitionResult(
                 allowed=False,
                 enforcement=None,
                 missing_fields=(),
                 warnings=(
                     f"Transition '{from_state}' -> '{to_state}' is not in the standard workflow for '{type_name}'. "
-                    f"Use get_valid_transitions() to see recommended transitions.",
+                    f"{allowed_transitions_clause(from_state, allowed)}",
                 ),
             )
 

@@ -492,7 +492,7 @@ def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any |
             )
             error = f"Bundled scanner {scanner_name!r} is not enabled in this project"
         else:
-            details["hint"] = "Call scanner_available_list to see bundled scanners that can be enabled."
+            details["hint"] = f"Bundled scanners that can be enabled: {', '.join(sorted(BUNDLED_SCANNERS))}."
             error = f"Scanner {scanner_name!r} not found"
         return None, ErrorResponse(
             error=error,

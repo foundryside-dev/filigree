@@ -345,7 +345,11 @@ def _guide_impl(pack_name: str, as_json: bool) -> None:
     with get_db() as db:
         pack = db.templates.get_pack(pack_name)
         if pack is None:
-            _emit_error(f"Unknown pack: {pack_name}", ErrorCode.NOT_FOUND, as_json=as_json)
+            available_packs = sorted(p.pack for p in db.templates.list_packs())
+            msg = f"Unknown pack: {pack_name}."
+            if available_packs:
+                msg += f" Available packs: {', '.join(available_packs)}."
+            _emit_error(msg, ErrorCode.NOT_FOUND, as_json=as_json)
 
         if as_json:
             guide_obj = None if pack.guide is None else dict(pack.guide)

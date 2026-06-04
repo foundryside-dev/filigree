@@ -158,7 +158,9 @@ def list_scanners_cmd(as_json: bool) -> None:
 
     if not items:
         click.echo("No scanners configured.")
-        click.echo("Run 'filigree scanner available' to see bundled scanners that can be enabled.")
+        if BUNDLED_SCANNERS:
+            click.echo(f"Bundled scanners that can be enabled: {', '.join(sorted(BUNDLED_SCANNERS))}.")
+            click.echo("Enable one with 'filigree scanner enable <name>'.")
         return
     for sc in items:
         click.echo(f"{sc['name']}  {sc.get('description', '')}")

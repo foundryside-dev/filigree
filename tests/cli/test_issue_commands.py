@@ -326,6 +326,28 @@ class TestUpdateAndClose:
         assert len(data["failed"]) == 1
         assert data["failed"][0]["id"] == "test-nonexistent"
 
+    def test_close_invalid_transition_json_includes_valid_transitions(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """`close --json` on a blocked transition must carry the structured
+        valid_transitions hint (like `update`/`release`), not a bare envelope,
+        and the message must inline the reachable state rather than naming a
+        tool to go call."""
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Close blocked", "--type", "bug", "--json"])
+        issue_id = json.loads(created.output)["issue_id"]
+        assert runner.invoke(cli, ["update", issue_id, "--status", "confirmed"]).exit_code == 0
+        assert runner.invoke(cli, ["update", issue_id, "--status", "fixing"]).exit_code == 0
+
+        result = runner.invoke(cli, ["close", issue_id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert "valid_transitions" in data
+        assert "verifying" in {t["to"] for t in data["valid_transitions"]}
+        # Facts inlined into the message; no deferral to a (renamed) tool/method.
+        assert "verifying" in data["error"]
+        assert "get_valid_transitions" not in result.output
+
     def test_close_json_all_success(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])

@@ -164,7 +164,9 @@ class TestListScannersCommand:
             result = runner.invoke(cli, ["list-scanners"])
             assert result.exit_code == 0
             assert "No scanners" in result.output
-            assert "filigree scanner available" in result.output
+            # Bundled names are inlined directly rather than deferring to another command.
+            assert "Bundled scanners that can be enabled:" in result.output
+            assert "filigree scanner enable" in result.output
         finally:
             os.chdir(original)
 
@@ -646,6 +648,10 @@ class TestPreviewScanCommand:
             assert result.exit_code == 1
             data = json.loads(result.output)
             assert data["code"] == "NOT_FOUND"
+            # The hint inlines the bundled names rather than telling the caller
+            # to go run another listing tool.
+            assert "Bundled scanners that can be enabled:" in data["details"]["hint"]
+            assert "scanner_available_list" not in data["details"]["hint"]
         finally:
             os.chdir(original)
 

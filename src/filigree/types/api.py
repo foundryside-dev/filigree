@@ -723,6 +723,19 @@ def invalid_transition_details(exc: BaseException) -> dict[str, list[TransitionH
     return None
 
 
+def allowed_transitions_clause(from_state: str, allowed_states: list[str]) -> str:
+    """Render the inline "what can I do from here" clause for transition errors.
+
+    States the facts — the reachable target states — with **no** tool or command
+    name. Lower layers state facts; each surface (CLI, MCP, dashboard) adds its
+    own affordance. Degrades cleanly for terminal states with no forward edges so
+    callers never see a dangling ``Allowed from 'X':`` with an empty list.
+    """
+    if allowed_states:
+        return f"Allowed from {from_state!r}: {', '.join(allowed_states)}."
+    return f"No forward transitions are available from {from_state!r}."
+
+
 def errorcode_to_http_status(code: ErrorCode) -> int:
     """Map an ErrorCode to the HTTP status the dashboard should return.
 

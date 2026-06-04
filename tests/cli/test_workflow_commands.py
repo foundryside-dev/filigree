@@ -191,6 +191,10 @@ class TestWorkflowCli:
         result = runner.invoke(cli, ["guide", "nonexistent_pack"])
         assert result.exit_code == 1
         assert "Unknown pack" in result.output
+        # The error inlines the real options rather than naming another tool to call.
+        assert "Available packs:" in result.output
+        assert "core" in result.output
+        assert "pack_list" not in result.output
 
     def test_guide_json_returns_object(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """--json must emit guide as an object, not a stringified MappingProxyType."""
