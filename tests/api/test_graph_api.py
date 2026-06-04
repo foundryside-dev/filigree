@@ -76,7 +76,7 @@ class TestGraphFrontendContracts:
     def test_topology_change_reuses_positions_only_when_all_nodes_have_positions(self) -> None:
         graph_js = (STATIC_DIR / "js" / "views" / "graph.js").read_text()
         assert "const canReusePositions =" in graph_js
-        assert "cyNodes.every((n) => Object.prototype.hasOwnProperty.call(previousPositions, n.data.id))" in graph_js
+        assert "cyNodes.every((n) => Object.hasOwn(previousPositions, n.data.id))" in graph_js
         assert "positions: (node) => previousPositions[node.id()]," in graph_js
         assert "previousPositions[node.id()] || { x: 0, y: 0 }" not in graph_js
 
