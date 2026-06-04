@@ -601,14 +601,21 @@ def create_classic_router() -> APIRouter:
             code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         # Fetch just the single comment to get the real created_at timestamp
-        row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        # and the stored verified_author (ADR-012) so the response is truthful.
+        row = db.conn.execute("SELECT created_at, verified_author FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger = logging.getLogger(__name__)
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)
             return _error_response("Internal error: comment created but not retrievable", ErrorCode.INTERNAL, 500)
         created_at = ISOTimestamp(row["created_at"])
         return JSONResponse(
-            CommentRecord(id=comment_id, author=author, text=text, created_at=created_at),
+            CommentRecord(
+                id=comment_id,
+                author=author,
+                verified_author=row["verified_author"],
+                text=text,
+                created_at=created_at,
+            ),
             status_code=201,
         )
 
