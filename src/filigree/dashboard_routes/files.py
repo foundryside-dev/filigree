@@ -41,12 +41,13 @@ from filigree.registry import (
 )
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode
-from filigree.types.core import AssocType, FindingStatus, Severity
+from filigree.types.core import AssocType, FindingStatus, Severity, make_issue_id
 
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+_MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
 
@@ -262,6 +263,18 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     scan_run_id = body.get("scan_run_id", "")
     if not isinstance(scan_run_id, str):
         return "scan_run_id must be a string"
+    # scanned_paths: the authoritative scanned-file set (incl. clean files with
+    # no findings) so the absent-fingerprint sweep can reconcile a file whose
+    # last finding disappeared — the close-on-fixed cascade's clean-file signal.
+    # Optional; a body without it yields [] (back-compat with classic callers).
+    scanned_paths = body.get("scanned_paths", [])
+    if not isinstance(scanned_paths, list):
+        return "scanned_paths must be a JSON array"
+    if len(scanned_paths) > _MAX_SCANNED_PATHS_PER_REQUEST:
+        return f"scanned_paths must contain at most {_MAX_SCANNED_PATHS_PER_REQUEST} paths"
+    for index, scanned_path in enumerate(scanned_paths):
+        if not isinstance(scanned_path, str) or not scanned_path:
+            return f"scanned_paths[{index}] must be a non-empty string"
     return {
         "scan_source": scan_source,
         "findings": findings,
@@ -269,6 +282,7 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
         "mark_unseen": mark_unseen,
         "create_observations": create_observations,
         "complete_scan_run": complete_scan_run,
+        "scanned_paths": scanned_paths,
     }
 
 
@@ -740,7 +754,7 @@ def create_loom_router() -> APIRouter:
                 issue = db.get_issue(str(issue_id))
                 linked_issue = dict(issue_to_public(issue))
                 issue_file_associations = [dict(item) for item in db.get_issue_files(issue.id)]
-                entity_associations = [dict(row) for row in db.list_entity_associations(issue.id)]
+                entity_associations = [dict(row) for row in db.list_entity_associations(make_issue_id(issue.id))]
             except KeyError:
                 linked_issue = None
 
@@ -795,7 +809,7 @@ def create_loom_router() -> APIRouter:
 
         finding_rows = db.conn.execute(
             """
-            SELECT *
+            SELECT id
             FROM scan_findings
             WHERE created_by = ? OR updated_by = ?
             ORDER BY updated_at DESC
@@ -803,7 +817,11 @@ def create_loom_router() -> APIRouter:
             """,
             (actor, actor, limit),
         ).fetchall()
-        findings = [scan_finding_to_loom(db._build_scan_finding(row).to_dict()) for row in finding_rows]
+        # Route through the public ``get_finding`` accessor rather than the
+        # private ``_build_scan_finding`` row-builder. This costs one extra
+        # SELECT per finding (N+1), which is acceptable on this diagnostic
+        # session-evidence surface and keeps the route off the DB internals.
+        findings = [scan_finding_to_loom(db.get_finding(row["id"])) for row in finding_rows]
 
         assoc_rows = db.conn.execute(
             """

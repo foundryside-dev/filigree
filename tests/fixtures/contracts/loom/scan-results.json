@@ -15,6 +15,9 @@
   },
   "shape_decl": {
     "request_type": "ScanIngestRequest (identical to classic)",
+    "request_optional_fields": {
+      "scanned_paths": "list[str]  # OPTIONAL. The authoritative set of files the scanner visited this run, including clean files with zero findings. Wire-compatible addition (omitting it preserves prior behaviour). When mark_unseen is true, the absent-fingerprint sweep is driven off {files-with-findings} ∪ {scanned_paths}, so a file whose last/only finding was fixed (and is therefore absent from findings) is still reconciled to unseen_in_latest and its linked issue cascade-closes. With scanned_paths non-empty, mark_unseen=true + findings=[] is a valid fully-clean scan (no longer a 400). Unknown clean paths (no prior file record) are skipped, never created."
+    },
     "response_type": "ScanIngestResponseLoom",
     "response_shape": {
       "succeeded": "list[str]  # server-generated finding ids for newly-created findings (was: new_finding_ids in classic)",
@@ -153,6 +156,38 @@
             "files_created": 1,
             "files_updated": 0,
             "findings_created": 1,
+            "findings_updated": 0,
+            "observations_created": 0,
+            "observations_failed": 0
+          },
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "success_clean_file_via_scanned_paths",
+      "note": "Close-on-fixed driver. An agent fixed the only finding in src/a.py; the re-scan carries no findings for it but lists it in scanned_paths with mark_unseen=true. Filigree flips the now-absent finding to unseen_in_latest and cascade-closes its linked issue. Cascade outcomes are logged, not surfaced in the envelope.",
+      "request": {
+        "method": "POST",
+        "path": "/api/loom/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "mark_unseen": true,
+          "findings": [],
+          "scanned_paths": ["src/a.py"]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": [],
+          "failed": [],
+          "stats": {
+            "files_created": 0,
+            "files_updated": 0,
+            "findings_created": 0,
             "findings_updated": 0,
             "observations_created": 0,
             "observations_failed": 0

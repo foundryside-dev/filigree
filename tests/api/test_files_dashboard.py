@@ -201,6 +201,64 @@ class TestFileEndpoints:
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
+    async def test_post_scan_results_scanned_paths_closes_fixed_issue(self, client: AsyncClient, api_db: FiligreeDB) -> None:
+        """End-to-end: a finding's file present solely via ``scanned_paths`` on a
+        clean re-scan flips the finding unseen and cascade-closes its issue
+        (proves the route threads ``scanned_paths`` into ingest)."""
+        first = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [{"path": "src/a.py", "rule_id": "WLN-001", "message": "sink", "fingerprint": "fp-e2e"}],
+            },
+        )
+        assert first.status_code == 200
+        finding = api_db.find_finding_by_fingerprint("wardline", "fp-e2e")
+        assert finding is not None
+        issue = api_db.promote_finding_to_issue(finding["id"], actor="t")["issue"]
+
+        clean = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [],
+                "scanned_paths": ["src/a.py"],
+                "mark_unseen": True,
+            },
+        )
+        assert clean.status_code == 200
+        assert api_db.get_finding(finding["id"])["status"] == "unseen_in_latest"
+        refreshed = api_db.get_issue(issue.id)
+        assert api_db._resolve_status_category(refreshed.type, refreshed.status) == "done"
+
+    async def test_post_scan_results_without_scanned_paths_still_works(self, client: AsyncClient) -> None:
+        """Back-compat: a body omitting ``scanned_paths`` is accepted unchanged."""
+        resp = await client.post(
+            "/api/v1/scan-results",
+            json={
+                "scan_source": "ruff",
+                "findings": [{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "Too long"}],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["findings_created"] == 1
+
+    async def test_post_scan_results_scanned_paths_must_be_array(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api/loom/scan-results",
+            json={"scan_source": "wardline", "findings": [], "scanned_paths": "src/a.py", "mark_unseen": True},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_post_scan_results_scanned_paths_rejects_non_string_element(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api/loom/scan-results",
+            json={"scan_source": "wardline", "findings": [], "scanned_paths": ["ok.py", 42], "mark_unseen": True},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
     async def test_post_file_association(self, client: AsyncClient, api_db: FiligreeDB) -> None:
         f = api_db.register_file("src/main.py")
         issue = api_db.create_issue("Fix bug")
