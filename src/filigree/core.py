@@ -366,7 +366,38 @@ def _main_worktree_from_git_path(git_path: Path) -> Path | None:
     main_git_dir = gitdir.parent.parent
     if main_git_dir.name != ".git" or not main_git_dir.is_dir():
         return None
+    # Bidirectional verification: git records a ``gitdir`` back-pointer in the
+    # admin dir that names *this* worktree's ``.git`` file. Requiring it to
+    # resolve back to ``git_path`` defeats two failure modes — an attacker-
+    # controlled ``.git`` file (an untrusted clone could otherwise redirect
+    # discovery onto an arbitrary victim project) and stale pointers left after
+    # ``git worktree remove`` or an admin-dir rename. On any mismatch or read
+    # failure we decline to redirect and let ``.git`` stand as a boundary.
+    if not _worktree_back_pointer_matches(gitdir, git_path):
+        return None
     return main_git_dir.parent
+
+
+def _worktree_back_pointer_matches(admin_dir: Path, git_path: Path) -> bool:
+    """Return whether *admin_dir*'s ``gitdir`` back-pointer resolves to *git_path*.
+
+    Git's linked-worktree bookkeeping is bidirectional: the worktree's ``.git``
+    file points at ``<main>/.git/worktrees/<name>`` (``admin_dir``), and that
+    admin dir contains a ``gitdir`` file holding the absolute path back to the
+    worktree's ``.git`` file. A genuine worktree round-trips; a spoofed or stale
+    pointer does not. A missing or unreadable back-pointer counts as no match.
+    """
+    back_pointer_file = admin_dir / "gitdir"
+    try:
+        recorded = back_pointer_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not recorded:
+        return False
+    try:
+        return Path(recorded).resolve() == git_path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _classify_git_entry(git_path: Path) -> str:

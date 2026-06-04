@@ -504,11 +504,17 @@ class TestGitWorktreeDiscovery:
 
     @staticmethod
     def _make_worktree(main_repo: Path, worktree_root: Path, name: str) -> Path:
-        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping."""
+        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping.
+
+        Mirrors git's real on-disk layout, including the bidirectional
+        ``gitdir`` back-pointer in the admin dir that names the worktree's
+        ``.git`` file — discovery verifies this round-trip before redirecting.
+        """
         wt_admin = main_repo / ".git" / "worktrees" / name
         wt_admin.mkdir(parents=True)
         worktree_root.mkdir(parents=True, exist_ok=True)
         (worktree_root / ".git").write_text(f"gitdir: {wt_admin}\n")
+        (wt_admin / "gitdir").write_text(f"{worktree_root / '.git'}\n")
         return worktree_root
 
     def test_worktree_inside_main_repo_finds_main_anchor(self, tmp_path: Path) -> None:
@@ -616,6 +622,7 @@ class TestGitWorktreeDiscovery:
         # Relative pointer: from wt/.git up to main/.git/worktrees/rel
         rel = os.path.relpath(wt_admin, wt)
         (wt / ".git").write_text(f"gitdir: {rel}\n")
+        (wt_admin / "gitdir").write_text(f"{wt / '.git'}\n")
 
         project_root, _ = find_filigree_anchor(wt)
         assert project_root == main
@@ -789,6 +796,51 @@ class TestGitWorktreeDiscovery:
 
         git_file = weird.resolve() / ".git"
         assert f"If `{git_file}` is malformed, fix or remove it before running `filigree init`." in str(excinfo.value)
+
+    def test_spoofed_worktree_pointer_is_rejected(self, tmp_path: Path) -> None:
+        """A ``.git`` file aimed at a worktree admin dir whose back-pointer
+        resolves to a *different* ``.git`` must not redirect.
+
+        Threat: an untrusted clone ships a ``.git`` file pointing at a victim
+        project's ``<main>/.git/worktrees/<name>/`` admin dir, hoping discovery
+        latches onto the victim's database. Git's bidirectional linkage defeats
+        this — the admin dir's ``gitdir`` back-pointer names the *real*
+        worktree's ``.git`` file, not the attacker's — so discovery refuses.
+        """
+        main = self._make_main_repo(tmp_path)
+        # The genuine worktree this admin dir belongs to.
+        legit_wt = tmp_path / "legit-wt"
+        legit_wt.mkdir()
+        (legit_wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'victim'}\n")
+        wt_admin = main / ".git" / "worktrees" / "victim"
+        wt_admin.mkdir(parents=True)
+        (wt_admin / "gitdir").write_text(f"{legit_wt / '.git'}\n")
+        # Attacker directory points its ``.git`` at the same admin dir.
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        (attacker / ".git").write_text(f"gitdir: {wt_admin}\n")
+
+        # Must NOT redirect to main's anchor; attacker has no anchor of its own.
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(attacker)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
+    def test_worktree_with_missing_back_pointer_is_not_redirected(self, tmp_path: Path) -> None:
+        """A worktree pointer whose admin dir has no ``gitdir`` back-pointer is
+        treated as stale (e.g. ``git worktree remove`` left the ``.git`` file
+        behind) and must not redirect to the main anchor.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt_admin = main / ".git" / "worktrees" / "stale"
+        wt_admin.mkdir(parents=True)
+        # Deliberately no back-pointer file written.
+        wt = tmp_path / "stale-wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {wt_admin}\n")
+
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(wt)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
 
 
 # ---------------------------------------------------------------------------
