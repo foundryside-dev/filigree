@@ -1,12 +1,14 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.venv/
+
+# Build / distribution
 dist/
 build/
-.venv/
-*.db
-*.db-wal
-*.db-shm
+
+# Test / type / lint caches
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
@@ -14,19 +16,35 @@ build/
 coverage.json
 htmlcov/
 
+# SQLite databases (and sidecar files)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Secrets / local environment
+.env
+.env.*
+
 # MkDocs build output (deployed via `mkdocs gh-deploy`, never committed)
 site/
 
+# Node
+node_modules/
+
+# Filigree issue tracker (keep the directory marker, ignore its contents)
 .filigree/*
 !.filigree/.gitkeep
+.filigree.old/
+
+# Agent / tooling config (machine- or user-local)
 .claude/
-node_modules/
-.mcp.json
 .codex/
 .agents/
 .clarion/
 clarion.yaml
-.filigree.old/
+.mcp.json
 
-# Filigree issue tracker
-.filigree/
+# Agent instruction files (untracked per-checkout)
+AGENTS.md
+CLAUDE.md
