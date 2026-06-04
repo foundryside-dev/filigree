@@ -5,6 +5,17 @@
 **Deciders**: John (project lead)
 **Context**: Filigree 2.0 direction; Loom federation participation (Clarion, Wardline, Shuttle); first external consumer (Clarion) approaching integration at WP2/9.
 
+> **Roster pointer (added 2026-06-05).** This ADR's references to the Loom
+> roster as "Clarion, Wardline, Shuttle, filigree" are **stale** and are
+> retained here only as the historical context of the 2026-04-24 decision. The
+> **authoritative federation roster and posture now live at `~/loom/doctrine.md`**:
+> 5 realized members (Clarion, Filigree, Wardline, Legis, Charter); **Shuttle is
+> a roadmap thought-bubble with no repo, not a fourth member**. Where this ADR
+> names "Clarion / Wardline / Shuttle" as the peer set, read the loom doctrine
+> for the current membership. **The decision below — Filigree's own named HTTP
+> generations (`classic`, `loom`) and their lifecycle — is Filigree-owned and
+> unchanged by this note.**
+
 ## Summary
 
 Filigree 2.0 reframes the product from "standalone issue tracker with an HTTP API" to "standalone issue tracker **plus** a loosely-coupled component of the Loom federation." This release introduces **named API generations** at the HTTP surface — `classic` (historical, at `/api/*` — mostly un-prefixed, with one `/api/v1/` outlier, `POST /api/v1/scan-results`) and `loom` (new, at `/api/loom/*`) — with **lifecycles decoupled from filigree's code-version cadence**. MCP and CLI reflect the living / current-recommended surface only; HTTP is where pinned generations live. The federation posture is **cooperation, not mandate**: every `loom`-generation endpoint must be fully functional in the absence of other federation components.
@@ -226,4 +237,4 @@ See the 2.0 federation work package (`docs/plans/2026-04-24-2.0-federation-work-
 - **Snapshot**: `docs/plans/2026-04-21-2.0-unified-surface-snapshot.md` (historical; still accurate for pre-2026-04-24 state)
 - **2.0 work package**: `docs/plans/2026-04-24-2.0-federation-work-package.md`
 - **Clarion ADRs consulted**: ADR-004 (finding-exchange-format), ADR-014 (filigree-registry-backend), ADR-015 (wardline-filigree-emission), ADR-016 (observation-transport), ADR-017 (severity-and-dedup) — all in `/home/john/clarion/docs/clarion/adr/`.
-- **Loom doctrine**: `/home/john/clarion/docs/suite/loom.md` (federation framing, cross-product contracts)
+- **Loom doctrine**: `~/loom/doctrine.md` (authoritative federation framing, roster, and axiom — promoted here 2026-06-05 from the former `/home/john/clarion/docs/suite/loom.md`, which is now a pointer). Cross-product contract index: `~/loom/contracts-index.md`.

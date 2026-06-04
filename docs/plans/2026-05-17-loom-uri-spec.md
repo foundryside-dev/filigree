@@ -1,6 +1,19 @@
 # Loom URI Scheme Specification
 
-**Status:** Draft (2026-05-17)
+**Status:** Draft (2026-05-17) — **superseded; see status note below.**
+
+> **Federation status (added 2026-06-05).** The federation-wide status of this
+> `loom://` URI scheme is now tracked authoritatively at `~/loom/uri-scheme.md`.
+> In short: the `loom://` registry + `/api/loom/multi-fetch` apparatus was
+> **never implemented and is formally closed** — the stable cross-tool identity
+> it reached for is now delivered by **SEI** (`~/loom/sei-standard.md`), which
+> lists this scheme as out of scope. The thin `shuttle://…` milestone-reference
+> convenience (used by the planning-deprecation plan) is **unresolved and
+> low-stakes** because **Shuttle is a roadmap thought-bubble with no repo** —
+> there is nothing for a `shuttle://` URI to resolve to. This spec is retained
+> for historical context; do not build on `loom://` or `shuttle://`. See
+> `~/loom/uri-scheme.md` and `~/loom/contracts-index.md`.
+
 **Scope:** Canonical form, registration, resolution, and authorization for Loom URIs — the cross-component reference primitive in the Loom federation
 **Sibling documents:**
 - `2026-05-17-shuttle-design.md` — Shuttle (consumer)

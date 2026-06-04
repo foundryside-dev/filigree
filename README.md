@@ -15,6 +15,8 @@ Traditional issue trackers are human-first — agents scrape CLI output or parse
 
 Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Loom HTTP generation at `/api/loom/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
 
+Filigree is the work-state member of the **Loom federation** — a family of independently-useful code-governance tools woven together by narrow, additive contracts. Filigree runs fully standalone; the Loom surface is optional enrichment. The authoritative federation roster, axiom, and composition doctrine live at the Loom hub (`~/loom`, see `~/loom/doctrine.md`); Filigree owns its own HTTP/MCP/CLI surface and contracts (see [docs/federation/contracts.md](docs/federation/contracts.md)).
+
 **Security boundary:** Filigree does not encrypt, sandbox, harden, or secure stored project data beyond ordinary filesystem permissions and standard HTTPS transport if you put it behind HTTPS yourself. Do not use Filigree for secure, regulated, confidential, or business-sensitive data.
 
 ### Key Features

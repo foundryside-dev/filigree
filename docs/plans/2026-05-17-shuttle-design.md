@@ -43,6 +43,14 @@ affordances, cross-step synthesis at fleet scale). Trying to bolt those
 onto filigree would distort filigree's role; building them as Shuttle, a
 federation peer, keeps each component's responsibility envelope clean.
 
+> **Roster/status pointer (added 2026-06-05).** The four-component framing in
+> this document is stale and Shuttle-centric. The **authoritative federation
+> roster and axiom now live at `~/loom/doctrine.md`**: 5 realized members
+> (Clarion, Filigree, Wardline, Legis, Charter), and **Shuttle is a roadmap
+> thought-bubble with no repo** — this very design was never built (see
+> `~/loom/members/shuttle.md`). Read this as a historical design sketch, not
+> current membership.
+
 **Federation reality check.** As of 2026-05-17:
 
 - Filigree's `/api/loom/*` surface exists (issues, files, analytics,

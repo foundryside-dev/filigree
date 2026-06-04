@@ -2,12 +2,25 @@
 
 This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
 
+> **Authority note (added 2026-06-05).** The **route shapes, envelopes, generation
+> definitions, and intake contracts in this document are Filigree-owned and
+> authoritative** — including the entity-association routes at the classic
+> `/api/issue/…` surface and `/api/entity-associations`. What is *not* owned here
+> is the federation **roster and axiom**: those now live at `~/loom/doctrine.md`
+> (5 realized members — Clarion, Filigree, Wardline, Legis, Charter; Shuttle is a
+> roadmap thought-bubble, not a member). The suite-level **cross-product contract
+> index** — which lists every live cross-product binding and points back to each
+> owning project's authoritative doc — lives at `~/loom/contracts-index.md`. Where
+> this document names a peer set like "Clarion + Wardline + Shuttle", read
+> `~/loom/doctrine.md` for current membership; the endpoint specs themselves are
+> unchanged.
+
 ## What a "contract" is here
 
 A **contract** is a named API generation at the HTTP surface. Filigree currently publishes two:
 
 - **`classic`** — the pre-federation `/api/*` surface as it existed through the 1.x series. Mostly un-prefixed (e.g. `/api/issue/{id}` singular, `/api/issues`, `/api/ready`), with one `/api/v1/` outlier, `POST /api/v1/scan-results`. (The per-endpoint table under "Living-surface alias decisions" below is the precise path reference.) Frozen: no new operations, no shape changes. Continues to be fully supported. Retirement requires a new ADR with 12 months of deprecation notice.
-- **`loom`** — `/api/loom/*`. Introduced in 2.0. The federation-era generation, named for the Loom federation (Clarion + Wardline + Shuttle + filigree). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `work_start`.
+- **`loom`** — `/api/loom/*`. Introduced in 2.0. The federation-era generation, named for the [Loom federation](file:///home/john/loom/doctrine.md) (authoritative roster lives at `~/loom/doctrine.md`). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `work_start`.
 
 The **living surface** at `/api/*` (no generation prefix) aliases the current recommended generation — as of 2026-04-24 that is `loom`. Living-surface endpoints are explicitly non-stability; production integrations across version boundaries must pin to a named generation.
 
@@ -460,6 +473,8 @@ and by the `success_wardline_sarif_adapter_fingerprint` example in
 
 ## Cross-references
 
+- **Loom federation doctrine** (authoritative roster + axiom + composition law): `~/loom/doctrine.md`.
+- **Loom cross-product contract index** (every live cross-product binding, pointing to each owning doc): `~/loom/contracts-index.md`.
 - **ADR-002** (the naming + lifecycle rules): `docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md`.
 - **2.0 work package** (the execution sequence): `docs/plans/2026-04-24-2.0-federation-work-package.md`.
 - **ADR-017 audit** (verifies classic-generation semantics are preserved on the 2.0 branch): `docs/plans/2026-04-24-adr017-audit.md`.
