@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 from filigree.core import FiligreeDB
+from filigree.types.core import make_issue_id
 
 
 def _seed_findings(db: FiligreeDB) -> dict[str, str]:
@@ -279,6 +280,57 @@ class TestPromoteFindingToIssue:
         ids = _seed_findings(db)
         with pytest.raises(ValueError, match="actor must be a string"):
             db.promote_finding_to_issue(ids["sqli"], actor=123)  # type: ignore[arg-type]
+
+
+class TestPromoteFindingAndAttachEntity:
+    def test_creates_issue_and_attaches_entity(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        result = db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+
+        assert result["created"] is True
+        assert result["association"]["entity_id"] == "py:func:login"
+        assert result["association"]["content_hash_at_attach"] == "hash-v1"
+        assoc = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert len(assoc) == 1
+
+    def test_retry_converges_after_attach_failure(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The promote+attach pair is non-atomic but idempotent: a failure in the
+        attach step (after the issue is already promoted and committed) leaves a
+        promoted-but-unassociated issue, and re-issuing the same request converges
+        to that issue with the association now present. Guards the partial-state
+        contract documented on ``promote_finding_and_attach_entity``.
+        """
+        ids = _seed_findings(db)
+        real_attach = db.add_entity_association
+        calls = {"n": 0}
+
+        def flaky_attach(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                msg = "simulated attach failure"
+                raise RuntimeError(msg)
+            return real_attach(*args, **kwargs)
+
+        monkeypatch.setattr(db, "add_entity_association", flaky_attach)
+
+        # First attempt: promote commits, then attach raises.
+        with pytest.raises(RuntimeError, match="simulated attach failure"):
+            db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+
+        # The issue was promoted (finding linked) despite the attach failure...
+        issue_id = db.get_finding(ids["sqli"])["issue_id"]
+        assert issue_id
+        # ...but no association exists yet — the partial state the contract warns about.
+        assert db.list_entity_associations(make_issue_id(issue_id)) == []
+
+        # Retry: promote reuses the existing issue, attach now succeeds.
+        result = db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+        assert result["issue"].id == issue_id
+        assert result["created"] is False
+        assoc = db.list_entity_associations(make_issue_id(issue_id))
+        assert len(assoc) == 1
+        assert assoc[0]["entity_id"] == "py:func:login"
+        assert assoc[0]["content_hash_at_attach"] == "hash-v1"
 
 
 class TestProcessScanResultsBreakingChange:

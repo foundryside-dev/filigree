@@ -48,6 +48,13 @@ class EntityAssociationRow(TypedDict):
     attached_at: ISOTimestamp
     attached_by: str
     migration_orphaned_at: ISOTimestamp | None
+    # ``orphan_status`` is two-state by design, per ADR-017's two-axis model.
+    # Filigree owns only the *content* axis (``freshness_status``); the
+    # *identity* axis (ALIVE/ORPHANED) is Clarion's via ``resolve_sei``.
+    # ``"orphaned"`` reports Filigree's own ``migration_orphaned_at`` marker;
+    # the non-orphaned value is ``"unknown"`` — an explicit deferral, NOT
+    # "active"/"healthy", because Filigree must never assert identity-axis
+    # liveness it does not own. See ``_row_to_entity_association``.
     orphan_status: str
     freshness_status: str
 
@@ -80,6 +87,8 @@ def _row_to_entity_association(r: Mapping[str, Any], *, current_content_hash: st
         attached_at=ISOTimestamp(r["attached_at"]),
         attached_by=r["attached_by"],
         migration_orphaned_at=ISOTimestamp(migration_orphaned_at) if migration_orphaned_at else None,
+        # "unknown" (not "active") for the non-orphaned case is deliberate —
+        # see the ADR-017 note on ``EntityAssociationRow.orphan_status``.
         orphan_status="orphaned" if migration_orphaned_at else "unknown",
         freshness_status=_freshness_status(str(content_hash_at_attach), current_content_hash),
     )
@@ -103,6 +112,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         *,
         actor: str = "",
         entity_kind: str | None = None,
+        _skip_begin: bool = False,
     ) -> EntityAssociationRow:
         """Attach a Clarion entity to a Filigree issue (or refresh an existing
         attachment).

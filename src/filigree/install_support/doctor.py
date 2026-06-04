@@ -129,6 +129,16 @@ def build_doctor_summary(
 
     The contract is intentionally compact so other agent-side tools can consume
     it without parsing Filigree's human diagnostic text.
+
+    **Check-id collapse is deliberate.** Multiple :class:`CheckResult`s that map
+    to the same ``check_id`` (e.g. the per-client "Claude Code MCP" and "Codex
+    MCP" checks both fold into ``mcp.registration``) are merged into a single
+    summary entry. The merge is order-independent and conservative: ``failed``
+    always wins, and ``fixed`` is only recorded when nothing under that id
+    failed. This keeps the machine contract coarse on purpose — consumers get a
+    stable per-concern status, not per-sub-check granularity. Callers needing to
+    know *which* sub-check failed should read the human ``results`` list, whose
+    granularity is preserved.
     """
     fixed = fixed_check_ids or set()
     fixed_names = fixed_check_names or set()

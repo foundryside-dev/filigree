@@ -194,12 +194,15 @@ export async function openDetail(issueId) {
     .map((assoc) => {
       const freshness = assoc.freshness_status || "unknown";
       const orphaned = assoc.orphan_status === "orphaned";
-      const freshnessClass =
+      // Only badge a *known* content-axis state. This forward (issue→entity)
+      // lookup never carries Clarion's current hash, so freshness is always
+      // "unknown" here; rendering that literal is noise, so suppress it.
+      const freshnessBadge =
         freshness === "fresh"
-          ? "text-emerald-400"
+          ? '<span class="text-emerald-400">fresh</span>'
           : freshness === "stale"
-            ? "text-amber-300"
-            : "text-slate-300";
+            ? '<span class="text-amber-300">stale</span>'
+            : "";
       const kind = assoc.entity_kind
         ? `<span class="text-[11px]" style="color:var(--text-muted)">${escHtml(assoc.entity_kind)}</span>`
         : "";
@@ -208,7 +211,7 @@ export async function openDetail(issueId) {
         '<div class="flex items-center gap-2">' +
         `<span class="truncate flex-1" style="color:var(--text-primary)">${escHtml(assoc.entity_id || assoc.clarion_entity_id || "")}</span>` +
         kind +
-        `<span class="${freshnessClass}">${escHtml(freshness)}</span>` +
+        freshnessBadge +
         (orphaned ? '<span class="text-red-300">orphaned</span>' : "") +
         "</div></div>"
       );
@@ -279,7 +282,9 @@ export async function openDetail(issueId) {
       : "") +
     (entityAssociationsData.length
       ? '<div class="mb-3"><div class="text-xs font-medium mb-1" style="color:var(--text-secondary)">Entity Associations</div>' +
-        `<div class="text-[11px] mb-1" style="color:var(--text-muted)">${entityAssociationsData.length} total &middot; ${entityAssocCounts.stale} stale &middot; ${entityAssocCounts.orphaned} orphaned</div>` +
+        `<div class="text-[11px] mb-1" style="color:var(--text-muted)">${entityAssociationsData.length} total` +
+        (entityAssocCounts.stale ? ` &middot; ${entityAssocCounts.stale} stale` : "") +
+        ` &middot; ${entityAssocCounts.orphaned} orphaned</div>` +
         entityAssociationsHtml +
         "</div>"
       : "") +
