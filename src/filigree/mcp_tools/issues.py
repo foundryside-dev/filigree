@@ -25,6 +25,8 @@ from filigree.mcp_tools.common import (
     _text,
     _validate_actor,
     _validate_int_range,
+    get_db,
+    refresh_summary,
 )
 from filigree.mcp_tools.payloads import file_assoc_to_mcp
 from filigree.types.api import (
@@ -834,10 +836,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 
 async def _handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetIssueArgs)
-    tracker = _get_db()
+    tracker = get_db()
     include_files = bool(args.get("include_files", False))
     try:
         issue = tracker.get_issue(args["issue_id"])
@@ -878,14 +878,12 @@ async def _handle_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, ListIssuesArgs)
     priority = args.get("priority")
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
-    tracker = _get_db()
+    tracker = get_db()
     status_filter = args.get("status")
     status_category = args.get("status_category")
     if status_category and not status_filter:
@@ -928,8 +926,6 @@ async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, CreateIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -938,7 +934,7 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.create_issue(
             args["title"],
@@ -956,13 +952,11 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     return _text(issue_to_public(issue))
 
 
 async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, UpdateIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -977,7 +971,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
     force_overwrite_corrupt = args.get("force_overwrite_corrupt", False)
     if not isinstance(force_overwrite_corrupt, bool):
         return _text(ErrorResponse(error="force_overwrite_corrupt must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         before = tracker.get_issue(args["issue_id"])
     except KeyError:
@@ -997,7 +991,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
             expected_assignee=expected_assignee,
             force_overwrite_corrupt=force_overwrite_corrupt,
         )
-        _refresh_summary()
+        refresh_summary()
         changed = [attr for attr in _UPDATE_TRACKED_FIELDS if getattr(issue, attr) != getattr(before, attr)]
         result = IssueWithChangedFields(**issue_to_public(issue), changed_fields=changed)
         return _text(result)
@@ -1016,8 +1010,6 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, CloseIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1028,7 +1020,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     force = args.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         ready_before = {i.id for i in tracker.get_ready()}
         annotation_warnings = tracker.get_annotation_closeout_warnings(args["issue_id"])
@@ -1041,7 +1033,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
             expected_assignee=expected_assignee,
             force=force,
         )
-        _refresh_summary()
+        refresh_summary()
         ready_after = tracker.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         result: dict[str, Any] = dict(issue_to_public(issue))
@@ -1059,8 +1051,6 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_delete_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, DeleteIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1071,10 +1061,10 @@ async def _handle_delete_issue(arguments: dict[str, Any]) -> list[TextContent]:
     force = args.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         result = tracker.delete_issue(issue_id, force=force, actor=actor)
-        _refresh_summary()
+        refresh_summary()
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {issue_id}", code=ErrorCode.NOT_FOUND))
     except IssueDeletionRefusedError as exc:
@@ -1087,19 +1077,17 @@ async def _handle_delete_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_reopen_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ReopenIssueArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.reopen_issue(
             args["issue_id"],
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1110,10 +1098,8 @@ async def _handle_reopen_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, SearchIssuesArgs)
-    tracker = _get_db()
+    tracker = get_db()
     effective_limit, offset, pag_err = _resolve_pagination(arguments)
     if pag_err is not None:
         return pag_err
@@ -1143,8 +1129,6 @@ async def _handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ClaimIssueArgs)
     assignee = args.get("assignee")
     if not isinstance(assignee, str) or not assignee.strip():
@@ -1152,14 +1136,14 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.claim_issue(
             args["issue_id"],
             assignee=assignee,
             actor=actor,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1176,8 +1160,6 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ReleaseClaimArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1194,7 +1176,7 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     revert_status = args.get("revert_status", True)
     if not isinstance(revert_status, bool):
         return _text(ErrorResponse(error="revert_status must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.release_claim(
             args["issue_id"],
@@ -1204,7 +1186,7 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
             reason=reason,
             revert_status=revert_status,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1225,13 +1207,11 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
     at create time, then release_my_claims(actor='my-session',
     label_prefix='cluster:') at session end. (F4 — review-h.)
     """
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ReleaseMyClaimsArgs)
     raw_actor = args.get("actor", "")
-    if not isinstance(raw_actor, str) or not raw_actor.strip():
-        return _text(ErrorResponse(error="actor is required and must be a non-empty string", code=ErrorCode.VALIDATION))
-    actor = raw_actor.strip()
+    actor, actor_error = _validate_actor(raw_actor)
+    if actor_error:
+        return actor_error
     label = args.get("label")
     if label is not None and not isinstance(label, str):
         return _text(ErrorResponse(error="label must be a string", code=ErrorCode.VALIDATION))
@@ -1251,7 +1231,7 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
     if isinstance(detail, dict):
         return _text(detail)
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         released, failed = tracker.release_my_claims(
             actor=actor,
@@ -1266,7 +1246,7 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     if not dry_run:
-        _refresh_summary()
+        refresh_summary()
     if detail == "full":
         full_payload: dict[str, Any] = {
             "succeeded": [issue_to_public(i) for i in released],
@@ -1285,8 +1265,6 @@ async def _handle_release_my_claims(arguments: dict[str, Any]) -> list[TextConte
 
 
 async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, HeartbeatWorkArgs)
     # When the caller omits actor, default the audit identity to the issue's
     # current assignee rather than the literal string 'mcp'. The previous
@@ -1302,7 +1280,7 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
         # No explicit actor — read the current holder so the audit row is
         # attributed correctly and the holder check is a no-op (caller
         # didn't ask for one).
-        tracker = _get_db()
+        tracker = get_db()
         try:
             issue = tracker.get_issue(args["issue_id"])
         except KeyError:
@@ -1316,7 +1294,7 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
     lease_err = _validate_int_range(lease_hours, "lease_hours", min_val=1)
     if lease_err:
         return lease_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.heartbeat_work(
             args["issue_id"],
@@ -1324,7 +1302,7 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
             expected_assignee=expected_assignee,
             lease_hours=lease_hours,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1337,8 +1315,6 @@ async def _handle_heartbeat_work(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_get_stale_claims(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetStaleClaimsArgs)
     stale_after_hours = args.get("stale_after_hours", 48)
     expires_within_hours = args.get("expires_within_hours")
@@ -1348,7 +1324,7 @@ async def _handle_get_stale_claims(arguments: dict[str, Any]) -> list[TextConten
     expiry_err = _validate_int_range(expires_within_hours, "expires_within_hours", min_val=1, max_val=8760)
     if expiry_err:
         return expiry_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issues = tracker.get_stale_claims(
             stale_after_hours=stale_after_hours,
@@ -1360,8 +1336,6 @@ async def _handle_get_stale_claims(arguments: dict[str, Any]) -> list[TextConten
 
 
 async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ReclaimIssueArgs)
     assignee = args.get("assignee")
     if not isinstance(assignee, str) or not assignee.strip():
@@ -1379,7 +1353,7 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     lease_err = _validate_int_range(lease_hours, "lease_hours", min_val=1)
     if lease_err:
         return lease_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.reclaim_issue(
             args["issue_id"],
@@ -1389,7 +1363,7 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
             actor=actor,
             lease_hours=lease_hours,
         )
-        _refresh_summary()
+        refresh_summary()
         return _text(issue_to_public(issue))
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
@@ -1402,8 +1376,6 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, ClaimNextArgs)
     assignee = args.get("assignee")
     if not isinstance(assignee, str) or not assignee.strip():
@@ -1419,7 +1391,7 @@ async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
     pmax_err = _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4)
     if pmax_err:
         return pmax_err
-    tracker = _get_db()
+    tracker = get_db()
     try:
         claimed = tracker.claim_next(
             assignee,
@@ -1432,7 +1404,7 @@ async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    _refresh_summary()
+    refresh_summary()
     result = ClaimNextResponse(
         **issue_to_public(claimed),
         selection_reason=claimed.format_claim_next_reason(),
@@ -1441,8 +1413,6 @@ async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, BatchCloseArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1456,7 +1426,7 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
@@ -1472,7 +1442,7 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
-    _refresh_summary()
+    refresh_summary()
     ready_after = tracker.get_ready()
     newly_unblocked = [i for i in ready_after if i.id not in ready_before]
     if detail == "full":
@@ -1493,8 +1463,6 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, BatchUpdateArgs)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
@@ -1509,7 +1477,7 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     detail = parse_response_detail(args.get("response_detail"))
     if isinstance(detail, dict):
         return _text(detail)
-    tracker = _get_db()
+    tracker = get_db()
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
@@ -1529,7 +1497,7 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
-    _refresh_summary()
+    refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(i) for i in updated],
@@ -1544,8 +1512,6 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, StartWorkArgs)
     assignee = args.get("assignee")
     if not isinstance(assignee, str) or not assignee.strip():
@@ -1556,7 +1522,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     advance = args.get("advance", False)
     if not isinstance(advance, bool):
         return _text(ErrorResponse(error="advance must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         issue = tracker.start_work(
             args["issue_id"],
@@ -1586,13 +1552,11 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
         if code == ErrorCode.INVALID_TRANSITION:
             return _text(_build_transition_error(tracker, args["issue_id"], msg))
         return _text(ErrorResponse(error=msg, code=code))
-    _refresh_summary()
+    refresh_summary()
     return _text(issue_to_public(issue))
 
 
 async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, StartNextWorkArgs)
     assignee = args.get("assignee")
     if not isinstance(assignee, str) or not assignee.strip():
@@ -1611,7 +1575,7 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
     advance = args.get("advance", False)
     if not isinstance(advance, bool):
         return _text(ErrorResponse(error="advance must be a boolean", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         claimed = tracker.start_next_work(
             assignee=assignee,
@@ -1629,5 +1593,5 @@ async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=msg, code=classify_value_error(msg)))
     if claimed is None:
         return _text(ClaimNextEmptyResponse(status="empty", reason="No ready issues matching filters"))
-    _refresh_summary()
+    refresh_summary()
     return _text(issue_to_public(claimed))

@@ -1,13 +1,15 @@
 """Pure helpers and constants shared across MCP tool modules.
 
-This module has NO dependency on ``mcp_server`` module globals, so it can
-be imported freely without triggering circular-import issues.
+This module holds pure helpers plus a tiny lazy context facade for runtime
+state owned by ``mcp_server``. Tool modules depend on this facade rather than
+importing transport-private globals directly.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from mcp.types import TextContent
@@ -34,6 +36,30 @@ def _parse_args(arguments: dict[str, Any], cls: type[_T]) -> _T:
     provides mypy type narrowing only — no runtime validation.
     """
     return cast(_T, arguments)
+
+
+def get_db() -> FiligreeDB:
+    from filigree.mcp_server import _get_db
+
+    return _get_db()
+
+
+def refresh_summary() -> None:
+    from filigree.mcp_server import _refresh_summary
+
+    _refresh_summary()
+
+
+def get_filigree_dir() -> Path | None:
+    from filigree.mcp_server import _get_filigree_dir
+
+    return _get_filigree_dir()
+
+
+def safe_path(path: str) -> Path:
+    from filigree.mcp_server import _safe_path
+
+    return _safe_path(path)
 
 
 # Hard cap on list/search results (issues, observations) to keep MCP response

@@ -1359,31 +1359,27 @@ class TestProcessScanResults:
                 ],
             )
 
-    def test_out_of_range_line_start_for_existing_file_is_cleared(self, db: FiligreeDB, tmp_path: Path) -> None:
-        """Scanner evidence line numbers must not point outside the target file."""
+    def test_out_of_range_line_start_for_existing_file_is_rejected(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """Scanner evidence line numbers must not be erased into file-scope duplicates."""
         db.project_root = tmp_path
         (tmp_path / "target.py").write_text("one\n")
 
-        result = db.process_scan_results(
-            scan_source="codex",
-            findings=[
-                {
-                    "path": "target.py",
-                    "rule_id": "cross-file-evidence",
-                    "severity": "medium",
-                    "message": "Finding cites evidence from another file",
-                    "line_start": 389,
-                    "line_end": 391,
-                },
-            ],
-        )
+        with pytest.raises(ValueError, match="line_start 389 exceeds file length"):
+            db.process_scan_results(
+                scan_source="codex",
+                findings=[
+                    {
+                        "path": "target.py",
+                        "rule_id": "cross-file-evidence",
+                        "severity": "medium",
+                        "message": "Finding cites evidence from another file",
+                        "line_start": 389,
+                        "line_end": 391,
+                    },
+                ],
+            )
 
-        file_record = db.get_file_by_path("target.py")
-        assert file_record is not None
-        finding = db.get_findings(file_record.id)[0]
-        assert finding.line_start is None
-        assert finding.line_end is None
-        assert any("line_start 389" in warning and "target.py has 1 line" in warning for warning in result["warnings"])
+        assert db.get_file_by_path("target.py") is None
 
     def test_non_dict_metadata_rejected(self, db: FiligreeDB) -> None:
         """filigree-ff98665ca3: list metadata must be rejected at ingest."""
@@ -2178,6 +2174,57 @@ class TestCleanStaleFindings:
         assert dismissed is not None
         assert dismissed["actor"] == "janitor"
         assert "stale" in dismissed["reason"]
+
+    def test_close_cascade_failure_records_reconciliation_comment(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        ingest = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+        finding_id = ingest["new_finding_ids"][0]
+        promoted = db.promote_finding_to_issue(finding_id)
+        issue = promoted["issue"]
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (finding_id,),
+        )
+        db.conn.commit()
+
+        def fail_close_tx(*args: Any, **kwargs: Any) -> bool:
+            raise sqlite3.OperationalError("close cascade boom")
+
+        monkeypatch.setattr(db, "_close_issue_for_fixed_finding_tx", fail_close_tx)
+
+        result = db.clean_stale_findings(days=30)
+
+        assert any("close cascade boom" in warning for warning in result["warnings"])
+        comments = db.get_comments(issue.id)
+        assert any("[reconciliation-debt]" in comment["text"] and finding_id in comment["text"] for comment in comments)
+
+    def test_reopen_cascade_failure_records_reconciliation_comment(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        ingest = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+        finding_id = ingest["new_finding_ids"][0]
+        promoted = db.promote_finding_to_issue(finding_id)
+        issue = promoted["issue"]
+        db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE id = ?", (finding_id,))
+        db.conn.commit()
+        db.close_issue(issue.id, actor="finding-cascade", reason="test cascade close", force=True)
+
+        def fail_reopen(*args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("reopen cascade boom")
+
+        monkeypatch.setattr(db, "reopen_issue", fail_reopen)
+
+        result = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+
+        assert any("reopen cascade boom" in warning for warning in result["warnings"])
+        comments = db.get_comments(issue.id)
+        assert any("[reconciliation-debt]" in comment["text"] and issue.id in comment["text"] for comment in comments)
 
 
 class TestGetFindings:

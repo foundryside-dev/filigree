@@ -146,6 +146,34 @@ class TestCooldownCheck:
         result = db.check_scan_cooldown("codex", "src/main.py")
         assert result is not None  # returns blocking run info
 
+    def test_recent_pending_scan_blocks(self, db: FiligreeDB) -> None:
+        db.create_scan_run(
+            scan_run_id="run-1",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["src/main.py"],
+            file_ids=["f-1"],
+        )
+        result = db.check_scan_cooldown("codex", "src/main.py")
+        assert result is not None
+        assert result["status"] == "pending"
+
+    def test_stale_pending_scan_does_not_block(self, db: FiligreeDB) -> None:
+        db.create_scan_run(
+            scan_run_id="run-1",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["src/main.py"],
+            file_ids=["f-1"],
+        )
+        db.conn.execute(
+            "UPDATE scan_runs SET updated_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?) WHERE id = ?",
+            ("-1 day", "run-1"),
+        )
+        db.conn.commit()
+
+        assert db.check_scan_cooldown("codex", "src/main.py") is None
+
     def test_failed_scan_does_not_block(self, db: FiligreeDB) -> None:
         db.create_scan_run(
             scan_run_id="run-1",
@@ -312,8 +340,48 @@ class TestGetScanStatus:
         with pytest.raises(ValueError, match="log_path must be project-relative"):
             db.set_scan_run_spawn_info("spawn-log", pid=123, log_path=str(tmp_path / "outside.log"))
 
+    def test_running_dead_process_status_read_does_not_mutate_by_default(self, db: FiligreeDB) -> None:
+        from unittest.mock import patch
+
+        db.create_scan_run(
+            scan_run_id="dead-read",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["a.py"],
+            file_ids=["f-1"],
+            pid=99999,
+        )
+        db.update_scan_run_status("dead-read", "running")
+
+        with patch("os.kill", side_effect=ProcessLookupError):
+            status = db.get_scan_status("dead-read")
+
+        assert status["status"] == "running"
+        assert status["process_alive"] is False
+        assert any("appears dead" in warning for warning in status["data_warnings"])
+        assert db.get_scan_run("dead-read")["status"] == "running"
+
+    def test_reconcile_scan_status_marks_dead_process_failed(self, db: FiligreeDB) -> None:
+        from unittest.mock import patch
+
+        db.create_scan_run(
+            scan_run_id="dead-reconcile",
+            scanner_name="codex",
+            scan_source="codex",
+            file_paths=["a.py"],
+            file_ids=["f-1"],
+            pid=99999,
+        )
+        db.update_scan_run_status("dead-reconcile", "running")
+
+        with patch("os.kill", side_effect=ProcessLookupError):
+            status = db.reconcile_scan_status("dead-reconcile")
+
+        assert status["status"] == "failed"
+        assert status["process_alive"] is False
+
     def test_dead_pid_already_completed_race(self, db: FiligreeDB) -> None:
-        """When another codepath completes the run before dead-PID auto-fail, re-read succeeds."""
+        """Completed rows stay terminal because status reads do not reconcile."""
         from unittest.mock import patch
 
         db.create_scan_run(
@@ -327,9 +395,6 @@ class TestGetScanStatus:
         db.update_scan_run_status("race-1", "running")
         # Simulate: another codepath already completed the run
         db.update_scan_run_status("race-1", "completed", findings_count=3)
-        # os.kill will raise ProcessLookupError (PID doesn't exist),
-        # then auto-fail will fail with "Invalid transition" since it's already completed.
-        # The method should re-read and return the completed status.
         with patch("os.kill", side_effect=ProcessLookupError):
             status = db.get_scan_status("race-1")
         assert status["status"] == "completed"

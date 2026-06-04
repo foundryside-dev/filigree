@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal, cast, get_args, get_type_hints
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
 from filigree.core import VALID_REGISTRY_BACKENDS, FiligreeDB
@@ -29,6 +30,7 @@ from filigree.registry import (
     RegistryResolutionError,
     RegistryUnavailableError,
     ResolvedFile,
+    probe_clarion_capabilities,
 )
 from filigree.types.core import ClarionConfig, ContentHash, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
 
@@ -993,6 +995,62 @@ def test_clarion_registry_sends_bearer_authorization_when_token_provided() -> No
 
     assert resolved["registry_backend"] == "clarion"
     assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
+
+
+def test_clarion_capability_probe_rejects_token_for_untrusted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_client(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("token-bearing non-loopback probe must not reach the network")
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
+
+    with pytest.raises(ValueError, match="auth_token"):
+        probe_clarion_capabilities(
+            "https://attacker.example",
+            timeout_seconds=1,
+            auth_token="test-loom-token",  # noqa: S106 - test fixture
+        )
+
+
+def test_clarion_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            observed.update(kwargs)
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def get(self, url: str, *, headers: dict[str, str], timeout: float) -> httpx.Response:
+            observed["url"] = url
+            observed["headers"] = headers
+            observed["timeout"] = timeout
+            return httpx.Response(
+                200,
+                json={
+                    "registry_backend": True,
+                    "file_registry": True,
+                    "api_version": 1,
+                    "instance_id": "clarion-test",
+                },
+            )
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
+
+    capabilities = probe_clarion_capabilities(
+        "http://127.0.0.1:8765",
+        timeout_seconds=2,
+        auth_token="test-loom-token",  # noqa: S106 - test fixture
+    )
+
+    assert capabilities["registry_backend"] is True
+    assert observed["trust_env"] is False
+    assert observed["follow_redirects"] is True
+    assert observed["headers"] == {"Authorization": "Bearer test-loom-token"}
+    assert observed["timeout"] == 2
 
 
 def test_clarion_registry_maps_401_to_registry_unavailable_with_auth_cause_kind() -> None:

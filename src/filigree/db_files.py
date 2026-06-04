@@ -25,6 +25,10 @@ from filigree.db_base import (
     _safe_json_loads,
 )
 from filigree.db_scans import TERMINAL_SCAN_RUN_STATUSES
+from filigree.finding_issue_cascade import (
+    FINDING_CASCADE_MARKER,
+    FindingIssueCascadeService,
+)
 from filigree.models import FileRecord, Issue, ScanFinding
 from filigree.registry import (
     BatchQuery,
@@ -70,13 +74,6 @@ TERMINAL_FINDING_STATUSES: frozenset[str] = frozenset({"fixed", "false_positive"
 if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING_STATUSES):
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
-
-# Actor recorded on a finding→issue cascade close/reopen. The reopen path only
-# auto-reopens an issue whose most recent into-done transition was made by this
-# actor (see ``_issue_last_closed_by_cascade``), so a human's terminal decision
-# is never silently overturned — even after a human reopen + reclose, which a
-# stored field marker would not survive.
-_FINDING_CASCADE_MARKER = "finding-cascade"
 
 
 def _validate_string(value: object, field_name: str) -> str:
@@ -917,7 +914,7 @@ class FilesMixin(DBMixinProtocol):
             return None
 
     def _normalize_line_attribution_for_existing_files(self, findings: list[dict[str, Any]]) -> list[str]:
-        """Clear or clamp line ranges that cannot exist in the target file."""
+        """Reject line ranges that cannot exist in an already-present target file."""
         if self.project_root is None:
             return []
 
@@ -944,19 +941,12 @@ class FilesMixin(DBMixinProtocol):
             line_start = f.get("line_start")
             line_end = f.get("line_end")
             if line_start is not None and line_start > line_count:
-                f["line_start"] = None
-                if line_end is not None:
-                    f["line_end"] = None
-                warnings.append(
-                    f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length "
-                    f"({path} has {line_count} {line_label}); line attribution cleared."
+                raise ValueError(
+                    f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length ({path} has {line_count} {line_label})"
                 )
-                continue
             if line_end is not None and line_end > line_count:
-                f["line_end"] = line_count if line_count > 0 else None
-                warnings.append(
-                    f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length "
-                    f"({path} has {line_count} {line_label}); line_end clamped."
+                raise ValueError(
+                    f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length ({path} has {line_count} {line_label})"
                 )
         return warnings
 
@@ -1826,16 +1816,15 @@ class FilesMixin(DBMixinProtocol):
             (finding_id,),
         )
 
+    def _finding_issue_cascade_service(self) -> FindingIssueCascadeService:
+        return FindingIssueCascadeService(self)
+
     def _close_issue_for_fixed_finding(self, finding_id: str, issue_id: str, *, warnings: list[str]) -> bool:
         """Close an issue whose linked finding just went ``fixed`` (best-effort).
 
         Returns True iff this call closed the issue.
         """
-        try:
-            return self._close_issue_for_fixed_finding_tx(finding_id, issue_id)
-        except (KeyError, ValueError, sqlite3.Error) as exc:
-            warnings.append(f"cascade close of issue {issue_id} failed: {exc}")
-            return False
+        return self._finding_issue_cascade_service().close_fixed_finding(finding_id, issue_id, warnings=warnings)
 
     @_retry_busy()
     @_in_immediate_tx("close_issue_for_fixed_finding")
@@ -1864,7 +1853,7 @@ class FilesMixin(DBMixinProtocol):
         self.close_issue(
             issue_id,
             reason="linked scan finding resolved (finding→issue cascade)",
-            actor=_FINDING_CASCADE_MARKER,
+            actor=FINDING_CASCADE_MARKER,
             force=True,
             _skip_begin=True,
         )
@@ -1878,21 +1867,7 @@ class FilesMixin(DBMixinProtocol):
         clear) is always honoured: the most recent into-done event would then
         carry the human's actor, not the cascade's.
         """
-        rows = self.conn.execute(
-            "SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = 'status_changed' ORDER BY created_at DESC, id DESC",
-            (issue.id,),
-        ).fetchall()
-        for row in rows:
-            new_status = row["new_value"]
-            if not new_status:
-                continue
-            try:
-                category = self._resolve_status_category(issue.type, new_status)
-            except (KeyError, ValueError):
-                continue
-            if category == "done":
-                return bool(row["actor"] == _FINDING_CASCADE_MARKER)
-        return False
+        return self._finding_issue_cascade_service().issue_last_closed_by_cascade(issue)
 
     def _reopen_issue_for_regressed_finding(self, issue_id: str, *, warnings: list[str]) -> bool:
         """Reopen a cascade-closed issue whose linked finding regressed (best-effort).
@@ -1903,20 +1878,7 @@ class FilesMixin(DBMixinProtocol):
         is never overturned. Runs in its own transaction; call AFTER the ingest
         transaction commits.
         """
-        try:
-            issue = self.get_issue(issue_id)
-        except KeyError:
-            return False  # issue hard-deleted; finding.issue_id was SET NULL
-        if self._resolve_status_category(issue.type, issue.status) != "done":
-            return False  # already open — nothing to reopen
-        if not self._issue_last_closed_by_cascade(issue):
-            return False  # human-closed (or reclosed) → respect the decision
-        try:
-            self.reopen_issue(issue_id, actor=_FINDING_CASCADE_MARKER)
-        except (KeyError, ValueError, sqlite3.Error) as exc:
-            warnings.append(f"cascade reopen of issue {issue_id} failed: {exc}")
-            return False
-        return True
+        return self._finding_issue_cascade_service().reopen_regressed_finding(issue_id, warnings=warnings)
 
     @_retry_busy()
     @_in_immediate_tx("clean_stale_findings")

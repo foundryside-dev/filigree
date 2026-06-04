@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from filigree.db_base import DBMixinProtocol, _begin_immediate, _escape_like, _now_iso
 from filigree.db_files import _is_project_relative_scan_path, _normalize_scan_path
+from filigree.finding_issue_cascade import record_reconciliation_debt_comment
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import (
     BatchDismissResult,
@@ -77,6 +78,13 @@ def _alive_clause(sweep: bool, now_iso: str) -> tuple[str, str, tuple[str, ...]]
 
 DISMISSED_AUDIT_TRAIL_CAP = 10_000
 OBSERVATION_SWEEP_FAILURE_ALERT_THRESHOLD = 3
+
+
+def _record_promotion_reconciliation_debt(conn: Any, issue_id: str, warnings: list[str]) -> None:
+    for warning in warnings:
+        if not warning.startswith("Failed"):
+            continue
+        record_reconciliation_debt_comment(conn, issue_id, f"Observation promotion follow-up failed: {warning}")
 
 
 def _expires_iso(ttl_days: int = DEFAULT_TTL_DAYS) -> str:
@@ -451,14 +459,14 @@ class ObservationsMixin(DBMixinProtocol):
         older_than_hours: int | None = None,
         sort_by: str = "priority",
         direction: str = "asc",
+        sweep: bool = True,
     ) -> list[ObservationDict]:
         """List pending observations with optional filtering.
 
-        Sweeps expired observations first (best-effort, in savepoint).  If the
-        sweep itself fails (transient DB error, rolled back), the read falls
-        back to ``WHERE expires_at > ?`` so expired rows are still excluded
-        from results — otherwise a suppressed sweep error would surface
-        expired rows as live.
+        Sweeps expired observations first when ``sweep=True`` (best-effort, in
+        savepoint).  If the sweep is disabled or fails (transient DB error,
+        rolled back), the read falls back to ``WHERE expires_at > ?`` so
+        expired rows are still excluded from results without mutating storage.
 
         Filters:
           - ``file_path``: substring match (LIKE)
@@ -523,7 +531,9 @@ class ObservationsMixin(DBMixinProtocol):
             msg = f"older_than_hours must be >= 0, got {older_than_hours}"
             raise ValueError(msg)
 
-        _, swept_ok = self._sweep_expired_observations()
+        swept_ok = False
+        if sweep:
+            _, swept_ok = self._sweep_expired_observations()
         now_iso = _now_iso()
 
         clauses: list[str] = []
@@ -934,6 +944,7 @@ class ObservationsMixin(DBMixinProtocol):
                         logger.warning(cleanup_msg, exc_info=True)
                         warnings.append(cleanup_msg)
 
+                _record_promotion_reconciliation_debt(self.conn, existing_issue.id, warnings)
                 idem_result = cast(PromoteObservationResult, {"issue": existing_issue, "warnings": warnings})
                 return idem_result
 
@@ -989,6 +1000,7 @@ class ObservationsMixin(DBMixinProtocol):
                 logger.warning(msg, exc_info=True)
                 warnings.append(msg)
 
+        _record_promotion_reconciliation_debt(self.conn, issue.id, warnings)
         refreshed = self.get_issue(issue.id)
         result = cast(PromoteObservationResult, {"issue": refreshed})
         if warnings:
@@ -1187,8 +1199,8 @@ class ObservationsMixin(DBMixinProtocol):
         for lbl in carry_labels:
             try:
                 self.add_label(issue.id, lbl)
-            except (sqlite3.Error, ValueError):
-                msg = f"Failed to add label {lbl!r} to promoted issue {issue.id}"
+            except (sqlite3.Error, ValueError) as exc:
+                msg = f"Failed to add label {lbl!r} to promoted issue {issue.id}: {exc}"
                 logger.warning(msg, exc_info=True)
                 warnings.append(msg)
 
@@ -1196,12 +1208,13 @@ class ObservationsMixin(DBMixinProtocol):
         try:
             if file_id:
                 self.add_file_association(file_id, issue.id, "mentioned_in")
-        except (sqlite3.Error, ValueError):
-            msg = f"Failed to add file association for promoted observation {obs_id}"
+        except (sqlite3.Error, ValueError) as exc:
+            msg = f"Failed to add file association for promoted observation {obs_id}: {exc}"
             logger.warning(msg, exc_info=True)
             warnings.append(msg)
 
         result = cast(PromoteObservationResult, {"issue": issue})
         if warnings:
+            _record_promotion_reconciliation_debt(self.conn, issue.id, warnings)
             result["warnings"] = warnings
         return result

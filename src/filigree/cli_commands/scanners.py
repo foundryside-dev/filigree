@@ -23,7 +23,7 @@ import click
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.cli_commands.files import finding_group
-from filigree.cli_common import add_hidden_flat_alias, get_db
+from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
 from filigree.db_files import INGESTED_FILE_ID_KEY
 from filigree.mcp_tools.scanners import (
@@ -39,8 +39,14 @@ from filigree.scanner_callback import resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import validate_scanner_command, validate_scanner_name
+from filigree.scanners import (
+    scanner_execution_approval_error,
+    scanner_requires_execution_approval,
+    validate_scanner_command,
+    validate_scanner_name,
+)
 from filigree.types.api import ErrorCode
+from filigree.validation import sanitize_actor
 
 _logger = logging.getLogger(__name__)
 
@@ -374,8 +380,20 @@ def scanner_disable_cmd(scanner: str, force: bool, as_json: bool) -> None:
 @click.argument("file_path")
 @click.option("--api-url", default=None, help="Dashboard URL for scan result callbacks")
 @click.option("--prompt", default="bug-hunt", help="Bundled prompt pack to pass to scanner commands. See 'filigree scanner prompts'.")
+@click.option(
+    "--approve-execution",
+    is_flag=True,
+    help="Required to execute custom project-local scanner TOML that does not match a bundled managed scanner.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: str, as_json: bool) -> None:
+def trigger_scan_cmd(
+    scanner: str,
+    file_path: str,
+    api_url: str | None,
+    prompt: str,
+    approve_execution: bool,
+    as_json: bool,
+) -> None:
     """Trigger an async scan on a single file. Returns immediately with a scan_run_id."""
     from datetime import UTC, datetime
 
@@ -405,6 +423,20 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
 
     if not target.is_file():
         _emit_error(f"File not found: {file_path}", ErrorCode.NOT_FOUND, as_json=as_json)
+        return
+
+    approval_err = scanner_execution_approval_error(cfg, approved=approve_execution, approval_hint="--approve-execution")
+    if approval_err is not None:
+        _emit_error(
+            approval_err,
+            ErrorCode.VALIDATION,
+            as_json=as_json,
+            details={
+                "scanner": cfg.name,
+                "managed": not scanner_requires_execution_approval(cfg),
+                "approval_argument": "approve_execution",
+            },
+        )
         return
 
     file_type_warning = ""
@@ -457,6 +489,8 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
                 scan_run_id=scan_run_id,
                 filigree_dir=filigree_dir,
                 prompt=prompt,
+                approve_execution=approve_execution,
+                approval_hint="--approve-execution",
             )
         except ScannerSpawnError as exc:
             status_update_error = _mark_reserved_scan_failed(
@@ -574,8 +608,20 @@ def trigger_scan_cmd(scanner: str, file_path: str, api_url: str | None, prompt: 
 @click.argument("file_paths", nargs=-1)
 @click.option("--api-url", default=None, help="Dashboard URL for scan result callbacks")
 @click.option("--prompt", default="bug-hunt", help="Bundled prompt pack to pass to scanner commands. See 'filigree scanner prompts'.")
+@click.option(
+    "--approve-execution",
+    is_flag=True,
+    help="Required to execute custom project-local scanner TOML that does not match a bundled managed scanner.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: str | None, prompt: str, as_json: bool) -> None:
+def trigger_scan_batch_cmd(
+    scanner: str,
+    file_paths: tuple[str, ...],
+    api_url: str | None,
+    prompt: str,
+    approve_execution: bool,
+    as_json: bool,
+) -> None:
     """Trigger a scanner on multiple files. Returns batch_id and per-file scan_run_ids."""
     from datetime import UTC, datetime
 
@@ -631,13 +677,7 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 skipped.append({"file_path": fp, "reason": "duplicate"})
                 continue
             seen_canonical.add(cp)
-            try:
-                file_record = tracker.register_file(cp)
-            except (RegistryResolutionError, RegistryUnavailableError) as exc:
-                _emit_registry_error(exc, action="triggering batch scan", as_json=as_json)
-                return
             canonical_paths.append(cp)
-            file_ids.append(file_record.id)
 
         if not canonical_paths:
             _emit_error(
@@ -647,6 +687,28 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                 details={"skipped": skipped},
             )
             return
+
+        approval_err = scanner_execution_approval_error(cfg, approved=approve_execution, approval_hint="--approve-execution")
+        if approval_err is not None:
+            _emit_error(
+                approval_err,
+                ErrorCode.VALIDATION,
+                as_json=as_json,
+                details={
+                    "scanner": cfg.name,
+                    "managed": not scanner_requires_execution_approval(cfg),
+                    "approval_argument": "approve_execution",
+                },
+            )
+            return
+
+        for cp in canonical_paths:
+            try:
+                file_record = tracker.register_file(cp)
+            except (RegistryResolutionError, RegistryUnavailableError) as exc:
+                _emit_registry_error(exc, action="triggering batch scan", as_json=as_json)
+                return
+            file_ids.append(file_record.id)
 
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         batch_id = f"{scanner}-batch-{ts}-{secrets.token_hex(3)}"
@@ -706,6 +768,8 @@ def trigger_scan_batch_cmd(scanner: str, file_paths: tuple[str, ...], api_url: s
                     filigree_dir=filigree_dir,
                     prompt=prompt,
                     log_suffix=f"-{entry['index']}",
+                    approve_execution=approve_execution,
+                    approval_hint="--approve-execution",
                 )
             except ScannerSpawnError as exc:
                 reason = str(exc)
@@ -976,7 +1040,7 @@ def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -
 @click.option("--file", "file_path", default=None, help="Path to JSON file with finding (default: stdin)")
 @click.option(
     "--actor",
-    default="",
+    default=None,
     help="Agent identity for the paired observation when --create-observation is used.",
 )
 @click.option(
@@ -1000,9 +1064,11 @@ def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -
     help="'slim' (default) drops batch-ingest stats; 'full' keeps the legacy keys.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def report_finding_cmd(
+    ctx: click.Context,
     file_path: str | None,
-    actor: str,
+    actor: str | None,
     create_observation: bool,
     no_observation: bool,
     response_detail: str,
@@ -1121,6 +1187,18 @@ def report_finding_cmd(
 
     observation_ids: list[str] = []
     create_paired_observation = create_observation and not no_observation
+    observation_actor = ""
+    if create_paired_observation:
+        raw_actor = actor
+        if raw_actor is None and ctx.obj is not None:
+            ctx_actor = ctx.obj.get("actor")
+            if isinstance(ctx_actor, str) and ctx_actor != "cli":
+                raw_actor = ctx_actor
+        if raw_actor is not None:
+            observation_actor, actor_err = sanitize_actor(raw_actor)
+            if actor_err:
+                _emit_error(actor_err, ErrorCode.VALIDATION, as_json=as_json)
+                return
     with get_db() as tracker:
         try:
             result = tracker.process_scan_results(
@@ -1128,8 +1206,9 @@ def report_finding_cmd(
                 findings=[finding_record],
                 scan_run_id="",
                 create_observations=create_paired_observation,
-                observation_actor=actor.strip(),
+                observation_actor=observation_actor,
             )
+            refresh_summary(tracker)
         except RegistryResolutionError as exc:
             _logger.warning("report_finding registry resolution failed: %s", exc)
             _emit_registry_error(exc, action="reporting finding", as_json=as_json)

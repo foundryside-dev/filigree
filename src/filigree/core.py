@@ -564,12 +564,25 @@ def read_config(filigree_dir: Path) -> ProjectConfig:
         if not isinstance(raw, dict):
             logger.warning("Config %s is not a JSON object, using defaults", config_path)
             return defaults
-        result: ProjectConfig = raw  # type: ignore[assignment]
-        # Ensure required keys have defaults (config.json may predate these fields)
+        result: ProjectConfig = dict(raw)  # type: ignore[assignment]
+        prefix = raw.get("prefix", defaults["prefix"])
+        if not isinstance(prefix, str) or not prefix:
+            logger.warning("Config %s has malformed prefix, using default", config_path)
+            result["prefix"] = defaults["prefix"]
+        version = raw.get("version", defaults["version"])
+        if isinstance(version, bool) or not isinstance(version, int):
+            logger.warning("Config %s has malformed version, using default", config_path)
+            result["version"] = defaults["version"]
+        packs = raw.get("enabled_packs", defaults["enabled_packs"])
+        if not isinstance(packs, list) or not all(isinstance(p, str) for p in packs):
+            logger.warning("Config %s has malformed enabled_packs, using default", config_path)
+            result["enabled_packs"] = defaults["enabled_packs"]
         if "prefix" not in result:
             result["prefix"] = defaults["prefix"]
         if "version" not in result:
             result["version"] = defaults["version"]
+        if "enabled_packs" not in result:
+            result["enabled_packs"] = defaults["enabled_packs"]
         if "registry_backend" not in result:
             result["registry_backend"] = defaults["registry_backend"]
         _validate_registry_settings(cast("dict[str, Any]", result), source=config_path)

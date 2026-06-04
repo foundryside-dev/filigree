@@ -147,6 +147,27 @@ _CATEGORY_KEYWORDS = {
 }
 
 
+def _is_no_finding_section(section: str) -> bool:
+    normalized = section.strip().strip("\"'").strip()
+    return bool(re.fullmatch(r"No concrete bug found(?:\b.*)?", normalized, re.IGNORECASE))
+
+
+def _extract_evidence_line(evidence: str, *, file_path: str = "") -> int | None:
+    if not evidence:
+        return None
+    if file_path:
+        path_m = re.search(rf"(?<![\w./-]){re.escape(file_path)}:(\d+)\b", evidence)
+        if path_m:
+            return int(path_m.group(1))
+    citation_m = re.search(r"(?:^|[\s`(])[\w./-]+\.[A-Za-z0-9_]+:(\d+)\b", evidence)
+    if citation_m:
+        return int(citation_m.group(1))
+    line_m = re.search(r"\bline\s+(\d+)\b", evidence, re.IGNORECASE)
+    if line_m:
+        return int(line_m.group(1))
+    return None
+
+
 # ── File discovery ──────────────────────────────────────────────────────
 
 
@@ -266,8 +287,9 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
         if not section:
             continue
 
-        # Skip "No concrete bug found" sentinel
-        if "No concrete bug found" in section:
+        # Skip only the standalone "No concrete bug found" sentinel. A real
+        # finding may cite that phrase inside evidence or root-cause text.
+        if _is_no_finding_section(section):
             continue
 
         # Extract ## Summary
@@ -295,9 +317,9 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
         # Infer rule_id from summary text — strip any newlines
         rule_id = _infer_rule_id(summary).strip().replace("\n", "")
 
-        # Extract line number from evidence if possible
-        line_m = re.search(r":(\d+)", evidence)
-        line_start = int(line_m.group(1)) if line_m else None
+        # Extract line number from file citations, avoiding unrelated colons
+        # such as URL schemes and localhost ports in evidence text.
+        line_start = _extract_evidence_line(evidence, file_path=file_path)
 
         message = summary
         if root_cause:
@@ -366,7 +388,16 @@ def post_to_api(
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-            body = json.loads(resp.read().decode("utf-8"))
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                detail = f"API success response was not a JSON object: {e}"
+                logger.warning("%s (endpoint: %s)", detail, endpoint)
+                return False, detail
+            if not isinstance(body, dict):
+                detail = f"API success response was not a JSON object: {type(body).__name__}"
+                logger.warning("%s (endpoint: %s)", detail, endpoint)
+                return False, detail
             # Log any severity coercion warnings from the API [B2]
             for w in body.get("warnings", []):
                 logger.warning("API warning: %s", w)
@@ -670,10 +701,10 @@ async def _analyse_files(
     for batch_start in range(0, len(remaining_files), batch_size):
         await run_batch(remaining_files[batch_start : batch_start + batch_size])
 
-    # Send a final completion POST with empty findings to mark the scan run
-    # as completed.  Per-file POSTs above used complete_scan_run=False to
-    # avoid prematurely completing batch scan runs (Bug #2 + #4 fix).
-    if not no_ingest and scan_run_id:
+    # Send a final completion POST only when every local execution/report read
+    # and finding-ingest POST succeeded. Otherwise the parent scanner process
+    # exits non-zero; the scan run must not be marked completed falsely.
+    if not no_ingest and scan_run_id and not failed and api_failures == 0:
         ok, err_detail = post_to_api(
             api_url=api_url,
             scan_source=scan_source,
@@ -704,7 +735,7 @@ async def _analyse_files(
         finding_sections = [
             section
             for raw in re.split(r"\n---+\n", text)
-            if (section := raw.strip()) and "No concrete bug found" not in section and re.search(r"##\s*Summary", section)
+            if (section := raw.strip()) and not _is_no_finding_section(section) and re.search(r"##\s*Summary", section)
         ]
         if not finding_sections:
             stats["clean"] += 1

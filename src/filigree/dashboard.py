@@ -31,6 +31,7 @@ import threading
 import time
 import webbrowser
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,9 +40,10 @@ if TYPE_CHECKING:
 
     from fastapi import APIRouter
     from starlette.middleware.base import RequestResponseEndpoint
-    from starlette.requests import Request
     from starlette.responses import Response
     from starlette.types import ASGIApp, Receive, Scope, Send
+
+from starlette.requests import Request
 
 from filigree import __version__
 from filigree.core import (
@@ -72,6 +74,24 @@ _EXPECTED_PROJECT_CONFIG_ERRORS = (ProjectNotInitialisedError, ValueError, TypeE
 
 _db: FiligreeDB | None = None
 _config: dict[str, Any] = {}
+_DASHBOARD_STATE_ATTR = "filigree_dashboard_state"
+
+
+@dataclass
+class DashboardState:
+    """Per-ASGI-app dashboard runtime state.
+
+    The module globals remain as startup/test compatibility inputs, but each
+    app captures its own state object so multiple apps in one process do not
+    route requests through whichever global was assigned most recently.
+    """
+
+    db: FiligreeDB | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+    project_store: ProjectStore | None = None
+    allow_http_force_close: bool = False
+    current_project_key: ContextVar[str] = field(default_factory=lambda: ContextVar("project_key", default=""))
+
 
 # 2.1.0 §1.1: opt-in gate for accepting ``force=true`` on HTTP batch-close
 # routes. Default-off — HTTP callers can't bypass the workflow validator
@@ -80,7 +100,14 @@ _config: dict[str, Any] = {}
 _allow_http_force_close: bool = False
 
 
-def _get_allow_http_force_close() -> bool:
+def _state_from_request(request: Request | None) -> DashboardState | None:
+    if request is None:
+        return None
+    state = getattr(request.app.state, _DASHBOARD_STATE_ATTR, None)
+    return state if isinstance(state, DashboardState) else None
+
+
+def _get_allow_http_force_close(request: Request | None = None) -> bool:
     """Accessor so route handlers read the current flag at request time.
 
     A plain ``from filigree.dashboard import _allow_http_force_close``
@@ -88,6 +115,9 @@ def _get_allow_http_force_close() -> bool:
     mutate this module attribute, so the routes need a function-level
     read instead.
     """
+    state = _state_from_request(request)
+    if state is not None:
+        return state.allow_http_force_close or _allow_http_force_close
     return _allow_http_force_close
 
 
@@ -389,25 +419,32 @@ class ProjectStore:
 _project_store: ProjectStore | None = None
 
 
-def _get_db() -> FiligreeDB:
+def _get_db(request: Request) -> FiligreeDB:
     """Return the active database connection.
 
-    In server mode (``_project_store`` set): resolves the project from
-    the per-request ``_current_project_key`` ContextVar.  Falls back to
-    ``default_key`` when the var is empty (un-prefixed ``/api/`` route).
+    In server mode (``DashboardState.project_store`` set): resolves the project
+    from the app-local per-request ContextVar.  Falls back to ``default_key``
+    when the var is empty (un-prefixed ``/api/`` route).
 
-    In ethereal mode: returns the module-level ``_db``.
+    In ethereal mode: returns the app-local single-project DB captured by
+    ``create_app``.
     """
     from fastapi import HTTPException
 
     from filigree.types.api import ErrorCode
 
-    if _project_store is not None:
-        key = _current_project_key.get() or _project_store.default_key
+    state = _state_from_request(request)
+    if state is None:
+        state = DashboardState(db=_db, config=_config, project_store=_project_store, allow_http_force_close=_allow_http_force_close)
+
+    if state.project_store is not None:
+        key = state.current_project_key.get() or state.project_store.default_key
         if not key:
             raise HTTPException(status_code=503, detail="No projects registered")
         try:
-            return _project_store.get_db(key)
+            db = state.project_store.get_db(key)
+            db._dashboard_server_mode = True  # type: ignore[attr-defined]
+            return db
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Unknown project: {key!r}") from None
         except SchemaVersionMismatchError:
@@ -420,9 +457,10 @@ def _get_db() -> FiligreeDB:
                     "code": ErrorCode.VALIDATION,
                 },
             ) from None
-    if _db is None:
+    if state.db is None:
         raise HTTPException(status_code=500, detail="Database not initialized")
-    return _db
+    state.db._dashboard_server_mode = False  # type: ignore[attr-defined]
+    return state.db
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +539,13 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     from filigree.types.api import ErrorCode
 
+    dashboard_state = DashboardState(
+        db=_db,
+        config=dict(_config),
+        project_store=_project_store,
+        allow_http_force_close=_allow_http_force_close,
+    )
+
     # --- MCP streamable-HTTP setup (optional) ---
     _mcp_handler: ASGIApp | None = None
     _mcp_lifespan_factory: Callable[..., Any] | None = None
@@ -510,16 +555,16 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         if server_mode:
             # Closure reads ContextVar — no changes to mcp_server.py needed
             def _server_db_resolver() -> FiligreeDB | None:
-                if _project_store is None:
+                if dashboard_state.project_store is None:
                     return None
-                key = _current_project_key.get() or _project_store.default_key
+                key = dashboard_state.current_project_key.get() or dashboard_state.project_store.default_key
                 if not key:
                     return None
-                return _project_store.get_db(key)
+                return dashboard_state.project_store.get_db(key)
 
             _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=_server_db_resolver)
         else:
-            _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=lambda: _db)
+            _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=lambda: dashboard_state.db)
     except ImportError:
         logger.debug("MCP streamable-HTTP not available (SDK not installed or import error)", exc_info=True)
 
@@ -532,6 +577,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
             yield
 
     app = FastAPI(title="Filigree Dashboard", docs_url=None, redoc_url=None, lifespan=_lifespan)
+    setattr(app.state, _DASHBOARD_STATE_ATTR, dashboard_state)
 
     # HTTPException handler — rewrite FastAPI's default ``{"detail": "..."}``
     # to the 2.0 flat envelope ``{"error", "code", ...}``. Maps HTTP status
@@ -644,11 +690,11 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                 if path.startswith("/api/p/"):
                     parts = path.split("/", 5)  # ['', 'api', 'p', key, ...]
                     if len(parts) >= 4 and parts[3]:
-                        token = _current_project_key.set(parts[3])
+                        token = dashboard_state.current_project_key.set(parts[3])
                         try:
                             return await call_next(request)
                         finally:
-                            _current_project_key.reset(token)
+                            dashboard_state.current_project_key.reset(token)
                 return await call_next(request)
 
         app.add_middleware(ProjectMiddleware)
@@ -665,12 +711,12 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     @app.get("/api/health")
     async def api_health() -> JSONResponse:
-        if server_mode and _project_store is not None:
+        if server_mode and dashboard_state.project_store is not None:
             return JSONResponse(
                 {
                     "status": "ok",
                     "mode": "server",
-                    "projects": len(_project_store.list_projects()),
+                    "projects": len(dashboard_state.project_store.list_projects()),
                     "version": __version__,
                 }
             )
@@ -678,20 +724,20 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     @app.get("/api/projects")
     async def api_projects() -> JSONResponse:
-        if server_mode and _project_store is not None:
-            return JSONResponse(_project_store.list_projects())
+        if server_mode and dashboard_state.project_store is not None:
+            return JSONResponse(dashboard_state.project_store.list_projects())
         # Ethereal mode: single project with empty key so setProject("")
         # routes to /api (not /api/p/prefix/ which would 404).
-        name = _config.get("name") or (_db.prefix if _db is not None else "")
+        name = dashboard_state.config.get("name") or (dashboard_state.db.prefix if dashboard_state.db is not None else "")
         return JSONResponse([{"key": "", "name": name, "path": ""}])
 
     if server_mode:
 
         @app.post("/api/reload")
         async def api_reload() -> JSONResponse:
-            if _project_store is None:
+            if dashboard_state.project_store is None:
                 return JSONResponse({"status": "error", "detail": "Not in server mode"}, status_code=500)
-            diff = _project_store.reload()
+            diff = dashboard_state.project_store.reload()
             if diff.get("error"):
                 from filigree.dashboard_routes.common import _error_response
                 from filigree.types.api import ErrorCode
@@ -710,7 +756,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                 {
                     "ok": True,
                     "status": "ok",
-                    "projects": len(_project_store.list_projects()),
+                    "projects": len(dashboard_state.project_store.list_projects()),
                     **diff,
                 }
             )
@@ -740,12 +786,12 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                         params = parse_qs(qs)
                         project_vals = params.get("project", [])
                         if project_vals:
-                            token = _current_project_key.set(project_vals[0])
+                            token = dashboard_state.current_project_key.set(project_vals[0])
                             try:
                                 await self._inner(scope, receive, send)
                                 return
                             finally:
-                                _current_project_key.reset(token)
+                                dashboard_state.current_project_key.reset(token)
                     await self._inner(scope, receive, send)
 
             app.routes.append(Mount("/mcp", app=_McpProjectWrapper(_mcp_handler)))

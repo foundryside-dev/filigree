@@ -68,7 +68,7 @@ class TestGetScanStatus:
         # Use a PID extremely unlikely to exist
         _create_run(db, pid=9999991)
         db.update_scan_run_status("run-1", "running")
-        status = db.get_scan_status("run-1")
+        status = db.get_scan_status("run-1", reconcile=True)
         # ProcessLookupError → auto-transition to failed
         assert status["status"] == "failed"
         assert status["process_alive"] is False
@@ -506,6 +506,22 @@ class TestReportFindingTool:
         assert data["code"] == ErrorCode.VALIDATION
         assert "catastrophic" in data["error"]
 
+    async def test_non_string_severity_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """Unhashable JSON values must not escape as raw TypeError."""
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/main.py",
+                    "rule_id": "some-rule",
+                    "message": "A message",
+                    "severity": [],
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "severity" in data["error"]
+
     async def test_missing_file_path_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """Omitting file_path triggers the required-fields validation error."""
         data = _parse(
@@ -700,6 +716,45 @@ class TestReportFindingTool:
         assert row["actor"] == "my-agent-007"
         assert data["created_by"] == "my-agent-007"
         assert data["updated_by"] == "my-agent-007"
+
+    async def test_create_observation_refreshes_summary(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        with patch("filigree.mcp_server._refresh_summary") as refresh_summary:
+            data = _parse(
+                await call_tool(
+                    "report_finding",
+                    {
+                        "file_path": "src/summary.py",
+                        "rule_id": "needs-refresh",
+                        "message": "Observation should appear in context",
+                        "severity": "medium",
+                        "create_observation": True,
+                    },
+                )
+            )
+
+        assert data["finding_result"] == "created"
+        refresh_summary.assert_called_once()
+
+    async def test_invalid_actor_on_observation_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/bad-actor.py",
+                    "rule_id": "bad-actor-rule",
+                    "message": "Finding with invalid actor",
+                    "actor": "\nbad",
+                    "create_observation": True,
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "control" in data["error"].lower()
+        row = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM observations WHERE file_path = ?",
+            ("src/bad-actor.py",),
+        ).fetchone()
+        assert row["c"] == 0
 
     async def test_observation_links_back_to_finding(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """report_finding creates an observation with source_finding_id linking

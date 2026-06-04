@@ -39,6 +39,8 @@ def _spawn_scan(
     filigree_dir: Path,
     prompt: str = "bug-hunt",
     log_suffix: str = "",
+    approve_execution: bool = False,
+    approval_hint: str = "approve_execution=true",
 ) -> dict[str, Any]:
     """Build command, validate, and spawn scanner process.
 
@@ -50,7 +52,19 @@ def _spawn_scan(
     *log_suffix* disambiguates log files when multiple processes share
     a scan_run_id (batch mode).
     """
-    from filigree.scanners import validate_scanner_command
+    from filigree.scanners import scanner_execution_approval_error, scanner_requires_execution_approval, validate_scanner_command
+
+    approval_error = scanner_execution_approval_error(cfg, approved=approve_execution, approval_hint=approval_hint)
+    if approval_error is not None:
+        raise ScannerSpawnError(
+            approval_error,
+            code=ErrorCode.VALIDATION,
+            details={
+                "scanner": cfg.name,
+                "managed": not scanner_requires_execution_approval(cfg),
+                "approval_argument": "approve_execution",
+            },
+        )
 
     try:
         cmd = cfg.build_command(

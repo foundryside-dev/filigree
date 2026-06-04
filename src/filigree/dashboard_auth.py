@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 #: ``scan-results`` is aliased (contracts.md Phase C1); future aliases are a
 #: one-line add here.
 LIVING_FEDERATION_ALIASES: frozenset[str] = frozenset({"scan-results"})
+CLASSIC_FEDERATION_ALIASES: frozenset[str] = frozenset({"v1/scan-results"})
 
 
 def is_loom_scoped_path(path: str) -> bool:
@@ -33,9 +34,13 @@ def is_loom_scoped_path(path: str) -> bool:
 
     Strips the ``/api`` root and an optional server-mode ``/p/{key}`` segment,
     then matches the loom prefix or a living federation alias. The classic
-    surface (``/api/issue/...``, ``/api/v1/scan-results``), the root dashboard,
-    and ``/api/health`` are all out of scope.
+    surface (``/api/issue/...``), the root dashboard, and ``/api/health`` are
+    out of scope. Scanner callback aliases and the dashboard-mounted MCP HTTP
+    endpoint are gated by the same token because they accept agent/federation
+    writes.
     """
+    if path == "/mcp" or path.startswith("/mcp/"):
+        return True
     if not path.startswith("/api/"):
         return False
     rest = path[len("/api/") :]
@@ -43,7 +48,7 @@ def is_loom_scoped_path(path: str) -> bool:
     if rest.startswith("p/"):
         parts = rest.split("/", 2)  # ['p', key, remainder]
         rest = parts[2] if len(parts) == 3 else ""
-    return rest == "loom" or rest.startswith("loom/") or rest in LIVING_FEDERATION_ALIASES
+    return rest == "loom" or rest.startswith("loom/") or rest in LIVING_FEDERATION_ALIASES or rest in CLASSIC_FEDERATION_ALIASES
 
 
 def _extract_bearer(header: str | None) -> str | None:

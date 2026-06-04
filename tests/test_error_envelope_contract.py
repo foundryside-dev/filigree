@@ -182,6 +182,30 @@ class TestCLISurface:
         finally:
             os.chdir(original)
 
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["search", "anything", "--limit", "-1", "--json"],
+            ["list-findings", "--severity", "impossible", "--json"],
+            ["batch-update", "test-0000000000", "--priority", "9", "--json"],
+        ],
+    )
+    def test_click_parse_errors_honor_json_envelope(self, initialized_project: Path, argv: list[str]) -> None:
+        """Parse-time Click validators still emit the flat envelope in JSON mode."""
+        import os
+
+        original = os.getcwd()
+        os.chdir(initialized_project)
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, argv)
+            assert result.exit_code != 0
+            payload = json.loads(result.output)
+            _assert_flat_envelope(payload, surface="cli")
+            assert payload["code"] == ErrorCode.VALIDATION
+        finally:
+            os.chdir(original)
+
 
 # ---------------------------------------------------------------------------
 # TransitionError — regression-pin PR #1 (a762547) across every surface.

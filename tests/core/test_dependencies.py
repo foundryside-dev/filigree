@@ -29,6 +29,21 @@ class TestDependencies:
         with pytest.raises(ValueError, match="cycle"):
             db.add_dependency(b.id, a.id)  # B depends on A would cycle
 
+    def test_cycle_check_runs_inside_immediate_transaction(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        a = db.create_issue("A")
+        b = db.create_issue("B")
+        observed: list[bool] = []
+
+        def fake_cycle_check(_issue_id: str, _depends_on_id: str) -> bool:
+            observed.append(db.conn.in_transaction)
+            return False
+
+        monkeypatch.setattr(db, "_would_create_cycle", fake_cycle_check)
+
+        db.add_dependency(a.id, b.id)
+
+        assert observed == [True]
+
     def test_ready_excludes_blocked(self, db: FiligreeDB) -> None:
         a = db.create_issue("Blocked")
         b = db.create_issue("Blocker")
@@ -153,6 +168,22 @@ class TestCriticalPath:
         db.add_dependency(d.id, e.id)
         path = db.get_critical_path()
         assert len(path) == 3
+
+    def test_existing_cycle_raises_integrity_error(self, db: FiligreeDB) -> None:
+        a = db.create_issue("A")
+        b = db.create_issue("B")
+        db.conn.execute(
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
+            (a.id, b.id, "2026-01-01T00:00:00+00:00"),
+        )
+        db.conn.execute(
+            "INSERT INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
+            (b.id, a.id, "2026-01-01T00:00:00+00:00"),
+        )
+        db.conn.commit()
+
+        with pytest.raises(ValueError, match="cycle"):
+            db.get_critical_path()
 
 
 class TestInvalidDepValidation:

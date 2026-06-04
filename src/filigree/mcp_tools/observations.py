@@ -421,6 +421,7 @@ async def _handle_list_observations(arguments: dict[str, Any]) -> list[TextConte
             older_than_hours=args.get("older_than_hours"),
             sort_by=args.get("sort_by", "priority"),
             direction=args.get("direction", "asc"),
+            sweep=False,
         )
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))

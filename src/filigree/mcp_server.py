@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sqlite3
 import sys
@@ -478,6 +479,9 @@ def _allowed_tool_arguments(tool: Tool) -> set[str]:
 
 
 _tool_argument_names: dict[str, set[str]] = {tool.name: _allowed_tool_arguments(tool) for tool in _all_tools}
+_tool_input_schemas: dict[str, dict[str, Any]] = {
+    tool.name: tool.inputSchema if isinstance(tool.inputSchema, dict) else {} for tool in _all_tools
+}
 
 
 def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse | None:
@@ -494,11 +498,145 @@ def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse 
     )
 
 
+def _json_type_label(type_spec: object) -> str:
+    labels = {
+        "string": "a string",
+        "integer": "an integer",
+        "number": "a number",
+        "boolean": "a boolean",
+        "array": "an array",
+        "object": "an object",
+        "null": "null",
+    }
+    if isinstance(type_spec, str):
+        return labels.get(type_spec, type_spec)
+    if isinstance(type_spec, list):
+        names = [item for item in type_spec if isinstance(item, str)]
+        return " or ".join(labels.get(name, name) for name in names) if names else "valid JSON type"
+    return "valid JSON type"
+
+
+def _json_type_matches(value: object, type_name: str) -> bool:
+    if type_name == "string":
+        return isinstance(value, str)
+    if type_name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if type_name == "boolean":
+        return isinstance(value, bool)
+    if type_name == "array":
+        return isinstance(value, list)
+    if type_name == "object":
+        return isinstance(value, dict)
+    if type_name == "null":
+        return value is None
+    return True
+
+
+def _validate_schema_value(value: object, schema: dict[str, Any], path: str) -> str | None:
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        errors: list[str] = []
+        for option in one_of:
+            if not isinstance(option, dict):
+                continue
+            error = _validate_schema_value(value, option, path)
+            if error is None:
+                return None
+            errors.append(error)
+        return errors[0] if errors else f"{path} does not match any allowed schema"
+
+    type_spec = schema.get("type")
+    if isinstance(type_spec, str):
+        allowed_types = [type_spec]
+    elif isinstance(type_spec, list):
+        allowed_types = [item for item in type_spec if isinstance(item, str)]
+    else:
+        allowed_types = []
+
+    if allowed_types and not any(_json_type_matches(value, type_name) for type_name in allowed_types):
+        return f"{path} must be {_json_type_label(type_spec)}"
+
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            return f"{path} length must be >= {min_length}"
+
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, int | float) and value < minimum:
+            return f"{path} must be >= {minimum}"
+        maximum = schema.get("maximum")
+        if isinstance(maximum, int | float) and value > maximum:
+            return f"{path} must be <= {maximum}"
+
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            if schema.get("additionalProperties") is False:
+                for key in value:
+                    if isinstance(key, str) and key not in properties:
+                        return f"Unknown parameter(s) for {path}: {key}" if path else f"Unknown parameter(s): {key}"
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    continue
+                property_schema = properties.get(key)
+                if not isinstance(property_schema, dict):
+                    continue
+                child_path = f"{path}.{key}" if path else key
+                error = _validate_schema_value(item, property_schema, child_path)
+                if error is not None:
+                    return error
+
+    return None
+
+
+def _schema_validation_error(tool_name: str, arguments: object) -> ErrorResponse | None:
+    if not isinstance(arguments, dict):
+        return ErrorResponse(error=f"Arguments for {tool_name} must be an object", code=ErrorCode.VALIDATION)
+    schema = _tool_input_schemas.get(tool_name)
+    if not isinstance(schema, dict):
+        return None
+    error = _validate_schema_value(arguments, schema, "")
+    if error is None:
+        return None
+    return ErrorResponse(error=error, code=ErrorCode.VALIDATION)
+
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
 
 CONTEXT_URI = "filigree://context"
+
+
+def _context_resource_error() -> ErrorResponse | None:
+    if _schema_mismatch is not None:
+        return ErrorResponse(
+            error=format_schema_mismatch_guidance(
+                _schema_mismatch.installed,
+                _schema_mismatch.database,
+            ),
+            code=ErrorCode.SCHEMA_MISMATCH,
+        )
+    if _registry_startup_error is not None:
+        return registry_error_response(_registry_startup_error, action="opening project database")
+    if _db_open_error is not None:
+        return ErrorResponse(error=f"Database not initialized: {_db_open_error}", code=ErrorCode.IO)
+
+    active_db = _request_db.get() or db
+    if active_db is not None:
+        try:
+            db_version = active_db.get_schema_version()
+        except sqlite3.Error:
+            db_version = None
+        if db_version is not None and db_version > CURRENT_SCHEMA_VERSION:
+            return ErrorResponse(
+                error=format_schema_mismatch_guidance(CURRENT_SCHEMA_VERSION, db_version),
+                code=ErrorCode.SCHEMA_MISMATCH,
+            )
+    return None
 
 
 @server.list_resources()  # type: ignore[untyped-decorator,no-untyped-call]
@@ -516,6 +654,9 @@ async def list_resources() -> list[Resource]:
 @server.read_resource()  # type: ignore[untyped-decorator,no-untyped-call]
 async def read_context(uri: str) -> str:
     if str(uri) == CONTEXT_URI:
+        degraded = _context_resource_error()
+        if degraded is not None:
+            return json.dumps(degraded)
         return generate_summary(_get_db())
     msg = f"Unknown resource: {uri}"
     raise ValueError(msg)
@@ -761,6 +902,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         from filigree.mcp_tools.common import _text as _common_text
 
         return _common_text(unknown_argument_error)
+    schema_validation_error = _schema_validation_error(name, arguments)
+    if schema_validation_error is not None:
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text(schema_validation_error)
 
     # Serialise tool execution per-DB. The MCP SDK dispatches tool calls
     # concurrently; the shared ``sqlite3.Connection`` on ``FiligreeDB`` has
@@ -855,7 +1001,7 @@ def create_mcp_app(
                         "error": format_schema_mismatch_guidance(exc.installed, exc.database),
                         "code": ErrorCode.SCHEMA_MISMATCH,
                     },
-                    status_code=409,
+                    status_code=errorcode_to_http_status(ErrorCode.SCHEMA_MISMATCH),
                 )
                 await resp(scope, receive, send)
                 return

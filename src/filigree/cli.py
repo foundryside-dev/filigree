@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import copy
 import json as json_mod
+import sys
+from collections.abc import Sequence
+from typing import Any
 
 import click
 
 from filigree import __version__
 from filigree.cli_commands import admin, files, issues, meta, observations, planning, scanners, sei, server, workflow
 from filigree.cli_commands import annotations as annotations_cmds
-from filigree.cli_common import _wants_json
+from filigree.cli_common import _detect_json_via_parse, _wants_json
 from filigree.types.api import ErrorCode
 from filigree.validation import sanitize_actor
 
@@ -35,6 +38,40 @@ class _FiligreeGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         ctx.meta["filigree_raw_args"] = list(args)
         return super().parse_args(ctx, args)
+
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        **extra: Any,
+    ) -> Any:
+        raw_args = list(sys.argv[1:] if args is None else args)
+        try:
+            result = super().main(
+                args=args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=False,
+                **extra,
+            )
+            if standalone_mode and isinstance(result, int) and result != 0:
+                sys.exit(result)
+            return result
+        except click.ClickException as exc:
+            if _detect_json_via_parse(self, raw_args):
+                click.echo(json_mod.dumps({"error": exc.format_message(), "code": ErrorCode.VALIDATION}))
+            elif standalone_mode:
+                exc.show()
+            if standalone_mode:
+                sys.exit(exc.exit_code)
+            raise
+        except click.Abort:
+            if standalone_mode:
+                click.echo("Aborted!", file=sys.stderr)
+                sys.exit(1)
+            raise
 
 
 @click.group(cls=_FiligreeGroup)

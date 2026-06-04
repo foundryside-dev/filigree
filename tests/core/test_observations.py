@@ -967,6 +967,8 @@ class TestPromoteObservation:
             result = db.promote_observation(obs["id"])
         assert "warnings" in result
         assert any("label" in w for w in result["warnings"])
+        comments = db.get_comments(result["issue"].id)
+        assert any("[reconciliation-debt]" in comment["text"] and "label boom" in comment["text"] for comment in comments)
 
     def test_promote_cleanup_failure_returns_warnings(self, db: FiligreeDB) -> None:
         """If observation delete fails, warning is surfaced."""
@@ -988,6 +990,8 @@ class TestPromoteObservation:
         assert result["issue"] is not None
         assert "warnings" in result
         assert any("delete observation" in w.lower() for w in result["warnings"])
+        comments = db.get_comments(result["issue"].id)
+        assert any("[reconciliation-debt]" in comment["text"] and obs["id"] in comment["text"] for comment in comments)
 
     def test_promote_audit_trail_failure_returns_warnings(self, db: FiligreeDB) -> None:
         """If audit trail insert fails but observation delete succeeds, warning is surfaced."""
@@ -1237,6 +1241,8 @@ class TestPromoteObservation:
         assert "warnings" in result1
         assert db.observation_count() == 2
         assert db.conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == issues_before + 1
+        comments = db.get_comments(first_issue.id)
+        assert any("[reconciliation-debt]" in comment["text"] and obs1["id"] in comment["text"] for comment in comments)
 
         monkeypatch.setattr(db, "link_observation_to_issue", real_link)
         result2 = db.promote_observations_to_issue(

@@ -69,6 +69,27 @@ def test_mcp_tools_total_count() -> None:
     assert total == 114, f"Expected 114 tools total, got {total}"
 
 
+def test_issue_and_file_mcp_tools_do_not_import_mcp_server_private_globals() -> None:
+    """Domain MCP modules should use the common context facade, not mcp_server internals."""
+    root = Path(__file__).resolve().parents[2]
+    for rel in ("src/filigree/mcp_tools/issues.py", "src/filigree/mcp_tools/files.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "from filigree.mcp_server import" not in text, rel
+
+
+def test_file_mixin_delegates_finding_issue_cascade_policy() -> None:
+    """Cross-domain finding→issue policy should live in the cascade service."""
+    root = Path(__file__).resolve().parents[2]
+    files_text = (root / "src/filigree/db_files.py").read_text(encoding="utf-8")
+    service_text = (root / "src/filigree/finding_issue_cascade.py").read_text(encoding="utf-8")
+
+    assert "FindingIssueCascadeService" in files_text
+    assert "record_reconciliation_debt_comment" not in files_text
+    assert "class FindingIssueCascadeService" in service_text
+    assert "def close_fixed_finding" in service_text
+    assert "def reopen_regressed_finding" in service_text
+
+
 def test_mcp_docs_tool_count_matches_registry() -> None:
     """docs/mcp.md headline count must match the live tool registry."""
     from filigree.mcp_server import _all_tools

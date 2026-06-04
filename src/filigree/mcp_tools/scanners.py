@@ -17,15 +17,28 @@ from mcp.types import TextContent, Tool
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.core import VALID_SEVERITIES
-from filigree.db_files import INGESTED_FILE_ID_KEY
-from filigree.mcp_tools.common import _list_response, _parse_args, _registry_error_text, _text, _validate_int_range
+from filigree.db_files import INGESTED_FILE_ID_KEY, _normalize_scan_path
+from filigree.mcp_tools.common import (
+    _list_response,
+    _parse_args,
+    _registry_error_text,
+    _text,
+    _validate_actor,
+    _validate_int_range,
+)
 from filigree.mcp_tools.payloads import finding_to_mcp
 from filigree.registry import RegistryResolutionError, RegistryUnavailableError
 from filigree.scanner_callback import ScannerApiUrlResolution, resolve_scanner_api_url_with_source
 from filigree.scanner_prompts import PROMPT_PACKS, applicable_prompt_pack_names, expand_prompt_pack_names, list_prompt_packs
 from filigree.scanner_runtime import ScannerSpawnError, _spawn_scan
 from filigree.scanners import list_scanners as _list_scanners
-from filigree.scanners import load_scanner, validate_scanner_command, validate_scanner_name
+from filigree.scanners import (
+    load_scanner,
+    scanner_execution_approval_error,
+    scanner_requires_execution_approval,
+    validate_scanner_command,
+    validate_scanner_name,
+)
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.files import ScanIngestResult
 from filigree.types.inputs import (
@@ -188,6 +201,57 @@ def _reported_finding_record(
     )
 
 
+def _normalize_report_finding_line_attribution(tracker: Any, finding: dict[str, Any]) -> list[str]:
+    """Clear impossible MCP-supplied line attribution before strict ingest validation."""
+    project_root = getattr(tracker, "project_root", None)
+    if project_root is None:
+        return []
+
+    path = finding.get("path")
+    if not isinstance(path, str):
+        return []
+
+    try:
+        root = Path(project_root).resolve()
+        target = (root / _normalize_scan_path(path)).resolve()
+        target.relative_to(root)
+    except (OSError, ValueError):
+        return []
+
+    if not target.is_file():
+        return []
+
+    try:
+        with target.open("rb") as handle:
+            line_count = sum(1 for _ in handle)
+    except OSError as exc:
+        _logger.debug("Could not count lines for MCP report target %s: %s", target, exc, exc_info=True)
+        return []
+
+    warnings: list[str] = []
+    line_label = "line" if line_count == 1 else "lines"
+    rule_id = finding.get("rule_id", "")
+
+    line_start = finding.get("line_start")
+    if isinstance(line_start, int) and not isinstance(line_start, bool) and line_start > line_count:
+        finding.pop("line_start", None)
+        finding.pop("line_end", None)
+        warnings.append(
+            f"Finding {rule_id!r} at {path}: line_start {line_start} exceeds file length "
+            f"({path} has {line_count} {line_label}); line attribution cleared"
+        )
+        return warnings
+
+    line_end = finding.get("line_end")
+    if isinstance(line_end, int) and not isinstance(line_end, bool) and line_end > line_count:
+        finding.pop("line_end", None)
+        warnings.append(
+            f"Finding {rule_id!r} at {path}: line_end {line_end} exceeds file length "
+            f"({path} has {line_count} {line_label}); line_end cleared"
+        )
+    return warnings
+
+
 def register(
     *,
     include_legacy: bool = False,
@@ -342,6 +406,11 @@ def register(
                         "type": "string",
                         "description": "Dashboard URL where scanner POSTs results. Defaults to the active local Filigree dashboard.",
                     },
+                    "approve_execution": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required to execute custom project-local scanner TOML that does not match a bundled managed scanner.",
+                    },
                 },
                 "required": ["scanner", "file_paths"],
             },
@@ -410,6 +479,11 @@ def register(
                     "api_url": {
                         "type": "string",
                         "description": "Dashboard URL where scanner POSTs results. Defaults to the active local Filigree dashboard.",
+                    },
+                    "approve_execution": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Required to execute custom project-local scanner TOML that does not match a bundled managed scanner.",
                     },
                 },
                 "required": ["scanner", "file_path"],
@@ -662,7 +736,7 @@ async def _handle_disable_scanner(arguments: dict[str, Any]) -> list[TextContent
 
 async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]:
     """Report a single agent-discovered finding via process_scan_results."""
-    from filigree.mcp_server import _get_db
+    from filigree.mcp_server import _get_db, _refresh_summary
 
     args = _parse_args(arguments, ReportFindingArgs)
     file_path = args.get("file_path", "")
@@ -672,6 +746,8 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
         return _text(ErrorResponse(error="file_path, rule_id, and message are required", code=ErrorCode.VALIDATION))
 
     severity = args.get("severity", "info")
+    if not isinstance(severity, str):
+        return _text(ErrorResponse(error="severity must be a string", code=ErrorCode.VALIDATION))
     if severity not in VALID_SEVERITIES:
         return _text(
             ErrorResponse(
@@ -693,8 +769,11 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     if args.get("category"):
         finding["metadata"] = {"category": args["category"]}
 
-    actor_raw = args.get("actor", "")
-    actor = actor_raw.strip() if isinstance(actor_raw, str) else ""
+    actor = ""
+    if "actor" in args:
+        actor, actor_error = _validate_actor(args.get("actor"))
+        if actor_error:
+            return actor_error
     create_observation = args.get("create_observation", False)
     if not isinstance(create_observation, bool):
         return _text(ErrorResponse(error="'create_observation' must be a boolean", code=ErrorCode.VALIDATION))
@@ -705,6 +784,7 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
         )
 
     tracker = _get_db()
+    mcp_line_warnings = _normalize_report_finding_line_attribution(tracker, finding)
     try:
         result = tracker.process_scan_results(
             scan_source="agent",
@@ -713,6 +793,7 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
             create_observations=create_observation,
             observation_actor=actor,
         )
+        _refresh_summary()
     except RegistryResolutionError as exc:
         _logger.error("report_finding registry resolution failed: %s", exc)
         return _registry_error_text(exc, action="reporting finding")
@@ -725,6 +806,9 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     except sqlite3.Error as exc:
         _logger.error("report_finding storage failure: %s", exc)
         return _text(ErrorResponse(error=f"Failed to report finding: {exc}", code=ErrorCode.IO))
+
+    if mcp_line_warnings:
+        result["warnings"].extend(mcp_line_warnings)
 
     reported_file_id = finding.get(INGESTED_FILE_ID_KEY)
     reported_line_start = finding.get("line_start")
@@ -790,6 +874,10 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
     api_url_arg = args.get("api_url")
     if api_url_arg is not None and not isinstance(api_url_arg, str):
         return _text(ErrorResponse(error="api_url must be a string", code=ErrorCode.VALIDATION))
+    approve_execution_raw = args.get("approve_execution", False)
+    if not isinstance(approve_execution_raw, bool):
+        return _text(ErrorResponse(error="approve_execution must be a boolean", code=ErrorCode.VALIDATION))
+    approve_execution = approve_execution_raw
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
@@ -818,6 +906,20 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     if not target.is_file():
         return _text(ErrorResponse(error=f"File not found: {file_path}", code=ErrorCode.NOT_FOUND))
+
+    approval_err = scanner_execution_approval_error(cfg, approved=approve_execution, approval_hint="approve_execution=true")
+    if approval_err is not None:
+        return _text(
+            ErrorResponse(
+                error=approval_err,
+                code=ErrorCode.VALIDATION,
+                details={
+                    "scanner": cfg.name,
+                    "managed": not scanner_requires_execution_approval(cfg),
+                    "approval_argument": "approve_execution",
+                },
+            )
+        )
 
     file_type_warning = ""
     if cfg.file_types:
@@ -881,6 +983,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
             scan_run_id=scan_run_id,
             filigree_dir=filigree_dir,
             prompt=prompt,
+            approve_execution=approve_execution,
         )
     except ScannerSpawnError as exc:
         status_update_error = _mark_scan_run_failed(
@@ -1020,6 +1123,10 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
     api_url_arg = args.get("api_url")
     if api_url_arg is not None and not isinstance(api_url_arg, str):
         return _text(ErrorResponse(error="api_url must be a string", code=ErrorCode.VALIDATION))
+    approve_execution_raw = args.get("approve_execution", False)
+    if not isinstance(approve_execution_raw, bool):
+        return _text(ErrorResponse(error="approve_execution must be a boolean", code=ErrorCode.VALIDATION))
+    approve_execution = approve_execution_raw
     prompt_err = _validate_prompt_pack(prompt)
     if prompt_err is not None:
         return _text(prompt_err)
@@ -1076,12 +1183,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             skipped.append({"file_path": fp, "reason": "duplicate"})
             continue
         seen_canonical.add(cp)
-        try:
-            file_record = tracker.register_file(cp)
-        except (RegistryResolutionError, RegistryUnavailableError) as exc:
-            return _registry_error_text(exc, action="triggering batch scan")
         canonical_paths.append(cp)
-        file_ids.append(file_record.id)
 
     if not canonical_paths:
         return _text(
@@ -1091,6 +1193,27 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                 details={"skipped": skipped},
             )
         )
+
+    approval_err = scanner_execution_approval_error(cfg, approved=approve_execution, approval_hint="approve_execution=true")
+    if approval_err is not None:
+        return _text(
+            ErrorResponse(
+                error=approval_err,
+                code=ErrorCode.VALIDATION,
+                details={
+                    "scanner": cfg.name,
+                    "managed": not scanner_requires_execution_approval(cfg),
+                    "approval_argument": "approve_execution",
+                },
+            )
+        )
+
+    for cp in canonical_paths:
+        try:
+            file_record = tracker.register_file(cp)
+        except (RegistryResolutionError, RegistryUnavailableError) as exc:
+            return _registry_error_text(exc, action="triggering batch scan")
+        file_ids.append(file_record.id)
 
     project_root = filigree_dir.parent
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
@@ -1170,6 +1293,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
                 filigree_dir=filigree_dir,
                 prompt=prompt,
                 log_suffix=f"-{entry['index']}",
+                approve_execution=approve_execution,
             )
         except ScannerSpawnError as exc:
             reason = str(exc)

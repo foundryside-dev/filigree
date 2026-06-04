@@ -632,7 +632,7 @@ class TestAnalyseFiles:
         assert post_calls[1]["complete_scan_run"] is True
         assert "[skip] target.py" in capsys.readouterr().err
 
-    async def test_records_api_failures_for_finding_and_completion_posts(
+    async def test_finding_post_failure_does_not_complete_scan_run(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -669,10 +669,52 @@ class TestAnalyseFiles:
         )
 
         assert stats["api_files_posted"] == 0
-        assert stats["api_files_failed"] == 2
+        assert stats["api_files_failed"] == 1
         err = capsys.readouterr().err
         assert "API error for target.py: boom" in err
-        assert "API error completing scan run: boom" in err
+        assert "API error completing scan run" not in err
+
+    async def test_executor_failure_does_not_complete_scan_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        target = root / "target.py"
+        target.write_text("x = 1\n")
+        output_dir = tmp_path / "reports"
+        post_calls: list[dict[str, Any]] = []
+
+        async def fake_executor(**_kwargs: object) -> None:
+            raise RuntimeError("scanner exploded")
+
+        def fake_post_to_api(**kwargs: Any) -> tuple[bool, str]:
+            post_calls.append(kwargs)
+            return True, ""
+
+        monkeypatch.setattr("filigree.scanner_scripts.scan_utils.post_to_api", fake_post_to_api)
+
+        stats = await _analyse_files(
+            files=[target],
+            output_dir=output_dir,
+            root_dir=root,
+            repo_root=root,
+            model=None,
+            batch_size=1,
+            context="ctx",
+            skip_existing=False,
+            timeout=30,
+            api_url="http://filigree.test",
+            no_ingest=False,
+            scan_run_id="run-1",
+            scan_source="test",
+            executor=fake_executor,
+            prompt_template=PROMPT_TEMPLATE,
+        )
+
+        assert stats["failed"] == 1
+        assert post_calls == []
 
     async def test_skip_existing_report_counts_clean_file(
         self,
@@ -993,6 +1035,48 @@ class TestParseFindings:
         assert len(findings) == 1
         assert findings[0]["severity"] == "info"
 
+    def test_sentinel_phrase_inside_valid_finding_does_not_drop_section(self) -> None:
+        md = """\
+## Summary
+Error handling accepts a forged clean-scan string
+
+## Severity
+- Severity: major
+- Priority: P1
+
+## Evidence
+src/filigree/scanner.py:88 logs user output containing "No concrete bug found in target file" before validation.
+
+## Root Cause Hypothesis
+The parser treats a sentinel phrase inside normal evidence as a whole-section sentinel.
+
+## Suggested Fix
+Only skip the exact no-finding sentinel section.
+"""
+
+        findings = parse_findings(md, file_path="src/filigree/scanner.py")
+
+        assert len(findings) == 1
+        assert findings[0]["line_start"] == 88
+
+    def test_line_number_prefers_file_citation_over_other_colons(self) -> None:
+        md = """\
+## Summary
+Dashboard callback reports the wrong line
+
+## Severity
+- Severity: minor
+- Priority: P2
+
+## Evidence
+The callback talks to http://localhost:8377 before hitting src/filigree/dashboard.py:55.
+"""
+
+        findings = parse_findings(md, file_path="src/filigree/dashboard.py")
+
+        assert len(findings) == 1
+        assert findings[0]["line_start"] == 55
+
 
 # ── _infer_rule_id ─────────────────────────────────────────────────────
 
@@ -1055,6 +1139,38 @@ class TestPostToApi:
                 findings=[{"path": "x.py", "rule_id": "other", "severity": "info", "message": "test"}],
             )
         assert result == (True, "")
+
+    def test_success_with_non_json_body_returns_false(self) -> None:
+        resp = MagicMock()
+        resp.read.return_value = b"<html>ok</html>"
+        resp.status = 200
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=resp):
+            ok, detail = post_to_api(
+                api_url="http://localhost:8377",
+                scan_source="test",
+                scan_run_id="run-1",
+                findings=[{"path": "x.py", "rule_id": "other", "severity": "info", "message": "test"}],
+            )
+        assert ok is False
+        assert "JSON object" in detail
+
+    def test_success_with_json_list_returns_false(self) -> None:
+        resp = MagicMock()
+        resp.read.return_value = b"[]"
+        resp.status = 200
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=resp):
+            ok, detail = post_to_api(
+                api_url="http://localhost:8377",
+                scan_source="test",
+                scan_run_id="run-1",
+                findings=[{"path": "x.py", "rule_id": "other", "severity": "info", "message": "test"}],
+            )
+        assert ok is False
+        assert "JSON object" in detail
 
     def test_sends_correct_payload(self) -> None:
         findings = [{"path": "x.py", "rule_id": "other", "severity": "info", "message": "test"}]

@@ -33,6 +33,9 @@ class TestIsLoomScopedPath:
             "/api/p/acme/loom/issues",  # server-mode project mount
             "/api/scan-results",  # living-surface federation alias
             "/api/p/acme/scan-results",  # alias under server-mode mount
+            "/api/v1/scan-results",  # classic scanner callback alias
+            "/mcp",  # dashboard-mounted MCP streamable HTTP endpoint
+            "/mcp/session",  # MCP subpaths inherit the same bearer boundary
         ],
     )
     def test_loom_scoped_paths_are_true(self, path: str) -> None:
@@ -46,7 +49,6 @@ class TestIsLoomScopedPath:
             "/api/ready",
             "/api/health",
             "/",
-            "/api/v1/scan-results",  # classic outlier — NOT loom-scoped
             "/api/p/acme/issue/x",  # classic under server-mode mount
             "/api",  # no trailing segment
             "/api/loomish/x",  # must not prefix-match "loom" loosely
@@ -155,6 +157,20 @@ class TestLoomAuthEnforcement:
         app = app_factory(TOKEN)
         async with _client(app) as c:
             resp = await c.post("/api/scan-results", json={})
+        assert resp.status_code == 401
+
+    async def test_classic_v1_scan_results_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        """The legacy scanner callback alias must share scan-ingest auth."""
+        app = app_factory(TOKEN)
+        async with _client(app) as c:
+            resp = await c.post("/api/v1/scan-results", json={})
+        assert resp.status_code == 401
+
+    async def test_dashboard_mounted_mcp_endpoint_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        """The dashboard-mounted HTTP MCP surface shares the bearer boundary."""
+        app = app_factory(TOKEN)
+        async with _client(app) as c:
+            resp = await c.post("/mcp", json={})
         assert resp.status_code == 401
 
     async def test_whitespace_token_leaves_surface_open_and_warns(

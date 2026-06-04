@@ -99,9 +99,8 @@ def _check_read_prefix_in_server_mode(db: FiligreeDB, issue_id: str) -> JSONResp
     identical to the caller.
     """
     from filigree.core import WrongProjectError
-    from filigree.dashboard import _project_store
 
-    if _project_store is None:
+    if not bool(getattr(db, "_dashboard_server_mode", False)):
         return None
     try:
         db._check_id_prefix(issue_id)

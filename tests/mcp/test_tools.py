@@ -1939,6 +1939,20 @@ class TestResource:
         assert "Project Pulse" in content
         assert "Resource test" in content
 
+    async def test_read_context_resource_reports_schema_mismatch(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        import filigree.mcp_server as mcp_mod
+        from filigree.types.api import SchemaVersionMismatchError
+
+        monkeypatch.setattr(mcp_mod, "db", None)
+        monkeypatch.setattr(mcp_mod, "_schema_mismatch", SchemaVersionMismatchError(installed=8, database=9))
+        monkeypatch.setattr(mcp_mod, "_db_open_error", None)
+
+        content = await read_context("filigree://context")
+        data = json.loads(content)
+
+        assert data["code"] == ErrorCode.SCHEMA_MISMATCH
+        assert "upgrade" in data["error"].lower()
+
     async def test_read_unknown_resource(self, mcp_db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="Unknown resource"):
             await read_context("filigree://nonexistent")
@@ -3221,6 +3235,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "nonexistent",
                     "file_path": "src/foo.py",
                 },
@@ -3247,6 +3262,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "bad",
                         "file_path": "bad_target.py",
                     },
@@ -3265,6 +3281,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "../../etc/passwd",
                 },
@@ -3278,6 +3295,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "../../../etc/crontab",
                     "file_path": "src/foo.py",
                 },
@@ -3293,6 +3311,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "src/foo.py",
                     "api_url": "https://evil.example.com:8377",
@@ -3308,6 +3327,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "nonexistent/file.py",
                 },
@@ -3329,6 +3349,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "test_target.py",
                     },
@@ -3368,6 +3389,7 @@ class TestScannerTools:
                     await call_tool(
                         "trigger_scan",
                         {
+                            "approve_execution": True,
                             "scanner": "test-scanner",
                             "file_path": "./canonical_target.py",
                         },
@@ -3394,6 +3416,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "existing.py",
                     },
@@ -3417,6 +3440,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "rate_test.py",
                     },
@@ -3430,6 +3454,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "rate_test.py",
                     },
@@ -3455,6 +3480,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "readme.txt",
                     },
@@ -3490,6 +3516,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "templated-scanner",
                         "file_path": "templated_exec_target.py",
                     },
@@ -3525,6 +3552,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "relative-scanner",
                         "file_path": "relative_exec_target.py",
                     },
@@ -3549,7 +3577,7 @@ class TestScannerTools:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "test-scanner", "file_path": "log_target.py"},
+                    {"approve_execution": True, "scanner": "test-scanner", "file_path": "log_target.py"},
                 )
             )
             assert "error" not in result
@@ -3598,7 +3626,7 @@ class TestScannerTools:
                 result = _parse(
                     await call_tool(
                         "trigger_scan",
-                        {"scanner": "test-scanner", "file_path": "fd_leak_target.py"},
+                        {"approve_execution": True, "scanner": "test-scanner", "file_path": "fd_leak_target.py"},
                     )
                 )
             assert "error" not in result, f"trigger_scan failed: {result}"
@@ -3640,6 +3668,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "shared.py",
                     },
@@ -3653,6 +3682,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "shared.py",
                     },
@@ -3799,7 +3829,7 @@ class TestHttpMcpRequestContext:
         start = next(m for m in messages if m["type"] == "http.response.start")
         body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
         data = json.loads(body)
-        assert start["status"] == 409
+        assert start["status"] == 503
         assert data["code"] == ErrorCode.SCHEMA_MISMATCH
         assert "upgrade" in data["error"].lower()
 
@@ -4012,7 +4042,7 @@ class TestTriggerScanCooldownDB:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "echo-scanner", "file_path": "cooldown_test.py"},
+                    {"approve_execution": True, "scanner": "echo-scanner", "file_path": "cooldown_test.py"},
                 )
             )
             assert result.get("status") == "triggered"
@@ -4022,7 +4052,7 @@ class TestTriggerScanCooldownDB:
             result2 = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "echo-scanner", "file_path": "cooldown_test.py"},
+                    {"approve_execution": True, "scanner": "echo-scanner", "file_path": "cooldown_test.py"},
                 )
             )
             assert result2["code"] == ErrorCode.CONFLICT
@@ -4046,7 +4076,7 @@ class TestTriggerScanCooldownDB:
                 result = _parse(
                     await call_tool(
                         "trigger_scan",
-                        {"scanner": "spawn-fail", "file_path": "spawn_fail.py"},
+                        {"approve_execution": True, "scanner": "spawn-fail", "file_path": "spawn_fail.py"},
                     )
                 )
             assert result["code"] == ErrorCode.IO
@@ -4069,7 +4099,7 @@ class TestTriggerScanCooldownDB:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "bad-cmd", "file_path": "cmd_fail.py"},
+                    {"approve_execution": True, "scanner": "bad-cmd", "file_path": "cmd_fail.py"},
                 )
             )
             assert result["code"] == ErrorCode.NOT_FOUND

@@ -131,6 +131,18 @@ class TestMCPUnknownParameterValidation:
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
 
+    async def test_release_my_claims_control_char_actor(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("release_my_claims", {"actor": "\nbad"})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "control" in data["error"].lower()
+
+    async def test_release_my_claims_long_actor(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("release_my_claims", {"actor": "a" * 129})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "128" in data["error"]
+
     async def test_batch_add_label_empty_actor(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Label target")
         result = await call_tool(

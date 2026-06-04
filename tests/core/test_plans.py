@@ -224,6 +224,29 @@ class TestCreatePlan:
 
         assert db.get_issue(blocked_step_id).blocked_by == [old_blocker_id]
 
+    def test_retarget_plan_dependency_cycle_check_runs_inside_immediate_transaction(
+        self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = db.create_plan(
+            {"title": "Retarget transaction"},
+            [{"title": "Phase", "steps": [{"title": "A"}, {"title": "B"}, {"title": "C", "deps": [0]}]}],
+        )
+        steps = plan["phases"][0]["steps"]
+        blocked_step_id = steps[2]["id"]
+        old_blocker_id = steps[0]["id"]
+        new_blocker_id = steps[1]["id"]
+        observed: list[bool] = []
+
+        def fake_cycle_check(_issue_id: str, _depends_on_id: str) -> bool:
+            observed.append(db.conn.in_transaction)
+            return False
+
+        monkeypatch.setattr(db, "_would_create_cycle", fake_cycle_check)
+
+        db.retarget_plan_dependency(blocked_step_id, old_blocker_id, new_blocker_id)
+
+        assert observed == [True]
+
     def test_plan_uses_template_initial_states(self, db: FiligreeDB) -> None:
         plan = db.create_plan(
             {"title": "Initial states"},

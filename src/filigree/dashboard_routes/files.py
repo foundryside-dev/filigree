@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import (
+    FILIGREE_DIR_NAME,
+    SUMMARY_FILENAME,
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
@@ -36,12 +38,16 @@ from filigree.registry import (
     RegistryResolutionError,
     RegistryUnavailableError,
 )
+from filigree.summary import write_summary
 from filigree.types.api import ErrorCode
 from filigree.types.core import AssocType, FindingStatus, Severity
 
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
+_MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+_MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
+_SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
 
 # CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
 # router factories, and the findings/clean-stale sweep) run via
@@ -84,6 +90,19 @@ def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any])
     """
     with db.borrow_for_worker_thread() as worker_db:
         return worker_db.process_scan_results(**parsed)
+
+
+def _refresh_summary_for_db(db: FiligreeDB) -> None:
+    """Best-effort context.md refresh after dashboard mutations."""
+    filigree_dir = db.project_root / FILIGREE_DIR_NAME if db.project_root is not None else db.db_path.parent
+    try:
+        write_summary(db, filigree_dir / SUMMARY_FILENAME)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Failed to refresh context.md summary after scan ingest", exc_info=True)
+    except Exception:
+        logger.warning("Unexpected error refreshing context.md after scan ingest", exc_info=True)
 
 
 def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_source: str, actor: str) -> CleanStaleResult:
@@ -185,6 +204,15 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     findings = body["findings"]
     if not isinstance(findings, list):
         return "findings must be a JSON array"
+    if len(findings) > _MAX_SCAN_FINDINGS_PER_REQUEST:
+        return f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings"
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"findings[{index}] must be a JSON object"
+        for field_name in _SCAN_FINDING_TEXT_FIELDS:
+            value = finding.get(field_name)
+            if isinstance(value, str) and len(value) > _MAX_SCAN_FINDING_TEXT_LENGTH:
+                return f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
     mark_unseen = body.get("mark_unseen", False)
     if not isinstance(mark_unseen, bool):
         return "mark_unseen must be a boolean"
@@ -507,6 +535,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(result)
 
     @router.get("/scan-runs")
@@ -577,6 +606,7 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(scan_ingest_result_to_loom(result))
 
     @router.get("/files")
@@ -883,6 +913,7 @@ def create_living_surface_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(scan_ingest_result_to_loom(result))
 
     return router

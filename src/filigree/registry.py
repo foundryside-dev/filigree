@@ -33,6 +33,7 @@ re-attaching the file under a local file_id would defeat the briefing block.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import time
@@ -40,9 +41,7 @@ from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
 from typing import Any, Literal, Protocol, TypeAlias, TypedDict
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
 
 import httpx
 
@@ -345,24 +344,25 @@ def clarion_identity_resolve_batch_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/api/v1/identity/resolve:batch"
 
 
-def _build_clarion_request(
-    url: str,
-    *,
-    auth_token: str | None,
-    data: bytes | None = None,
-    method: str | None = None,
-) -> Request:
-    """Build a Clarion HTTP Request, attaching the Bearer token if present.
+def _is_loopback_origin(url: str) -> bool:
+    host = urlparse(url).hostname
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
-    Per the Clarion 1.0 cross-product contract: send ``Authorization: Bearer <token>``
-    whenever a token is configured and resolved; otherwise send no auth header
-    (Clarion accepts unauthenticated on loopback bind, rejects on non-loopback).
 
-    Pass ``data`` to issue a POST (Content-Type defaults to application/json
-    since every Clarion POST in this codebase is JSON).
-    """
-    headers = _clarion_headers(auth_token=auth_token, has_body=data is not None)
-    return Request(url, data=data, headers=headers, method=method)  # noqa: S310 — scheme validated by normalize_clarion_base_url
+def _validate_clarion_token_origin(url: str, *, auth_token: str | None) -> None:
+    if auth_token and not _is_loopback_origin(url):
+        msg = (
+            "clarion.auth_token may only be sent to loopback Clarion origins by default; "
+            f"refusing token-bearing request to {urlparse(url).netloc!r}"
+        )
+        raise ValueError(msg)
 
 
 def _clarion_headers(*, auth_token: str | None, has_body: bool = False) -> dict[str, str]:
@@ -390,21 +390,19 @@ def probe_clarion_capabilities(base_url: str, *, timeout_seconds: float, auth_to
     Version-mismatch checks are layered on by ``validate_clarion_capabilities``.
     """
     url = clarion_capabilities_url(base_url)
-    request = _build_clarion_request(url, auth_token=auth_token)
+    _validate_clarion_token_origin(url, auth_token=auth_token)
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-            raw = response.read().decode("utf-8")
-    except HTTPError as exc:
-        try:
-            reason = exc.reason or exc.msg
-            if exc.code == 401:
+        with httpx.Client(trust_env=False, follow_redirects=True) as client:
+            response = client.get(url, headers=_clarion_headers(auth_token=auth_token), timeout=timeout_seconds)
+        raw = response.text
+        if response.status_code >= 400:
+            reason = response.reason_phrase
+            if response.status_code == 401:
                 msg = f"Clarion capability probe rejected at {url}: HTTP 401 {reason} (check token_env)"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth") from exc
-            msg = f"Clarion capability probe failed at {url}: HTTP {exc.code} {reason}"
-            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error") from exc
-        finally:
-            exc.close()
-    except (URLError, TimeoutError, OSError) as exc:
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+            msg = f"Clarion capability probe failed at {url}: HTTP {response.status_code} {reason}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="http_error")
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
         msg = f"Clarion capability probe unreachable at {url}: {exc}"
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
 
@@ -497,23 +495,6 @@ def validate_clarion_capabilities(capabilities: ClarionCapabilities, *, base_url
             "Reconfigure Clarion or switch this project to registry_backend='local'."
         )
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="role_declined")
-
-
-def _is_briefing_blocked_body(exc: HTTPError) -> bool:
-    """Return True if a 403 response body declares ``code: "BRIEFING_BLOCKED"``.
-
-    HTTPError exposes the response body as a read-once stream (``exc.read()``);
-    we tolerate empty / malformed bodies and treat them as "not specifically
-    briefing-blocked" so generic 403s fall through to the regular
-    RegistryResolutionError path.
-    """
-    try:
-        raw = exc.read()
-    except Exception:
-        return False
-    if not raw:
-        return False
-    return _is_briefing_blocked_payload(raw)
 
 
 def _is_briefing_blocked_payload(raw: str | bytes | bytearray) -> bool:

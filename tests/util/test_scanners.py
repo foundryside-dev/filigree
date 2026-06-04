@@ -75,6 +75,19 @@ class TestListScanners:
         result = list_scanners(scanners_dir)
         assert result == []
 
+    def test_skips_invalid_utf8_toml(self, tmp_path: Path) -> None:
+        scanners_dir = tmp_path / "scanners"
+        scanners_dir.mkdir()
+        (scanners_dir / "bad.toml").write_bytes(b"\xff")
+        errors: list[str] = []
+
+        result = list_scanners(scanners_dir, errors=errors)
+
+        assert result == []
+        assert errors
+        assert "bad.toml" in errors[0]
+        assert "failed to read" in errors[0]
+
     def test_skips_invalid_field_types(self, tmp_path: Path) -> None:
         scanners_dir = tmp_path / "scanners"
         scanners_dir.mkdir()

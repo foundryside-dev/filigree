@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from filigree.db_base import DBMixinProtocol, _now_iso
+from filigree.db_base import DBMixinProtocol, _begin_immediate, _now_iso
 from filigree.models import _EMPTY_TS, Issue
 from filigree.types.api import BatchFailure
 from filigree.types.core import IssueDict
@@ -221,21 +221,23 @@ class PlanningMixin(DBMixinProtocol):
         # for *either* argument, not whichever happens to be looked up first.
         self._check_id_prefix(issue_id)
         self._check_id_prefix(depends_on_id)
-        # Validate both issues exist
-        self.get_issue(issue_id)  # raises KeyError if not found
-        self.get_issue(depends_on_id)  # raises KeyError if not found
-
-        if issue_id == depends_on_id:
-            msg = f"Cannot add self-dependency: {issue_id}"
-            raise ValueError(msg)
-
-        # Check for cycles: would depends_on_id transitively reach issue_id?
-        if self._would_create_cycle(issue_id, depends_on_id):
-            msg = f"Dependency {issue_id} -> {depends_on_id} would create a cycle"
-            raise ValueError(msg)
-
-        now = _now_iso()
+        _begin_immediate(self.conn, "add_dependency")
         try:
+            # Validate both issues exist under the same write lock as the cycle
+            # check and insert so competing writers cannot race the DAG check.
+            self.get_issue(issue_id)  # raises KeyError if not found
+            self.get_issue(depends_on_id)  # raises KeyError if not found
+
+            if issue_id == depends_on_id:
+                msg = f"Cannot add self-dependency: {issue_id}"
+                raise ValueError(msg)
+
+            # Check for cycles: would depends_on_id transitively reach issue_id?
+            if self._would_create_cycle(issue_id, depends_on_id):
+                msg = f"Dependency {issue_id} -> {depends_on_id} would create a cycle"
+                raise ValueError(msg)
+
+            now = _now_iso()
             cursor = self.conn.execute(
                 "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, ?, ?)",
                 (issue_id, depends_on_id, dep_type, now),
@@ -249,7 +251,8 @@ class PlanningMixin(DBMixinProtocol):
             self._record_event(issue_id, "dependency_added", actor=actor, new_value=f"{dep_type}:{depends_on_id}")
             self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if self.conn.in_transaction:
+                self.conn.rollback()
             raise
         return True
 
@@ -453,9 +456,11 @@ class PlanningMixin(DBMixinProtocol):
         queue = deque(nid for nid in open_ids if in_degree[nid] == 0)
         dist: dict[str, int] = dict.fromkeys(open_ids, 0)
         pred: dict[str, str | None] = dict.fromkeys(open_ids, None)
+        processed: set[str] = set()
 
         while queue:
             node = queue.popleft()
+            processed.add(node)
             for neighbor in forward[node]:
                 if dist[node] + 1 > dist[neighbor]:
                     dist[neighbor] = dist[node] + 1
@@ -463,6 +468,11 @@ class PlanningMixin(DBMixinProtocol):
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
+
+        if len(processed) != len(open_ids):
+            cyclic_ids = sorted(open_ids - processed)
+            msg = f"Dependency graph contains a cycle involving: {', '.join(cyclic_ids)}"
+            raise ValueError(msg)
 
         if not dist:
             return []
@@ -728,36 +738,38 @@ class PlanningMixin(DBMixinProtocol):
         for issue_id in (step_id, old_depends_on_id, new_depends_on_id):
             self._check_id_prefix(issue_id)
 
-        step = self.get_issue(step_id)
-        old_dep = self.get_issue(old_depends_on_id)
-        new_dep = self.get_issue(new_depends_on_id)
-        if step.type != "step":
-            msg = f"step_id must reference a step issue, got {step.type!r}: {step_id}"
-            raise ValueError(msg)
-        if old_dep.type != "step" or new_dep.type != "step":
-            msg = "old_depends_on_id and new_depends_on_id must both reference step issues"
-            raise ValueError(msg)
-        if step_id == new_depends_on_id:
-            msg = f"Cannot add self-dependency: {step_id}"
-            raise ValueError(msg)
-
-        row = self.conn.execute(
-            "SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
-            (step_id, old_depends_on_id),
-        ).fetchone()
-        if row is None:
-            msg = f"Dependency not found: {step_id} -> {old_depends_on_id}"
-            raise ValueError(msg)
-        dep_type = row["type"] or "blocks"
-
-        if old_depends_on_id == new_depends_on_id:
-            return self.get_issue(step_id)
-        if self._would_create_cycle(step_id, new_depends_on_id):
-            msg = f"Dependency {step_id} -> {new_depends_on_id} would create a cycle"
-            raise ValueError(msg)
-
-        now = _now_iso()
+        _begin_immediate(self.conn, "retarget_plan_dependency")
         try:
+            step = self.get_issue(step_id)
+            old_dep = self.get_issue(old_depends_on_id)
+            new_dep = self.get_issue(new_depends_on_id)
+            if step.type != "step":
+                msg = f"step_id must reference a step issue, got {step.type!r}: {step_id}"
+                raise ValueError(msg)
+            if old_dep.type != "step" or new_dep.type != "step":
+                msg = "old_depends_on_id and new_depends_on_id must both reference step issues"
+                raise ValueError(msg)
+            if step_id == new_depends_on_id:
+                msg = f"Cannot add self-dependency: {step_id}"
+                raise ValueError(msg)
+
+            row = self.conn.execute(
+                "SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
+                (step_id, old_depends_on_id),
+            ).fetchone()
+            if row is None:
+                msg = f"Dependency not found: {step_id} -> {old_depends_on_id}"
+                raise ValueError(msg)
+            dep_type = row["type"] or "blocks"
+
+            if old_depends_on_id == new_depends_on_id:
+                self.conn.rollback()
+                return self.get_issue(step_id)
+            if self._would_create_cycle(step_id, new_depends_on_id):
+                msg = f"Dependency {step_id} -> {new_depends_on_id} would create a cycle"
+                raise ValueError(msg)
+
+            now = _now_iso()
             self.conn.execute(
                 "DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
                 (step_id, old_depends_on_id),
@@ -772,7 +784,8 @@ class PlanningMixin(DBMixinProtocol):
             self.conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (now, step_id))
             self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if self.conn.in_transaction:
+                self.conn.rollback()
             raise
 
         return self.get_issue(step_id)

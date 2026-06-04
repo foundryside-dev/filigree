@@ -661,6 +661,7 @@ class TriggerScanArgs(TypedDict):
     file_path: str
     api_url: NotRequired[str]
     prompt: NotRequired[str]
+    approve_execution: NotRequired[bool]
 
 
 class EnableScannerArgs(TypedDict):
@@ -743,6 +744,7 @@ class TriggerScanBatchArgs(TypedDict):
     file_paths: list[str]
     api_url: NotRequired[str]
     prompt: NotRequired[str]
+    approve_execution: NotRequired[bool]
 
 
 class GetScanStatusArgs(TypedDict):

@@ -214,6 +214,28 @@ class TestProjectConfigShape:
         assert isinstance(result["version"], int)
         assert isinstance(result["enabled_packs"], list)
 
+    def test_malformed_config_fields_fall_back_to_typed_defaults(self, tmp_path: Path) -> None:
+        """Malformed config.json values must not cross the project trust boundary."""
+        import json
+
+        from filigree.core import read_config
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "prefix": 123,
+                    "version": "two",
+                    "enabled_packs": "core",
+                }
+            )
+        )
+
+        result = read_config(tmp_path)
+
+        assert result["prefix"] == "filigree"
+        assert result["version"] == 1
+        assert result["enabled_packs"] == ["core", "planning", "release"]
+
 
 class TestFileRecordDictShape:
     def test_keys_match(self, db: FiligreeDB) -> None:
@@ -270,6 +292,10 @@ class TestFileRecordBackendInvariant:
     def test_clarion_with_empty_hash_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="content_hash"):
             FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="")
+
+    def test_invalid_registry_backend_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="registry_backend"):
+            FileRecord(id="f1", path="src/a.py", registry_backend="remote", content_hash="sha256:abc")  # type: ignore[arg-type]
 
 
 class TestScanFindingDictShape:
