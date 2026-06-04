@@ -46,6 +46,10 @@ _OBSERVE_KEYS = frozenset(
         "actor",
         "created_at",
         "expires_at",
+        # Added v23→v24 (ADR-012): nullable transport-bound actor identity.
+        # Surfaces as None until later tasks stamp it; output shape tracks
+        # the SCHEMA_SQL column mechanically (SELECT * → dict(row)).
+        "verified_actor",
     }
 )
 

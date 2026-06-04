@@ -233,6 +233,10 @@ class ObservationDict(TypedDict):
     actor: str
     created_at: ISOTimestamp
     expires_at: ISOTimestamp
+    # v23->v24 (ADR-012): nullable transport-bound actor identity. NotRequired
+    # because the SELECT * read paths surface it via dict(row) while the manual
+    # create-return literal stamps it None; later tasks populate the value.
+    verified_actor: NotRequired[str | None]
 
 
 class ObservationLinkDict(TypedDict):

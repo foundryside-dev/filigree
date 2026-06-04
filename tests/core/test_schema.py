@@ -346,6 +346,64 @@ class TestEntityAssociationsSchema:
         assert row["entity_kind"] == ""
         conn.close()
 
+    def test_migration_v23_to_v24_adds_verified_actor_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v23 DB: drop the new columns and stamp the prior version.
+        conn.execute("ALTER TABLE events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE file_events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE annotation_events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE comments DROP COLUMN verified_author")
+        conn.execute("ALTER TABLE observations DROP COLUMN verified_actor")
+        conn.execute("PRAGMA user_version = 23")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES ('iss-1', 'created', 'x', ?)",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "verified_actor" not in _get_table_columns(conn, "events")
+
+        applied = apply_pending_migrations(conn, 24)
+
+        assert applied == 1
+        assert _get_schema_version(conn) == 24
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_actor" in _get_table_columns(conn, "file_events")
+        assert "verified_actor" in _get_table_columns(conn, "annotation_events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        assert "verified_actor" in _get_table_columns(conn, "observations")
+        # Pre-existing row reads NULL (no backfill).
+        row = conn.execute("SELECT verified_actor FROM events WHERE issue_id = 'iss-1'").fetchone()
+        assert row["verified_actor"] is None
+        conn.close()
+
+    def test_migration_v23_to_v24_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v23_to_v24
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Columns already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v23_to_v24(conn)
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        conn.close()
+
+    def test_fresh_schema_has_v24_verified_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_actor" in _get_table_columns(conn, "file_events")
+        assert "verified_actor" in _get_table_columns(conn, "annotation_events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        assert "verified_actor" in _get_table_columns(conn, "observations")
+        conn.close()
+
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
         """v15→v16 (2.1.0 §0.2): event_seq column added with DEFAULT 0;
         the dedup UNIQUE index is rebuilt to include the new column so
@@ -1931,8 +1989,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_23(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 23
+    def test_current_schema_version_is_24(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 24
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS events (
     -- computes the next value inline under the caller-held writer transaction via
     -- COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
     -- -1) + 1; legacy rows default to 0.
-    event_seq  INTEGER NOT NULL DEFAULT 0
+    event_seq  INTEGER NOT NULL DEFAULT 0,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
@@ -77,7 +78,8 @@ CREATE TABLE IF NOT EXISTS comments (
     issue_id   TEXT NOT NULL REFERENCES issues(id),
     author     TEXT DEFAULT '',
     text       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    verified_author TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
@@ -233,7 +235,8 @@ CREATE TABLE IF NOT EXISTS file_events (
     old_value   TEXT DEFAULT '',
     new_value   TEXT DEFAULT '',
     actor       TEXT DEFAULT '',
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id);
@@ -252,7 +255,8 @@ CREATE TABLE IF NOT EXISTS observations (
     priority          INTEGER DEFAULT 3 CHECK (priority BETWEEN 0 AND 4),
     actor             TEXT DEFAULT '',
     created_at        TEXT NOT NULL,
-    expires_at        TEXT NOT NULL
+    expires_at        TEXT NOT NULL,
+    verified_actor    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_observations_priority ON observations(priority, created_at);
@@ -377,7 +381,8 @@ CREATE TABLE IF NOT EXISTS annotation_events (
     new_value     TEXT,
     target_type   TEXT DEFAULT '',
     target_id     TEXT DEFAULT '',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_annotation_events_annotation ON annotation_events(annotation_id, created_at);
@@ -572,4 +577,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24

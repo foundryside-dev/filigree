@@ -788,6 +788,26 @@ def migrate_v22_to_v23(conn: sqlite3.Connection) -> None:
     add_column(conn, "entity_associations", "entity_kind", "TEXT NOT NULL", default="''")
 
 
+def migrate_v23_to_v24(conn: sqlite3.Connection) -> None:
+    """v23 -> v24: Add nullable ``verified_*`` transport-bound actor columns (ADR-012).
+
+    The ``actor``/``author`` string on a write is an unauthenticated *claim*. This
+    adds a sibling column on every runtime event-bearing table holding the
+    identity the transport *verified* (the OS user the writing process ran as), or
+    NULL when no transport proof exists. NULL is the default for all existing rows
+    (no backfill) and for every unverified or system-written row. The claimed
+    column is unchanged; the ``events`` dedup index is NOT extended — verified_actor
+    is attribution metadata, not part of event identity. Nullable (``default=None``
+    adds no DEFAULT clause); existing rows read NULL. Idempotent: ``add_column``
+    no-ops if the column already exists.
+    """
+    add_column(conn, "events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "file_events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "annotation_events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "comments", "verified_author", "TEXT", default=None)
+    add_column(conn, "observations", "verified_actor", "TEXT", default=None)
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -811,6 +831,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     20: migrate_v20_to_v21,
     21: migrate_v21_to_v22,
     22: migrate_v22_to_v23,
+    23: migrate_v23_to_v24,
 }
 
 

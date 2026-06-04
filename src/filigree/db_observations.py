@@ -449,6 +449,10 @@ class ObservationsMixin(DBMixinProtocol):
             "actor": actor,
             "created_at": now,
             "expires_at": ISOTimestamp(expires),
+            # v23->v24 (ADR-012): create path does not stamp transport identity
+            # yet (later tasks own that); surface None so the create-return shape
+            # matches the SELECT * read paths.
+            "verified_actor": None,
         }
 
     def list_observations(
