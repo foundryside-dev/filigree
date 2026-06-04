@@ -116,7 +116,7 @@ export async function openDetail(issueId) {
         `<span class="w-2 h-2 rounded-full shrink-0" style="background:${sc}"></span>` +
         `<span class="cursor-pointer flex-1" style="color:var(--accent)" role="button" tabindex="0" aria-label="Open blocker ${escHtml(det.title.slice(0, 40))}" onclick="openDetail('${safeBid}')">${escHtml(det.title.slice(0, 40))}</span>` +
         `<span style="color:var(--text-muted)">${escHtml(det.status || "")}</span>` +
-        `<button onclick="event.stopPropagation();removeDependency('${safeIssueId}','${safeBid}')" class="text-red-400 hover:text-red-300 ml-1" title="Remove dependency">&times;</button></div>`
+        `<button onclick="event.stopPropagation();removeDependency('${safeIssueId}','${safeBid}')" class="text-red-400 hover:text-red-300 ml-1" title="Remove dependency" aria-label="Remove dependency">&times;</button></div>`
       );
     })
     .join("");

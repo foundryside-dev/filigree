@@ -176,7 +176,7 @@ export async function loadFiles() {
         '<span class="font-medium" style="color:var(--text-primary)">' +
         escHtml(state.filesScanSource) +
         "</span>" +
-        '<button onclick="clearScanSourceFilter()" class="ml-1 rounded-full px-1.5" style="color:var(--text-muted)" title="Clear filter">&times;</button>' +
+        '<button onclick="clearScanSourceFilter()" class="ml-1 rounded-full px-1.5" style="color:var(--text-muted)" title="Clear filter" aria-label="Clear scan source filter">&times;</button>' +
         "</div>"
       : "";
 
@@ -346,7 +346,7 @@ function renderFileDetail(data) {
   // Header
   let html =
     '<div class="flex items-center gap-2 mb-4">' +
-    '<button onclick="closeFileDetail()" class="text-xs bg-overlay px-2 py-1 rounded bg-overlay-hover" title="Close">&times;</button>' +
+    '<button onclick="closeFileDetail()" class="text-xs bg-overlay px-2 py-1 rounded bg-overlay-hover" title="Close" aria-label="Close file detail">&times;</button>' +
     `<span class="text-sm font-semibold truncate" style="color:var(--text-primary)" title="${escHtml(f.path)}">${escHtml(f.path)}</span>` +
     "</div>";
 
