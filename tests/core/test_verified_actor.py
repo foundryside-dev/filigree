@@ -53,3 +53,11 @@ def test_event_record_read_path_exposes_verified_actor(db: FiligreeDB) -> None:
     events = db.get_issue_events(issue_id)
     created = next(e for e in events if e["event_type"] == "created")
     assert created["verified_actor"] == "alice"
+
+
+def test_recent_events_read_path_exposes_verified_actor(db: FiligreeDB) -> None:
+    db.set_verified_actor("alice")
+    issue_id = _create_issue(db)
+    events = db.get_recent_events()
+    created = next(e for e in events if e["event_type"] == "created" and e["issue_id"] == issue_id)
+    assert created["verified_actor"] == "alice"
