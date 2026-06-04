@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { fetchReady } from "../api.js";
-import { escHtml, escJsSingleAttr } from "../ui.js";
 import { callbacks } from "../router.js";
+import { escHtml, escJsSingleAttr } from "../ui.js";
 
 const PRIORITY_LABELS = ["P0", "P1", "P2", "P3", "P4"];
 const PRIORITY_COLORS = [

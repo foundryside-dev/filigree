@@ -189,7 +189,7 @@ export function showWorkflowModal(type) {
     '<select id="workflowModalType" onchange="loadWorkflowInModal()" class="bg-overlay text-primary text-xs rounded px-2 py-1 border border-strong">' +
     '<option value="">Select type...</option></select>' +
     "</div>" +
-    '<button id="workflowModalClose" class="text-muted text-primary-hover text-lg">&times;</button>' +
+    '<button id="workflowModalClose" class="text-muted text-primary-hover text-lg" aria-label="Close workflow diagram">&times;</button>' +
     "</div>" +
     '<div id="workflowModalCy" class="flex-1" style="min-height:0"></div>' +
     "</div>";

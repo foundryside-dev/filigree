@@ -11,6 +11,7 @@
 
 // --- Module imports ---
 
+import { computeHealthScore, computeImpactScores } from "./analytics.js";
 import { fetchAllData, fetchDashboardConfig, fetchFileSchema, fetchProjects } from "./api.js";
 import {
   applyFilters,
@@ -21,15 +22,15 @@ import {
   callbacks as filtersCallbacks,
   loadPreset,
   loadProjectFilterSettings,
+  onDoneTimeBoundChange,
   populatePresets,
-  savePreset,
   populateTypeFilter,
+  savePreset,
   toggleBlocked,
   toggleCardSelect,
   toggleMultiSelect,
   toggleReady,
   toggleStatusPill,
-  onDoneTimeBoundChange,
   trackChanges,
   updateTypeFilterUI,
 } from "./filters.js";
@@ -48,9 +49,9 @@ import {
   batchSetPriority,
   closeSettingsMenu,
   copyIssueId,
+  endTour,
   escHtml,
   escJsSingleAttr,
-  endTour,
   reloadServer,
   showCreateForm,
   showToast,
@@ -82,46 +83,10 @@ import {
   showAddBlocker,
   updateIssue,
 } from "./views/detail.js";
-import { computeHealthScore, computeImpactScores } from "./analytics.js";
 import {
-  callbacks as graphCallbacks,
-  graphFit,
-  renderGraph,
-  refreshCriticalPathState,
-  setCriticalPathStateFromPath,
-  showHealthBreakdown,
-  toggleCriticalPath,
-} from "./views/graph.js";
-import {
-  renderGraphSidebar,
-  graphSidebarSelectAll,
-  graphSidebarClearAll,
-  rebuildTreeIndex,
-  attachSidebarListeners,
-  callbacks as sidebarCallbacks,
-} from "./views/graphSidebar.js";
-import {
-  initDragAndDrop,
-  callbacks as kanbanCallbacks,
-  renderKanban,
-  toggleEpicExpand,
-} from "./views/kanban.js";
-import {
-  loadMetrics,
-  renderSparkline,
-  showStaleIssues,
-  updateStaleBadge,
-} from "./views/metrics.js";
-import {
-  loadPlanView,
-  loadWorkflow,
-  loadWorkflowInModal,
-  showWorkflowModal,
-} from "./views/workflow.js";
-import {
-  closeFinding,
   clearScanSourceFilter,
   closeFileDetail,
+  closeFinding,
   createIssueFromFinding,
   filesPageNext,
   filesPagePrev,
@@ -138,6 +103,36 @@ import {
   switchFileTab,
 } from "./views/files.js";
 import {
+  callbacks as graphCallbacks,
+  graphFit,
+  refreshCriticalPathState,
+  renderGraph,
+  setCriticalPathStateFromPath,
+  showHealthBreakdown,
+  toggleCriticalPath,
+} from "./views/graph.js";
+import {
+  attachSidebarListeners,
+  graphSidebarClearAll,
+  graphSidebarSelectAll,
+  rebuildTreeIndex,
+  renderGraphSidebar,
+  callbacks as sidebarCallbacks,
+} from "./views/graphSidebar.js";
+import {
+  initDragAndDrop,
+  callbacks as kanbanCallbacks,
+  renderKanban,
+  toggleEpicExpand,
+} from "./views/kanban.js";
+import {
+  loadMetrics,
+  renderSparkline,
+  showStaleIssues,
+  updateStaleBadge,
+} from "./views/metrics.js";
+import { loadReady } from "./views/ready.js";
+import {
   collapseAllReleaseTree,
   loadReleases,
   retryReleaseTree,
@@ -145,7 +140,12 @@ import {
   toggleReleaseExpand,
   toggleReleaseTreeNode,
 } from "./views/releases.js";
-import { loadReady } from "./views/ready.js";
+import {
+  loadPlanView,
+  loadWorkflow,
+  loadWorkflowInModal,
+  showWorkflowModal,
+} from "./views/workflow.js";
 
 // ---------------------------------------------------------------------------
 // Core data fetching (lives here because it touches every module)
