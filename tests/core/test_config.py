@@ -224,15 +224,14 @@ class TestFromFiligreeDir:
 class TestConfigEnabledPacks:
     """Verify enabled_packs default and passthrough."""
 
-    def test_read_config_missing_enabled_packs_not_injected(self, tmp_path: Path) -> None:
-        """Config without enabled_packs should not auto-inject — FiligreeDB constructor applies default."""
+    def test_read_config_missing_enabled_packs_gets_default(self, tmp_path: Path) -> None:
+        """Config without enabled_packs receives the validated project default."""
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(filigree_dir, {"prefix": "test", "version": 1})
 
         config = read_config(filigree_dir)
-        assert "enabled_packs" not in config
-        # FiligreeDB constructor applies the default when enabled_packs=None
+        assert config["enabled_packs"] == ["core", "planning", "release"]
         db = FiligreeDB(filigree_dir / "filigree.db", prefix="test", enabled_packs=config.get("enabled_packs"))
         db.initialize()
         assert db.enabled_packs == ["core", "planning", "release"]

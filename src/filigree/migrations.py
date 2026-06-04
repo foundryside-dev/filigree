@@ -757,6 +757,26 @@ def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
     add_column(conn, "deleted_issues", "entity_ids", "TEXT NOT NULL", default="'[]'")
 
 
+def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
+    """v21 -> v22: Add ``entity_associations.migration_orphaned_at`` (SEI backfill).
+
+    The locator→SEI value migration (ADR-038 §7, driven by ``filigree
+    sei-backfill``) rewrites each opaque ``clarion_entity_id`` from its locator to
+    the resolved SEI *in place* — the column name, wire shape, and storage
+    mechanism are unchanged. A locator that no longer resolves (Clarion answers
+    ``alive:false``) must be kept verbatim and flagged for human review, never
+    silently dropped (the suite's no-false-green ethos).
+
+    This adds the nullable marker column that flag carries: NULL is the healthy
+    default; a non-NULL ISO timestamp records when the backfill found the row's
+    locator unresolvable. It is additive metadata about the migration, not a
+    change to the opaque id itself. Nullable (``default=None`` adds no DEFAULT
+    clause); existing rows read back NULL. Idempotent: ``add_column`` no-ops if
+    the column already exists.
+    """
+    add_column(conn, "entity_associations", "migration_orphaned_at", "TEXT", default=None)
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -778,6 +798,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     18: migrate_v18_to_v19,
     19: migrate_v19_to_v20,
     20: migrate_v20_to_v21,
+    21: migrate_v21_to_v22,
 }
 
 

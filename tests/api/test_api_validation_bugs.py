@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -104,6 +105,55 @@ class TestScanIngestStatusCode:
         assert resp.status_code == 400, f"Missing findings should return 400, got {resp.status_code}"
         body = resp.json()
         assert body.get("code") == "VALIDATION"
+
+    async def test_scan_results_rejects_too_many_findings(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        """Bulk scan ingest has a request-level cap before DB work starts."""
+        payload = {
+            "scan_source": "test-scanner",
+            "findings": [
+                {"path": f"src/file_{i}.py", "rule_id": "R001", "message": "Test finding", "severity": "low"} for i in range(1001)
+            ],
+        }
+
+        resp = await client.post("/api/v1/scan-results", json=payload)
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body.get("code") == "VALIDATION"
+        assert "at most 1000 findings" in body["error"]
+
+    async def test_scan_results_rejects_overlong_finding_text(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        """Large scanner-controlled strings are rejected before storage."""
+        payload = {
+            "scan_source": "test-scanner",
+            "findings": [
+                {
+                    "path": "src/foo.py",
+                    "rule_id": "R001",
+                    "message": "x" * 20001,
+                    "severity": "low",
+                }
+            ],
+        }
+
+        resp = await client.post("/api/v1/scan-results", json=payload)
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body.get("code") == "VALIDATION"
+        assert "message must be at most 20000 characters" in body["error"]
+
+    async def test_scan_results_refreshes_summary_after_success(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        payload = {
+            "scan_source": "test-scanner",
+            "findings": [{"path": "src/foo.py", "rule_id": "R001", "message": "Test finding", "severity": "low"}],
+        }
+
+        with patch("filigree.dashboard_routes.files.write_summary", create=True) as write_summary:
+            resp = await client.post("/api/v1/scan-results", json=payload)
+
+        assert resp.status_code == 200
+        write_summary.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

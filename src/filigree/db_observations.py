@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from filigree.db_base import DBMixinProtocol, _begin_immediate, _escape_like, _now_iso
 from filigree.db_files import _is_project_relative_scan_path, _normalize_scan_path
+from filigree.finding_issue_cascade import record_reconciliation_debt_comment
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import (
     BatchDismissResult,
@@ -77,6 +78,13 @@ def _alive_clause(sweep: bool, now_iso: str) -> tuple[str, str, tuple[str, ...]]
 
 DISMISSED_AUDIT_TRAIL_CAP = 10_000
 OBSERVATION_SWEEP_FAILURE_ALERT_THRESHOLD = 3
+
+
+def _record_promotion_reconciliation_debt(conn: Any, issue_id: str, warnings: list[str]) -> None:
+    for warning in warnings:
+        if not warning.startswith("Failed"):
+            continue
+        record_reconciliation_debt_comment(conn, issue_id, f"Observation promotion follow-up failed: {warning}")
 
 
 def _expires_iso(ttl_days: int = DEFAULT_TTL_DAYS) -> str:
@@ -224,6 +232,7 @@ class ObservationsMixin(DBMixinProtocol):
         summary: str,
         *,
         detail: str = "",
+        file_id: str = "",
         file_path: str = "",
         line: int | None = None,
         source_issue_id: str = "",
@@ -246,6 +255,7 @@ class ObservationsMixin(DBMixinProtocol):
         avoid committing partial work.
         """
         summary = _require_string(summary, "summary")
+        file_id = _require_string(file_id, "file_id")
         file_path = _require_string(file_path, "file_path")
         for field_name, value in (
             ("detail", detail),
@@ -268,7 +278,7 @@ class ObservationsMixin(DBMixinProtocol):
             if line > MAX_SQLITE_INTEGER:
                 raise ValueError(f"line must be <= {MAX_SQLITE_INTEGER}, got {line}")
 
-        file_id: str | None = None
+        linked_file_id: str | None = file_id or None
         # Track whether THIS call created a new file_record so we can compensate
         # by deleting it if the later observation INSERT fails — otherwise the
         # file_record is orphaned (register_file commits independently).
@@ -277,6 +287,10 @@ class ObservationsMixin(DBMixinProtocol):
             file_path = _normalize_scan_path(file_path)
             if not _is_project_relative_scan_path(file_path):
                 raise ValueError("file_path must be project-relative")
+        elif linked_file_id:
+            row = self.conn.execute("SELECT path FROM file_records WHERE id = ?", (linked_file_id,)).fetchone()
+            if row is not None:
+                file_path = row["path"] or ""
 
         now = _now_iso()
         summary_stripped = summary.strip()
@@ -294,20 +308,20 @@ class ObservationsMixin(DBMixinProtocol):
             # Live duplicate — return existing row
             return cast(ObservationDict, dict(existing))
 
-        if file_path:
+        if file_path and linked_file_id is None:
             if auto_commit:
                 # Standalone call — register_file commits, which is fine.
                 existing_fr = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
                 fr = self.register_file(file_path)
-                file_id = fr.id
+                linked_file_id = fr.id
                 if existing_fr is None:
-                    created_file_id = file_id
+                    created_file_id = linked_file_id
             else:
                 # Inside an outer transaction — register_file would commit
                 # prematurely.  Look up the file_id without side effects;
                 # the caller is responsible for ensuring the file exists.
                 row = self.conn.execute("SELECT id FROM file_records WHERE path = ?", (file_path,)).fetchone()
-                file_id = row["id"] if row else None
+                linked_file_id = row["id"] if row else None
 
         savepoint_name = "create_observation_mutation"
         savepoint_active = False
@@ -359,7 +373,7 @@ class ObservationsMixin(DBMixinProtocol):
                     obs_id,
                     summary_stripped,
                     detail,
-                    file_id,
+                    linked_file_id,
                     file_path,
                     line,
                     source_issue_id,
@@ -426,7 +440,7 @@ class ObservationsMixin(DBMixinProtocol):
             "id": obs_id,
             "summary": summary_stripped,
             "detail": detail,
-            "file_id": file_id,
+            "file_id": linked_file_id,
             "file_path": file_path,
             "line": line,
             "source_issue_id": source_issue_id,
@@ -451,14 +465,14 @@ class ObservationsMixin(DBMixinProtocol):
         older_than_hours: int | None = None,
         sort_by: str = "priority",
         direction: str = "asc",
+        sweep: bool = True,
     ) -> list[ObservationDict]:
         """List pending observations with optional filtering.
 
-        Sweeps expired observations first (best-effort, in savepoint).  If the
-        sweep itself fails (transient DB error, rolled back), the read falls
-        back to ``WHERE expires_at > ?`` so expired rows are still excluded
-        from results — otherwise a suppressed sweep error would surface
-        expired rows as live.
+        Sweeps expired observations first when ``sweep=True`` (best-effort, in
+        savepoint).  If the sweep is disabled or fails (transient DB error,
+        rolled back), the read falls back to ``WHERE expires_at > ?`` so
+        expired rows are still excluded from results without mutating storage.
 
         Filters:
           - ``file_path``: substring match (LIKE)
@@ -523,7 +537,9 @@ class ObservationsMixin(DBMixinProtocol):
             msg = f"older_than_hours must be >= 0, got {older_than_hours}"
             raise ValueError(msg)
 
-        _, swept_ok = self._sweep_expired_observations()
+        swept_ok = False
+        if sweep:
+            _, swept_ok = self._sweep_expired_observations()
         now_iso = _now_iso()
 
         clauses: list[str] = []
@@ -934,6 +950,7 @@ class ObservationsMixin(DBMixinProtocol):
                         logger.warning(cleanup_msg, exc_info=True)
                         warnings.append(cleanup_msg)
 
+                _record_promotion_reconciliation_debt(self.conn, existing_issue.id, warnings)
                 idem_result = cast(PromoteObservationResult, {"issue": existing_issue, "warnings": warnings})
                 return idem_result
 
@@ -989,6 +1006,7 @@ class ObservationsMixin(DBMixinProtocol):
                 logger.warning(msg, exc_info=True)
                 warnings.append(msg)
 
+        _record_promotion_reconciliation_debt(self.conn, issue.id, warnings)
         refreshed = self.get_issue(issue.id)
         result = cast(PromoteObservationResult, {"issue": refreshed})
         if warnings:
@@ -1187,8 +1205,8 @@ class ObservationsMixin(DBMixinProtocol):
         for lbl in carry_labels:
             try:
                 self.add_label(issue.id, lbl)
-            except (sqlite3.Error, ValueError):
-                msg = f"Failed to add label {lbl!r} to promoted issue {issue.id}"
+            except (sqlite3.Error, ValueError) as exc:
+                msg = f"Failed to add label {lbl!r} to promoted issue {issue.id}: {exc}"
                 logger.warning(msg, exc_info=True)
                 warnings.append(msg)
 
@@ -1196,12 +1214,13 @@ class ObservationsMixin(DBMixinProtocol):
         try:
             if file_id:
                 self.add_file_association(file_id, issue.id, "mentioned_in")
-        except (sqlite3.Error, ValueError):
-            msg = f"Failed to add file association for promoted observation {obs_id}"
+        except (sqlite3.Error, ValueError) as exc:
+            msg = f"Failed to add file association for promoted observation {obs_id}: {exc}"
             logger.warning(msg, exc_info=True)
             warnings.append(msg)
 
         result = cast(PromoteObservationResult, {"issue": issue})
         if warnings:
+            _record_promotion_reconciliation_debt(self.conn, issue.id, warnings)
             result["warnings"] = warnings
         return result

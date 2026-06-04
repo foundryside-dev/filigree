@@ -5,7 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "23 9 * * 1"
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      require_live_clarion:
+        description: "Run live Clarion integration tests and fail if Clarion is unavailable"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,6 +61,9 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -67,3 +79,67 @@ jobs:
           path: |
             .coverage
             coverage.json
+
+  clarion-contract:
+    name: Clarion Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --group dev
+      - run: >
+          uv run pytest
+          tests/unit/test_registry.py
+          tests/api/test_registry_backend_integration.py
+          tests/core/test_registry_backend_matrix.py
+          tests/api/test_loom_auth.py
+          tests/federation/test_sei_conformance_oracle.py
+
+  live-clarion:
+    name: Live Clarion Integration
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_live_clarion) }}
+    runs-on: ubuntu-latest
+    env:
+      CLARION_STAGING_BASE_URL: ${{ secrets.CLARION_STAGING_BASE_URL }}
+      FILIGREE_REQUIRE_LIVE_CLARION: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --group dev
+      - name: Run live Clarion checks
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            uv run pytest tests/integration/test_clarion_staging_smoke.py
+          else
+            uv run pytest \
+              tests/integration/test_clarion_staging_smoke.py \
+              tests/integration/test_clarion_phase_d_e2e.py \
+              tests/federation/test_sei_oracle_live_clarion.py
+          fi
+
+  docs:
+    name: Docs (build + deploy)
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, frontend, test, clarion-contract]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --extra docs
+      - name: Build (strict)
+        run: uv run mkdocs build --strict
+      - name: Deploy (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: uv run mkdocs gh-deploy --force

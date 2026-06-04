@@ -1,17 +1,45 @@
 # Filigree Federation Contracts
 
-This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](../architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
+This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
 
 ## What a "contract" is here
 
 A **contract** is a named API generation at the HTTP surface. Filigree currently publishes two:
 
-- **`classic`** — `/api/v1/*`. The pre-federation HTTP surface as it existed through the 1.x series. Frozen: no new operations, no shape changes. Continues to be fully supported. Retirement requires a new ADR with 12 months of deprecation notice.
-- **`loom`** — `/api/loom/*`. Introduced in 2.0. The federation-era generation, named for the Loom federation (Clarion + Wardline + Shuttle + filigree). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `start_work`.
+- **`classic`** — the pre-federation `/api/*` surface as it existed through the 1.x series. Mostly un-prefixed (e.g. `/api/issue/{id}` singular, `/api/issues`, `/api/ready`), with one `/api/v1/` outlier, `POST /api/v1/scan-results`. (The per-endpoint table under "Living-surface alias decisions" below is the precise path reference.) Frozen: no new operations, no shape changes. Continues to be fully supported. Retirement requires a new ADR with 12 months of deprecation notice.
+- **`loom`** — `/api/loom/*`. Introduced in 2.0. The federation-era generation, named for the Loom federation (Clarion + Wardline + Shuttle + filigree). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `work_start`.
 
 The **living surface** at `/api/*` (no generation prefix) aliases the current recommended generation — as of 2026-04-24 that is `loom`. Living-surface endpoints are explicitly non-stability; production integrations across version boundaries must pin to a named generation.
 
 MCP and CLI reflect the living surface only. They evolve forward with each release; they do not publish pinnable contracts. Callers who need pinned stability use HTTP.
+
+## Authentication (opt-in, loom surface) — ADR-018
+
+By default Filigree's HTTP API performs **no** inbound authentication: it is
+loopback-only and the transport is the trust boundary ([ADR-012](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-012-actor-identity-threat-model.md)).
+
+When an operator sets the **`FILIGREE_API_TOKEN`** environment variable on the
+Filigree server, the **loom federation surface** is gated behind a bearer token
+([ADR-018](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-018-loom-bearer-token-auth.md)):
+
+- **Enforced paths:** `/api/loom/*` and the living-surface federation aliases
+  that route to loom (today: `POST /api/scan-results`), including under the
+  server-mode project mount (`/api/p/{key}/loom/…`).
+- **Not enforced:** the classic surface (`/api/issue/…`, `/api/issues`,
+  `/api/v1/scan-results`), the local dashboard (`/`), and `/api/health`. The
+  classic `/api/v1/scan-results` outlier is **not** gated — federation producers
+  should post to `/api/loom/scan-results` or `/api/scan-results`.
+- **Request:** send `Authorization: Bearer <FILIGREE_API_TOKEN>`. The comparison
+  is constant-time.
+- **Rejection:** a missing/invalid token on an enforced path returns
+  `401` with the standard envelope `{"error": "...", "code": "PERMISSION"}` and a
+  `WWW-Authenticate: Bearer` header.
+- **Default (unset):** identical to prior behaviour — no auth, loopback is the
+  boundary. Adding the token is wire-compatible: consumers that do not configure
+  it are unaffected.
+
+This gates *access* only; it does not bind a verified identity into the `actor`
+audit field (that remains future work — `filigree-81d3971467`).
 
 ## Fixture layout
 
@@ -104,38 +132,38 @@ Phase D landed the per-ADR-002 §5 commitment that **MCP reflects the
 living surface only**. Every MCP tool now mirrors the loom HTTP
 vocabulary that landed in Phase C:
 
-- **Vocabulary.** Single-issue MCP tools (`get_issue`, `update_issue`,
-  `close_issue`, `reopen_issue`, `claim_issue`, `release_claim`,
-  `undo_last`, `add_comment`, `get_comments`, `add_label`,
-  `remove_label`, `get_issue_events`) take `issue_id` as the input
-  field name (was `id`). `create_issue.parent_id` and
-  `update_issue.parent_id` input fields renamed to `parent_issue_id`.
-  `add_dependency` / `remove_dependency` take `from_issue_id` /
-  `to_issue_id` (was `from_id` / `to_id`). `dismiss_observation` /
-  `promote_observation` take `observation_id`. The
+- **Vocabulary.** Single-issue MCP tools (`issue_get`, `issue_update`,
+  `issue_close`, `issue_reopen`, `work_claim`, `work_release`,
+  `admin_undo_last`, `comment_add`, `comment_list`, `label_add`,
+  `label_remove`, `issue_event_list`) take `issue_id` as the input
+  field name (was `id`). `issue_create.parent_id` and
+  `issue_update.parent_id` input fields renamed to `parent_issue_id`.
+  `dependency_add` / `dependency_remove` take `from_issue_id` /
+  `to_issue_id` (was `from_id` / `to_id`). `observation_dismiss` /
+  `observation_promote` take `observation_id`. The
   `SlimIssue.id` projection field renamed to `SlimIssue.issue_id`,
   matching `SlimIssueLoom`.
 
 - **Soft-transition warnings.** Single-issue mutation responses keep
   non-fatal workflow advisories in `data_warnings[]`. For
-  `update_issue` / `PATCH /api/loom/issues/{issue_id}`, soft enforcement
+  `issue_update` / `PATCH /api/loom/issues/{issue_id}`, soft enforcement
   warnings are returned in-band and recorded once as `transition_warning`
   events.
 
 - **Batch tools.** Issue-batch input field unified to `issue_ids` —
-  `batch_update`, `batch_close`, `batch_add_label`, `batch_add_comment`.
+  `issue_batch_update`, `issue_batch_close`, `label_batch_add`, `comment_batch_add`.
   Observation/finding batches use `observation_ids` / `finding_ids`
   per the entity-PK rule. Container keys unified to
   `{succeeded, failed}` (`BatchResponse[T]`); legacy
   `{updated|closed, errors, count}` and `BatchActionResponse.results`
-  removed. `batch_close` / `batch_update` return
+  removed. `issue_batch_close` / `issue_batch_update` return
   `BatchResponse[SlimIssue]`; label/comment/observation/finding batches
   return `BatchResponse[str]`.
 
-- **List tools.** Every MCP list tool (`list_issues`, `search_issues`,
-  `get_ready`, `get_blocked`, `get_comments`, `get_issue_events`,
-  `get_changes`, `list_files`, `list_findings`, `list_observations`,
-  `list_scanners`, `list_packs`, `list_types`, `list_labels`) returns
+- **List tools.** Every MCP list tool (`issue_list`, `issue_search`,
+  `work_ready`, `work_blocked`, `comment_list`, `issue_event_list`,
+  `change_list`, `file_list`, `finding_list`, `observation_list`,
+  `scanner_list`, `pack_list`, `type_list`, `label_list`) returns
   the unified `ListResponse[T]` envelope: `{items, has_more,
   next_offset?}`. Loose siblings (`stats`, `total`, `errors`, `hint`,
   `limit`, `offset`) dropped per the loom precedent.
@@ -150,13 +178,13 @@ vocabulary that landed in Phase C:
   keep their existing names — the rename is only at the MCP/CLI
   surface.
 
-- **`get_issue.include_files` defaults to `False`.** Aligns MCP with
+- **`issue_get.include_files` defaults to `False`.** Aligns MCP with
   the loom HTTP `GET /api/loom/issues/{issue_id}` contract (defaulted
   to `False` since Phase C3). Federation consumers needing the
   file-association payload pass `include_files=true` explicitly.
 
-- **Composed operations.** New atomic MCP tools `start_work` and
-  `start_next_work` claim an issue and transition it to a working
+- **Composed operations.** New atomic MCP tools `work_start` and
+  `work_start_next` claim an issue and transition it to a working
   status in one call. `target_status` defaults to the unique wip-category
   status reachable from the issue's current status; statuses with multiple
   reachable wip targets raise `AmbiguousTransitionError` so the caller specifies.
@@ -167,7 +195,7 @@ vocabulary that landed in Phase C:
 
 - **Claim liveness.** Claiming surfaces now return `claimed_at`,
   `last_heartbeat_at`, and `claim_expires_at` on issue records. MCP adds
-  `heartbeat_work`, `get_stale_claims`, and `reclaim_issue` so agents can
+  `work_heartbeat`, `work_stale_list`, and `work_reclaim` so agents can
   refresh long-running work, discover expired or legacy stale assignments, and
   transfer ownership with an expected-holder check.
 
@@ -216,7 +244,7 @@ now at full parity with MCP and loom HTTP.
   methods the MCP tools call.
 
 - **`filigree show --with-files` flag.** Phase E5 aligns `filigree
-  show <id>` with `get_issue.include_files=False` (D4 default): file
+  show <id>` with `issue_get.include_files=False` (D4 default): file
   associations are omitted unless `--with-files` is passed.
 
 - **`--json` envelopes unified.** Phase E1 aligned remaining CLI
@@ -274,7 +302,7 @@ Federation consumers use this block to distinguish older Filigree builds
 from ADR-014-aware builds, and to detect whether the current project is
 running in `local` or `clarion` mode.
 
-Direct file registration is displaced in `clarion` mode. MCP `register_file`
+Direct file registration is displaced in `clarion` mode. MCP `file_register`
 and CLI `filigree register-file` return
 `FILE_REGISTRY_DISPLACED` with the Clarion read URL to use instead.
 Auto-create surfaces (`POST /api/v1/scan-results`,
@@ -291,10 +319,10 @@ Clarion's read API.
 
 ## F5 — Deletion signal (`issue_deleted` on `/api/loom/changes`) (2026-05-30)
 
-A hard delete (`delete_issue` / `filigree delete-issue`) removes the issue row
+A hard delete (`issue_delete` / `filigree delete-issue`) removes the issue row
 and every dependent row in one transaction, so a deleted issue is otherwise
 invisible to consumers reconciling off `GET /api/loom/changes` (the feed INNER
-JOINs `issues`). To close that, `delete_issue` writes a `deleted_issues`
+JOINs `issues`). To close that, `issue_delete` writes a `deleted_issues`
 tombstone in the same transaction, and the changes feed surfaces it as a
 synthetic change record:
 
@@ -321,9 +349,9 @@ labels) — reconcile deletions on an *unfiltered* feed.
 
 ### `affected_entities` — the entity-association amplifier (schema v21)
 
-`delete_issue` cascades the issue's `entity_associations` rows
+`issue_delete` cascades the issue's `entity_associations` rows
 (`ON DELETE CASCADE`). Filigree's own reverse-lookup surfaces
-(`list_associations_by_entity`, `GET /api/entity-associations?entity_id=…`)
+(`entity_association_list_by_entity`, `GET /api/entity-associations?entity_id=…`)
 read that table, so post-delete they correctly return nothing. **The hazard is
 on the consumer side:** a consumer that mirrors those bindings (e.g. Clarion's
 reverse lookup) and reconciles only the issue would keep the mirrored binding
@@ -363,7 +391,7 @@ docstring). `process_scan_runs` only validates an *existing* run's
 `scan_source` (it never requires the row to exist). A create handshake would
 contradict a path Filigree built on purpose. The `scan_runs` lifecycle table
 (`create_scan_run` / `reserve_scan_run`) exists for Filigree's **own**
-`trigger_scan` orchestration — where Filigree mints the id and pre-creates the
+`scan_trigger` orchestration — where Filigree mints the id and pre-creates the
 row for cooldown + `pending → running → completed` tracking — and is not part
 of the external producer contract.
 
@@ -374,23 +402,26 @@ of the external producer contract.
   `scan_runs` row, ingest either rejects with `VALIDATION` (400) when the
   `scan_source` differs, or **silently misattributes** when it matches. Use a
   collision-free scheme (UUID4 or a `producer:`-prefixed id) so a producer id
-  can never collide with Filigree's own `trigger_scan`-minted ids.
+  can never collide with Filigree's own `scan_trigger`-minted ids.
 - **Keep `scan_source` stable across a run.** History groups on
   `(scan_run_id, scan_source)`; a mid-run `scan_source` change splits the run.
-- **Completion warning is benign.** With `complete_scan_run=true` (the
-  default), an unknown run cannot be transitioned to `completed` (no
-  `scan_runs` row), so the response `warnings[]` carries a benign
-  `"Scan run <id> status not updated to 'completed': …"`. **Findings are still
-  ingested.** Consumers MUST NOT treat a populated `warnings[]` as failure —
-  switch on HTTP status and the `stats` counts (`findings_created`, etc.). An
-  enrich-only producer that wants a clean `warnings[]` should send
-  `complete_scan_run=false`, which skips the completion attempt entirely.
+- **No completion warning for an unknown run.** With `complete_scan_run=true`
+  (the default), an unknown run has no `scan_runs` row to transition to
+  `completed`, so Filigree **skips the completion attempt silently** — the
+  response `warnings[]` is clean. (Previously this emitted a benign
+  `"Scan run <id> status not updated to 'completed': …"` on every enrich-only
+  POST; that server-side noise is now suppressed for the no-row case. A run
+  that *does* exist but cannot transition still warns.) Either way **findings
+  are ingested**, and consumers MUST NOT treat a populated `warnings[]` as
+  failure — switch on HTTP status and the `stats` counts (`findings_created`,
+  etc.). `complete_scan_run=false` still skips the completion attempt entirely
+  and is the explicit way to opt out for runs that *do* have a row.
 
 Pinned at the HTTP intake boundary by
 `tests/api/test_files_api.py::TestUnknownScanRunIdContract` (200 + ingest +
-reconstruction, the benign completion warning, and `complete_scan_run=false`
-suppression), and at the core-method level by
-`tests/api/test_files_api.py::TestScanRunsAPI` and
+reconstruction, the suppressed completion warning, and `complete_scan_run=false`),
+and at the core-method level by `tests/core/test_files.py::TestScanRunId`
+(unknown-run/known-run/terminal-run warning distinction) and
 `tests/core/test_files.py::TestGetScanRunsCore`.
 
 **Clarion may drop its "pending Filigree's confirmation" caveat** on
@@ -407,5 +438,6 @@ suppression), and at the core-method level by
 - **ADR-002** (the naming + lifecycle rules): `docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md`.
 - **2.0 work package** (the execution sequence): `docs/plans/2026-04-24-2.0-federation-work-package.md`.
 - **ADR-017 audit** (verifies classic-generation semantics are preserved on the 2.0 branch): `docs/plans/2026-04-24-adr017-audit.md`.
+- **SEI conformance position** (Filigree's obligations + emerging requirements for the SEI lock window): `docs/superpowers/specs/2026-06-01-filigree-roadmap-to-first-class.md` Appendix A.
 - **Clarion ADR-004** (finding exchange format): `/home/john/clarion/docs/clarion/adr/ADR-004-finding-exchange-format.md`.
 - **Clarion ADR-017** (severity + dedup): `/home/john/clarion/docs/clarion/adr/ADR-017-severity-and-dedup.md`.

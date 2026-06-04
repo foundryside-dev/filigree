@@ -64,6 +64,10 @@ export function escJsSingle(str) {
     .replace(/>/g, "\\x3E");
 }
 
+export function escJsSingleAttr(str) {
+  return escHtml(escJsSingle(str));
+}
+
 // ---------------------------------------------------------------------------
 // Onboarding tour
 // ---------------------------------------------------------------------------
@@ -161,7 +165,7 @@ export function copyIssueId(id, event) {
 // Render a clickable issue ID span (reusable across views)
 // ---------------------------------------------------------------------------
 export function issueIdChip(id) {
-  const safeId = escJsSingle(id);
+  const safeId = escJsSingleAttr(id);
   return (
     `<span class="cursor-pointer hover:underline" style="color:var(--text-muted)" ` +
     `title="Click to copy" tabindex="0" role="button" ` +

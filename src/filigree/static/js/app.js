@@ -49,7 +49,7 @@ import {
   closeSettingsMenu,
   copyIssueId,
   escHtml,
-  escJsSingle,
+  escJsSingleAttr,
   endTour,
   reloadServer,
   showCreateForm,
@@ -504,7 +504,7 @@ document.addEventListener("keydown", (e) => {
             ready
               .map(
                 (t) =>
-                  `<button onclick="moveIssueTo('${escJsSingle(issueId)}','${escJsSingle(t.to)}')" class="text-xs text-left bg-overlay bg-overlay-hover px-3 py-2 rounded" style="color:var(--text-primary)">${escHtml(t.to)}</button>`,
+                  `<button onclick="moveIssueTo('${escJsSingleAttr(issueId)}','${escJsSingleAttr(t.to)}')" class="text-xs text-left bg-overlay bg-overlay-hover px-3 py-2 rounded" style="color:var(--text-primary)">${escHtml(t.to)}</button>`,
               )
               .join("") +
             "</div>" +

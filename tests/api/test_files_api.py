@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
 
+import filigree.dashboard_routes.files as files_routes
+from filigree.core import FiligreeDB
 from filigree.registry import RegistryFileNotFoundError, RegistryUnavailableError, ResolvedFile
 from tests.conftest import PopulatedDB
 
@@ -246,11 +249,14 @@ class TestUnknownScanRunIdContract:
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
         assert any(r["scan_run_id"] == "clarion-run-never-seen-001" for r in runs)
 
-    async def test_unknown_run_completion_warning_is_benign(self, client: AsyncClient) -> None:
-        """With complete_scan_run=True (default) an unknown run emits a benign
-        completion warning in warnings[] — there is no scan_runs row to mark
-        'completed'. Consumers MUST NOT treat populated warnings[] as failure;
-        findings are still ingested (findings_created reflects the real work)."""
+    async def test_unknown_run_completion_is_silently_skipped(self, client: AsyncClient) -> None:
+        """With complete_scan_run=True (default) an unknown run does NOT emit a
+        completion warning — there is no scan_runs row to mark 'completed', so
+        Filigree skips the completion attempt server-side rather than surfacing
+        a benign "status not updated" warning on every enrich-only POST (which
+        would train consumers to ignore warnings[]). Findings are still ingested
+        and the run is reconstructed in history. Only a run that EXISTS but
+        cannot transition still warns (covered by core-level tests)."""
         resp = await client.post(
             "/api/v1/scan-results",
             json={
@@ -262,7 +268,10 @@ class TestUnknownScanRunIdContract:
         assert resp.status_code == 200
         body = resp.json()
         assert body["findings_created"] == 1
-        assert any("not updated to 'completed'" in w for w in body["warnings"])
+        assert not any("not updated to 'completed'" in w for w in body["warnings"])
+        # The unknown run is still reconstructed from scan_findings in history.
+        runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
+        assert any(r["scan_run_id"] == "clarion-run-warn-001" for r in runs)
 
     async def test_complete_scan_run_false_suppresses_completion_warning(self, client: AsyncClient) -> None:
         """complete_scan_run=False suppresses the completion attempt entirely,
@@ -448,7 +457,7 @@ class TestLoomCleanStaleFindingsAPI:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
 
         # Only the old clarion unseen finding was swept.
         assert self._status_by_rule(dashboard_db, "clar_old.py")["C-OLD"] == "fixed"
@@ -475,7 +484,7 @@ class TestLoomCleanStaleFindingsAPI:
         db.conn.commit()
         resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
         assert resp.status_code == 200
-        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30}
+        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
 
     async def test_coalesce_fallback_null_last_seen_at(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Age gate is coalesce(last_seen_at, updated_at): a NULL last_seen_at
@@ -583,3 +592,201 @@ class TestLoomCleanStaleFindingsAPI:
             assert set(body.keys()) == set(exp_body.keys()), example["name"]
             for key, val in exp_body.items():
                 assert type(body[key]) is type(val), f"{example['name']}:{key}"
+
+    async def test_db_error_returns_enveloped_io_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A sqlite3.Error during the sweep yields ``{error, code: IO}``, not a bare 500."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        assert resp.status_code == 500
+        assert resp.json()["code"] == "IO"
+
+    async def test_unexpected_error_returns_enveloped_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any unguarded exception still yields a ``{error, code: INTERNAL}`` body."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert set(body.keys()) >= {"error", "code"}
+
+
+class TestLoomPromoteFindingAPI:
+    """POST /api/loom/findings/promote — Wardline A2 promote-by-fingerprint.
+
+    HTTP surface over the idempotent core ``promote_finding_to_issue``, keyed on
+    ``(scan_source, fingerprint)`` (Wardline only knows its fingerprint and only
+    speaks HTTP). See the 2026-06-02 promote-by-fingerprint brief.
+    """
+
+    async def _ingest(self, client: AsyncClient, fingerprint: str = "fp-http") -> None:
+        resp = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "fingerprint": fingerprint}],
+            },
+        )
+        assert resp.status_code == 200
+
+    async def test_promote_returns_issue_id_created(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["created"] is True
+        assert body["issue_id"]
+        assert set(body.keys()) == {"issue_id", "created"}
+
+    async def test_promote_is_idempotent(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        first = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        second = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert first.json()["created"] is True
+        assert second.status_code == 200
+        assert second.json()["created"] is False
+        assert second.json()["issue_id"] == first.json()["issue_id"]
+
+    async def test_unknown_fingerprint_404(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-nope"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_unknown_scan_source_404(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "other", "fingerprint": "fp-http"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_missing_fingerprint_400(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_blank_fingerprint_400_not_404(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "  "})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_missing_scan_source_400(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/loom/findings/promote", json={"fingerprint": "fp-http"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    @pytest.mark.parametrize("bad", ["P9", "Z", "5", "-1"])
+    async def test_bad_priority_400(self, client: AsyncClient, bad: str) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/loom/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "priority": bad},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_priority_label_applied(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client, "fp-prio")
+        resp = await client.post(
+            "/api/loom/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-prio", "priority": "P2"},
+        )
+        assert resp.status_code == 200
+        issue = dashboard_db.db.get_issue(resp.json()["issue_id"])
+        assert issue.priority == 2
+
+    async def test_fingerprint_filter_on_get_findings(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-a")
+        await self._ingest(client, "fp-b")
+        resp = await client.get("/api/loom/findings?scan_source=wardline&fingerprint=fp-b")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        assert items[0]["fingerprint"] == "fp-b"
+
+    async def test_end_to_end_cascade_over_wire(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Promote → stale-fix → reopen-on-regress, all via HTTP (the A2 oracle)."""
+        await self._ingest(client, "fp-cycle")
+        promoted = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-cycle"})
+        issue_id = promoted.json()["issue_id"]
+
+        # Drive the finding stale, then sweep it fixed via the HTTP clean-stale.
+        dashboard_db.db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE fingerprint = 'fp-cycle'",
+            (_OLD_TS,),
+        )
+        dashboard_db.db.conn.commit()
+        swept = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
+        assert swept.status_code == 200
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) == "done"
+
+        # Re-ingest the same fingerprint → finding regresses → issue reopens.
+        await self._ingest(client, "fp-cycle")
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) != "done"
+
+    async def test_finding_vanishes_mid_flight_returns_404(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A concurrent hard-delete between resolve and promote → 404, not a bare 500.
+
+        ``get_finding`` inside ``promote_finding_to_issue`` raises KeyError when
+        the row was deleted in the window after our fingerprint resolve. The
+        helper re-resolves, sees the finding is gone, and folds it into the
+        ``None`` → 404 NOT_FOUND path with a proper ``{error, code}`` envelope.
+        """
+        await self._ingest(client)
+        calls = {"n": 0}
+        real_find = FiligreeDB.find_finding_by_fingerprint
+
+        def flaky_find(self: FiligreeDB, scan_source: str, fingerprint: str):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            # First call (resolve) sees the finding; the re-check (after the
+            # simulated delete) sees nothing.
+            return real_find(self, scan_source, fingerprint) if calls["n"] == 1 else None
+
+        def vanished(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            raise KeyError("Finding not found: deleted mid-flight")
+
+        monkeypatch.setattr(FiligreeDB, "find_finding_by_fingerprint", flaky_find)
+        monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", vanished)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "NOT_FOUND"
+
+    async def test_keyerror_with_finding_still_present_is_500_internal(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deep KeyError that is NOT a vanished finding must not be masked as 404.
+
+        If ``promote_finding_to_issue`` raises KeyError while the finding still
+        resolves (e.g. a just-created issue that could not be rebuilt — a real
+        invariant violation), the helper re-raises and the route's catch-all
+        surfaces it as a properly-enveloped INTERNAL/500, not a benign 404.
+        """
+        await self._ingest(client)  # find_finding_by_fingerprint left intact → re-check still finds it
+
+        def deep_bug(self: FiligreeDB, *args: object, **kwargs: object) -> dict[str, object]:
+            raise KeyError("Issue not found: just-created issue not rebuildable")
+
+        monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", deep_bug)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert "error" in body
+
+    async def test_unexpected_error_returns_enveloped_500(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any unguarded exception still yields a ``{error, code: INTERNAL}`` body."""
+        await self._ingest(client)
+
+        def boom(*args: object, **kwargs: object) -> dict[str, object]:
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(files_routes, "_promote_finding_on_private_conn", boom)
+        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["code"] == "INTERNAL"
+        assert set(body.keys()) >= {"error", "code"}

@@ -21,6 +21,10 @@ from filigree.models import Issue
 logger = logging.getLogger(__name__)
 
 STALE_THRESHOLD_DAYS = 3
+SUMMARY_FETCH_LIMIT = 100
+SUMMARY_RENDER_LIMIT = 12
+SUMMARY_BLOCKED_RENDER_LIMIT = 10
+SUMMARY_EPIC_RENDER_LIMIT = 10
 
 
 class _MalformedTimestamp:
@@ -75,7 +79,7 @@ def generate_summary(db: FiligreeDB) -> str:
     ready = db.get_ready()
     blocked = db.get_blocked()
     # Use wip category to capture all work-in-progress states (fixing, verifying, etc.)
-    in_progress = db.list_issues(status="wip", limit=10000)
+    in_progress = db.list_issues(status="wip", limit=SUMMARY_FETCH_LIMIT)
     recent = db.get_recent_events(limit=10)
 
     lines: list[str] = []
@@ -118,8 +122,8 @@ def generate_summary(db: FiligreeDB) -> str:
     lines.append("")
 
     # -- Active Plans (milestones)
-    milestones = db.list_issues(type="milestone", status="open", limit=10000)
-    milestones += db.list_issues(type="milestone", status="wip", limit=10000)
+    milestones = db.list_issues(type="milestone", status="open", limit=SUMMARY_FETCH_LIMIT)
+    milestones += db.list_issues(type="milestone", status="wip", limit=SUMMARY_FETCH_LIMIT)
     if milestones:
         lines.append("## Active Plans")
         for ms in milestones:
@@ -171,13 +175,16 @@ def generate_summary(db: FiligreeDB) -> str:
     # -- In Progress (all wip-category states)
     lines.append("## In Progress")
     if in_progress:
-        for issue in in_progress:
+        for issue in in_progress[:SUMMARY_RENDER_LIMIT]:
             parent_ctx = ""
             if issue.parent_id and issue.parent_id in parent_titles:
                 parent_ctx = f" ({parent_titles[issue.parent_id]})"
             # Show state in parens when it differs from the default "in_progress"
             state_info = f" ({issue.status})" if issue.status != "in_progress" else ""
             lines.append(f'- {issue.id} [{issue.type}] "{_sanitize_title(issue.title)}"{state_info}{parent_ctx}')
+        omitted_wip = max(wip_count, len(in_progress)) - SUMMARY_RENDER_LIMIT
+        if omitted_wip > 0:
+            lines.append(f"  ...and {omitted_wip} more in progress. Run `issue_list status=wip` for the full set.")
     else:
         lines.append("- (none)")
     lines.append("")
@@ -208,7 +215,7 @@ def generate_summary(db: FiligreeDB) -> str:
             stale.append((issue, parsed_updated))
     if stale:
         lines.append("## Stale (in_progress >3 days, no activity)")
-        for issue, parsed_updated in stale:
+        for issue, parsed_updated in stale[:SUMMARY_RENDER_LIMIT]:
             if isinstance(parsed_updated, _MalformedTimestamp):
                 marker = _sanitize_title(str(issue.updated_at))
                 line = f'- P{issue.priority} {issue.id} [{issue.type}] "{_sanitize_title(issue.title)}" (malformed updated_at: {marker})'
@@ -216,29 +223,31 @@ def generate_summary(db: FiligreeDB) -> str:
                 days_ago = (now - parsed_updated).days
                 line = f'- P{issue.priority} {issue.id} [{issue.type}] "{_sanitize_title(issue.title)}" ({days_ago}d stale)'
             lines.append(line)
+        if len(stale) > SUMMARY_RENDER_LIMIT:
+            lines.append(f"  ...and {len(stale) - SUMMARY_RENDER_LIMIT} more stale. Run `issue_list status=wip` for the full set.")
         lines.append("")
 
     # -- Blocked (top 10)
     lines.append("## Blocked (top 10 by priority)")
     if blocked:
-        for issue in blocked[:10]:
+        for issue in blocked[:SUMMARY_BLOCKED_RENDER_LIMIT]:
             blockers_str = ", ".join(issue.blocked_by) if issue.blocked_by else "?"
             title = _sanitize_title(issue.title)
             line = f'- P{issue.priority} {issue.id} [{issue.type}] "{title}" \u2190 blocked by: {blockers_str}'
             lines.append(line)
-        if len(blocked) > 10:
-            lines.append(f"  ...and {len(blocked) - 10} more")
+        if len(blocked) > SUMMARY_BLOCKED_RENDER_LIMIT:
+            lines.append(f"  ...and {len(blocked) - SUMMARY_BLOCKED_RENDER_LIMIT} more")
     else:
         lines.append("- (none)")
     lines.append("")
 
     # -- Epic Progress (limit 10; use status_category for done/open checks)
-    epics = db.list_issues(type="epic", limit=10000)
+    epics = db.list_issues(type="epic", limit=SUMMARY_FETCH_LIMIT)
     open_epics = [e for e in epics if e.status_category != "done"]
     if open_epics:
         lines.append("## Epic Progress")
-        for epic in open_epics[:10]:
-            children = db.list_issues(parent_id=epic.id, limit=10000)
+        for epic in open_epics[:SUMMARY_EPIC_RENDER_LIMIT]:
+            children = db.list_issues(parent_id=epic.id, limit=SUMMARY_FETCH_LIMIT)
             total = len(children)
             done = sum(1 for c in children if c.status_category == "done")
             ready_c = sum(1 for c in children if c.is_ready)
@@ -304,13 +313,13 @@ def generate_summary(db: FiligreeDB) -> str:
                 oldest_h = obs_stats["oldest_hours"]
                 age_str = f"{oldest_h:.0f}h ago" if oldest_h is not None else "unknown"
                 lines.append(f"STALE OBSERVATIONS: {stale_n} observation(s) older than 48 hours (oldest: {age_str})")
-                lines.append(f"  Total pending: {obs_stats['count']}. Run `list_observations` to review.")
+                lines.append(f"  Total pending: {obs_stats['count']}. Run `observation_list` to review.")
             else:
                 oldest_h = obs_stats["oldest_hours"]
                 age_str = f"{oldest_h:.0f}h ago" if oldest_h is not None else "unknown"
                 lines.append(f"OBSERVATIONS: {obs_stats['count']} pending (oldest: {age_str})")
-                lines.append("  Use `list_observations` to review, `promote_observation` to create issues,")
-                lines.append("  or `dismiss_observation` to clear.")
+                lines.append("  Use `observation_list` to review, `observation_promote` to create issues,")
+                lines.append("  or `observation_dismiss` to clear.")
             if obs_stats["expiring_soon_count"] > 0:
                 lines.append(f"  ({obs_stats['expiring_soon_count']} expiring within 24h)")
             lines.append("")

@@ -249,7 +249,8 @@ class TestConfIO:
 
 class TestFindFiligreeAnchor:
     """``find_filigree_anchor`` is the discovery primitive for read-only
-    contexts (inspection commands, MCP startup, ``filigree doctor``).
+    contexts (inspection commands, ``filigree doctor``, and explicit
+    legacy-compatible callers).
 
     It returns ``(project_root, conf_path_or_None)`` so callers can decide
     how to open the project — via :meth:`FiligreeDB.from_conf` for v2.0

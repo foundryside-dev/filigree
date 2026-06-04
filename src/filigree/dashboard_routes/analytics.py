@@ -541,6 +541,11 @@ def create_classic_router() -> APIRouter:
         events = db.get_events_since(since, limit=limit) if since else db.get_recent_events(limit=limit)
         return JSONResponse(events)
 
+    @router.post("/v1/observations")
+    async def api_classic_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Create a new observation or return an existing duplicate (classic alias)."""
+        return await _create_observation_handler(request, db)
+
     return router
 
 
@@ -677,6 +682,7 @@ def create_loom_router() -> APIRouter:
             offset=offset,
             file_path=params.get("file_path", ""),
             file_id=params.get("file_id", ""),
+            sweep=False,
         )
         has_more = len(observations) > limit
         if has_more:
@@ -684,4 +690,146 @@ def create_loom_router() -> APIRouter:
         items = [observation_to_loom(o) for o in observations]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
+    @router.post("/observations")
+    async def api_loom_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Create a new observation or return an existing duplicate (loom generation)."""
+        return await _create_observation_handler(request, db)
+
     return router
+
+
+def create_living_surface_router() -> APIRouter:
+    """Build the living-surface APIRouter for analytics and observations.
+
+    Per ``docs/federation/contracts.md``, the living surface at
+    ``/api/*`` (no generation prefix) aliases the current recommended
+    generation — as of 2026-04-26 that is loom. Living-surface aliases
+    are added per-endpoint in Phase C wherever there is no classic
+    counterpart at the same path.
+    """
+    from fastapi import APIRouter, Depends
+
+    from filigree.dashboard import _get_db
+
+    router = APIRouter()
+
+    @router.post("/observations")
+    async def api_living_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Ingest observation — living surface (loom envelope).
+
+        Equivalent to /api/loom/observations as of 2026-04-26.
+        """
+        return await _create_observation_handler(request, db)
+
+    return router
+
+
+async def _create_observation_handler(request: Request, db: FiligreeDB) -> JSONResponse:
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from fastapi.responses import JSONResponse
+
+    from filigree.dashboard_routes.common import _error_response, _parse_json_body, _validate_actor
+    from filigree.db_files import _is_project_relative_scan_path, _normalize_scan_path
+    from filigree.generations.loom.adapters import observation_to_loom
+
+    body = await _parse_json_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+
+    # 1. Parse and validate summary (required)
+    summary = body.get("summary")
+    if summary is None:
+        return _error_response("summary is required", ErrorCode.VALIDATION, 400)
+    if not isinstance(summary, str):
+        return _error_response("summary must be a string", ErrorCode.VALIDATION, 400)
+    summary_stripped = summary.strip()
+    if not summary_stripped:
+        return _error_response("Observation summary cannot be empty", ErrorCode.VALIDATION, 400)
+
+    # 2. Parse and validate detail (optional string)
+    detail = body.get("detail", "")
+    if not isinstance(detail, str):
+        return _error_response("detail must be a string", ErrorCode.VALIDATION, 400)
+
+    # 3. Parse and validate file_path (optional string)
+    file_path = body.get("file_path", "")
+    if not isinstance(file_path, str):
+        return _error_response("file_path must be a string", ErrorCode.VALIDATION, 400)
+
+    # 4. Parse and validate line (optional integer)
+    line = body.get("line")
+    if line is not None:
+        if not isinstance(line, int) or isinstance(line, bool):
+            return _error_response("line must be an integer", ErrorCode.VALIDATION, 400)
+        if line < 0:
+            return _error_response("line must be >= 0", ErrorCode.VALIDATION, 400)
+        if line > 9223372036854775807:  # MAX_SQLITE_INTEGER
+            return _error_response("line is too large", ErrorCode.VALIDATION, 400)
+
+    # 5. Parse and validate source_issue_id & source_finding_id
+    source_issue_id = body.get("source_issue_id", "")
+    if not isinstance(source_issue_id, str):
+        return _error_response("source_issue_id must be a string", ErrorCode.VALIDATION, 400)
+    source_finding_id = body.get("source_finding_id", "")
+    if not isinstance(source_finding_id, str):
+        return _error_response("source_finding_id must be a string", ErrorCode.VALIDATION, 400)
+
+    # 6. Parse and validate priority (optional integer)
+    priority_val = body.get("priority", 3)
+    if not isinstance(priority_val, int) or isinstance(priority_val, bool) or not (0 <= priority_val <= 4):
+        return _error_response("priority must be an integer between 0 and 4", ErrorCode.VALIDATION, 400)
+
+    # 7. Validate actor name
+    actor_val = body.get("actor", "dashboard")
+    actor, actor_err = _validate_actor(actor_val)
+    if actor_err:
+        return actor_err
+
+    # 8. Check project-relative file_path validation
+    normalized_path = ""
+    if file_path:
+        try:
+            normalized_path = _normalize_scan_path(file_path)
+            if not _is_project_relative_scan_path(normalized_path):
+                return _error_response("file_path must be project-relative", ErrorCode.VALIDATION, 400)
+        except ValueError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+
+    # 9. Perform idempotency check: check if live duplicate exists before calling create_observation
+    line_cmp = line if line is not None else -1
+    now = datetime.now(UTC).isoformat()
+
+    is_duplicate = False
+    try:
+        existing = db.conn.execute(
+            "SELECT * FROM observations WHERE summary = ? AND file_path = ? AND coalesce(line, -1) = ?",
+            (summary_stripped, normalized_path, line_cmp),
+        ).fetchone()
+        if existing and existing["expires_at"] > now:
+            is_duplicate = True
+    except sqlite3.Error as e:
+        return _error_response(f"Database error during duplicate check: {e}", ErrorCode.IO, 500)
+
+    # 10. Call the underlying SQLite DB wrapper to create or replace the observation
+    try:
+        obs = db.create_observation(
+            summary_stripped,
+            detail=detail,
+            file_path=file_path,
+            line=line,
+            source_issue_id=source_issue_id,
+            source_finding_id=source_finding_id,
+            priority=priority_val,
+            actor=actor,
+        )
+    except ValueError as e:
+        return _error_response(str(e), ErrorCode.VALIDATION, 400)
+    except sqlite3.Error as e:
+        return _error_response(f"Database error: {e}", ErrorCode.IO, 500)
+
+    # 11. Map and return
+    mapped = observation_to_loom(obs)
+    status_code = 200 if is_duplicate else 201
+    return JSONResponse(mapped, status_code=status_code)

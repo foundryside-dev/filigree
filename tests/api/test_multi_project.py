@@ -349,6 +349,52 @@ class TestProjectStore:
         assert results[0] is results[1], "both threads must observe the same cached handle"
         assert project_store._dbs["alpha"] is opened[0]
 
+    def test_slow_uncached_open_does_not_block_cached_other_project(
+        self, project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slow first open for one project must not serialize cached reads for another."""
+        import threading
+        import time
+
+        bravo_db = project_store.get_db("bravo")
+        alpha_path = Path(next(p["path"] for p in project_store.list_projects() if p["key"] == "alpha"))
+        original_open = dash_module._open_db_for_filigree_dir
+        slow_open_entered = threading.Event()
+        release_slow_open = threading.Event()
+        errors: list[BaseException] = []
+
+        def slow_alpha_open(filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
+            if filigree_dir == alpha_path:
+                slow_open_entered.set()
+                release_slow_open.wait(timeout=5.0)
+            return original_open(filigree_dir, check_same_thread=check_same_thread)
+
+        def open_alpha() -> None:
+            try:
+                project_store.get_db("alpha")
+            except BaseException as exc:  # captured for assertion in the test thread
+                errors.append(exc)
+
+        monkeypatch.setattr(dash_module, "_open_db_for_filigree_dir", slow_alpha_open)
+        thread = threading.Thread(target=open_alpha)
+        thread.start()
+        try:
+            assert slow_open_entered.wait(timeout=2.0), "alpha open did not enter the patched slow path"
+            timer = threading.Timer(0.5, release_slow_open.set)
+            timer.start()
+            started = time.monotonic()
+            cached = project_store.get_db("bravo")
+            elapsed = time.monotonic() - started
+            timer.cancel()
+        finally:
+            release_slow_open.set()
+            thread.join(timeout=5.0)
+
+        assert not thread.is_alive(), "alpha opener did not finish"
+        assert errors == []
+        assert cached is bravo_db
+        assert elapsed < 0.25, f"cached read waited behind unrelated slow open for {elapsed:.3f}s"
+
     def test_get_db_honors_custom_db_path_from_conf(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """filigree-da8d5aba0f: ProjectStore must open the conf-declared db
         path, not silently fall back to ``.filigree/filigree.db``.

@@ -470,6 +470,7 @@ class ErrorCode(StrEnum):
     BRIEFING_BLOCKED = "BRIEFING_BLOCKED"
     STOP_FAILED = "STOP_FAILED"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
+    CLARION_OUT_OF_SYNC = "CLARION_OUT_OF_SYNC"
     INTERNAL = "INTERNAL"
 
 
@@ -744,6 +745,7 @@ def errorcode_to_http_status(code: ErrorCode) -> int:
             | ErrorCode.SCHEMA_MISMATCH
             | ErrorCode.REGISTRY_UNAVAILABLE
             | ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+            | ErrorCode.CLARION_OUT_OF_SYNC
         ):
             # Service exists but is not in a state where it can answer —
             # 503 lets clients retry once the project is initialized or

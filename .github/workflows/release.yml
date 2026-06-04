@@ -30,8 +30,61 @@ jobs:
             exit 1
           fi
 
-  build:
+  live-clarion-release-check:
     needs: [ci, validate-tag]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check scheduled Live Clarion integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=200
+          LAST_CONTRACT_SHA=$(git log -1 --format=%H origin/main -- \
+            .github/workflows/ci.yml \
+            docs/federation/contracts.md \
+            docs/federation/registry-backend-launch-runbook.md \
+            src/filigree/core.py \
+            src/filigree/registry.py \
+            src/filigree/sei_backfill.py \
+            tests/integration/test_clarion_staging_smoke.py \
+            tests/integration/test_clarion_phase_d_e2e.py \
+            tests/federation/test_sei_oracle_live_clarion.py)
+
+          if ! RUNS=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/ci.yml/runs" \
+            -f event=schedule \
+            -f status=success \
+            -f per_page=20 \
+            --jq '.workflow_runs[] | select(.conclusion == "success") | [.head_sha, .html_url] | @tsv'); then
+            echo "::warning title=Live Clarion release checklist::Could not inspect scheduled Live Clarion Integration lane history. Confirm it has passed since Clarion contract changes before publishing federation-sensitive changes."
+            exit 0
+          fi
+
+          MATCHED_URL=""
+          while IFS=$'\t' read -r run_sha run_url; do
+            [ -n "$run_sha" ] || continue
+            git fetch origin "$run_sha" --depth=1 >/dev/null 2>&1 || true
+            if git merge-base --is-ancestor "$LAST_CONTRACT_SHA" "$run_sha" 2>/dev/null; then
+              MATCHED_URL="$run_url"
+              break
+            fi
+          done <<< "$RUNS"
+
+          if [ -z "$MATCHED_URL" ]; then
+            echo "::warning title=Live Clarion release checklist::No successful scheduled Live Clarion Integration lane was found at or after Clarion contract changes ($LAST_CONTRACT_SHA). Run CI manually with require_live_clarion=true or wait for the scheduled lane before publishing federation-sensitive changes."
+          else
+            echo "Scheduled Live Clarion Integration proof: $MATCHED_URL"
+          fi
+
+  build:
+    needs: [ci, validate-tag, live-clarion-release-check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

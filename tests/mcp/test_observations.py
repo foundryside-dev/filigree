@@ -167,6 +167,18 @@ class TestListObservationsTool:
         assert len(data["items"]) == 1
         assert data["items"][0]["summary"] == "from issue"
 
+    async def test_list_does_not_sweep_expired_observations_from_read_only_tool(self, mcp_db: FiligreeDB) -> None:
+        obs = mcp_db.create_observation("expired scratchpad")
+        mcp_db.conn.execute("UPDATE observations SET expires_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", obs["id"]))
+        mcp_db.conn.commit()
+
+        result = await call_tool("list_observations", {})
+        data = _parse(result)
+
+        assert data["items"] == []
+        row = mcp_db.conn.execute("SELECT id FROM observations WHERE id = ?", (obs["id"],)).fetchone()
+        assert row is not None
+
 
 class TestDismissObservationTool:
     async def test_dismiss(self, mcp_db: FiligreeDB) -> None:

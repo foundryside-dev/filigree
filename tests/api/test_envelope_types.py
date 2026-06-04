@@ -62,6 +62,7 @@ def test_error_code_enum_members() -> None:
         "FILE_REGISTRY_DISPLACED",
         "REGISTRY_UNAVAILABLE",
         "CLARION_REGISTRY_VERSION_MISMATCH",
+        "CLARION_OUT_OF_SYNC",
         "BRIEFING_BLOCKED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",

@@ -39,6 +39,7 @@ from filigree.types.api import (
 )
 from filigree.types.core import StatusCategory
 from filigree.types.files import DeleteIssueResult
+from filigree.validation import sanitize_actor
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -405,7 +406,11 @@ class IssuesMixin(DBMixinProtocol):
         if not proposed_parent_id or proposed_parent_id == child_id:
             return proposed_parent_id == child_id
         ancestor: str | None = proposed_parent_id
+        seen: set[str] = set()
         while ancestor is not None:
+            if ancestor in seen:
+                return True
+            seen.add(ancestor)
             row = self.conn.execute("SELECT parent_id FROM issues WHERE id = ?", (ancestor,)).fetchone()
             if row is None:
                 return False
@@ -1119,6 +1124,7 @@ class IssuesMixin(DBMixinProtocol):
         fields: dict[str, Any] | None = None,
         expected_assignee: str | None = None,
         force: bool = False,
+        _skip_begin: bool = False,
     ) -> Issue:
         """Close an issue.
 
@@ -1186,11 +1192,12 @@ class IssuesMixin(DBMixinProtocol):
             actor=actor,
             expected_assignee=expected_assignee,
             backward=use_reverse_transition,
+            _skip_begin=_skip_begin,
         )
 
     @_retry_busy()
     @_in_immediate_tx("reopen_issue")
-    def reopen_issue(self, issue_id: str, *, actor: str = "") -> Issue:
+    def reopen_issue(self, issue_id: str, *, actor: str = "", _skip_begin: bool = False) -> Issue:
         """Reopen a closed issue to the last non-done status before closure.
 
         The target comes from the most recent ``status_changed`` event whose
@@ -1729,13 +1736,13 @@ class IssuesMixin(DBMixinProtocol):
             is the list of per-issue errors (e.g. a concurrent reassignment
             that broke the compare-and-swap).
         """
-        if not actor or not actor.strip():
-            msg = "actor is required for release_my_claims"
+        normalized_actor, actor_error = sanitize_actor(actor)
+        if actor_error:
+            msg = actor_error
             raise ValueError(msg)
         if label_prefix is not None and not label_prefix.endswith(":"):
             msg = f"label_prefix must include a trailing colon (got {label_prefix!r})"
             raise ValueError(msg)
-        normalized_actor = actor.strip()
 
         # Discover candidates. assignee filter is exact match; label / label_prefix
         # are passed through to list_issues' own filter plumbing.

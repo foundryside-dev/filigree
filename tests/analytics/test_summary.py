@@ -437,8 +437,8 @@ class TestSummaryTimezoneHandling:
 
 
 class TestSummaryWipLimit:
-    def test_list_issues_called_with_high_limit(self, db: FiligreeDB) -> None:
-        """Verify that list_issues is called with a high limit in generate_summary."""
+    def test_list_issues_uses_bounded_wip_limit(self, db: FiligreeDB) -> None:
+        """Summary should not request huge WIP/stale working sets."""
         # We patch list_issues to track calls with limit parameter
         original_list_issues = db.list_issues
         call_limits: list[int | None] = []
@@ -450,9 +450,22 @@ class TestSummaryWipLimit:
         with patch.object(db, "list_issues", side_effect=tracking_list_issues):
             generate_summary(db)
 
-        # All calls should have limit=10000 (not the default 100)
-        for limit in call_limits:
-            assert limit == 10000, f"list_issues called with limit={limit}, expected 10000"
+        assert 10000 not in call_limits
+        assert max(limit for limit in call_limits if limit is not None) <= 100
+
+    def test_in_progress_and_stale_sections_are_capped(self, db: FiligreeDB) -> None:
+        for i in range(20):
+            issue = db.create_issue(f"WIP task {i}")
+            db.update_issue(issue.id, status="in_progress")
+            old_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+            db.conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (old_ts, issue.id))
+            db.conn.commit()
+
+        summary = generate_summary(db)
+
+        assert summary.count('[task] "WIP task') <= 24
+        assert "...and 8 more in progress" in summary
+        assert "...and 8 more stale" in summary
 
 
 class TestSanitizeTitle:
@@ -501,7 +514,7 @@ class TestObservationsInSummary:
         summary = generate_summary(db)
         assert "OBSERVATIONS:" in summary
         assert "1 pending" in summary
-        assert "list_observations" in summary
+        assert "observation_list" in summary
 
     def test_stale_observations_warning(self, db: FiligreeDB) -> None:
         obs = db.create_observation("Old thing")

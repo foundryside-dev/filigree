@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import (
+    FILIGREE_DIR_NAME,
+    SUMMARY_FILENAME,
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
@@ -36,12 +38,16 @@ from filigree.registry import (
     RegistryResolutionError,
     RegistryUnavailableError,
 )
+from filigree.summary import write_summary
 from filigree.types.api import ErrorCode
 from filigree.types.core import AssocType, FindingStatus, Severity
 
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
+_MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+_MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
+_SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
 
 # CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
 # router factories, and the findings/clean-stale sweep) run via
@@ -59,14 +65,19 @@ _MAX_MIN_FINDINGS = 2_147_483_647
 #     a connection cross-thread.
 #
 # clean-stale conforms under this invariant despite using to_thread, because it
-# borrows a private connection. This module-level asyncio.Lock still serialises
-# the two worker WRITE paths against each other: WAL permits a single writer at
-# the file level, so two concurrent worker writers would otherwise contend for
-# the write lock (SQLITE_BUSY churn up to busy_timeout). Event-loop handlers do
-# not take this lock — they run on a different connection and SQLite's file
-# locking (WAL + busy_timeout) mediates writer/writer contention between them
-# and a worker.
-_SCAN_RESULTS_LOCK = asyncio.Lock()
+# borrows a private connection. Writer/writer contention — between two worker
+# paths, or a worker and an event-loop handler — is mediated entirely by
+# SQLite's own file locking: WAL admits a single writer at a time and
+# ``busy_timeout`` (5 s) makes the loser wait for the brief write window rather
+# than raise SQLITE_BUSY. No application-level lock is taken, so the worker
+# paths run fully in parallel right up to that window — the bulk of each call
+# (the Clarion HTTP resolution, which happens BEFORE any write transaction
+# opens) overlaps freely. The shared registry's ``httpx.Client`` is safe for
+# concurrent use, so two workers may resolve against Clarion simultaneously.
+# The post-commit clean-stale finding→issue close cascade re-checks that the
+# finding is still ``fixed`` inside its own writer transaction before closing
+# the issue, so a concurrent re-ingest cannot leave an open finding on a newly
+# cascade-closed issue.
 
 
 def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any]) -> ScanIngestResult:
@@ -81,6 +92,19 @@ def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any])
         return worker_db.process_scan_results(**parsed)
 
 
+def _refresh_summary_for_db(db: FiligreeDB) -> None:
+    """Best-effort context.md refresh after dashboard mutations."""
+    filigree_dir = db.project_root / FILIGREE_DIR_NAME if db.project_root is not None else db.db_path.parent
+    try:
+        write_summary(db, filigree_dir / SUMMARY_FILENAME)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Failed to refresh context.md summary after scan ingest", exc_info=True)
+    except Exception:
+        logger.warning("Unexpected error refreshing context.md after scan ingest", exc_info=True)
+
+
 def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_source: str, actor: str) -> CleanStaleResult:
     """Run ``clean_stale_findings`` on a private worker-thread connection.
 
@@ -88,6 +112,65 @@ def _clean_stale_findings_on_private_conn(db: FiligreeDB, *, days: int, scan_sou
     """
     with db.borrow_for_worker_thread() as worker_db:
         return worker_db.clean_stale_findings(days=days, scan_source=scan_source, actor=actor)
+
+
+def _promote_finding_on_private_conn(
+    db: FiligreeDB,
+    *,
+    scan_source: str,
+    fingerprint: str,
+    priority: int | None,
+    labels: list[str] | None,
+    actor: str,
+) -> dict[str, Any] | None:
+    """Resolve ``(scan_source, fingerprint)`` → finding and promote it.
+
+    Runs on a private worker-thread connection (CONTRACT-E) — the resolve and
+    the promote (an issue write) share the SAME borrowed connection so it is
+    never used cross-thread. Returns ``{"issue_id", "created"}`` or ``None``
+    when no finding matches the fingerprint.
+    """
+    with db.borrow_for_worker_thread() as worker_db:
+        finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
+        if finding is None:
+            return None
+        try:
+            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+        except KeyError:
+            # promote_finding_to_issue re-reads the finding (``get_finding``)
+            # before it writes. A concurrent hard-delete in the window between
+            # our resolve above and that re-read makes it raise KeyError — the
+            # finding genuinely vanished mid-flight. Re-resolve to confirm: if
+            # it is gone, fold into the "no finding for fingerprint" path (the
+            # route maps ``None`` → 404). If it is still present, the KeyError
+            # came from deeper in the promote (e.g. a just-created issue that
+            # could not be rebuilt — a real invariant violation), so re-raise
+            # and let the route's catch-all surface it as INTERNAL/500 rather
+            # than masking a bug as a benign 404.
+            if worker_db.find_finding_by_fingerprint(scan_source, fingerprint) is None:
+                return None
+            raise
+        return {"issue_id": result["issue"].id, "created": result["created"]}
+
+
+def _parse_promote_priority(raw: Any) -> tuple[int | None, str | None]:
+    """Normalize an optional ``"P2"``/``"2"``/``2`` priority to an int 0-4.
+
+    Returns ``(priority, None)`` on success (``priority`` is ``None`` when the
+    field was omitted), or ``(None, error_message)`` on a malformed value.
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if text[:1] in ("P", "p"):
+        text = text[1:]
+    try:
+        value = int(text)
+    except ValueError:
+        return None, f"priority must be P0-P4 or 0-4, got {raw!r}"
+    if not 0 <= value <= 4:
+        return None, f"priority must be in 0-4, got {raw!r}"
+    return value, None
 
 
 def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONResponse:
@@ -121,6 +204,15 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     findings = body["findings"]
     if not isinstance(findings, list):
         return "findings must be a JSON array"
+    if len(findings) > _MAX_SCAN_FINDINGS_PER_REQUEST:
+        return f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings"
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"findings[{index}] must be a JSON object"
+        for field_name in _SCAN_FINDING_TEXT_FIELDS:
+            value = finding.get(field_name)
+            if isinstance(value, str) and len(value) > _MAX_SCAN_FINDING_TEXT_LENGTH:
+                return f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
     mark_unseen = body.get("mark_unseen", False)
     if not isinstance(mark_unseen, bool):
         return "mark_unseen must be a boolean"
@@ -432,17 +524,18 @@ def create_classic_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(result)
 
     @router.get("/scan-runs")
@@ -502,17 +595,18 @@ def create_loom_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(scan_ingest_result_to_loom(result))
 
     @router.get("/files")
@@ -558,8 +652,9 @@ def create_loom_router() -> APIRouter:
 
         Loom-only (no classic dashboard counterpart at this path).
         Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
-        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``.
-        Drops MCP's ``total`` field per the unified envelope.
+        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``, plus
+        ``fingerprint`` (lets a scanner confirm a finding's issue link without
+        re-promoting). Drops MCP's ``total`` field per the unified envelope.
         """
         params = request.query_params
         pagination = _parse_pagination(params)
@@ -567,7 +662,7 @@ def create_loom_router() -> APIRouter:
             return pagination
         limit, offset = pagination
         filters: dict[str, Any] = {}
-        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id"):
+        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "fingerprint"):
             val = params.get(key)
             if val is not None:
                 filters[key] = val
@@ -577,6 +672,77 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         items = [scan_finding_to_loom(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
+
+    @router.post("/findings/promote")
+    async def api_loom_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Promote a finding to a tracked issue, keyed by ``(scan_source, fingerprint)``.
+
+        This is the HTTP surface Wardline's ``file_finding`` posts to (A2): an
+        agent holding only a scanner fingerprint turns one true-positive into a
+        tracked issue. Idempotent — re-promoting a fingerprint whose finding
+        already links an issue returns that issue with ``created=false`` (no
+        duplicate). Returns 404 when the fingerprint was never ingested under
+        ``scan_source``. See the 2026-06-02 promote-by-fingerprint brief.
+
+        Request: ``{scan_source (req), fingerprint (req), priority?, labels?}``.
+        ``priority`` accepts ``"P2"``/``2``; omit to derive from severity.
+        Response: ``{"issue_id": "<id>", "created": true|false}``.
+
+        Concurrency: promote is a WRITE (issue create + finding link), so it
+        runs via ``asyncio.to_thread`` on a PRIVATE worker-thread connection
+        (see ``_promote_finding_on_private_conn`` and CONTRACT-E in the module
+        header), never touching the shared event-loop connection.
+        """
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        fingerprint = body.get("fingerprint", "")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            return _error_response("fingerprint is required and must be a string", ErrorCode.VALIDATION, 400)
+        priority, priority_err = _parse_promote_priority(body.get("priority"))
+        if priority_err is not None:
+            return _error_response(priority_err, ErrorCode.VALIDATION, 400)
+        labels = body.get("labels")
+        if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
+            return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        try:
+            result = await asyncio.to_thread(
+                _promote_finding_on_private_conn,
+                db,
+                scan_source=scan_source,
+                fingerprint=fingerprint,
+                priority=priority,
+                labels=labels,
+                actor=actor,
+            )
+        except ValueError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        except sqlite3.Error as e:
+            return _error_response(f"database error promoting finding: {e}", ErrorCode.IO, 500)
+        except Exception:
+            # Backstop: no app-level catch-all exists, so an unguarded exception
+            # (e.g. a deep KeyError when a just-created issue can't be rebuilt)
+            # would otherwise leak a bare Starlette 500 with no ``{error, code}``
+            # body — breaking the switch-on-code envelope federation consumers
+            # rely on. Mirror the per-route idiom in ``releases.py``.
+            logger.exception("BUG: unexpected error promoting finding (scan_source=%r, fingerprint=%r)", scan_source, fingerprint)
+            return _error_response("Internal error promoting finding", ErrorCode.INTERNAL, 500, exc_info=False)
+        if result is None:
+            return _error_response("no finding for fingerprint", ErrorCode.NOT_FOUND, 404)
+        logger.info(
+            "promote-by-fingerprint: issue=%s created=%s (scan_source=%r, actor=%r)",
+            result["issue_id"],
+            result["created"],
+            scan_source,
+            actor,
+        )
+        return JSONResponse(result)
 
     @router.post("/findings/clean-stale")
     async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
@@ -611,11 +777,12 @@ def create_loom_router() -> APIRouter:
         and ``FiligreeDB.borrow_for_worker_thread``) — the same idiom as the
         scan-results handlers. Because it never touches the shared event-loop
         connection, it cannot race the plain-async event-loop write handlers
-        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It still
-        acquires ``_SCAN_RESULTS_LOCK`` to serialise against the scan-results
-        worker WRITE path (WAL allows one writer at the file level; the lock
-        avoids SQLITE_BUSY churn between the two worker writers). See the lock's
-        CONTRACT-E note for the connection-scoped invariant.
+        (e.g. PATCH findings) at the ``sqlite3.Connection`` level. It takes no
+        app-level lock against the scan-results worker path; WAL admits one
+        writer at a time and ``busy_timeout`` absorbs the brief overlap. Its
+        post-commit issue close cascade revalidates that each finding is still
+        ``fixed`` under a writer transaction before closing the linked issue.
+        See the module header for the connection-scoped invariant.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -631,7 +798,7 @@ def create_loom_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
-        async with _SCAN_RESULTS_LOCK:
+        try:
             result = await asyncio.to_thread(
                 _clean_stale_findings_on_private_conn,
                 db,
@@ -639,6 +806,16 @@ def create_loom_router() -> APIRouter:
                 scan_source=scan_source,
                 actor=actor,
             )
+        except sqlite3.Error as e:
+            return _error_response(f"database error cleaning stale findings: {e}", ErrorCode.IO, 500)
+        except Exception:
+            # Backstop (same rationale as the promote route): without an
+            # app-level catch-all, an unguarded exception here leaks a bare 500
+            # with no envelope, breaking the switch-on-code contract.
+            logger.exception(
+                "BUG: unexpected error cleaning stale findings (scan_source=%r, older_than_days=%d)", scan_source, older_than_days
+            )
+            return _error_response("Internal error cleaning stale findings", ErrorCode.INTERNAL, 500, exc_info=False)
         logger.info(
             "clean-stale: %d findings fixed (scan_source=%r, older_than_days=%d, actor=%r)",
             result["findings_fixed"],
@@ -651,6 +828,11 @@ def create_loom_router() -> APIRouter:
                 "findings_fixed": result["findings_fixed"],
                 "scan_source": scan_source,
                 "older_than_days": older_than_days,
+                # Degradation signal from the best-effort finding→issue cascade.
+                # Mirrors the loom scan-results envelope, which also lifts
+                # ``warnings`` to the top level — so a federation consumer learns
+                # a cascade close partially failed instead of it dying in logs.
+                "warnings": result["warnings"],
             }
         )
 
@@ -720,17 +902,18 @@ def create_living_surface_router() -> APIRouter:
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
-        # event-loop connection cross-thread. _SCAN_RESULTS_LOCK serialises the
-        # worker WRITE paths; see the lock's note for the connection invariant.
+        # event-loop connection cross-thread. No app-level lock: concurrent
+        # workers overlap their HTTP resolution and serialise only at the WAL
+        # write window via busy_timeout (see the module header).
         try:
-            async with _SCAN_RESULTS_LOCK:
-                result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
+            result = await asyncio.to_thread(_ingest_scan_results_on_private_conn, db, parsed)
         except RegistryResolutionError as e:
             return _registry_resolution_error_response(e)
         except RegistryUnavailableError as e:
             return _error_response(str(e), ErrorCode.REGISTRY_UNAVAILABLE, 503)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        _refresh_summary_for_db(db)
         return JSONResponse(scan_ingest_result_to_loom(result))
 
     return router

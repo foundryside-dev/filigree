@@ -202,7 +202,7 @@ def _parse_toml(path: Path, *, errors: list[str] | None = None) -> ScannerConfig
 
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         logger.warning("Failed to read scanner TOML: %s", path, exc_info=True)
         if errors is not None:
             errors.append(f"{path.name}: failed to read file (permission denied or I/O error)")
@@ -330,3 +330,16 @@ def validate_scanner_command(
     if shutil.which(binary) is None:
         return f"Command {binary!r} not found on PATH"
     return None
+
+
+def scanner_requires_execution_approval(cfg: ScannerConfig) -> bool:
+    """Return True when a scanner is project-local/custom and must be explicitly approved."""
+    return not cfg.matches_bundled_definition()
+
+
+def scanner_execution_approval_error(cfg: ScannerConfig, *, approved: bool, approval_hint: str) -> str | None:
+    """Return a validation message if ``cfg`` cannot be spawned without approval."""
+    if approved or not scanner_requires_execution_approval(cfg):
+        return None
+    managed_hint = "Enable a bundled scanner for managed execution, or preview this scanner before approving it."
+    return f"Custom scanner {cfg.name!r} requires {approval_hint} before Filigree will execute its project-local TOML. {managed_hint}"

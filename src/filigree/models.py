@@ -31,6 +31,7 @@ _EMPTY_TS: ISOTimestamp = ISOTimestamp("")
 _VALID_STATUS_CATEGORIES: frozenset[str] = frozenset(get_args(StatusCategory))
 _VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 _VALID_FINDING_STATUSES: frozenset[str] = frozenset(get_args(FindingStatus))
+_VALID_REGISTRY_BACKENDS: frozenset[str] = frozenset(get_args(RegistryBackend))
 
 
 @dataclass
@@ -152,6 +153,8 @@ class FileRecord:
         # ``clarion`` files must carry a non-empty hash. Reject the two illegal
         # cross combinations at construction — mirrors ScanFinding's enum guard
         # and closes the type-level hole the flat dataclass otherwise allows.
+        if self.registry_backend not in _VALID_REGISTRY_BACKENDS:
+            raise ValueError(f"Invalid registry_backend: {self.registry_backend!r}")
         is_local = self.registry_backend == "local"
         has_empty_hash = self.content_hash == ""
         if is_local != has_empty_hash:

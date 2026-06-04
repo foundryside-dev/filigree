@@ -1,18 +1,21 @@
 """Pure helpers and constants shared across MCP tool modules.
 
-This module has NO dependency on ``mcp_server`` module globals, so it can
-be imported freely without triggering circular-import issues.
+This module holds pure helpers plus a tiny lazy context facade for runtime
+state owned by ``mcp_server``. Tool modules depend on this facade rather than
+importing transport-private globals directly.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from mcp.types import TextContent
 
 from filigree.issue_payloads import issue_to_ready, issue_to_slim
+from filigree.mcp_runtime import McpRuntimeContext, McpToolMetadata, get_runtime_context
 from filigree.models import Issue
 from filigree.registry_errors import RegistryPublicError, registry_error_response
 
@@ -34,6 +37,38 @@ def _parse_args(arguments: dict[str, Any], cls: type[_T]) -> _T:
     provides mypy type narrowing only — no runtime validation.
     """
     return cast(_T, arguments)
+
+
+def get_db() -> FiligreeDB:
+    return get_runtime_context().get_db()
+
+
+def refresh_summary() -> None:
+    get_runtime_context().refresh_summary()
+
+
+def get_filigree_dir() -> Path | None:
+    return get_runtime_context().get_filigree_dir()
+
+
+def safe_path(path: str) -> Path:
+    return get_runtime_context().safe_path(path)
+
+
+def runtime_context() -> McpRuntimeContext:
+    return get_runtime_context()
+
+
+def get_mcp_status_payload() -> dict[str, Any]:
+    return get_runtime_context().get_status_payload()
+
+
+def tool_metadata() -> McpToolMetadata:
+    return get_runtime_context().get_tool_metadata()
+
+
+def resolve_request_filigree_dir(db: FiligreeDB) -> Path:
+    return get_runtime_context().resolve_request_filigree_dir(db)
 
 
 # Hard cap on list/search results (issues, observations) to keep MCP response
@@ -197,11 +232,11 @@ def _build_transition_error(
         try:
             if not valid_transitions and tracker.get_issue(issue_id).status_category == "done":
                 data["reopen_available"] = True
-                data["hint"] = "Use reopen_issue to return this closed issue to the last non-done status before closure"
+                data["hint"] = "Use issue_reopen to return this closed issue to the last non-done status before closure"
             else:
-                data["hint"] = "Use get_valid_transitions to see allowed state changes"
+                data["hint"] = "Use workflow_transition_list to see allowed state changes"
         except Exception as exc:
-            data["hint"] = "Use get_valid_transitions to see allowed state changes"
+            data["hint"] = "Use workflow_transition_list to see allowed state changes"
             _log_transition_enrichment_failure(issue_id, exc)
         return data
     try:
@@ -212,9 +247,9 @@ def _build_transition_error(
             data["valid_transitions"] = [{"to": t.to, "category": t.category} for t in transitions]
         if not transitions and tracker.get_issue(issue_id).status_category == "done":
             data["reopen_available"] = True
-            data["hint"] = "Use reopen_issue to return this closed issue to the last non-done status before closure"
+            data["hint"] = "Use issue_reopen to return this closed issue to the last non-done status before closure"
         else:
-            data["hint"] = "Use get_valid_transitions to see allowed state changes"
+            data["hint"] = "Use workflow_transition_list to see allowed state changes"
     except Exception as exc:
         # Enrichment is best-effort — must never mask the original error.
         _log_transition_enrichment_failure(issue_id, exc)

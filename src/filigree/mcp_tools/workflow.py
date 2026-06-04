@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
-from filigree.mcp_tools.common import _list_response, _parse_args, _text
+from filigree.mcp_tools.common import _list_response, _parse_args, _text, get_db, get_mcp_status_payload, refresh_summary, tool_metadata
 from filigree.types.api import (
     ErrorCode,
     ErrorResponse,
@@ -66,13 +66,21 @@ def _tool_property_names(tool: Tool) -> set[str]:
 
 
 def derive_entity_id_tool_acceptance(tools: list[Tool]) -> dict[str, list[str]]:
-    """Map each entity ID family to live tools that accept that family."""
+    """Map each entity ID family to live tools that accept that family.
+
+    Emits the **served (namespaced) wire names** so this discovery surface stays
+    consistent with ``list_tools()``. ``tools`` carries the OLD/canonical names
+    (it is ``_all_tools``), so each is translated through ``RENAME_MAP``.
+    """
+    from filigree.mcp_tools.rename import RENAME_MAP
+
     accepted: dict[str, set[str]] = {entity: set() for entity in _ENTITY_ID_TOOL_FIELDS}
     for tool in tools:
         prop_names = _tool_property_names(tool)
+        served_name = RENAME_MAP.get(tool.name, tool.name)
         for entity, fields in _ENTITY_ID_TOOL_FIELDS.items():
             if prop_names & fields:
-                accepted[entity].add(tool.name)
+                accepted[entity].add(served_name)
     return {entity: sorted(names) for entity, names in accepted.items()}
 
 
@@ -121,7 +129,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="get_type_info",
-            description=("compatibility alias for get_template; returns the same canonical full workflow definition."),
+            description=("compatibility alias for template_get; returns the same canonical full workflow definition."),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -148,7 +156,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="validate_issue",
-            description="Validate an issue against its type template. Returns warnings for missing recommended fields. Call get_valid_transitions first to see allowed state changes.",
+            description="Validate an issue against its type template. Returns warnings for missing recommended fields. Call workflow_transition_list first to see allowed state changes.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -211,10 +219,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 
 async def _handle_get_template(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetTemplateArgs)
-    tracker = _get_db()
+    tracker = get_db()
     tpl = tracker.get_template(args["type"])
     if tpl is None:
         return _text(ErrorResponse(error=f"Unknown template: {args['type']}", code=ErrorCode.NOT_FOUND))
@@ -222,9 +228,7 @@ async def _handle_get_template(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_workflow_statuses(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
-    tracker = _get_db()
+    tracker = get_db()
     return _text(
         WorkflowStatusesResponse(
             statuses={
@@ -237,11 +241,9 @@ async def _handle_get_workflow_statuses(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _all_tools, _get_db
-
-    tracker = _get_db()
+    tracker = get_db()
     prefix = tracker.prefix
-    accepted_by_entity = derive_entity_id_tool_acceptance(_all_tools)
+    accepted_by_entity = derive_entity_id_tool_acceptance(list(tool_metadata().tools))
     return _text(
         SchemaResponse(
             project_prefix=prefix,
@@ -287,15 +289,11 @@ async def _handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_mcp_status(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import get_mcp_status_payload
-
     return _text(get_mcp_status_payload())
 
 
 async def _handle_list_types(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
-    tracker = _get_db()
+    tracker = get_db()
     types_list: list[TypeListItem] = []
     for tt in tracker.templates.list_types():
         types_list.append(
@@ -313,10 +311,8 @@ async def _handle_list_types(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_type_info(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetTypeInfoArgs)
-    tracker = _get_db()
+    tracker = get_db()
     tpl = tracker.get_template(args["type"])
     if tpl is None:
         return _text(ErrorResponse(error=f"Unknown type: {args['type']}", code=ErrorCode.NOT_FOUND))
@@ -324,9 +320,7 @@ async def _handle_get_type_info(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_list_packs(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
-    tracker = _get_db()
+    tracker = get_db()
     packs_list: list[PackListItem] = []
     for pack in tracker.templates.list_packs():
         packs_list.append(
@@ -344,10 +338,8 @@ async def _handle_list_packs(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_valid_transitions(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetValidTransitionsArgs)
-    tracker = _get_db()
+    tracker = get_db()
     try:
         transitions = tracker.get_valid_transitions(args["issue_id"])
         items = [
@@ -367,10 +359,8 @@ async def _handle_get_valid_transitions(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_validate_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, ValidateIssueArgs)
-    tracker = _get_db()
+    tracker = get_db()
     try:
         val_result = tracker.validate_issue(args["issue_id"])
         return _text(
@@ -393,20 +383,25 @@ def _build_tool_catalog() -> dict[str, Any]:
     tier markers. Lazy-imported to avoid an import cycle (mcp_server imports the
     tool modules).
     """
-    from filigree.mcp_server import _all_tools, _tool_subsystem
+    from filigree.mcp_tools.rename import RENAME_MAP
     from filigree.mcp_tools.tiers import tier_for
 
+    # _all_tools, _tool_subsystem and tier_for are all keyed off the OLD/canonical
+    # names, so tier/subsystem lookups use tool.name; the catalogue *emits* the
+    # served (namespaced) name so this discovery surface matches list_tools().
     core: list[str] = []
     by_subsystem: dict[str, dict[str, list[str]]] = {}
     counts: dict[str, int] = {"core": 0, "common": 0, "niche": 0}
+    metadata = tool_metadata()
 
-    for tool in _all_tools:
+    for tool in metadata.tools:
         tier = tier_for(tool.name)
+        served_name = RENAME_MAP.get(tool.name, tool.name)
         counts[tier] += 1
         if tier == "core":
-            core.append(tool.name)
-        subsystem = _tool_subsystem.get(tool.name, "unknown")
-        by_subsystem.setdefault(subsystem, {}).setdefault(tier, []).append(tool.name)
+            core.append(served_name)
+        subsystem = metadata.tool_subsystem.get(tool.name, "unknown")
+        by_subsystem.setdefault(subsystem, {}).setdefault(tier, []).append(served_name)
 
     for tiers_for_subsystem in by_subsystem.values():
         for names in tiers_for_subsystem.values():
@@ -426,10 +421,8 @@ def _build_tool_catalog() -> dict[str, Any]:
 
 
 async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetWorkflowGuideArgs)
-    tracker = _get_db()
+    tracker = get_db()
     wf_pack = tracker.templates.get_pack(args["pack"])
     note: str | None = None
 
@@ -443,7 +436,7 @@ async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextCont
     if wf_pack is None:
         return _text(
             ErrorResponse(
-                error=f"Unknown pack: '{args['pack']}'. Use list_packs to see available packs, or list_types to see types.",
+                error=f"Unknown pack: '{args['pack']}'. Use pack_list to see available packs, or type_list to see types.",
                 code=ErrorCode.NOT_FOUND,
             )
         )
@@ -459,10 +452,8 @@ async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextCont
 
 
 async def _handle_explain_status(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, ExplainStatusArgs)
-    tracker = _get_db()
+    tracker = get_db()
     type_tpl = tracker.templates.get_type(args["type"])
     if type_tpl is None:
         return _text(ErrorResponse(error=f"Unknown type: {args['type']}", code=ErrorCode.NOT_FOUND))
@@ -503,9 +494,7 @@ async def _handle_explain_status(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_reload_templates(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
-    tracker = _get_db()
+    tracker = get_db()
     try:
         tracker.reload_templates()
         # Force the new registry to materialise before regenerating context.md;
@@ -513,5 +502,5 @@ async def _handle_reload_templates(arguments: dict[str, Any]) -> list[TextConten
         tracker.templates.list_types()
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
-    _refresh_summary()
+    refresh_summary()
     return _text({"status": "ok"})

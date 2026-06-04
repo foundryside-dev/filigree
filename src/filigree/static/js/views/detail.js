@@ -18,7 +18,7 @@ import {
 } from "../api.js";
 import { updateHash } from "../router.js";
 import { CATEGORY_COLORS, PRIORITY_COLORS, state, TYPE_ICONS } from "../state.js";
-import { escHtml, escJsSingle, issueIdChip, setLoading, showToast, trapFocus } from "../ui.js";
+import { escHtml, escJsSingleAttr, issueIdChip, setLoading, showToast, trapFocus } from "../ui.js";
 
 // --- Callbacks for functions not yet available at import time ---
 
@@ -92,7 +92,7 @@ export async function openDetail(issueId) {
       '<div class="text-xs rounded px-3 py-2 mb-3" style="background:var(--surface-overlay);border:1px dashed var(--border-strong);color:var(--text-secondary)">Showing cached data \u2014 could not reach server.</div>';
   }
 
-  const safeId = escJsSingle(d.id);
+  const safeId = escJsSingleAttr(d.id);
   const htmlId = escHtml(d.id);
   const statusCat = d.status_category || "open";
   const statusColor = CATEGORY_COLORS[statusCat] || "#64748B";
@@ -109,8 +109,8 @@ export async function openDetail(issueId) {
       if (!det) return `<div class="text-xs" style="color:var(--text-muted)">${escHtml(bid)}</div>`;
       const detCat = det.status_category || "open";
       const sc = CATEGORY_COLORS[detCat] || "#64748B";
-      const safeBid = escJsSingle(bid);
-      const safeIssueId = escJsSingle(d.id);
+      const safeBid = escJsSingleAttr(bid);
+      const safeIssueId = escJsSingleAttr(d.id);
       return (
         '<div class="flex items-center gap-2 text-xs">' +
         `<span class="w-2 h-2 rounded-full shrink-0" style="background:${sc}"></span>` +
@@ -127,7 +127,7 @@ export async function openDetail(issueId) {
       if (!det) return `<div class="text-xs" style="color:var(--text-muted)">${escHtml(bid)}</div>`;
       const detCat = det.status_category || "open";
       const sc = CATEGORY_COLORS[detCat] || "#64748B";
-      const safeBid = escJsSingle(bid);
+      const safeBid = escJsSingleAttr(bid);
       return (
         `<div class="flex items-center gap-2 text-xs cursor-pointer" style="color:var(--accent)" role="button" tabindex="0" aria-label="Open downstream ${escHtml(det.title.slice(0, 40))}" onclick="openDetail('${safeBid}')">` +
         `<span class="w-2 h-2 rounded-full" style="background:${sc}"></span>` +
@@ -157,7 +157,7 @@ export async function openDetail(issueId) {
     .join("");
   const issueFilesHtml = issueFilesData
     .map((f) => {
-      const safeFileId = escJsSingle(f.file_id);
+      const safeFileId = escJsSingleAttr(f.file_id);
       const assoc = f.assoc_type
         ? ` <span style="color:var(--text-muted)">(${escHtml(f.assoc_type)})</span>`
         : "";
@@ -304,7 +304,7 @@ export async function openDetail(issueId) {
             ? ` <span style="color:var(--text-muted)">(missing: ${t.missing_fields.map((f) => escHtml(f)).join(", ")})</span>`
             : "";
           return (
-            `<button ${t.ready ? `onclick="updateIssue('${safeId}',{status:'${escJsSingle(t.to)}'},this)"` : "disabled"}` +
+            `<button ${t.ready ? `onclick="updateIssue('${safeId}',{status:'${escJsSingleAttr(t.to)}'},this)"` : "disabled"}` +
             ` class="text-xs px-2 py-1 rounded ${cls}" style="${btnStyle}">` +
             `${escHtml(t.to)}${missingText}</button>`
           );
@@ -429,7 +429,7 @@ export async function reopenIssue(issueId) {
 // ---------------------------------------------------------------------------
 
 export async function claimIssue(issueId) {
-  const safeIssueId = escJsSingle(issueId);
+  const safeIssueId = escJsSingleAttr(issueId);
   const existing = document.getElementById("claimModal");
   if (existing) existing.remove();
   const saved = localStorage.getItem("filigree_claim_name") || "";
@@ -533,7 +533,7 @@ export async function removeDependency(issueId, depId) {
 // ---------------------------------------------------------------------------
 
 export async function showAddBlocker(issueId) {
-  const safeIssueId = escJsSingle(issueId);
+  const safeIssueId = escJsSingleAttr(issueId);
   const existing = document.getElementById("addBlockerModal");
   if (existing) existing.remove();
   const modal = document.createElement("div");
@@ -574,7 +574,7 @@ export async function showAddBlocker(issueId) {
             .filter((r) => r.id !== issueId)
             .map(
               (r) =>
-                `<div class="flex items-center gap-2 py-1 px-1 cursor-pointer bg-overlay-hover rounded" onclick="addDependency('${safeIssueId}','${escJsSingle(r.id)}')">` +
+                `<div class="flex items-center gap-2 py-1 px-1 cursor-pointer bg-overlay-hover rounded" onclick="addDependency('${safeIssueId}','${escJsSingleAttr(r.id)}')">` +
                 `<span style="color:var(--text-secondary)">${escHtml(r.id)}</span>` +
                 `<span style="color:var(--text-primary)" class="truncate">${escHtml(r.title.slice(0, 30))}</span></div>`,
             )

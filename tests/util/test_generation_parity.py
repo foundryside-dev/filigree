@@ -74,8 +74,8 @@ def _assert_shape_matches(actual: Any, expected: Any, path: str = "$") -> None:
       ``expected`` is non-empty, the key set must match exactly and
       values recurse.
     - Lists: if ``expected`` is empty, ``actual`` may be any list; if
-      ``expected`` is non-empty, the first element of ``actual`` is
-      checked against the first element of ``expected``.
+      ``expected`` is non-empty, every element of ``actual`` is checked
+      against the first element of ``expected``.
     - Scalars: same Python type (``bool`` is not ``int`` for the type
       check; ``int`` and ``float`` are distinct).
     """
@@ -94,7 +94,8 @@ def _assert_shape_matches(actual: Any, expected: Any, path: str = "$") -> None:
         assert isinstance(actual, list), f"{path}: expected list, got {type(actual).__name__}"
         if expected:
             assert actual, f"{path}: expected non-empty list, got empty"
-            _assert_shape_matches(actual[0], expected[0], f"{path}[0]")
+            for index, item in enumerate(actual):
+                _assert_shape_matches(item, expected[0], f"{path}[{index}]")
         # Empty expected is a soft check: actual may be any list length.
         # Tests that need exact length pin it in the test body.
     else:
@@ -111,7 +112,7 @@ def _assert_structural_equivalence(a: Any, b: Any, path: str = "$") -> None:
     side effects between the two calls (e.g. scan-results dedup on the
     second invocation) make list lengths legitimately diverge. Equivalence
     here is: same JSON type at each level, same dict key sets, same scalar
-    types, list element types match if both are non-empty. Unlike
+    types, every list element type matches if both lists are non-empty. Unlike
     ``_assert_shape_matches``, list emptiness is not checked — both being
     lists is enough.
     """
@@ -125,9 +126,28 @@ def _assert_structural_equivalence(a: Any, b: Any, path: str = "$") -> None:
     elif isinstance(a, list):
         assert isinstance(b, list), f"{path}: a is list, b is {type(b).__name__}"
         if a and b:
-            _assert_structural_equivalence(a[0], b[0], f"{path}[0]")
+            for index, item in enumerate(a):
+                _assert_structural_equivalence(item, b[0], f"{path}[{index}]")
+            for index, item in enumerate(b):
+                _assert_structural_equivalence(a[0], item, f"{path}[{index}]")
     else:
         assert type(a) is type(b), f"{path}: type mismatch — a={type(a).__name__} ({a!r}), b={type(b).__name__} ({b!r})"
+
+
+def test_shape_match_checks_later_list_items() -> None:
+    actual = [{"id": "ok"}, {"id": 123}]
+    expected = [{"id": "sample"}]
+
+    with pytest.raises(AssertionError, match=r"\$\[1\]\.id"):
+        _assert_shape_matches(actual, expected)
+
+
+def test_structural_equivalence_checks_later_list_items() -> None:
+    actual = [{"id": "ok"}, {"id": 123}]
+    expected = [{"id": "sample"}]
+
+    with pytest.raises(AssertionError, match=r"\$\[1\]\.id"):
+        _assert_structural_equivalence(actual, expected)
 
 
 def _assert_error_envelope(

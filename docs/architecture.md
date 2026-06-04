@@ -141,7 +141,7 @@ CREATE TABLE events (
 );
 ```
 
-Indexed on `issue_id`, `created_at`, and a composite index on `(issue_id, created_at DESC)` for efficient per-issue history queries. Powers event history, undo, session resumption, and analytics. Per [ADR-003](./architecture/decisions/ADR-003-operational-durability-not-audit-proofing.md), these records are durable for operational utility rather than audit-proof evidence.
+Indexed on `issue_id`, `created_at`, and a composite index on `(issue_id, created_at DESC)` for efficient per-issue history queries. Powers event history, undo, session resumption, and analytics. Per [ADR-003](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-003-operational-durability-not-audit-proofing.md), these records are durable for operational utility rather than audit-proof evidence.
 
 #### `comments`
 
@@ -239,7 +239,7 @@ Every mutation creates an event record. This enables:
 - **Analytics** — cycle time, lead time, and throughput computed from events
 - **Archival** — old events can be compacted without losing issue state
 
-See [ADR-003](./architecture/decisions/ADR-003-operational-durability-not-audit-proofing.md):
+See [ADR-003](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-003-operational-durability-not-audit-proofing.md):
 Filigree records are durable working memory, not audit-proof evidence.
 
 ### Batch Optimizations

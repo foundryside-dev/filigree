@@ -433,9 +433,12 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
     closer-first: a child anchor wins over an ancestor regardless of type.
 
     Pure read — never writes. Use this when discovery must work on read-only
-    mounts (inspection commands, MCP startup, ``filigree doctor``). To force
-    a backfill, run ``filigree init`` (or another explicit write path) on
-    a writable copy of the project.
+    mounts (inspection commands, ``filigree doctor``, and explicit
+    legacy-compatible code paths). Implicit agent startup surfaces use the
+    stricter :func:`find_filigree_conf` path so a legacy ancestor is not
+    treated as a project attachment signal. To force a backfill, run
+    ``filigree init`` (or another explicit write path) on a writable copy of
+    the project.
 
     When *start* sits inside a git linked worktree, discovery is redirected
     to the main worktree root so the worktree's ``.git`` file is not
@@ -561,12 +564,25 @@ def read_config(filigree_dir: Path) -> ProjectConfig:
         if not isinstance(raw, dict):
             logger.warning("Config %s is not a JSON object, using defaults", config_path)
             return defaults
-        result: ProjectConfig = raw  # type: ignore[assignment]
-        # Ensure required keys have defaults (config.json may predate these fields)
+        result: ProjectConfig = dict(raw)  # type: ignore[assignment]
+        prefix = raw.get("prefix", defaults["prefix"])
+        if not isinstance(prefix, str) or not prefix:
+            logger.warning("Config %s has malformed prefix, using default", config_path)
+            result["prefix"] = defaults["prefix"]
+        version = raw.get("version", defaults["version"])
+        if isinstance(version, bool) or not isinstance(version, int):
+            logger.warning("Config %s has malformed version, using default", config_path)
+            result["version"] = defaults["version"]
+        packs = raw.get("enabled_packs", defaults["enabled_packs"])
+        if not isinstance(packs, list) or not all(isinstance(p, str) for p in packs):
+            logger.warning("Config %s has malformed enabled_packs, using default", config_path)
+            result["enabled_packs"] = defaults["enabled_packs"]
         if "prefix" not in result:
             result["prefix"] = defaults["prefix"]
         if "version" not in result:
             result["version"] = defaults["version"]
+        if "enabled_packs" not in result:
+            result["enabled_packs"] = defaults["enabled_packs"]
         if "registry_backend" not in result:
             result["registry_backend"] = defaults["registry_backend"]
         _validate_registry_settings(cast("dict[str, Any]", result), source=config_path)
@@ -1034,6 +1050,30 @@ class FiligreeDB(
 
     def _make_local_registry(self) -> LocalRegistry:
         return LocalRegistry(lambda: self._generate_unique_id("file_records", "f"))
+
+    def _rebind_local_id_factory_to_self(self) -> None:
+        """Repoint any local file-id factory at THIS instance's connection.
+
+        ``LocalRegistry``'s id factory closes over the ``FiligreeDB`` it was
+        built on, minting ids via that instance's ``self.conn``. A clone from
+        :meth:`borrow_for_worker_thread` shares the parent's registry object by
+        reference, so without this rebind a worker-thread clone would mint local
+        file ids through the PARENT's (shared, event-loop) connection — a
+        cross-thread ``sqlite3.Connection`` misuse (``SQLITE_MISUSE``). Rebind
+        the local registry, or the local-fallback half of a Clarion fallback
+        wrapper, so id minting uses this clone's private connection. The shared
+        Clarion ``_primary`` (the ``httpx.Client``) is kept by reference and is
+        never closed by the non-owning clone.
+        """
+        registry = self.registry
+        if isinstance(registry, LocalRegistry):
+            self.registry = self._make_local_registry()
+        elif isinstance(registry, _ClarionLocalFallbackRegistry):
+            self.registry = _ClarionLocalFallbackRegistry(
+                registry._primary,
+                self._make_local_registry(),
+                base_url=registry._base_url,
+            )
 
     def _clarion_base_url(self) -> str | None:
         """Return the configured Clarion base URL, or ``None`` if absent.
@@ -1549,16 +1589,28 @@ class FiligreeDB(
         one ``sqlite3.Connection`` interleaves statements on the connection's
         single implicit transaction, so one writer's ``COMMIT``/``ROLLBACK``
         can land mid-transaction in another's (silent partial/lost writes).
-        ``_SCAN_RESULTS_LOCK`` serialises the worker paths against each other
-        but not against the event-loop handlers — only a separate connection
-        closes that race class (the CONTRACT-E follow-up).
+        A separate connection per worker is what closes that race class (the
+        CONTRACT-E follow-up). Worker/worker and worker/event-loop write
+        contention is then mediated entirely by SQLite's own file locking
+        (WAL admits one writer at a time; ``busy_timeout`` makes the loser wait
+        rather than error) — no application-level lock is needed, and the
+        worker paths run fully in parallel up to the brief write window.
 
-        The clone shares all config, the registry client, and the Clarion
+        The clone shares all config, the Clarion HTTP client, and the Clarion
         capability-probe state by reference (read-only on the worker side, so
         no second ADR-014 probe runs) but lazily opens its OWN connection on
         first ``self.conn`` access. ``check_same_thread=True`` on the clone
         turns any stray cross-thread use of that connection into a loud
-        ``ProgrammingError`` rather than silent interleaving.
+        ``ProgrammingError`` rather than silent interleaving. The shared
+        Clarion ``httpx.Client`` is safe for concurrent calls, so two worker
+        clones may resolve against Clarion at the same time.
+
+        The local file-id factory is the one piece NOT shared verbatim: a
+        ``LocalRegistry`` mints ids through the ``FiligreeDB`` it closed over,
+        so the clone gets its factory rebound to itself
+        (:meth:`_rebind_local_id_factory_to_self`) — otherwise worker-thread id
+        minting in local (or Clarion-fallback) mode would reach back into the
+        parent's shared connection and raise ``SQLITE_MISUSE``.
 
         The clone does NOT own the registry: exiting the context tears down
         only the private connection (commit on clean exit, rollback on an
@@ -1572,6 +1624,10 @@ class FiligreeDB(
         clone._conn = None
         clone._check_same_thread = True
         clone._owns_registry = False
+        # The shared registry's local-id factory closes over the PARENT's
+        # connection; rebind it to the clone so worker-thread file-id minting
+        # uses the clone's private connection, not the shared one.
+        clone._rebind_local_id_factory_to_self()
         try:
             yield clone
         finally:

@@ -191,7 +191,7 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
     }
 
 
-def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
+def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = None) -> dict[str, Any] | JSONResponse:
     """Validate the batch-close request body.
 
     Shared by classic ``POST /api/batch/close`` and loom
@@ -233,7 +233,7 @@ def _parse_batch_close_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespon
         # the routes package).
         from filigree.dashboard import _get_allow_http_force_close
 
-        if not _get_allow_http_force_close():
+        if not _get_allow_http_force_close(request):
             return _error_response(
                 "force=true is not permitted on HTTP batch-close. "
                 "Start the dashboard with --allow-http-force-close to opt in, "
@@ -689,7 +689,7 @@ def create_classic_router() -> APIRouter:
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
-        parsed = _parse_batch_close_body(body)
+        parsed = _parse_batch_close_body(body, request=request)
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
@@ -1163,7 +1163,7 @@ def create_loom_router() -> APIRouter:
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
-        parsed = _parse_batch_close_body(body)
+        parsed = _parse_batch_close_body(body, request=request)
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")

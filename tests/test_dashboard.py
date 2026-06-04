@@ -739,6 +739,40 @@ class TestCreateApp:
         assert len(data) == 1
         assert data[0]["key"] == ""
 
+    async def test_two_ethereal_apps_keep_separate_database_state(self, tmp_path: Path) -> None:
+        """create_app() must capture runtime state instead of reading globals per request."""
+        alpha_dir = tmp_path / "alpha"
+        bravo_dir = tmp_path / "bravo"
+        alpha_dir.mkdir()
+        bravo_dir.mkdir()
+        alpha_db = make_db(alpha_dir, prefix="alpha", check_same_thread=False)
+        bravo_db = make_db(bravo_dir, prefix="bravo", check_same_thread=False)
+        saved_db = dash_module._db
+        saved_store = dash_module._project_store
+        try:
+            dash_module._project_store = None
+            dash_module._db = alpha_db
+            alpha_app = create_app()
+            dash_module._db = bravo_db
+            bravo_app = create_app()
+
+            alpha_transport = ASGITransport(app=alpha_app)
+            bravo_transport = ASGITransport(app=bravo_app)
+            async with (
+                AsyncClient(transport=alpha_transport, base_url="http://alpha") as alpha_client,
+                AsyncClient(transport=bravo_transport, base_url="http://bravo") as bravo_client,
+            ):
+                alpha_resp = await alpha_client.get("/api/projects")
+                bravo_resp = await bravo_client.get("/api/projects")
+
+            assert alpha_resp.json()[0]["name"] == "alpha"
+            assert bravo_resp.json()[0]["name"] == "bravo"
+        finally:
+            dash_module._db = saved_db
+            dash_module._project_store = saved_store
+            alpha_db.close()
+            bravo_db.close()
+
 
 # ---------------------------------------------------------------------------
 # _safe_bounded_int re-export

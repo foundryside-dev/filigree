@@ -12,6 +12,7 @@ Covers two bugs:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pytest
 
 from filigree.core import (
     CONF_FILENAME,
+    DB_FILENAME,
     FILIGREE_DIR_NAME,
     FiligreeDB,
     write_conf,
@@ -105,6 +107,35 @@ class TestStdioStartupHonoursConf:
         finally:
             if mcp_mod.db is not None:
                 mcp_mod.db.close()
+
+    def test_run_without_project_requires_conf_not_legacy_ancestor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Agent stdio startup must not attach to a legacy ancestor."""
+        import filigree.mcp_server as mcp_mod
+
+        legacy_dir = tmp_path / FILIGREE_DIR_NAME
+        legacy_dir.mkdir()
+        d = FiligreeDB(legacy_dir / DB_FILENAME, prefix="filigree")
+        d.initialize()
+        d.close()
+        workdir = tmp_path / "scratch" / "leaf"
+        workdir.mkdir(parents=True)
+        monkeypatch.chdir(workdir)
+
+        def _forbid_startup(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("stdio startup should not open a legacy ancestor")
+
+        monkeypatch.setattr(mcp_mod, "_attempt_startup", _forbid_startup)
+
+        with pytest.raises(SystemExit) as excinfo:
+            asyncio.run(mcp_mod._run(None))
+
+        assert excinfo.value.code == 1
+        assert ".filigree.conf" in capsys.readouterr().err
 
     def test_attempt_startup_records_invalid_conf_as_open_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Malformed/unsafe .filigree.conf should use the clean startup-open

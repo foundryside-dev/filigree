@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sqlite3
 import sys
 import time
 import weakref
+from collections import Counter
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -42,10 +44,11 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
-    find_filigree_anchor,
+    find_filigree_conf,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
+from filigree.mcp_runtime import McpRuntimeContext, McpToolMetadata, set_runtime_context
 from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backward compat
     _MAX_LIST_RESULTS,
     _text,
@@ -63,6 +66,15 @@ server = Server("filigree")
 db: FiligreeDB | None = None
 _filigree_dir: Path | None = None
 _logger: logging.Logger | None = None
+
+# Deprecation telemetry (rollout plan §5.3): count how often callers reach a
+# tool via its DEPRECATED OLD name (keyed by the inbound wire name) so we can
+# PROVE, before old names are removed in Phase 2, that consumers have migrated.
+# The count is exact: ``call_tool`` runs as an asyncio coroutine on the single
+# event-loop thread, and there is no ``await`` between the Counter read and
+# write, so each ``+= 1`` is uninterruptible — the GIL is not relied upon.
+_deprecated_tool_calls: Counter[str] = Counter()
+
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
 _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_dir", default=None)
 
@@ -202,6 +214,33 @@ def _safe_path(raw: str) -> Path:
     return safe_path(raw, filigree_dir.parent)
 
 
+def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
+    """Record that a caller reached a tool via its deprecated OLD name.
+
+    Best-effort: increment the per-wire-name counter and emit a structured
+    ``deprecated_tool_name`` log event (matching the ``tool_call``/``tool_error``
+    style elsewhere in this module). ``wire_name`` is guaranteed to be a key of
+    ``RENAME_MAP`` by the caller's detection guard.
+
+    Runs before the handler's try/except in ``call_tool``, so it is wrapped in a
+    blanket guard: telemetry must NEVER break a real tool call.
+    """
+    try:
+        _deprecated_tool_calls[wire_name] += 1
+        if _logger:
+            _logger.info(
+                "deprecated_tool_name",
+                extra={
+                    "tool": wire_name,
+                    "canonical": RENAME_MAP[wire_name],
+                    "actor": arguments.get("actor"),
+                },
+            )
+    except Exception:
+        # Telemetry is best-effort; never break a tool call.
+        pass
+
+
 def get_mcp_status_payload() -> dict[str, Any]:
     """Return read-only MCP server health without requiring a usable DB.
 
@@ -299,6 +338,13 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
         "runtime": _runtime_diagnostics(),
+        # Deprecation-readiness signal (plan §5.3): old-name usage counts.
+        # Surfaced only on the healthy path; degraded payloads above report
+        # *why* the connector is degraded, not migration telemetry.
+        "deprecated_tool_name_calls": {
+            "total": sum(_deprecated_tool_calls.values()),
+            "by_name": dict(_deprecated_tool_calls),
+        },
     }
 
 
@@ -317,6 +363,7 @@ from filigree.mcp_tools import (  # noqa: E402, I001  — must come after global
     scanners as _scanners_mod,
     workflow as _workflow_mod,
 )
+from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP  # noqa: E402
 from filigree.mcp_tools.tiers import tier_for  # noqa: E402
 
 _all_tools: list[Tool] = []
@@ -408,6 +455,20 @@ def _apply_tier_metadata(tools: list[Tool]) -> None:
 _apply_tier_metadata(_all_tools)
 
 
+# ---------------------------------------------------------------------------
+# Served tool surface (namespaced wire names)
+# ---------------------------------------------------------------------------
+# ``_all_tools`` keeps its OLD/canonical names — TIER_MAP, _tool_argument_names,
+# _all_handlers, and get_schema's derivation all key off them. The wire surface
+# served by list_tools() is a one-time projection that renames ONLY ``.name`` to
+# the namespaced ``<entity>_<verb>`` form (RENAME_MAP). model_copy preserves the
+# already-applied tier markers and annotations. Built AFTER _apply_tier_metadata
+# so those carry across the copy. Inbound new names are canonicalized back to the
+# old name at the top of call_tool (NEW_TO_OLD), so every downstream guard and
+# _all_handlers.get keeps operating on the canonical identity.
+_served_tools: list[Tool] = [tool.model_copy(update={"name": RENAME_MAP[tool.name]}) for tool in _all_tools]
+
+
 def _allowed_tool_arguments(tool: Tool) -> set[str]:
     schema = tool.inputSchema
     if not isinstance(schema, dict):
@@ -419,6 +480,26 @@ def _allowed_tool_arguments(tool: Tool) -> set[str]:
 
 
 _tool_argument_names: dict[str, set[str]] = {tool.name: _allowed_tool_arguments(tool) for tool in _all_tools}
+_tool_input_schemas: dict[str, dict[str, Any]] = {
+    tool.name: tool.inputSchema if isinstance(tool.inputSchema, dict) else {} for tool in _all_tools
+}
+
+
+def _runtime_tool_metadata() -> McpToolMetadata:
+    return McpToolMetadata(tools=tuple(_all_tools), tool_subsystem=dict(_tool_subsystem))
+
+
+set_runtime_context(
+    McpRuntimeContext(
+        get_db=_get_db,
+        get_filigree_dir=_get_filigree_dir,
+        safe_path=_safe_path,
+        refresh_summary=_refresh_summary,
+        get_status_payload=get_mcp_status_payload,
+        get_tool_metadata=_runtime_tool_metadata,
+        resolve_request_filigree_dir=_resolve_request_filigree_dir,
+    )
+)
 
 
 def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse | None:
@@ -435,11 +516,152 @@ def _unknown_argument_error(tool_name: str, arguments: object) -> ErrorResponse 
     )
 
 
+def _json_type_label(type_spec: object) -> str:
+    labels = {
+        "string": "a string",
+        "integer": "an integer",
+        "number": "a number",
+        "boolean": "a boolean",
+        "array": "an array",
+        "object": "an object",
+        "null": "null",
+    }
+    if isinstance(type_spec, str):
+        return labels.get(type_spec, type_spec)
+    if isinstance(type_spec, list):
+        names = [item for item in type_spec if isinstance(item, str)]
+        return " or ".join(labels.get(name, name) for name in names) if names else "valid JSON type"
+    return "valid JSON type"
+
+
+def _json_type_matches(value: object, type_name: str) -> bool:
+    if type_name == "string":
+        return isinstance(value, str)
+    if type_name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if type_name == "boolean":
+        return isinstance(value, bool)
+    if type_name == "array":
+        return isinstance(value, list)
+    if type_name == "object":
+        return isinstance(value, dict)
+    if type_name == "null":
+        return value is None
+    return True
+
+
+def _validate_schema_value(value: object, schema: dict[str, Any], path: str) -> str | None:
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        errors: list[str] = []
+        for option in one_of:
+            if not isinstance(option, dict):
+                continue
+            error = _validate_schema_value(value, option, path)
+            if error is None:
+                return None
+            errors.append(error)
+        return errors[0] if errors else f"{path} does not match any allowed schema"
+
+    type_spec = schema.get("type")
+    if isinstance(type_spec, str):
+        allowed_types = [type_spec]
+    elif isinstance(type_spec, list):
+        allowed_types = [item for item in type_spec if isinstance(item, str)]
+    else:
+        allowed_types = []
+
+    if allowed_types and not any(_json_type_matches(value, type_name) for type_name in allowed_types):
+        return f"{path} must be {_json_type_label(type_spec)}"
+
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            return f"{path} length must be >= {min_length}"
+
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, int | float) and value < minimum:
+            return f"{path} must be >= {minimum}"
+        maximum = schema.get("maximum")
+        if isinstance(maximum, int | float) and value > maximum:
+            return f"{path} must be <= {maximum}"
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str) and key not in value:
+                    child_path = f"{path}.{key}" if path else key
+                    return f"{child_path} is required"
+
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            if schema.get("additionalProperties") is False:
+                for key in value:
+                    if isinstance(key, str) and key not in properties:
+                        return f"Unknown parameter(s) for {path}: {key}" if path else f"Unknown parameter(s): {key}"
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    continue
+                property_schema = properties.get(key)
+                if not isinstance(property_schema, dict):
+                    continue
+                child_path = f"{path}.{key}" if path else key
+                error = _validate_schema_value(item, property_schema, child_path)
+                if error is not None:
+                    return error
+
+    return None
+
+
+def _schema_validation_error(tool_name: str, arguments: object) -> ErrorResponse | None:
+    if not isinstance(arguments, dict):
+        return ErrorResponse(error=f"Arguments for {tool_name} must be an object", code=ErrorCode.VALIDATION)
+    schema = _tool_input_schemas.get(tool_name)
+    if not isinstance(schema, dict):
+        return None
+    error = _validate_schema_value(arguments, schema, "")
+    if error is None:
+        return None
+    return ErrorResponse(error=error, code=ErrorCode.VALIDATION)
+
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
 
 CONTEXT_URI = "filigree://context"
+
+
+def _context_resource_error() -> ErrorResponse | None:
+    if _schema_mismatch is not None:
+        return ErrorResponse(
+            error=format_schema_mismatch_guidance(
+                _schema_mismatch.installed,
+                _schema_mismatch.database,
+            ),
+            code=ErrorCode.SCHEMA_MISMATCH,
+        )
+    if _registry_startup_error is not None:
+        return registry_error_response(_registry_startup_error, action="opening project database")
+    if _db_open_error is not None:
+        return ErrorResponse(error=f"Database not initialized: {_db_open_error}", code=ErrorCode.IO)
+
+    active_db = _request_db.get() or db
+    if active_db is not None:
+        try:
+            db_version = active_db.get_schema_version()
+        except sqlite3.Error:
+            db_version = None
+        if db_version is not None and db_version > CURRENT_SCHEMA_VERSION:
+            return ErrorResponse(
+                error=format_schema_mismatch_guidance(CURRENT_SCHEMA_VERSION, db_version),
+                code=ErrorCode.SCHEMA_MISMATCH,
+            )
+    return None
 
 
 @server.list_resources()  # type: ignore[untyped-decorator,no-untyped-call]
@@ -457,6 +679,9 @@ async def list_resources() -> list[Resource]:
 @server.read_resource()  # type: ignore[untyped-decorator,no-untyped-call]
 async def read_context(uri: str) -> str:
     if str(uri) == CONTEXT_URI:
+        degraded = _context_resource_error()
+        if degraded is not None:
+            return json.dumps(degraded)
         return generate_summary(_get_db())
     msg = f"Unknown resource: {uri}"
     raise ValueError(msg)
@@ -474,35 +699,35 @@ Filigree data lives in `.filigree/` and is accessed via these MCP tools.
 
 ## Quick start
 1. Read `filigree://context` resource for current project state (vitals, ready work, blockers)
-2. Use `get_ready` to find unblocked tasks sorted by priority
-3. Use `start_work` or `start_next_work` to atomically claim and transition a task into work
-4. Use `get_valid_transitions` to see allowed status changes before manual updates
-5. Work on the task, use `add_comment` to log progress
-6. Use `close_issue` when done — response includes newly-unblocked items
+2. Use `work_ready` to find unblocked tasks sorted by priority
+3. Use `work_start` or `work_start_next` to atomically claim and transition a task into work
+4. Use `workflow_transition_list` to see allowed status changes before manual updates
+5. Work on the task, use `comment_add` to log progress
+6. Use `issue_close` when done — response includes newly-unblocked items
 
 ## Key tools
-- **get_issue / list_issues / search_issues** — read project state
-- **create_issue / update_issue / close_issue** — mutate issues
-- **start_work / start_next_work** — usual path: atomic claim plus transition to work
-- `claim_issue` / `claim_next` — claim-only, niche path with optimistic locking
-- **get_valid_transitions / validate_issue** — workflow-aware status management
-- **list_types / get_type_info / explain_status** — discover type workflows
-- **list_packs / get_workflow_guide** — workflow pack documentation
-- **add_dependency / remove_dependency** — manage blockers
-- **get_plan / create_plan** — milestone/phase/step hierarchies
-- **batch_close / batch_update** — bulk operations (per-issue error handling)
-- **get_changes** — events since a timestamp (session resumption)
-- **get_template** — field schemas for issue types
-- **get_stats / get_summary** — project analytics
-- **get_metrics** — flow metrics (cycle time, lead time, throughput)
-- **get_critical_path** — longest dependency chain among open issues
-- **reload_templates** — refresh templates after editing .filigree/templates/
+- **issue_get / issue_list / issue_search** — read project state
+- **issue_create / issue_update / issue_close** — mutate issues
+- **work_start / work_start_next** — usual path: atomic claim plus transition to work
+- `work_claim` / `work_claim_next` — claim-only, niche path with optimistic locking
+- **workflow_transition_list / issue_validate** — workflow-aware status management
+- **type_list / type_get / workflow_status_explain** — discover type workflows
+- **pack_list / workflow_guide_get** — workflow pack documentation
+- **dependency_add / dependency_remove** — manage blockers
+- **plan_get / plan_create** — milestone/phase/step hierarchies
+- **issue_batch_close / issue_batch_update** — bulk operations (per-issue error handling)
+- **change_list** — events since a timestamp (session resumption)
+- **template_get** — field schemas for issue types
+- **stats_get / summary_get** — project analytics
+- **metrics_get** — flow metrics (cycle time, lead time, throughput)
+- **dependency_critical_path** — longest dependency chain among open issues
+- **admin_reload_templates** — refresh templates after editing .filigree/templates/
 
 ## Conventions
 - Issue IDs: `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`)
 - Priorities: P0 (critical) through P4 (low)
-- Each type has its own status workflow — use `list_types` to discover
-- Use `get_valid_transitions <id>` before status changes
+- Each type has its own status workflow — use `type_list` to discover
+- Use `workflow_transition_list <id>` before status changes
 """
 
 
@@ -535,9 +760,9 @@ def _build_workflow_text() -> str:
             if obs_stats["count"] > 0:
                 lines.append("\n## Observations\n")
                 if obs_stats["stale_count"] > 0:
-                    lines.append(f"- {obs_stats['stale_count']} stale observation(s) (>48h old). Run `list_observations` to triage.")
+                    lines.append(f"- {obs_stats['stale_count']} stale observation(s) (>48h old). Run `observation_list` to triage.")
                 else:
-                    lines.append(f"- {obs_stats['count']} pending observation(s). Use `list_observations` to review.")
+                    lines.append(f"- {obs_stats['count']} pending observation(s). Use `observation_list` to review.")
         except sqlite3.OperationalError:
             logging.getLogger(__name__).debug("observation stats unavailable in MCP prompt", exc_info=True)
 
@@ -559,7 +784,7 @@ def _build_workflow_text() -> str:
         return (
             _WORKFLOW_TEXT_STATIC + "\n\n> **ERROR:** Failed to load workflow types "
             "due to an unexpected error. Run `filigree doctor` to diagnose. "
-            "Use `list_types` and `list_packs` directly.\n"
+            "Use `type_list` and `pack_list` directly.\n"
         )
 
 
@@ -610,12 +835,38 @@ async def get_workflow_prompt(name: str, arguments: dict[str, str] | None = None
 
 @server.list_tools()  # type: ignore[untyped-decorator,no-untyped-call]
 async def list_tools() -> list[Tool]:
-    return _all_tools
+    # Serve namespaced names only. _served_tools is the one-time projection of
+    # _all_tools with .name renamed via RENAME_MAP (tier markers + annotations
+    # preserved). Returned in both normal and schema-mismatch degraded mode —
+    # introspection needs no DB.
+    return _served_tools
 
 
 @server.call_tool()  # type: ignore[untyped-decorator]
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     t0 = time.monotonic()
+
+    # Canonicalize at the very top: callers may use the namespaced wire name
+    # (served by list_tools) OR the legacy old name. Resolve the new name back
+    # to its canonical (old) identity so EVERY downstream guard, dispatch, arg
+    # check, and log line operates on one name. Critically, this keeps the three
+    # ``name != "get_mcp_status"`` degraded-mode exemptions reachable via the new
+    # ``mcp_status_get`` name. Unknown names pass through unchanged to the
+    # NOT_FOUND fast-path below.
+    #
+    # Deprecation telemetry (plan §5.3): capture the inbound wire name BEFORE
+    # canonicalizing, then detect the deprecated-old-name case. A caller using
+    # the NEW name (``issue_get``) resolves to a different canonical name
+    # (``get_issue``) — not deprecated. A caller using the OLD name
+    # (``get_issue``) resolves to itself AND is a key of ``RENAME_MAP`` (has a
+    # successor) — deprecated. An unknown name resolves to itself but is not in
+    # ``RENAME_MAP``, so it is not recorded (it falls through to the NOT_FOUND
+    # fast-path). Recorded here, before the degraded-mode guards, so old-name
+    # usage is counted regardless of the call's eventual outcome.
+    wire_name = name
+    name = NEW_TO_OLD.get(name, name)
+    if name == wire_name and wire_name in RENAME_MAP:
+        _record_deprecated_tool_call(wire_name, arguments)
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools
@@ -676,6 +927,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         from filigree.mcp_tools.common import _text as _common_text
 
         return _common_text(unknown_argument_error)
+    schema_validation_error = _schema_validation_error(name, arguments)
+    if schema_validation_error is not None:
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text(schema_validation_error)
 
     # Serialise tool execution per-DB. The MCP SDK dispatches tool calls
     # concurrently; the shared ``sqlite3.Connection`` on ``FiligreeDB`` has
@@ -770,7 +1026,7 @@ def create_mcp_app(
                         "error": format_schema_mismatch_guidance(exc.installed, exc.database),
                         "code": ErrorCode.SCHEMA_MISMATCH,
                     },
-                    status_code=409,
+                    status_code=errorcode_to_http_status(ErrorCode.SCHEMA_MISMATCH),
                 )
                 await resp(scope, receive, send)
                 return
@@ -921,12 +1177,13 @@ async def _run(project_path: Path | None) -> None:
             sys.exit(1)
     else:
         try:
-            project_root, conf_path = find_filigree_anchor()
+            conf_path = find_filigree_conf()
         except FileNotFoundError as exc:
             # ProjectNotInitialisedError carries a message that points at
             # `filigree init` and `filigree doctor`.
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        project_root = conf_path.parent
         filigree_dir = project_root / FILIGREE_DIR_NAME
 
     _attempt_startup(filigree_dir, conf_path=conf_path)

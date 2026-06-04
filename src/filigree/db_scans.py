@@ -19,6 +19,7 @@ from filigree.types.files import ScanRunDict, ScanRunStatusDict
 logger = logging.getLogger(__name__)
 
 SCAN_COOLDOWN_SECONDS = 30
+SCAN_PENDING_STALE_SECONDS = 15 * 60
 VALID_SCAN_RUN_STATUSES: frozenset[str] = frozenset(get_args(ScanRunStatus))
 
 # Valid transitions: from_status -> set of valid to_statuses
@@ -26,6 +27,12 @@ _VALID_TRANSITIONS: dict[ScanRunStatus, set[ScanRunStatus]] = {
     "pending": {"running", "failed"},
     "running": {"completed", "failed", "timeout"},
 }
+
+# Terminal states are exactly those that never appear as a transition source —
+# derived from _VALID_TRANSITIONS so the two can't drift. Today: completed,
+# failed, timeout. Consumers deciding "benign already-finished vs actionable
+# transition failure" must use this, not a hand-written tuple.
+TERMINAL_SCAN_RUN_STATUSES: frozenset[str] = VALID_SCAN_RUN_STATUSES - frozenset(_VALID_TRANSITIONS)
 
 
 class ScansMixin(DBMixinProtocol):
@@ -225,11 +232,11 @@ class ScansMixin(DBMixinProtocol):
         Returns the blocking scan run dict, or ``None`` if trigger is allowed.
         Two distinct invariants apply here:
 
-        - ``pending`` and ``running`` rows are a singleton lock on the active
-          run for ``(scanner_name, file_path)``. They block regardless of age:
-          ``updated_at`` is only refreshed on status transitions, so a
-          long-running scan would otherwise fall outside the cutoff and a
-          duplicate trigger could spawn a parallel process.
+        - Fresh ``pending`` rows and all ``running`` rows are a singleton lock
+          on the active run for ``(scanner_name, file_path)``. Pending rows
+          become stale after ``SCAN_PENDING_STALE_SECONDS`` because they have
+          not yet backfilled a PID; this prevents a crash-before-spawn from
+          blocking future scans forever.
         - ``completed`` rows act as a debounce window — they block for
           ``SCAN_COOLDOWN_SECONDS`` after completion, then trigger is allowed.
         """
@@ -241,24 +248,30 @@ class ScansMixin(DBMixinProtocol):
             "  SELECT 1 FROM json_each(sr.file_paths) je WHERE je.value = ?"
             ") "
             "AND ("
-            "  sr.status IN ('pending', 'running') "
+            "  ("
+            "    sr.status = 'pending' "
+            "    AND sr.updated_at >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?) "
+            "  ) "
+            "  OR sr.status = 'running' "
             "  OR ("
             "    sr.status = 'completed' "
             "    AND sr.updated_at >= strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', ?) "
             "  )"
             ") "
             "ORDER BY sr.updated_at DESC LIMIT 1",
-            (scanner_name, file_path, f"-{SCAN_COOLDOWN_SECONDS} seconds"),
+            (scanner_name, file_path, f"-{SCAN_PENDING_STALE_SECONDS} seconds", f"-{SCAN_COOLDOWN_SECONDS} seconds"),
         ).fetchone()
         if row is None:
             return None
         return self._build_scan_run_dict(row)
 
-    def get_scan_status(self, scan_run_id: str, *, log_lines: int = 50) -> ScanRunStatusDict:
+    def get_scan_status(self, scan_run_id: str, *, log_lines: int = 50, reconcile: bool = False) -> ScanRunStatusDict:
         """Get scan run with live PID check and log tail.
 
-        When a running scan's process is detected as dead, the status is
-        auto-transitioned to ``'failed'`` so the DB does not stay stale.
+        By default this is a pure read: a dead PID is reported via
+        ``process_alive=False`` and ``data_warnings`` without changing the row.
+        Pass ``reconcile=True`` (or call :meth:`reconcile_scan_status`) to mark
+        a running scan with a dead process as ``failed``.
         """
         run = self.get_scan_run(scan_run_id)
         process_alive = False
@@ -275,24 +288,29 @@ class ScansMixin(DBMixinProtocol):
                     scan_run_id,
                     run["pid"],
                 )
-                try:
-                    run = self.update_scan_run_status(
-                        scan_run_id,
-                        "failed",
-                        error_message=f"Process {run['pid']} died without updating status",
-                    )
-                except (KeyError, ValueError) as exc:
-                    logger.warning(
-                        "Could not auto-fail scan run %s: %s",
-                        scan_run_id,
-                        exc,
-                    )
-                    # Re-read: another codepath may have completed it concurrently.
-                    run = self.get_scan_run(scan_run_id)
-                    if run["status"] == "running":
-                        run["data_warnings"].append(
-                            f"Process {run['pid']} appears dead but status is still 'running' (auto-fail transition failed: {exc})"
+                if reconcile:
+                    try:
+                        run = self.update_scan_run_status(
+                            scan_run_id,
+                            "failed",
+                            error_message=f"Process {run['pid']} died without updating status",
                         )
+                    except (KeyError, ValueError) as exc:
+                        logger.warning(
+                            "Could not reconcile dead scan run %s: %s",
+                            scan_run_id,
+                            exc,
+                        )
+                        # Re-read: another codepath may have completed it concurrently.
+                        run = self.get_scan_run(scan_run_id)
+                        if run["status"] == "running":
+                            run["data_warnings"].append(
+                                f"Process {run['pid']} appears dead but status is still 'running' (reconcile failed: {exc})"
+                            )
+                else:
+                    run["data_warnings"].append(
+                        f"Process {run['pid']} appears dead while status is still 'running'; call reconcile_scan_status to mark it failed."
+                    )
         log_tail: list[str] = []
         if run["log_path"]:
             log_path, warning = self._resolve_scan_log_path(run["log_path"])
@@ -314,6 +332,10 @@ class ScansMixin(DBMixinProtocol):
                 f"status for the remaining {len(run['file_paths']) - 1} file(s) is not tracked individually"
             )
         return result
+
+    def reconcile_scan_status(self, scan_run_id: str, *, log_lines: int = 50) -> ScanRunStatusDict:
+        """Reconcile live process state for a scan run, mutating stale rows."""
+        return self.get_scan_status(scan_run_id, log_lines=log_lines, reconcile=True)
 
     def _scan_project_root(self) -> Path:
         """Return the project root used for resolving scan log paths."""

@@ -185,7 +185,7 @@ class TestStartWorkCli:
         data = json.loads(result.output)
         assert data["code"] == "INVALID_TRANSITION"
         assert {t["to"] for t in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
-        assert data["hint"] == "Use get_valid_transitions to see allowed state changes"
+        assert data["hint"] == "Use 'filigree transitions <id>' to see allowed state changes"
 
     def test_ambiguous_transition_includes_candidate_details(self, monkeypatch) -> None:
         class FakeDB:

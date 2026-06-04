@@ -219,23 +219,23 @@ class TestToolDescriptions:
     async def test_ready_tool_descriptions_name_open_category(self) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        get_ready_description = tools["get_ready"].description or ""
+        get_ready_description = tools["work_ready"].description or ""
         assert "open category" in get_ready_description
         assert "include_context" in get_ready_description
         assert "(open, no blockers)" not in get_ready_description
 
-        get_stats_description = tools["get_stats"].description or ""
+        get_stats_description = tools["stats_get"].description or ""
         assert "status_name_counts" in get_stats_description
         assert "status_category_counts" in get_stats_description
 
-        for tool_name in ("claim_next", "start_next_work"):
+        for tool_name in ("work_claim_next", "work_start_next"):
             description = tools[tool_name].description or ""
             assert "open-category ready issue" in description
 
     async def test_requirement_type_descriptions_name_optional_pack(self) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        for tool_name in ("create_issue", "promote_observation", "batch_promote_observations"):
+        for tool_name in ("issue_create", "observation_promote", "observation_batch_promote"):
             schema = tools[tool_name].inputSchema
             assert isinstance(schema, dict)
             properties = schema.get("properties", {})
@@ -420,12 +420,12 @@ class TestUpdateAndClose:
 class TestDeleteIssue:
     async def test_delete_issue_tool_registered(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
-        assert "delete_issue" in tools
-        schema = tools["delete_issue"].inputSchema
+        assert "issue_delete" in tools
+        schema = tools["issue_delete"].inputSchema
         assert set(schema["properties"]) == {"issue_id", "force", "actor"}
         assert schema["required"] == ["issue_id"]
-        assert "IRREVERSIBLE" in tools["delete_issue"].description
-        assert "undo_last cannot reverse" in tools["delete_issue"].description
+        assert "IRREVERSIBLE" in tools["issue_delete"].description
+        assert "undo_last cannot reverse" in tools["issue_delete"].description
 
     async def test_delete_success_envelope(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Delete me")
@@ -734,8 +734,8 @@ class TestTemplateAndSummary:
     async def test_template_tool_descriptions_explain_alias_contract(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name: tool for tool in await list_tools()}
 
-        assert "canonical full workflow definition" in tools["get_template"].description
-        assert "compatibility alias" in tools["get_type_info"].description
+        assert "canonical full workflow definition" in tools["template_get"].description
+        assert "compatibility alias" in tools["type_get"].description
 
     async def test_get_template_unknown(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("get_template", {"type": "nonexistent"})
@@ -749,7 +749,7 @@ class TestTemplateAndSummary:
 
     async def test_session_context_tool_is_available(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        assert "session_context" in {tool.name for tool in tools}
+        assert "session_context_get" in {tool.name for tool in tools}
 
     async def test_session_context_returns_startup_snapshot(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("Ready via MCP session context")
@@ -964,7 +964,7 @@ class TestCreatePlan:
 
     async def test_create_plan_from_file_tool_is_available(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        assert "create_plan_from_file" in {tool.name for tool in tools}
+        assert "plan_create_from_file" in {tool.name for tool in tools}
 
     async def test_create_plan_from_file_reads_project_relative_json(self, mcp_db: FiligreeDB) -> None:
         plan_path = mcp_db.db_path.parent.parent / "plan.json"
@@ -1787,7 +1787,7 @@ class TestActorIdentity:
 class TestResource:
     async def test_get_schema_documents_entity_id_prefixes(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name for tool in await list_tools()}
-        assert "get_schema" in tools
+        assert "schema_get" in tools
 
         result = await call_tool("get_schema", {})
 
@@ -1796,18 +1796,19 @@ class TestResource:
         prefixes = data["entity_id_prefixes"]
         assert prefixes["issue"]["prefix"] == "mcp-"
         assert prefixes["issue"]["primary_key"] == "issue_id"
-        assert "get_issue" in prefixes["issue"]["accepted_by_tools"]
+        # accepted_by_tools emits the served (namespaced) names, matching list_tools().
+        assert "issue_get" in prefixes["issue"]["accepted_by_tools"]
         assert prefixes["observation"]["prefix"] == "mcp-obs-"
         assert prefixes["observation"]["primary_key"] == "observation_id"
-        assert "promote_observation" in prefixes["observation"]["accepted_by_tools"]
-        assert "batch_promote_observations" in prefixes["observation"]["accepted_by_tools"]
+        assert "observation_promote" in prefixes["observation"]["accepted_by_tools"]
+        assert "observation_batch_promote" in prefixes["observation"]["accepted_by_tools"]
         assert prefixes["scan_finding"]["prefix"] == "mcp-sf-"
         assert prefixes["scan_finding"]["primary_key"] == "finding_id"
-        assert "promote_finding" in prefixes["scan_finding"]["accepted_by_tools"]
+        assert "finding_promote" in prefixes["scan_finding"]["accepted_by_tools"]
         assert prefixes["file_record"]["prefix"] == "mcp-f-"
         assert prefixes["file_record"]["primary_key"] == "file_id"
-        assert "get_file" in prefixes["file_record"]["accepted_by_tools"]
-        assert "delete_file_record" in prefixes["file_record"]["accepted_by_tools"]
+        assert "file_get" in prefixes["file_record"]["accepted_by_tools"]
+        assert "file_delete" in prefixes["file_record"]["accepted_by_tools"]
 
     async def test_get_schema_accepted_tools_are_derived_from_live_registry(self, mcp_db: FiligreeDB) -> None:
         field_map = {
@@ -1830,6 +1831,9 @@ class TestResource:
             "annotation": {"annotation_id", "annotation_ids"},
         }
         expected: dict[str, list[str]] = {entity: [] for entity in field_map}
+        # Both surfaces now emit the served (namespaced) names: list_tools()
+        # serves them, and get_schema's accepted_by_tools is translated through
+        # RENAME_MAP at the emission point. So compare new names directly.
         for tool in await list_tools():
             props = tool.inputSchema.get("properties", {}) if isinstance(tool.inputSchema, dict) else {}
             prop_names = set(props) if isinstance(props, dict) else set()
@@ -1844,7 +1848,7 @@ class TestResource:
 
     async def test_get_mcp_status_reports_compatible_database(self, mcp_db: FiligreeDB) -> None:
         tools = {tool.name for tool in await list_tools()}
-        assert "get_mcp_status" in tools
+        assert "mcp_status_get" in tools
 
         result = await call_tool("get_mcp_status", {})
 
@@ -1935,6 +1939,20 @@ class TestResource:
         assert "Project Pulse" in content
         assert "Resource test" in content
 
+    async def test_read_context_resource_reports_schema_mismatch(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        import filigree.mcp_server as mcp_mod
+        from filigree.types.api import SchemaVersionMismatchError
+
+        monkeypatch.setattr(mcp_mod, "db", None)
+        monkeypatch.setattr(mcp_mod, "_schema_mismatch", SchemaVersionMismatchError(installed=8, database=9))
+        monkeypatch.setattr(mcp_mod, "_db_open_error", None)
+
+        content = await read_context("filigree://context")
+        data = json.loads(content)
+
+        assert data["code"] == ErrorCode.SCHEMA_MISMATCH
+        assert "upgrade" in data["error"].lower()
+
     async def test_read_unknown_resource(self, mcp_db: FiligreeDB) -> None:
         with pytest.raises(ValueError, match="Unknown resource"):
             await read_context("filigree://nonexistent")
@@ -1963,9 +1981,9 @@ class TestPrompt:
     async def test_workflow_prompt_recommends_start_work_flow(self, mcp_db: FiligreeDB) -> None:
         result = await get_workflow_prompt("filigree-workflow", {"include_context": "false"})
         text = result.messages[0].content.text
-        assert "Use `start_work` or `start_next_work`" in text
-        assert "`claim_issue` / `claim_next` — claim-only" in text
-        assert "Use `claim_issue` or `claim_next` to atomically claim a task" not in text
+        assert "Use `work_start` or `work_start_next`" in text
+        assert "`work_claim` / `work_claim_next` — claim-only" in text
+        assert "Use `work_claim` or `work_claim_next` to atomically claim a task" not in text
 
 
 class TestProactiveContext:
@@ -2289,7 +2307,7 @@ class TestMCPMutationEnhancements:
         assert data["code"] == ErrorCode.INVALID_TRANSITION
         assert data["valid_transitions"] == []
         assert data["reopen_available"] is True
-        assert "reopen_issue" in data["hint"]
+        assert "issue_reopen" in data["hint"]
 
     async def test_transition_error_survives_enrichment_backend_failure(self, mcp_db: FiligreeDB) -> None:
         """filigree-55c5347992: enrichment lookup failure must not mask invalid_transition."""
@@ -2549,7 +2567,9 @@ class TestInstructionsUpdate:
         from filigree.install import FILIGREE_INSTRUCTIONS
 
         assert "INVALID_TRANSITION" in FILIGREE_INSTRUCTIONS
-        assert "get_valid_transitions" in FILIGREE_INSTRUCTIONS
+        # MCP tool namespaced old->new (ADR-016 §7): get_valid_transitions is
+        # now served as workflow_transition_list.
+        assert "workflow_transition_list" in FILIGREE_INSTRUCTIONS
 
 
 class TestSafePath:
@@ -2811,18 +2831,18 @@ class TestFileTools:
         tools = await list_tools()
         names = {t.name for t in tools}
         assert {
-            "list_files",
-            "get_file",
-            "get_file_timeline",
-            "get_issue_files",
-            "add_file_association",
-            "register_file",
-            "delete_file_record",
+            "file_list",
+            "file_get",
+            "file_timeline_get",
+            "issue_file_list",
+            "file_association_add",
+            "file_register",
+            "file_delete",
         }.issubset(names)
 
     async def test_create_issue_tool_docs_call_out_labels_at_creation(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
-        create_tool = next(t for t in tools if t.name == "create_issue")
+        create_tool = next(t for t in tools if t.name == "issue_create")
         assert "labels" in create_tool.description.lower()
         labels_schema = (create_tool.inputSchema or {}).get("properties", {}).get("labels", {})
         assert "creation" in (labels_schema.get("description") or "").lower()
@@ -3215,6 +3235,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "nonexistent",
                     "file_path": "src/foo.py",
                 },
@@ -3241,6 +3262,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "bad",
                         "file_path": "bad_target.py",
                     },
@@ -3259,6 +3281,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "../../etc/passwd",
                 },
@@ -3272,6 +3295,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "../../../etc/crontab",
                     "file_path": "src/foo.py",
                 },
@@ -3287,6 +3311,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "src/foo.py",
                     "api_url": "https://evil.example.com:8377",
@@ -3302,6 +3327,7 @@ class TestScannerTools:
             await call_tool(
                 "trigger_scan",
                 {
+                    "approve_execution": True,
                     "scanner": "test-scanner",
                     "file_path": "nonexistent/file.py",
                 },
@@ -3323,6 +3349,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "test_target.py",
                     },
@@ -3362,6 +3389,7 @@ class TestScannerTools:
                     await call_tool(
                         "trigger_scan",
                         {
+                            "approve_execution": True,
                             "scanner": "test-scanner",
                             "file_path": "./canonical_target.py",
                         },
@@ -3388,6 +3416,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "existing.py",
                     },
@@ -3411,6 +3440,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "rate_test.py",
                     },
@@ -3424,6 +3454,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "rate_test.py",
                     },
@@ -3449,6 +3480,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "readme.txt",
                     },
@@ -3484,6 +3516,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "templated-scanner",
                         "file_path": "templated_exec_target.py",
                     },
@@ -3519,6 +3552,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "relative-scanner",
                         "file_path": "relative_exec_target.py",
                     },
@@ -3543,7 +3577,7 @@ class TestScannerTools:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "test-scanner", "file_path": "log_target.py"},
+                    {"approve_execution": True, "scanner": "test-scanner", "file_path": "log_target.py"},
                 )
             )
             assert "error" not in result
@@ -3592,7 +3626,7 @@ class TestScannerTools:
                 result = _parse(
                     await call_tool(
                         "trigger_scan",
-                        {"scanner": "test-scanner", "file_path": "fd_leak_target.py"},
+                        {"approve_execution": True, "scanner": "test-scanner", "file_path": "fd_leak_target.py"},
                     )
                 )
             assert "error" not in result, f"trigger_scan failed: {result}"
@@ -3634,6 +3668,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "shared.py",
                     },
@@ -3647,6 +3682,7 @@ class TestScannerTools:
                 await call_tool(
                     "trigger_scan",
                     {
+                        "approve_execution": True,
                         "scanner": "test-scanner",
                         "file_path": "shared.py",
                     },
@@ -3793,7 +3829,7 @@ class TestHttpMcpRequestContext:
         start = next(m for m in messages if m["type"] == "http.response.start")
         body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
         data = json.loads(body)
-        assert start["status"] == 409
+        assert start["status"] == 503
         assert data["code"] == ErrorCode.SCHEMA_MISMATCH
         assert "upgrade" in data["error"].lower()
 
@@ -4006,7 +4042,7 @@ class TestTriggerScanCooldownDB:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "echo-scanner", "file_path": "cooldown_test.py"},
+                    {"approve_execution": True, "scanner": "echo-scanner", "file_path": "cooldown_test.py"},
                 )
             )
             assert result.get("status") == "triggered"
@@ -4016,7 +4052,7 @@ class TestTriggerScanCooldownDB:
             result2 = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "echo-scanner", "file_path": "cooldown_test.py"},
+                    {"approve_execution": True, "scanner": "echo-scanner", "file_path": "cooldown_test.py"},
                 )
             )
             assert result2["code"] == ErrorCode.CONFLICT
@@ -4040,7 +4076,7 @@ class TestTriggerScanCooldownDB:
                 result = _parse(
                     await call_tool(
                         "trigger_scan",
-                        {"scanner": "spawn-fail", "file_path": "spawn_fail.py"},
+                        {"approve_execution": True, "scanner": "spawn-fail", "file_path": "spawn_fail.py"},
                     )
                 )
             assert result["code"] == ErrorCode.IO
@@ -4063,7 +4099,7 @@ class TestTriggerScanCooldownDB:
             result = _parse(
                 await call_tool(
                     "trigger_scan",
-                    {"scanner": "bad-cmd", "file_path": "cmd_fail.py"},
+                    {"approve_execution": True, "scanner": "bad-cmd", "file_path": "cmd_fail.py"},
                 )
             )
             assert result["code"] == ErrorCode.NOT_FOUND

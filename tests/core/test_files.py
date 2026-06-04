@@ -1066,6 +1066,36 @@ class TestProcessScanResults:
         assert "[codex]" in obs[0]["summary"]
         assert obs[0]["priority"] == 1  # high -> P1
 
+    def test_create_observations_link_canonical_file_id_when_registry_normalizes_path(self, tmp_path: Path) -> None:
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=_CasefoldingRegistry())
+        db.initialize()
+        try:
+            result = db.process_scan_results(
+                scan_source="codex",
+                create_observations=True,
+                findings=[
+                    {
+                        "path": "SRC/Main.py",
+                        "rule_id": "logic-error",
+                        "severity": "high",
+                        "message": "Off-by-one in pagination loop",
+                        "line_start": 42,
+                    },
+                ],
+            )
+
+            assert result["observations_created"] == 1
+            finding = db.conn.execute("SELECT file_id FROM scan_findings").fetchone()
+            observation = db.conn.execute("SELECT file_id, file_path FROM observations").fetchone()
+            file_record = db.conn.execute("SELECT id, path FROM file_records").fetchone()
+            assert finding is not None
+            assert observation is not None
+            assert file_record is not None
+            assert observation["file_id"] == finding["file_id"] == file_record["id"]
+            assert observation["file_path"] == file_record["path"] == "src/main.py"
+        finally:
+            db.close()
+
     def test_create_observations_does_not_backfill_existing(self, db: FiligreeDB) -> None:
         finding = {
             "path": "src/main.py",
@@ -1359,31 +1389,27 @@ class TestProcessScanResults:
                 ],
             )
 
-    def test_out_of_range_line_start_for_existing_file_is_cleared(self, db: FiligreeDB, tmp_path: Path) -> None:
-        """Scanner evidence line numbers must not point outside the target file."""
+    def test_out_of_range_line_start_for_existing_file_is_rejected(self, db: FiligreeDB, tmp_path: Path) -> None:
+        """Scanner evidence line numbers must not be erased into file-scope duplicates."""
         db.project_root = tmp_path
         (tmp_path / "target.py").write_text("one\n")
 
-        result = db.process_scan_results(
-            scan_source="codex",
-            findings=[
-                {
-                    "path": "target.py",
-                    "rule_id": "cross-file-evidence",
-                    "severity": "medium",
-                    "message": "Finding cites evidence from another file",
-                    "line_start": 389,
-                    "line_end": 391,
-                },
-            ],
-        )
+        with pytest.raises(ValueError, match="line_start 389 exceeds file length"):
+            db.process_scan_results(
+                scan_source="codex",
+                findings=[
+                    {
+                        "path": "target.py",
+                        "rule_id": "cross-file-evidence",
+                        "severity": "medium",
+                        "message": "Finding cites evidence from another file",
+                        "line_start": 389,
+                        "line_end": 391,
+                    },
+                ],
+            )
 
-        file_record = db.get_file_by_path("target.py")
-        assert file_record is not None
-        finding = db.get_findings(file_record.id)[0]
-        assert finding.line_start is None
-        assert finding.line_end is None
-        assert any("line_start 389" in warning and "target.py has 1 line" in warning for warning in result["warnings"])
+        assert db.get_file_by_path("target.py") is None
 
     def test_non_dict_metadata_rejected(self, db: FiligreeDB) -> None:
         """filigree-ff98665ca3: list metadata must be rejected at ingest."""
@@ -1643,6 +1669,122 @@ class TestScanRunId:
         run = db.get_scan_run("run-source")
         assert findings["c"] == 0
         assert run["status"] == "running"
+
+    def test_unknown_run_completion_emits_no_warning(self, db: FiligreeDB) -> None:
+        """§F6: an enrich-only POST under a scan_run_id with NO scan_runs row
+        skips the completion attempt silently — no "status not updated" warning
+        (there is nothing to complete). Findings still ingest."""
+        result = db.process_scan_results(
+            scan_source="clarion",
+            scan_run_id="never-created-run",
+            findings=[{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
+        )
+        assert result["findings_created"] == 1
+        assert not any("not updated to 'completed'" in w for w in result["warnings"])
+
+    def test_known_run_completes_without_warning(self, db: FiligreeDB) -> None:
+        """A run that EXISTS and is mid-flight transitions to completed cleanly
+        — no warning, and the row lands in 'completed'."""
+        db.create_scan_run(scan_run_id="run-ok", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        db.update_scan_run_status("run-ok", "running")
+        result = db.process_scan_results(
+            scan_source="codex",
+            scan_run_id="run-ok",
+            findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+        )
+        assert not any("not updated to 'completed'" in w for w in result["warnings"])
+        assert db.get_scan_run("run-ok")["status"] == "completed"
+
+    def test_existing_terminal_run_still_warns(self, db: FiligreeDB) -> None:
+        """The real-advisory path is preserved: a run that EXISTS but cannot be
+        transitioned (already terminal) STILL surfaces the completion warning —
+        only the no-row case is suppressed."""
+        db.create_scan_run(scan_run_id="run-done", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        db.update_scan_run_status("run-done", "running")
+        db.update_scan_run_status("run-done", "completed")
+        result = db.process_scan_results(
+            scan_source="codex",
+            scan_run_id="run-done",
+            findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+        )
+        assert result["findings_created"] == 1
+        assert any("not updated to 'completed'" in w for w in result["warnings"])
+
+    def test_existing_nonterminal_run_completion_failure_logs_warning(self, db: FiligreeDB, caplog: pytest.LogCaptureFixture) -> None:
+        """The actually-actionable advisory the suppression change claims to
+        preserve: an EXISTING, NON-terminal run whose completion transition fails
+        is logged at WARNING by ``_complete_scan_run_with_warning`` — distinct
+        from the INFO benign-terminal path.
+
+        A run left in ``pending`` (never advanced to ``running``) cannot make the
+        ``pending -> completed`` hop, so ``update_scan_run_status`` raises; the row
+        is re-queried, found still non-terminal (``pending`` is genuinely not a
+        terminal state), and the failure routes to the WARNING branch. A run that
+        is already terminal — including ``timeout`` — must instead take the benign
+        INFO path; see ``test_terminal_timeout_run_completion_stays_benign_info``.
+
+        The WARNING-level log record is the LOAD-BEARING assertion:
+        ``stats['warnings']`` is appended in BOTH the INFO and WARNING branches
+        (it sits outside the if/else), so ``test_existing_terminal_run_still_warns``
+        already covers that string via the INFO path — only the log level
+        discriminates this branch.
+        """
+        db.create_scan_run(scan_run_id="run-stuck", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        # Deliberately do NOT advance to 'running' — the run stays 'pending'.
+
+        with caplog.at_level(logging.WARNING, logger="filigree.db_files"):
+            result = db.process_scan_results(
+                scan_source="codex",
+                scan_run_id="run-stuck",
+                findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+            )
+
+        # Findings still ingest — a completion failure never blocks ingestion.
+        assert result["findings_created"] == 1
+
+        # Filter on the db_files message so the sibling 'Invalid scan_run
+        # transition' WARNING from filigree.db_scans cannot satisfy this by
+        # accident, and require WARNING level so the INFO terminal branch cannot.
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == "filigree.db_files" and r.levelno == logging.WARNING and "Failed to mark scan run" in r.getMessage()
+        ]
+        assert len(warnings) == 1, [(r.name, r.levelname, r.getMessage()) for r in caplog.records]
+
+    def test_terminal_timeout_run_completion_stays_benign_info(self, db: FiligreeDB, caplog: pytest.LogCaptureFixture) -> None:
+        """A run already in ``timeout`` is terminal, so a late completion attempt
+        is benign and must take the INFO path — NOT the actionable WARNING.
+
+        Regression guard for the terminal-state classification: ``timeout`` is a
+        terminal state in ``_VALID_TRANSITIONS`` (no outbound hops). Before the
+        fix, ``_complete_scan_run_with_warning`` checked only
+        ``("completed", "failed")`` and so logged a spurious WARNING for
+        ``timeout`` runs — exactly the benign noise the suppression change set out
+        to remove. Both branches still append to ``stats['warnings']``, so the
+        ABSENCE of a db_files WARNING record is the discriminating assertion.
+        """
+        db.create_scan_run(scan_run_id="run-timeout", scanner_name="codex", scan_source="codex", file_paths=["a.py"], file_ids=[])
+        db.update_scan_run_status("run-timeout", "running")
+        db.update_scan_run_status("run-timeout", "timeout")
+
+        with caplog.at_level(logging.WARNING, logger="filigree.db_files"):
+            result = db.process_scan_results(
+                scan_source="codex",
+                scan_run_id="run-timeout",
+                findings=[{"path": "a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
+            )
+
+        assert result["findings_created"] == 1
+        # The benign-terminal advisory is still surfaced in stats (both branches do).
+        assert any("not updated to 'completed'" in w for w in result["warnings"])
+        # ...but NOT escalated to a db_files WARNING — that is the load-bearing check.
+        db_files_warnings = [
+            r
+            for r in caplog.records
+            if r.name == "filigree.db_files" and r.levelno == logging.WARNING and "Failed to mark scan run" in r.getMessage()
+        ]
+        assert db_files_warnings == [], [(r.name, r.levelname, r.getMessage()) for r in caplog.records]
 
 
 class TestSuggestionField:
@@ -2062,6 +2204,57 @@ class TestCleanStaleFindings:
         assert dismissed is not None
         assert dismissed["actor"] == "janitor"
         assert "stale" in dismissed["reason"]
+
+    def test_close_cascade_failure_records_reconciliation_comment(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        ingest = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+        finding_id = ingest["new_finding_ids"][0]
+        promoted = db.promote_finding_to_issue(finding_id)
+        issue = promoted["issue"]
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (finding_id,),
+        )
+        db.conn.commit()
+
+        def fail_close_tx(*args: Any, **kwargs: Any) -> bool:
+            raise sqlite3.OperationalError("close cascade boom")
+
+        monkeypatch.setattr(db, "_close_issue_for_fixed_finding_tx", fail_close_tx)
+
+        result = db.clean_stale_findings(days=30)
+
+        assert any("close cascade boom" in warning for warning in result["warnings"])
+        comments = db.get_comments(issue.id)
+        assert any("[reconciliation-debt]" in comment["text"] and finding_id in comment["text"] for comment in comments)
+
+    def test_reopen_cascade_failure_records_reconciliation_comment(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        ingest = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+        finding_id = ingest["new_finding_ids"][0]
+        promoted = db.promote_finding_to_issue(finding_id)
+        issue = promoted["issue"]
+        db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE id = ?", (finding_id,))
+        db.conn.commit()
+        db.close_issue(issue.id, actor="finding-cascade", reason="test cascade close", force=True)
+
+        def fail_reopen(*args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("reopen cascade boom")
+
+        monkeypatch.setattr(db, "reopen_issue", fail_reopen)
+
+        result = db.process_scan_results(
+            scan_source="ruff",
+            findings=[{"path": "a.py", "rule_id": "E501", "severity": "low", "message": "m"}],
+        )
+
+        assert any("reopen cascade boom" in warning for warning in result["warnings"])
+        comments = db.get_comments(issue.id)
+        assert any("[reconciliation-debt]" in comment["text"] and issue.id in comment["text"] for comment in comments)
 
 
 class TestGetFindings:

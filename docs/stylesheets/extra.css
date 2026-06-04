@@ -1,0 +1,336 @@
+/* ==========================================================================
+   Filigree — Loom design system + Filigree accent, layered on Material.
+
+   Strategy (shared with Wardline so the suite stays visually coherent):
+   - Material owns the light/dark toggle. We do NOT add a custom toggle and we
+     do NOT use light-dark()/[data-theme]; we map semantic tokens under
+     Material's own scheme selectors ([data-md-color-scheme="default"|"slate"])
+     and override Material's --md-primary/--md-accent variables there.
+   - The OKLCH ink ramp + spacing/type/radius scale are the shared Loom system,
+     identical to Wardline. The ONLY divergence is the accent hue:
+     Wardline = teal (~195); Filigree = gold/amber (~82) — "filigree" is fine
+     ornamental gold metalwork.
+   ========================================================================== */
+
+:root {
+  /* ---- Loom primitive ramp (OKLCH, perceptually uniform) — shared ---- */
+  /* Slate/ink — shared Loom neutral hue (~255) */
+  --loom-ink-50:  oklch(0.97 0.010 255);
+  --loom-ink-100: oklch(0.93 0.018 255);
+  --loom-ink-200: oklch(0.86 0.028 255);
+  --loom-ink-700: oklch(0.40 0.060 255);
+  --loom-ink-900: oklch(0.22 0.040 255);
+
+  /* Filigree accent — gold/amber (~82) */
+  --fg-gold-200: oklch(0.90 0.060 82);
+  --fg-gold-300: oklch(0.84 0.090 82);
+  --fg-gold-400: oklch(0.77 0.115 82);
+  --fg-gold-500: oklch(0.68 0.120 78);
+  --fg-gold-600: oklch(0.58 0.105 72);
+  --fg-gold-700: oklch(0.50 0.090 68);
+
+  /* ---- Spacing scale (4px base) — shared ---- */
+  --fg-space-1: 0.25rem;
+  --fg-space-2: 0.5rem;
+  --fg-space-3: 0.75rem;
+  --fg-space-4: 1rem;
+  --fg-space-5: 1.5rem;
+  --fg-space-6: 2rem;
+  --fg-space-8: 3rem;
+  --fg-space-10: 4rem;
+
+  /* ---- Fluid type — shared ---- */
+  --fg-text-hero: clamp(2.25rem, 1.6rem + 3vw, 3.5rem);
+  --fg-text-lead: clamp(1.1rem, 1rem + 0.6vw, 1.375rem);
+
+  --fg-radius: 10px;
+  --fg-content-width: 52rem;
+}
+
+/* ---- Material variable overrides: LIGHT scheme ---- */
+[data-md-color-scheme="default"] {
+  /* Deep amber/bronze on white = AA contrast; used for links/headers */
+  --md-primary-fg-color:        var(--fg-gold-700);
+  --md-primary-fg-color--light: var(--fg-gold-500);
+  --md-primary-fg-color--dark:  var(--fg-gold-700);
+  --md-accent-fg-color:         var(--fg-gold-600);
+
+  /* Semantic tokens for landing markup */
+  --fg-bg:          oklch(0.99 0.003 255);
+  --fg-bg-subtle:   oklch(0.975 0.006 255);
+  --fg-bg-card:     oklch(1 0 0);
+  --fg-text:        var(--loom-ink-900);
+  --fg-text-muted:  oklch(0.46 0.020 255);
+  --fg-border:      var(--loom-ink-200);
+  --fg-accent:      var(--fg-gold-700);
+  --fg-accent-soft: oklch(0.95 0.035 85);
+  --fg-on-accent:   oklch(0.99 0.005 85);
+}
+
+/* ---- Material variable overrides: DARK (slate) scheme ---- */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        var(--fg-gold-400);
+  --md-primary-fg-color--light: var(--fg-gold-300);
+  --md-primary-fg-color--dark:  var(--fg-gold-500);
+  --md-accent-fg-color:         var(--fg-gold-300);
+
+  --fg-bg:          oklch(0.21 0.022 255);
+  --fg-bg-subtle:   oklch(0.25 0.022 255);
+  --fg-bg-card:     oklch(0.27 0.024 255);
+  --fg-text:        oklch(0.94 0.012 255);
+  --fg-text-muted:  oklch(0.80 0.018 255);
+  --fg-border:      oklch(0.36 0.024 255);
+  --fg-accent:      var(--fg-gold-300);
+  --fg-accent-soft: oklch(0.32 0.045 78);
+  --fg-on-accent:   oklch(0.18 0.030 78);
+}
+
+/* ==========================================================================
+   Landing page
+   ========================================================================== */
+
+.fg-landing {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 0 var(--fg-space-4) var(--fg-space-10);
+}
+
+/* ---- Hero ---- */
+.fg-hero {
+  text-align: center;
+  padding: var(--fg-space-10) var(--fg-space-3) var(--fg-space-8);
+}
+
+.fg-hero__title {
+  font-size: var(--fg-text-hero);
+  line-height: 1.05;
+  margin: 0 0 var(--fg-space-4);
+  letter-spacing: -0.02em;
+  color: var(--fg-text);
+}
+
+.fg-hero__tagline {
+  font-size: var(--fg-text-lead);
+  line-height: 1.5;
+  color: var(--fg-text-muted);
+  max-width: 42rem;
+  margin: 0 auto var(--fg-space-6);
+}
+
+.fg-hero__cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fg-space-3);
+  justify-content: center;
+}
+
+.fg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: var(--fg-space-3) var(--fg-space-5);
+  border-radius: var(--fg-radius);
+  font-weight: 600;
+  font-size: 1rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.fg-btn--primary {
+  background: var(--fg-accent);
+  color: var(--fg-on-accent);
+}
+.fg-btn--primary:hover,
+.fg-btn--primary:focus-visible {
+  background: var(--fg-gold-600);
+  color: var(--fg-on-accent);
+}
+[data-md-color-scheme="slate"] .fg-btn--primary:hover,
+[data-md-color-scheme="slate"] .fg-btn--primary:focus-visible {
+  background: var(--fg-gold-200);
+}
+
+.fg-btn--secondary {
+  background: transparent;
+  color: var(--fg-text);
+  border-color: var(--fg-border);
+}
+.fg-btn--secondary:hover,
+.fg-btn--secondary:focus-visible {
+  border-color: var(--fg-accent);
+  color: var(--fg-accent);
+}
+
+.fg-btn:focus-visible {
+  outline: 3px solid var(--fg-text);
+  outline-offset: 2px;
+}
+
+/* ---- Feature cards ---- */
+.fg-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--fg-space-4);
+  margin: var(--fg-space-6) 0 var(--fg-space-8);
+}
+
+.fg-feature-card {
+  padding: var(--fg-space-5);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius);
+  background: var(--fg-bg-subtle);
+}
+
+.fg-feature-card h3 {
+  margin: 0 0 var(--fg-space-2);
+  font-size: 1.1rem;
+  color: var(--fg-text);
+}
+
+.fg-feature-card p {
+  margin: 0;
+  color: var(--fg-text-muted);
+  line-height: 1.55;
+}
+
+.fg-feature-card code {
+  background: var(--fg-accent-soft);
+  color: var(--fg-accent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+/* ---- Embedded markdown body (install + quick example) ---- */
+.fg-body {
+  margin: var(--fg-space-8) 0;
+}
+
+/* The markdown body provides its own H2s; give it a top divider for rhythm */
+.fg-body::before {
+  content: "";
+  display: block;
+  border-top: 1px solid var(--fg-border);
+  margin-bottom: var(--fg-space-6);
+}
+
+/* ---- Loom suite ---- */
+.fg-suite {
+  margin-top: var(--fg-space-10);
+  padding-top: var(--fg-space-6);
+  border-top: 1px solid var(--fg-border);
+}
+
+.fg-suite h2 {
+  margin: 0 0 var(--fg-space-2);
+}
+
+.fg-suite__intro {
+  color: var(--fg-text-muted);
+  max-width: 44rem;
+  line-height: 1.55;
+  margin: 0 0 var(--fg-space-5);
+}
+
+.fg-suite__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--fg-space-4);
+}
+
+.fg-suite-card {
+  display: block;
+  padding: var(--fg-space-5);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius);
+  background: var(--fg-bg-card);
+  text-decoration: none;
+  color: var(--fg-text);
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.fg-suite-card:hover,
+.fg-suite-card:focus-visible {
+  border-color: var(--fg-accent);
+  transform: translateY(-2px);
+}
+
+.fg-suite-card:focus-visible {
+  outline: 3px solid var(--fg-accent);
+  outline-offset: 2px;
+}
+
+.fg-suite-card h3 {
+  margin: 0 0 var(--fg-space-2);
+  font-size: 1.1rem;
+  color: var(--fg-accent);
+}
+
+.fg-suite-card p {
+  margin: 0;
+  color: var(--fg-text-muted);
+  line-height: 1.5;
+}
+
+.fg-suite-card--current {
+  border-color: var(--fg-accent);
+  background: var(--fg-accent-soft);
+}
+
+.fg-suite-card--current h3 {
+  color: var(--fg-text);
+}
+
+.fg-suite-card__badge {
+  display: inline-block;
+  margin-top: var(--fg-space-3);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-on-accent);
+  background: var(--fg-accent);
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+}
+
+/* ==========================================================================
+   Footer Loom suite links (copyright partial override) — site-wide
+   ========================================================================== */
+.fg-footer-suite {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--fg-space-3);
+  margin-bottom: var(--fg-space-2);
+  font-size: 0.8rem;
+}
+
+.fg-footer-suite__label {
+  font-weight: 700;
+  opacity: 0.8;
+}
+
+.fg-footer-suite a {
+  color: inherit;
+  text-decoration: none;
+  opacity: 0.85;
+}
+
+.fg-footer-suite a:hover,
+.fg-footer-suite a:focus-visible {
+  text-decoration: underline;
+  opacity: 1;
+}
+
+/* ==========================================================================
+   Reduced motion
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .fg-btn,
+  .fg-suite-card {
+    transition: none;
+  }
+}

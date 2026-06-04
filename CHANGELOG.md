@@ -5,6 +5,198 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-06-02
+
+### Added
+
+- **Opt-in bearer-token auth for the loom federation surface (ADR-018; HTTP
+  generation: `loom`).** When the operator sets `FILIGREE_API_TOKEN`, requests to
+  `/api/loom/*` and the living federation alias `POST /api/scan-results` (incl.
+  server-mode `/api/p/{key}/…` mounts) must carry `Authorization: Bearer <token>`
+  or receive `401 PERMISSION` (with `WWW-Authenticate: Bearer`). Filigree finally
+  honours the token Clarion already sends instead of ignoring it. **Opt-in and
+  wire-compatible:** with the env var unset, behaviour is byte-identical to today
+  (loopback boundary, ADR-012) and the middleware is not installed. A set-but-blank
+  (empty or whitespace) token correctly installs no middleware — a blank string
+  cannot be a secret — but now logs a startup warning so an operator who exported
+  one is not left believing auth is on. The classic
+  surface, the dashboard UI, `/api/health`, and `/` stay open. Reuses
+  `ErrorCode.PERMISSION` (no new error code). Constant-time comparison; a
+  non-ASCII token is a clean 401, not a 500. Gates **access** only — binding a
+  verified identity into `actor` remains future work (`filigree-81d3971467`).
+
+- **Promote-by-fingerprint HTTP route + finding→issue status cascade (Wardline
+  A2).** New `POST /api/loom/findings/promote` turns a single true-positive into
+  a tracked issue keyed on `(scan_source, fingerprint)` — the HTTP surface a
+  scanner (e.g. Wardline) needs when it knows only its own fingerprint and
+  speaks HTTP. Idempotent: re-promoting a fingerprint whose finding already
+  links an issue returns `{"issue_id", "created": false}` with no duplicate; an
+  un-ingested fingerprint returns `404 NOT_FOUND`. `priority` accepts `"P2"` or
+  `2`. Backed by new read-only `find_finding_by_fingerprint` and a `created`
+  flag on `promote_finding_to_issue`; runs on a private worker-thread connection
+  (CONTRACT-E). A finding→issue **status cascade** now keeps the filed issue
+  honest: when a fingerprint-linked finding goes `fixed` via the clean-stale
+  sweep its linked issue is auto-closed, and when the finding regresses to
+  `open` on re-ingest the issue is reopened — but only if the cascade was what
+  closed it (gated on the most recent into-done transition's actor in the event
+  history, so a human's reopen + reclose is always honoured). The cascade is
+  best-effort (a workflow-forbidden close/reopen must not fail the sweep or the
+  ingest), and a failure is now surfaced rather than swallowed: `clean_stale_findings`
+  and the `POST /api/loom/findings/clean-stale` response carry a `warnings[]`
+  field (additive and wire-compatible — mirrors the loom scan-results envelope,
+  which already lifts `warnings` to the top level), and reopen-cascade failures
+  on re-ingest ride out in `stats["warnings"]` (both HTTP envelopes) and are
+  logged per-failure so a systemic "every cascade is failing" is visible in
+  operator logs. `GET /api/loom/findings` gains an optional `fingerprint`
+  filter. No schema change (reuses existing columns and the event log).
+
+- **SEI conformance: locator→SEI backfill + two-axis freshness (ADR-017).**
+  Filigree can now re-key its opaque Clarion entity bindings from mutable
+  locators (`{plugin}:{kind}:{qualname}`) to durable, opaque SEIs
+  (`clarion:eid:<hex>`). New operator-invoked verb `filigree sei-backfill`
+  (default dry-run; `--execute` applies) resolves every stored
+  `entity_associations.clarion_entity_id` — and every historical
+  `deleted_issues.entity_ids` tombstone (so the `affected_entities` change feed
+  is SEI-only after cutover, REQ-F-01) — through Clarion's
+  `POST /api/v1/identity/resolve:batch` and rewrites it **in place** (column
+  name, wire shape, and opaque storage unchanged). Idempotent and resumable: an
+  already-SEI value is skipped, and Clarion rejects SEI-shaped input with 400
+  (REQ-F-02). Unresolvable locators are flagged ORPHAN and kept verbatim — never
+  dropped — via the additive nullable `entity_associations.migration_orphaned_at`
+  column (**schema v22**). The capability probe now reads `_capabilities.sei`
+  and degrades cleanly against a pre-SEI Clarion ("identity unavailable; nothing
+  to migrate"). Conformance is proven, not asserted: the shared §8 oracle runs
+  in `tests/federation/` against both a Clarion stub (fast lane) and a live
+  `clarion serve` (faithful lane). The production cutover run remains
+  owner-scheduled; this verb is the machinery, not the trigger.
+- **Deprecation telemetry for pre-rename MCP tool names.** Every inbound
+  `call_tool` that arrives under an old (pre-ADR-016) tool name is counted so the
+  namespacing cutover can be tracked and the alias window eventually closed. The
+  call still succeeds (see the deprecation window below); the telemetry is
+  hardened so a malformed/old-name call cannot break dispatch.
+
+### Changed (BREAKING)
+
+- **MCP tool names are namespaced `<entity>_<verb>` (ADR-016 §7).** All MCP tool
+  wire names were renamed to an entity-prefixed form so they no longer collide
+  across subsystems — e.g. `get_issue` → `issue_get`, `start_work` →
+  `work_start`, `add_comment` → `comment_add`, `list_findings` → `finding_list`,
+  `observe` → `observation_create`. There is **no** `filigree_` prefix: clients
+  already surface tools as `mcp__filigree__<name>`. `list_tools` now serves only
+  the new names; `mcp_tools/rename.py::RENAME_MAP` is the frozen, CI-validated
+  old→new source of truth.
+
+  **Deprecation window (no hard break yet):** `call_tool` canonicalizes an
+  inbound new name back to its handler and *still accepts the old names* at
+  dispatch, emitting deprecation telemetry per old-name call. Integrations
+  should migrate to the new names now; a future release will remove the
+  aliases. **CLI verbs are unchanged** — only the MCP wire surface moved. (See
+  `docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`.)
+
+### Changed
+
+- **Parallel scan-results ingest.** `_SCAN_RESULTS_LOCK` was removed so two
+  concurrent scan-results POSTs overlap their (slow) Clarion HTTP file-identity
+  resolution instead of serialising; resolution runs before the write window, so
+  the two writers contend only briefly at the WAL writer lock. See the two
+  Fixed entries below for the regressions this exposed and how they were closed.
+
+### Fixed
+
+- **Loom finding routes no longer leak a non-enveloped 500 on a concurrent
+  write.** `POST /api/loom/findings/promote` and `/api/loom/findings/clean-stale`
+  caught only `ValueError`/`sqlite3.Error` (promote) or nothing at all
+  (clean-stale), and there is no app-level catch-all — so an unguarded exception
+  (e.g. a `KeyError` when a concurrent writer hard-deletes the finding/issue
+  between resolve and promote) escaped as a bare Starlette 500 with no
+  `{error, code}` body, breaking the switch-on-code envelope federation
+  consumers depend on. Both routes now mirror the per-route guard idiom from the
+  releases routes: an unexpected exception becomes a properly-enveloped
+  `500 INTERNAL`, and clean-stale additionally maps `sqlite3.Error` to
+  `500 IO`. The promote path is more precise about the hard-delete race — it
+  re-resolves the fingerprint and, only if the finding genuinely vanished,
+  returns `404 NOT_FOUND`; a `KeyError` raised while the finding is still
+  present (a real invariant violation, not a vanished row) is surfaced as
+  `INTERNAL` rather than masked as a benign 404.
+
+- **SEI backfill surfaces a corrupt tombstone instead of silently dropping it.**
+  A `deleted_issues.entity_ids` blob that is corrupt JSON or not a JSON array
+  decoded to `[]`, so the whole tombstone vanished from the backfill with no log,
+  counter, or orphan — violating the module's "never silently drops an orphan"
+  contract (and notably less careful than the sibling breadcrumb on the
+  scan-ingest path). `run_sei_backfill` now emits a `logger.warning` naming the
+  issue and increments a new `tombstones_corrupt` report counter (surfaced in the
+  CLI JSON), on both the dry-run and applied paths; the corrupt row is left
+  verbatim for manual inspection, never rewritten. Only Filigree writes that
+  column, so this signals corruption or tampering rather than a normal path.
+
+- **SEI backfill no longer mass-orphans live bindings on an incomplete Clarion
+  response.** `_parse_sei_resolution` accepted whatever `POST
+  /api/v1/identity/resolve:batch` returned without checking that every
+  *submitted* locator was accounted for — unlike its file-path sibling
+  `_parse_batch_response`, which has always enforced exactly-one-channel
+  completeness. A locator a truncated or buggy Clarion dropped from all three
+  channels (`resolved` / `not_found` / `invalid`) read as `None` downstream,
+  which the backfill could not distinguish from an affirmative orphan: it wrote
+  `migration_orphaned_at` on a live, valid binding and reported it "unresolved".
+  The parse layer now threads the submitted locators through and asserts each
+  appears in exactly one channel, raising `invalid_response` (`cause_kind`) on a
+  missing, unexpected, or multiply-claimed locator. An orphan is now only ever a
+  locator Clarion *affirmatively* returned in `not_found`, never one that fell
+  out of the response.
+
+- **Benign scan-run completion warning suppressed for unknown `scan_run_id`.**
+  An enrich-only producer (e.g. `clarion analyze`) POSTs findings under a
+  `scan_run_id` Filigree never created; the completion step no longer emits a
+  "status not updated" warning for that tolerate-unknown case, so consumers are
+  not trained to ignore `warnings[]`. A real run that exists but cannot be
+  transitioned still surfaces the advisory. Terminal-state runs (now including
+  `timeout`, previously misclassified as non-terminal) are likewise treated as
+  benign and logged at INFO rather than WARNING — the benign/actionable split
+  derives from a single `TERMINAL_SCAN_RUN_STATUSES` constant so it cannot drift
+  from the transition table.
+
+- **Agent-facing runtime prose no longer points at pre-rename tool names.**
+  Session-context (`hooks.py`), project summary (`summary.py`), and the
+  `scan trigger` response still told agents to invoke `list_observations` /
+  `promote_observation` / `dismiss_observation` / `get_scan_status` — names
+  `list_tools` no longer serves. These response/hook strings are not part of the
+  static tool surface, so the existing served-prose guard could not see them;
+  they now use the namespaced names and a new CI guard
+  (`test_no_old_names_in_runtime_prose`) fails on any directive ("Use/Run/Call X")
+  that names a tool by an old name, keeping the runtime surface cut over.
+
+- **Concurrent same-path scan-results ingest no longer fails with a spurious
+  `run migrate-registry` 400 in local / Clarion-fallback mode.** Removing
+  `_SCAN_RESULTS_LOCK` (to let Clarion HTTP resolution overlap) exposed a race
+  the lock had masked: `LocalRegistry.resolve_file` mints a *fresh* id per call,
+  so two concurrent POSTs for the same new path pre-resolve to two different
+  ids. The winner commits; the loser's INSERT hits the `path` UNIQUE constraint,
+  re-reads the committed row, finds an id mismatch, and raised
+  `ValueError(...run migrate-registry...)` — surfaced as an HTTP 400 telling the
+  operator to run an unrelated DB migration. The `_upsert_file_record`
+  id-mismatch guard now adopts the committed row's id when the resolution is a
+  `local` backend (the minted id is arbitrary, so the stored row is
+  authoritative); a stable-id (`clarion`) mismatch is genuine registry drift and
+  still raises. Registry-owned column sync is skipped on the adopt path so a
+  winner's Clarion `content_hash`/`registry_backend` is never clobbered by the
+  loser's empties. Adds same-path concurrent-ingest coverage (deterministic
+  white-box plus a barrier-synchronised end-to-end test).
+
+- **Scan write paths now use the project's writer-lock discipline.**
+  `process_scan_results`, `update_finding`, and `clean_stale_findings` ran their
+  writes in lazy `DEFERRED` transactions with no `BEGIN IMMEDIATE` and no
+  busy-retry — unlike every other write surface — so once `_SCAN_RESULTS_LOCK`
+  was removed they relied solely on `busy_timeout` to avoid `SQLITE_BUSY`, an
+  undocumented guard one refactor (e.g. a `BEGIN`-before-`SELECT`) from breaking.
+  They now acquire the writer lock eagerly via `@_in_immediate_tx` and recover
+  transient `SQLITE_BUSY`/`SQLITE_LOCKED` via `@_retry_busy`, matching
+  `create_issue` et al. `process_scan_results` keeps Clarion HTTP resolution and
+  scan-run completion outside the writer lock (the write window is an extracted
+  retry-safe helper), so the parallel-ingest win is preserved. No behaviour or
+  wire change; transaction atomicity is unchanged (the loop already committed
+  once).
+
 ## [2.2.0] - 2026-05-31
 
 ### Added
@@ -560,8 +752,8 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   A module-level `_SCAN_RESULTS_LOCK` (`asyncio.Lock`) serialises
   concurrent scan-results POSTs to protect the shared
   `sqlite3.Connection` from the race the move-off-event-loop would
-  otherwise enable. True parallelism of scan-results awaits a
-  per-thread connection pool, filed as a 2.2 follow-up
+  otherwise enable. True parallelism of scan-results awaited a
+  per-thread connection pool, later landed in 2.3.0
   (filigree-d4237f486f).
 
 - **Clarion path-normalisation contract documented (CONTRACT-4).**
@@ -726,7 +918,7 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   (`tests/mcp/test_boundary_validation.py`), and HTTP
   (`tests/api/test_api.py::TestActorLengthCapAtHTTPBoundary`).
   Transport-bound identity verification — the "verified actor"
-  enhancement — is tracked as a 2.2+ work package in the filigree
+  enhancement — is tracked as a 2.3.0+ work package in the filigree
   tracker.
 
 - **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0

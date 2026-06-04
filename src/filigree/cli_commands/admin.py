@@ -782,10 +782,15 @@ def clean_stale_findings(ctx: click.Context, days: int, scan_source: str | None,
         result = db.clean_stale_findings(days=days, scan_source=scan_source, actor=ctx.obj["actor"])
         if as_json:
             click.echo(json_mod.dumps(result))
-        elif result["findings_fixed"] > 0:
+            return
+        if result["findings_fixed"] > 0:
             click.echo(f"Fixed {result['findings_fixed']} stale findings (unseen > {days} days)")
         else:
             click.echo("No stale findings to clean")
+        # Surface best-effort finding→issue cascade advisories so a partial
+        # cascade failure is visible in human mode too, not just --json.
+        for warning in result["warnings"]:
+            click.echo(f"Warning: {warning}", err=True)
 
 
 @click.command("compact")

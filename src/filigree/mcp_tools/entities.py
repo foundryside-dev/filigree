@@ -27,6 +27,7 @@ from filigree.mcp_tools.common import (
     _parse_args,
     _text,
     _validate_actor,
+    get_db,
 )
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.core import make_clarion_entity_id, make_content_hash, make_issue_id
@@ -158,10 +159,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.core import WrongProjectError
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, AddEntityAssociationArgs)
-    tracker = _get_db()
+    tracker = get_db()
     issue_id = args.get("issue_id", "")
     entity_id = args.get("entity_id", "")
     content_hash = args.get("content_hash", "")
@@ -196,10 +196,9 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
 
 async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.core import WrongProjectError
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, RemoveEntityAssociationArgs)
-    tracker = _get_db()
+    tracker = get_db()
     issue_id = args.get("issue_id", "")
     entity_id = args.get("entity_id", "")
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -229,10 +228,9 @@ async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[T
 
 async def _handle_list_entity_associations(arguments: dict[str, Any]) -> list[TextContent]:
     from filigree.core import WrongProjectError
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListEntityAssociationsArgs)
-    tracker = _get_db()
+    tracker = get_db()
     issue_id = args.get("issue_id", "")
 
     err = _require_nonempty_str(issue_id, "issue_id")
@@ -259,10 +257,9 @@ async def _handle_list_entity_associations(arguments: dict[str, Any]) -> list[Te
 
 
 async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
 
     args = _parse_args(arguments, ListAssociationsByEntityArgs)
-    tracker = _get_db()
+    tracker = get_db()
     entity_id = args.get("entity_id", "")
 
     err = _require_nonempty_str(entity_id, "entity_id")

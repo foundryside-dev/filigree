@@ -95,11 +95,16 @@ class TestToolAnnotations:
 
 class TestCuratedCatalogue:
     async def test_catalog_present_and_consistent(self, mcp_db: FiligreeDB) -> None:
+        # The catalogue emits the served (namespaced) names, matching list_tools().
+        # TIER_MAP / tier_for / _all_tools are keyed off the OLD/canonical names,
+        # so translate across RENAME_MAP / NEW_TO_OLD when comparing.
+        from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP
+
         data = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
         catalog = data["tool_catalog"]
 
-        # Core list matches the central mapping exactly.
-        expected_core = sorted(name for name, tier in TIER_MAP.items() if tier == "core")
+        # Core list matches the central mapping exactly (served names).
+        expected_core = sorted(RENAME_MAP[name] for name, tier in TIER_MAP.items() if tier == "core")
         assert catalog["core"] == expected_core
 
         # Counts add up to the full surface.
@@ -114,11 +119,15 @@ class TestCuratedCatalogue:
                 for name in names:
                     assert name not in seen, f"{name} listed twice in catalog"
                     seen[name] = tier
-                    assert tier_for(name) == tier, f"{name} catalog tier {tier} != mapping {tier_for(name)}"
-        assert set(seen) == {t.name for t in _all_tools}
+                    canonical = NEW_TO_OLD[name]
+                    assert tier_for(canonical) == tier, f"{name} catalog tier {tier} != mapping {tier_for(canonical)}"
+        assert set(seen) == {RENAME_MAP[t.name] for t in _all_tools}
 
     async def test_catalog_lists_known_core_tools(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
         core = set(data["tool_catalog"]["core"])
-        for expected in ("get_ready", "start_work", "update_issue", "close_issue", "create_issue"):
+        # Served (namespaced) names — old names must be absent.
+        for expected in ("work_ready", "work_start", "issue_update", "issue_close", "issue_create"):
             assert expected in core
+        for old in ("get_ready", "start_work", "update_issue", "close_issue", "create_issue"):
+            assert old not in core

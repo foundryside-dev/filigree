@@ -19,6 +19,10 @@ from filigree.mcp_tools.common import (
     _validate_actor,
     _validate_int_range,
     _validate_str,
+    get_db,
+    get_filigree_dir,
+    refresh_summary,
+    safe_path,
 )
 from filigree.mcp_tools.payloads import (
     file_assoc_to_mcp,
@@ -327,10 +331,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
 
 
 async def _handle_list_files(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, ListFilesArgs)
-    tracker = _get_db()
+    tracker = get_db()
     limit = args.get("limit", 100)
     offset = args.get("offset", 0)
     min_findings = args.get("min_findings")
@@ -382,10 +384,8 @@ async def _handle_list_files(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_file(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetFileArgs)
-    tracker = _get_db()
+    tracker = get_db()
     file_id = args.get("file_id", "")
     if not isinstance(file_id, str) or not file_id.strip():
         return _text(ErrorResponse(error="file_id is required", code=ErrorCode.VALIDATION))
@@ -397,10 +397,8 @@ async def _handle_get_file(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_delete_file_record(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, DeleteFileRecordArgs)
-    tracker = _get_db()
+    tracker = get_db()
     file_id = args.get("file_id", "")
     force = args.get("force", False)
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
@@ -423,10 +421,8 @@ async def _handle_delete_file_record(arguments: dict[str, Any]) -> list[TextCont
 
 
 async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetFileTimelineArgs)
-    tracker = _get_db()
+    tracker = get_db()
     file_id = args.get("file_id", "")
     limit = args.get("limit", 50)
     offset = args.get("offset", 0)
@@ -469,10 +465,8 @@ async def _handle_get_file_timeline(arguments: dict[str, Any]) -> list[TextConte
 
 
 async def _handle_get_issue_files(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetIssueFilesArgs)
-    tracker = _get_db()
+    tracker = get_db()
     issue_id = args.get("issue_id", "")
     if not isinstance(issue_id, str) or not issue_id.strip():
         return _text(ErrorResponse(error="issue_id is required", code=ErrorCode.VALIDATION))
@@ -485,10 +479,8 @@ async def _handle_get_issue_files(arguments: dict[str, Any]) -> list[TextContent
 
 
 async def _handle_add_file_association(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, AddFileAssociationArgs)
-    tracker = _get_db()
+    tracker = get_db()
     file_id = args.get("file_id", "")
     issue_id = args.get("issue_id", "")
     assoc_type = args.get("assoc_type", "")
@@ -527,10 +519,8 @@ async def _handle_add_file_association(arguments: dict[str, Any]) -> list[TextCo
 
 
 async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _get_filigree_dir, _safe_path
-
     args = _parse_args(arguments, RegisterFileArgs)
-    tracker = _get_db()
+    tracker = get_db()
     raw_path = args.get("path", "")
     language = args.get("language", "")
     file_type = args.get("file_type", "")
@@ -549,11 +539,11 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error="metadata must be an object", code=ErrorCode.VALIDATION))
 
     try:
-        target = _safe_path(raw_path)
+        target = safe_path(raw_path)
     except ValueError as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
 
-    filigree_dir = _get_filigree_dir()
+    filigree_dir = get_filigree_dir()
     if filigree_dir is None:
         return _text(ErrorResponse(error="Project directory not initialized", code=ErrorCode.NOT_INITIALIZED))
 
@@ -600,13 +590,11 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_get_finding(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, GetFindingArgs)
     finding_id = args.get("finding_id", "")
     if not isinstance(finding_id, str) or not finding_id.strip():
         return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
-    tracker = _get_db()
+    tracker = get_db()
     try:
         finding = tracker.get_finding(finding_id)
     except KeyError:
@@ -615,10 +603,8 @@ async def _handle_get_finding(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_list_findings(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, ListFindingsArgs)
-    tracker = _get_db()
+    tracker = get_db()
     limit = args.get("limit", 100)
     offset = args.get("offset", 0)
 
@@ -653,8 +639,6 @@ async def _handle_list_findings(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_update_finding(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, UpdateFindingArgs)
     finding_id = args.get("finding_id", "")
     if not isinstance(finding_id, str) or not finding_id.strip():
@@ -667,7 +651,7 @@ async def _handle_update_finding(arguments: dict[str, Any]) -> list[TextContent]
     if status is None and issue_id is None:
         return _text(ErrorResponse(error="At least one of status or issue_id must be provided", code=ErrorCode.VALIDATION))
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         updated = tracker.update_finding(finding_id, status=status, issue_id=issue_id, actor=actor)
     except KeyError:
@@ -678,8 +662,6 @@ async def _handle_update_finding(arguments: dict[str, Any]) -> list[TextContent]
 
 
 async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, BatchUpdateFindingsArgs)
     finding_ids = args.get("finding_ids", [])
     status = args.get("status", "")
@@ -701,7 +683,7 @@ async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextC
     if isinstance(detail, dict):
         return _text(detail)
 
-    tracker = _get_db()
+    tracker = get_db()
     updated_ids: list[str] = []
     updated_records: list[dict[str, Any]] = []
     errors: list[BatchFailure] = []
@@ -732,8 +714,6 @@ async def _handle_batch_update_findings(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db, _refresh_summary
-
     args = _parse_args(arguments, PromoteFindingArgs)
     finding_id = args.get("finding_id", "")
     if not isinstance(finding_id, str) or not finding_id.strip():
@@ -749,7 +729,7 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     if labels is not None and (not isinstance(labels, list) or not all(isinstance(lbl, str) for lbl in labels)):
         return _text(ErrorResponse(error="labels must be a list of strings", code=ErrorCode.VALIDATION))
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
     except KeyError:
@@ -760,7 +740,7 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     except sqlite3.Error as exc:
         _logger.exception("Database error promoting finding %s", finding_id)
         return _text(ErrorResponse(error=f"Database error promoting finding: {exc}", code=ErrorCode.IO))
-    _refresh_summary()
+    refresh_summary()
     response: dict[str, object] = dict(issue_to_public(result["issue"]))
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
@@ -768,8 +748,6 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
 
 
 async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.mcp_server import _get_db
-
     args = _parse_args(arguments, DismissFindingArgs)
     finding_id = args.get("finding_id", "")
     if not isinstance(finding_id, str) or not finding_id.strip():
@@ -803,7 +781,7 @@ async def _handle_dismiss_finding(arguments: dict[str, Any]) -> list[TextContent
         )
     status: FindingStatus = valid_dismiss_statuses[status_arg]
 
-    tracker = _get_db()
+    tracker = get_db()
     try:
         updated = tracker.update_finding(finding_id, status=status, dismiss_reason=reason or None, actor=actor)
     except KeyError:

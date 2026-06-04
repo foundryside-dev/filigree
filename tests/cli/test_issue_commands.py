@@ -245,7 +245,7 @@ class TestUpdateAndClose:
         data = json.loads(result.output)
         assert data["code"] == "INVALID_TRANSITION"
         assert {transition["to"] for transition in data["valid_transitions"]} == {"confirmed", "wont_fix", "not_a_bug"}
-        assert data["hint"] == "Use get_valid_transitions to see allowed state changes"
+        assert data["hint"] == "Use 'filigree transitions <id>' to see allowed state changes"
 
     def test_update_claim_conflict_json_includes_details(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

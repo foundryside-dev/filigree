@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 
+from filigree.cli import cli
+from filigree.cli_common import get_db
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, SUMMARY_FILENAME, VALID_SEVERITIES, FiligreeDB, write_config
 from filigree.db_scans import SCAN_COOLDOWN_SECONDS
 from filigree.mcp_server import call_tool  # type: ignore[attr-defined]
@@ -40,6 +45,31 @@ def _create_run(
     )
 
 
+def _report_finding_link_state(db: FiligreeDB, finding_id: str, observation_id: str) -> dict[str, object]:
+    finding = db.get_finding(finding_id)
+    file_row = db.conn.execute("SELECT path FROM file_records WHERE id = ?", (finding["file_id"],)).fetchone()
+    assert file_row is not None
+    observation = db.conn.execute(
+        "SELECT file_id, file_path, line, source_finding_id, actor FROM observations WHERE id = ?",
+        (observation_id,),
+    ).fetchone()
+    assert observation is not None
+    return {
+        "path": file_row["path"],
+        "rule_id": finding["rule_id"],
+        "message": finding["message"],
+        "severity": finding["severity"],
+        "line_start": finding.get("line_start"),
+        "line_end": finding.get("line_end"),
+        "finding_file_id_present": bool(finding.get("file_id")),
+        "observation_file_id_matches": observation["file_id"] == finding["file_id"],
+        "observation_file_path": observation["file_path"],
+        "observation_line": observation["line"],
+        "source_finding_id_matches": observation["source_finding_id"] == finding_id,
+        "actor": observation["actor"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # TestGetScanStatus (original 2 methods + extensions)
 # ---------------------------------------------------------------------------
@@ -68,7 +98,7 @@ class TestGetScanStatus:
         # Use a PID extremely unlikely to exist
         _create_run(db, pid=9999991)
         db.update_scan_run_status("run-1", "running")
-        status = db.get_scan_status("run-1")
+        status = db.get_scan_status("run-1", reconcile=True)
         # ProcessLookupError → auto-transition to failed
         assert status["status"] == "failed"
         assert status["process_alive"] is False
@@ -506,6 +536,22 @@ class TestReportFindingTool:
         assert data["code"] == ErrorCode.VALIDATION
         assert "catastrophic" in data["error"]
 
+    async def test_non_string_severity_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        """Unhashable JSON values must not escape as raw TypeError."""
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/main.py",
+                    "rule_id": "some-rule",
+                    "message": "A message",
+                    "severity": [],
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "severity" in data["error"]
+
     async def test_missing_file_path_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """Omitting file_path triggers the required-fields validation error."""
         data = _parse(
@@ -701,6 +747,45 @@ class TestReportFindingTool:
         assert data["created_by"] == "my-agent-007"
         assert data["updated_by"] == "my-agent-007"
 
+    async def test_create_observation_refreshes_summary(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        with patch("filigree.mcp_tools.scanners.refresh_summary") as refresh_summary:
+            data = _parse(
+                await call_tool(
+                    "report_finding",
+                    {
+                        "file_path": "src/summary.py",
+                        "rule_id": "needs-refresh",
+                        "message": "Observation should appear in context",
+                        "severity": "medium",
+                        "create_observation": True,
+                    },
+                )
+            )
+
+        assert data["finding_result"] == "created"
+        refresh_summary.assert_called_once()
+
+    async def test_invalid_actor_on_observation_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    "file_path": "src/bad-actor.py",
+                    "rule_id": "bad-actor-rule",
+                    "message": "Finding with invalid actor",
+                    "actor": "\nbad",
+                    "create_observation": True,
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "control" in data["error"].lower()
+        row = mcp_db_for_report_finding.conn.execute(
+            "SELECT COUNT(*) AS c FROM observations WHERE file_path = ?",
+            ("src/bad-actor.py",),
+        ).fetchone()
+        assert row["c"] == 0
+
     async def test_observation_links_back_to_finding(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """report_finding creates an observation with source_finding_id linking
         back to the finding (filigree-cb980eee0d, P1.2). The dual-write that
@@ -728,6 +813,77 @@ class TestReportFindingTool:
         ).fetchone()
         assert row is not None
         assert row["source_finding_id"] == finding_id
+
+    async def test_cli_and_mcp_report_finding_normalization_parity(
+        self,
+        mcp_db_for_report_finding: FiligreeDB,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """CLI and MCP should share scanner-report orchestration and linkage."""
+        payload = {
+            "file_path": "src/foo.py",
+            "rule_id": "line-too-high",
+            "message": "Line attribution should be normalized",
+            "severity": "high",
+            "line_start": 389,
+            "line_end": 391,
+        }
+
+        mcp_root = mcp_db_for_report_finding.project_root
+        assert mcp_root is not None
+        (mcp_root / "src").mkdir()
+        (mcp_root / "src/foo.py").write_text("x = 1\n", encoding="utf-8")
+        mcp_data = _parse(
+            await call_tool(
+                "report_finding",
+                {
+                    **payload,
+                    "actor": "scanner-agent",
+                    "create_observation": True,
+                    "response_detail": "full",
+                },
+            )
+        )
+        assert mcp_data["finding_result"] == "created"
+        assert "line_start 389 exceeds file length" in mcp_data["warnings"][0]
+        mcp_state = _report_finding_link_state(
+            mcp_db_for_report_finding,
+            mcp_data["finding_id"],
+            mcp_data["observation_id"],
+        )
+
+        cli_project = tmp_path_factory.mktemp("report-finding-cli")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(cli_project))
+        try:
+            init_result = runner.invoke(cli, ["init", "--prefix", "test"])
+            assert init_result.exit_code == 0, init_result.output
+            (cli_project / "src").mkdir()
+            (cli_project / "src/foo.py").write_text("x = 1\n", encoding="utf-8")
+            cli_data_result = runner.invoke(
+                cli,
+                [
+                    "report-finding",
+                    "--json",
+                    "--response-detail",
+                    "full",
+                    "--create-observation",
+                    "--actor",
+                    "scanner-agent",
+                ],
+                input=json.dumps({**payload, "path": payload["file_path"]}),
+            )
+            assert cli_data_result.exit_code == 0, cli_data_result.output
+            cli_data = json.loads(cli_data_result.output)
+            assert cli_data["status"] == "created"
+            assert "line_start 389 exceeds file length" in cli_data["warnings"][0]
+            with get_db() as cli_db:
+                cli_state = _report_finding_link_state(cli_db, cli_data["finding_id"], cli_data["observation_id"])
+        finally:
+            os.chdir(original)
+
+        assert cli_state == mcp_state
 
     async def test_dismiss_finding_cascades_to_observation(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         """dismiss_finding auto-dismisses the linked observation (P1.2)."""

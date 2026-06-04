@@ -6,6 +6,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -922,6 +923,32 @@ class TestReparenting:
         with pytest.raises(ValueError, match="circular"):
             db.update_issue(grandparent.id, parent_id=child.id)
 
+    def test_existing_parent_loop_is_detected_without_unbounded_walk(self, db: FiligreeDB) -> None:
+        class _Cursor:
+            def __init__(self, parent_id: str | None) -> None:
+                self._parent_id = parent_id
+
+            def fetchone(self) -> dict[str, str] | None:
+                if self._parent_id is None:
+                    return None
+                return {"parent_id": self._parent_id}
+
+        class _LoopingConn:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def execute(self, _sql: str, params: tuple[Any, ...]) -> _Cursor:
+                self.calls += 1
+                if self.calls > 4:
+                    raise AssertionError("parent-cycle traversal did not stop")
+                parent_map = {"parent-a": "parent-b", "parent-b": "parent-a"}
+                return _Cursor(parent_map.get(str(params[0])))
+
+        class _FakeDB:
+            conn = _LoopingConn()
+
+        assert type(db)._would_create_parent_cycle(_FakeDB(), "child", "parent-a") is True
+
     def test_clear_parent_id(self, db: FiligreeDB) -> None:
         parent = db.create_issue("Parent")
         child = db.create_issue("Child", parent_id=parent.id)
@@ -1392,6 +1419,7 @@ class TestImportJsonl:
                 "content_hash_at_attach": "hash-a",
                 "attached_at": attached["attached_at"],
                 "attached_by": "alice",
+                "migration_orphaned_at": None,
             }
         ]
 

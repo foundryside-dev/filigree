@@ -216,3 +216,9 @@ class CleanStaleResult(TypedDict):
     """Shape returned by ``clean_stale_findings()``."""
 
     findings_fixed: int
+    closed_issue_ids: list[str]
+    #: Operator-facing advisories from the best-effort finding→issue cascade —
+    #: e.g. a linked issue whose close could not be completed. Empty on the
+    #: happy path. Surfaced so a caller (CLI ``--json``, the loom HTTP envelope)
+    #: learns a cascade close partially failed instead of it dying in the logs.
+    warnings: list[str]

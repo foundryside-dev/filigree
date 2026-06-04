@@ -5,7 +5,7 @@
 
 import { fetchActivity, fetchMetrics, fetchObservationStats } from "../api.js";
 import { state, THEME_COLORS } from "../state.js";
-import { escHtml, escJsSingle } from "../ui.js";
+import { escHtml, escJsSingleAttr } from "../ui.js";
 import { renderActivitySection } from "./activity.js";
 
 /**
@@ -277,7 +277,7 @@ export function showStaleIssues() {
         const hrs = Math.floor((Date.now() - new Date(i.updated_at).getTime()) / 3600000);
         return (
           "<button onclick=\"document.getElementById('staleModal').remove();openDetail('" +
-          escJsSingle(i.id) +
+          escJsSingleAttr(i.id) +
           "')\" " +
           'class="text-xs text-left bg-overlay bg-overlay-hover px-3 py-2 rounded" style="color:var(--text-primary)">' +
           escHtml(i.title.slice(0, 40)) +

@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────
 
 DEFAULT_SCANNER_API_URL = "http://localhost:8377"
+DEFAULT_SCANNER_API_TOKEN_ENV = "FILIGREE_FEDERATION_API_TOKEN"  # noqa: S105 - env var name, not a token value
+LEGACY_SCANNER_API_TOKEN_ENV = "FILIGREE_API_TOKEN"  # noqa: S105 - env var name, not a token value
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -145,6 +147,27 @@ _CATEGORY_KEYWORDS = {
     "deprecated": "api-misuse",
     "misuse": "api-misuse",
 }
+
+
+def _is_no_finding_section(section: str) -> bool:
+    normalized = section.strip().strip("\"'").strip()
+    return bool(re.fullmatch(r"No concrete bug found(?:\b.*)?", normalized, re.IGNORECASE))
+
+
+def _extract_evidence_line(evidence: str, *, file_path: str = "") -> int | None:
+    if not evidence:
+        return None
+    if file_path:
+        path_m = re.search(rf"(?<![\w./-]){re.escape(file_path)}:(\d+)\b", evidence)
+        if path_m:
+            return int(path_m.group(1))
+    citation_m = re.search(r"(?:^|[\s`(])[\w./-]+\.[A-Za-z0-9_]+:(\d+)\b", evidence)
+    if citation_m:
+        return int(citation_m.group(1))
+    line_m = re.search(r"\bline\s+(\d+)\b", evidence, re.IGNORECASE)
+    if line_m:
+        return int(line_m.group(1))
+    return None
 
 
 # ── File discovery ──────────────────────────────────────────────────────
@@ -266,8 +289,9 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
         if not section:
             continue
 
-        # Skip "No concrete bug found" sentinel
-        if "No concrete bug found" in section:
+        # Skip only the standalone "No concrete bug found" sentinel. A real
+        # finding may cite that phrase inside evidence or root-cause text.
+        if _is_no_finding_section(section):
             continue
 
         # Extract ## Summary
@@ -295,9 +319,9 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
         # Infer rule_id from summary text — strip any newlines
         rule_id = _infer_rule_id(summary).strip().replace("\n", "")
 
-        # Extract line number from evidence if possible
-        line_m = re.search(r":(\d+)", evidence)
-        line_start = int(line_m.group(1)) if line_m else None
+        # Extract line number from file citations, avoiding unrelated colons
+        # such as URL schemes and localhost ports in evidence text.
+        line_start = _extract_evidence_line(evidence, file_path=file_path)
 
         message = summary
         if root_cause:
@@ -321,6 +345,13 @@ def parse_findings(text: str, *, file_path: str = "") -> list[dict[str, Any]]:
 # ── API posting ─────────────────────────────────────────────────────────
 
 
+def _resolve_api_token_from_env(api_token_env: str) -> str | None:
+    api_token = os.environ.get(api_token_env, "").strip()
+    if api_token or api_token_env != DEFAULT_SCANNER_API_TOKEN_ENV:
+        return api_token or None
+    return os.environ.get(LEGACY_SCANNER_API_TOKEN_ENV, "").strip() or None
+
+
 def post_to_api(
     *,
     api_url: str,
@@ -329,6 +360,7 @@ def post_to_api(
     findings: list[dict[str, Any]],
     create_observations: bool = False,
     complete_scan_run: bool = True,
+    api_token: str | None = None,
 ) -> tuple[bool, str]:
     """POST findings to filigree's scan API.
 
@@ -340,6 +372,7 @@ def post_to_api(
         create_observations: If True, auto-promote findings to observations for triage.
         complete_scan_run: If False, don't mark the scan run as completed.
             Use for batch scans where multiple POSTs share a scan_run_id.
+        api_token: Optional bearer token for token-gated scanner callback endpoints.
 
     Returns:
         ``(True, "")`` on success, ``(False, error_detail)`` on failure.
@@ -357,16 +390,28 @@ def post_to_api(
     if not complete_scan_run:
         payload["complete_scan_run"] = False
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
     req = urllib.request.Request(  # noqa: S310
         endpoint,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-            body = json.loads(resp.read().decode("utf-8"))
+            try:
+                body = json.loads(resp.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                detail = f"API success response was not a JSON object: {e}"
+                logger.warning("%s (endpoint: %s)", detail, endpoint)
+                return False, detail
+            if not isinstance(body, dict):
+                detail = f"API success response was not a JSON object: {type(body).__name__}"
+                logger.warning("%s (endpoint: %s)", detail, endpoint)
+                return False, detail
             # Log any severity coercion warnings from the API [B2]
             for w in body.get("warnings", []):
                 logger.warning("API warning: %s", w)
@@ -548,6 +593,7 @@ async def _analyse_files(
     scan_source: str,
     executor: Any,
     prompt_template: str,
+    api_token: str | None = None,
     cache_warmup: bool = True,
 ) -> dict[str, int]:
     """Run analysis on all files in batches. Returns summary stats."""
@@ -599,6 +645,7 @@ async def _analyse_files(
             findings=findings,
             create_observations=True,
             complete_scan_run=False,
+            api_token=api_token,
         )
         if ok:
             api_successes += 1
@@ -670,16 +717,17 @@ async def _analyse_files(
     for batch_start in range(0, len(remaining_files), batch_size):
         await run_batch(remaining_files[batch_start : batch_start + batch_size])
 
-    # Send a final completion POST with empty findings to mark the scan run
-    # as completed.  Per-file POSTs above used complete_scan_run=False to
-    # avoid prematurely completing batch scan runs (Bug #2 + #4 fix).
-    if not no_ingest and scan_run_id:
+    # Send a final completion POST only when every local execution/report read
+    # and finding-ingest POST succeeded. Otherwise the parent scanner process
+    # exits non-zero; the scan run must not be marked completed falsely.
+    if not no_ingest and scan_run_id and not failed and api_failures == 0:
         ok, err_detail = post_to_api(
             api_url=api_url,
             scan_source=scan_source,
             scan_run_id=scan_run_id,
             findings=[],
             complete_scan_run=True,
+            api_token=api_token,
         )
         if not ok:
             print(f"  API error completing scan run: {err_detail}", file=sys.stderr)
@@ -704,7 +752,7 @@ async def _analyse_files(
         finding_sections = [
             section
             for raw in re.split(r"\n---+\n", text)
-            if (section := raw.strip()) and "No concrete bug found" not in section and re.search(r"##\s*Summary", section)
+            if (section := raw.strip()) and not _is_no_finding_section(section) and re.search(r"##\s*Summary", section)
         ]
         if not finding_sections:
             stats["clean"] += 1
@@ -766,6 +814,11 @@ async def run_scanner_pipeline(
     parser.add_argument("--dry-run", action="store_true", help="List files with count and token estimate")
     parser.add_argument("--max-files", type=int, default=50, help="Maximum files to scan (default: 50)")
     parser.add_argument("--api-url", default=None, help="Filigree dashboard URL")
+    parser.add_argument(
+        "--api-token-env",
+        default=DEFAULT_SCANNER_API_TOKEN_ENV,
+        help=f"Environment variable carrying the Filigree API bearer token (default: {DEFAULT_SCANNER_API_TOKEN_ENV})",
+    )
     parser.add_argument("--no-ingest", action="store_true", help="Skip API POST (markdown-only mode)")
     parser.add_argument("--scan-run-id", default=None, help="External scan run ID")
     parser.add_argument("--prompt", default="bug-hunt", help="Bundled prompt pack to use")
@@ -840,6 +893,11 @@ async def run_scanner_pipeline(
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    api_token_env = args.api_token_env.strip()
+    if not api_token_env:
+        print("Error: --api-token-env must be a non-empty environment variable name", file=sys.stderr)
+        return 1
+    api_token = _resolve_api_token_from_env(api_token_env)
 
     model_display = f", model={args.model}" if args.model else ""
     print(f"Analysing {len(files)} files (batch={args.batch_size}{model_display}) ...", file=sys.stderr)
@@ -864,6 +922,7 @@ async def run_scanner_pipeline(
         scan_source=scan_source,
         executor=executor,
         prompt_template=template,
+        api_token=api_token,
         cache_warmup=not args.no_cache_warmup,
     )
 
