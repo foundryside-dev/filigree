@@ -991,6 +991,7 @@ class FiligreeDB(
         registry_backend: RegistryBackend = "local",
         clarion_config: ClarionConfig | None = None,
         skip_clarion_capability_probe: bool = False,
+        verified_actor: str | None = None,
     ) -> None:
         # ``skip_clarion_capability_probe`` exists for unit tests that stand up
         # stub HTTP servers serving only ``/api/v1/files``; production callers
@@ -1014,6 +1015,11 @@ class FiligreeDB(
         self.enabled_packs = self._enabled_packs_override if self._enabled_packs_override is not None else ["core", "planning", "release"]
         self._conn: sqlite3.Connection | None = None
         self._check_same_thread = check_same_thread
+        # ADR-012 (schema v24): the transport-verified identity for this session,
+        # set once at the entry point (CLI get_db / MCP _init_db). None = no
+        # transport proof; every runtime insert stamps this into verified_*.
+        # ``borrow_for_worker_thread`` propagates it for free via copy.copy.
+        self._verified_actor: str | None = verified_actor
         # Whether this instance owns (and must close) ``self.registry``.
         # ``borrow_for_worker_thread`` clones share the registry by reference
         # and set this False so tearing the clone down never closes the
@@ -1609,6 +1615,16 @@ class FiligreeDB(
         close_registry = getattr(self.registry, "close", None)
         if callable(close_registry):
             close_registry()
+
+    def set_verified_actor(self, value: str | None) -> None:
+        """Set the transport-verified identity for this session.
+
+        Entry points (CLI ``get_db``, MCP ``_init_db``) construct the DB before
+        resolving identity, then call this. Every subsequent runtime write
+        stamps ``value`` into its ``verified_*`` column. ``None`` (the default)
+        leaves writes unverified (``verified_* = NULL``).
+        """
+        self._verified_actor = value
 
     @contextlib.contextmanager
     def borrow_for_worker_thread(self) -> Iterator[FiligreeDB]:

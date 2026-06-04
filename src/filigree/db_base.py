@@ -291,6 +291,10 @@ class DBMixinProtocol(Protocol):
     registry_backend: RegistryBackend
     allow_local_fallback: bool
     _conn: sqlite3.Connection | None
+    # ADR-012 (schema v24): transport-verified session identity. Mixins read
+    # this directly when stamping verified_* columns. Set on FiligreeDB.__init__
+    # (defaults to None); never None-guarded at insert sites.
+    _verified_actor: str | None
     _template_registry: TemplateRegistry | None
     _enabled_packs_override: list[str] | None
 
