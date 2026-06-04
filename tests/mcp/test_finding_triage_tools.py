@@ -467,6 +467,7 @@ class TestPromoteFindingTool:
         assert "id" not in data
         assert "observation_id" not in data
         assert data["type"] == "bug"
+        assert data["fields"]["severity"] == "critical"
         assert "SQL injection" in data["title"]
         assert "from-finding" in data["labels"]
         assert mcp_db.get_finding(ids["sqli"])["issue_id"] == data["issue_id"]
@@ -506,6 +507,27 @@ class TestPromoteFindingTool:
         data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["cluster:mcp"]}))
 
         assert set(data["labels"]) == {"from-finding", "cluster:mcp"}
+
+    async def test_promote_and_attach_entity(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+
+        data = _parse(
+            await call_tool(
+                "promote_finding_and_attach_entity",
+                {
+                    "finding_id": ids["sqli"],
+                    "entity_id": "clarion:eid:mcp",
+                    "content_hash": "hash-v1",
+                    "entity_kind": "function",
+                    "actor": "mcp-agent",
+                },
+            )
+        )
+
+        assert data["issue_id"]
+        assert data["association"]["entity_id"] == "clarion:eid:mcp"
+        assert data["association"]["entity_kind"] == "function"
+        assert mcp_db.list_entity_associations(data["issue_id"])[0]["content_hash_at_attach"] == "hash-v1"
 
     async def test_promote_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("promote_finding", {"finding_id": "nonexistent"}))

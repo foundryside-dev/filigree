@@ -399,12 +399,11 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
   ON annotation_closeout_acknowledgements(target_type, target_id);
 
 -- ---- Cross-product entity associations (ADR-029) --------------------------
--- Binds Filigree issues to Clarion entities (functions, classes, modules).
--- The clarion_entity_id is OPAQUE to Filigree — no grammar parsing, no
--- CHECK constraint on its shape. Filigree does not know what a "Clarion
--- entity" is; it stores the ID as a string and hands content_hash back at
--- query time so Clarion can detect drift. This preserves the federation
--- enrich-only rule (loom.md §5).
+-- Binds Filigree issues to opaque external entities.
+-- The historical clarion_entity_id column name is retained for compatibility,
+-- but the value is OPAQUE to Filigree: no grammar parsing, no CHECK constraint
+-- on its shape, and no inference of kind from the ID string. Callers may supply
+-- entity_kind metadata explicitly when they already know it.
 
 -- ``migration_orphaned_at`` (v22) supports the locator→SEI backfill (ADR-038
 -- §7). NULL is the healthy/default state. A non-NULL ISO timestamp marks a row
@@ -420,6 +419,7 @@ CREATE TABLE IF NOT EXISTS entity_associations (
     attached_at             TEXT NOT NULL,
     attached_by             TEXT NOT NULL,
     migration_orphaned_at   TEXT,
+    entity_kind             TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (issue_id, clarion_entity_id)
 );
 
@@ -572,4 +572,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23

@@ -18,10 +18,18 @@ from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRu
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
+    from filigree.db_entity_associations import EntityAssociationRow
     from filigree.registry import RegistryProtocol
     from filigree.templates import TemplateRegistry, TransitionOption
     from filigree.types.api import BatchFailure
-    from filigree.types.core import ObservationDict, ObservationLinkDict, ScanFindingDict
+    from filigree.types.core import (
+        ClarionEntityId,
+        ContentHash,
+        IssueId,
+        ObservationDict,
+        ObservationLinkDict,
+        ScanFindingDict,
+    )
     from filigree.types.files import ScanRunDict
     from filigree.types.planning import CommentRecord
 
@@ -467,6 +475,19 @@ class DBMixinProtocol(Protocol):
     def get_file(self, file_id: str) -> FileRecord: ...
     def add_file_association(self, file_id: str, issue_id: str, assoc_type: AssocType, *, actor: str = "") -> None: ...
     def get_finding(self, finding_id: str) -> ScanFindingDict: ...
+
+    # -- EntityAssociationsMixin ---------------------------------------------
+
+    def add_entity_association(
+        self,
+        issue_id: IssueId,
+        entity_id: ClarionEntityId,
+        content_hash: ContentHash,
+        *,
+        actor: str = "",
+        entity_kind: str | None = None,
+        _skip_begin: bool = False,
+    ) -> EntityAssociationRow: ...
 
     # -- ObservationsMixin ---------------------------------------------------
 

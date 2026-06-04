@@ -68,9 +68,25 @@ class TestAddEntityAssociationHTTP:
         )
         assert resp.status_code == 201
         body = resp.json()
+        assert body["entity_id"] == "py:func:tokenize"
         assert body["clarion_entity_id"] == "py:func:tokenize"
         assert body["content_hash_at_attach"] == "hash-a"
         assert body["attached_by"] == "alice"
+
+    async def test_attach_preserves_optional_entity_kind(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={
+                "entity_id": "not-a-clarion-locator",
+                "content_hash": "hash-a",
+                "entity_kind": "function",
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["entity_id"] == "not-a-clarion-locator"
+        assert body["entity_kind"] == "function"
 
     async def test_attach_idempotent_refreshes_hash(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         issue_id = dashboard_db.ids["a"]
@@ -168,7 +184,27 @@ class TestListAssociationsByEntityHTTP:
         assert resp.status_code == 200
         body = resp.json()
         assert {row["issue_id"] for row in body["associations"]} == {a_id, b_id}
+        assert all(row["entity_id"] == target for row in body["associations"])
         assert all(row["clarion_entity_id"] == target for row in body["associations"])
+
+    async def test_current_content_hash_marks_freshness(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        a_id = dashboard_db.ids["a"]
+        target = "clarion:eid:fresh"
+        dashboard_db.db.add_entity_association(a_id, target, content_hash="hash-a")
+
+        fresh = await client.get(
+            "/api/entity-associations",
+            params={"entity_id": target, "current_content_hash": "hash-a"},
+        )
+        stale = await client.get(
+            "/api/entity-associations",
+            params={"entity_id": target, "current_content_hash": "hash-b"},
+        )
+
+        assert fresh.status_code == 200
+        assert stale.status_code == 200
+        assert fresh.json()["associations"][0]["freshness_status"] == "fresh"
+        assert stale.json()["associations"][0]["freshness_status"] == "stale"
 
     async def test_foreign_looking_entity_id_is_opaque_lookup_key(self, client: AsyncClient) -> None:
         resp = await client.get("/api/entity-associations", params={"entity_id": "other-1234567890"})

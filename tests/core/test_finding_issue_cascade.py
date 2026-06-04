@@ -179,6 +179,28 @@ class TestCloseOnFixed:
         assert issue.id not in result["closed_issue_ids"]  # cascade close failed
         assert any(f"cascade close of issue {issue.id} failed" in w for w in result["warnings"])
 
+    def test_sibling_open_finding_blocks_clean_stale_close(self, db: FiligreeDB) -> None:
+        """The sibling-open guard protects the clean-stale path too (shared tx):
+        archiving one of an issue's findings to ``fixed`` must not close the
+        issue while another linked finding is still open."""
+        a_id = _ingest(db, "fp-cs-sibA")  # src/a.py
+        issue = db.promote_finding_to_issue(a_id, actor="t")["issue"]
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/b.py", "fp-cs-sibB")])
+        b_id = db.find_finding_by_fingerprint("wardline", "fp-cs-sibB")["id"]  # type: ignore[index]
+        db.update_finding(b_id, issue_id=issue.id, actor="t")
+        # Age A into the stale window; B stays open.
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (a_id,),
+        )
+        db.conn.commit()
+
+        result = db.clean_stale_findings(days=30)
+
+        assert result["findings_fixed"] == 1  # A archived to fixed
+        assert issue.id not in result["closed_issue_ids"]  # B still open → not closed
+        assert not _is_done(db, issue.id)
+
 
 class TestReopenOnRegress:
     def _auto_close(self, db: FiligreeDB, fingerprint: str = "fp-abc") -> tuple[str, str]:
@@ -272,3 +294,231 @@ class TestReopenOnRegress:
         assert any("reopen cascade" in r.message for r in caplog.records)
         # The reopen genuinely failed → issue stays closed.
         assert _is_done(db, issue_id)
+
+
+class TestCloseOnFixedFromIngest:
+    """Close-on-fixed fires eagerly from scan ingest, not just from the
+    age-gated ``clean_stale_findings`` sweep.
+
+    The product gap this closes: when an agent fixes the last/only finding in a
+    file and re-scans, that file is clean — it carries zero findings in the
+    batch. The per-(file, scan_source) unseen sweep only visits files present in
+    the batch, so without ``scanned_paths`` the fixed file is never swept and the
+    linked issue never closes. Wardline already emits ``scanned_paths`` (the full
+    scanned-file set incl. clean files) and ``mark_unseen=True``; ingest now
+    consumes both. NONE of these tests use a same-file "decoy" finding — the
+    fixed file is present solely via ``scanned_paths``.
+    """
+
+    def test_fix_only_finding_in_file_closes_issue_no_decoy(self, db: FiligreeDB) -> None:
+        """The headline DoD: fix the only finding in a file → re-scan with the
+        file present solely via ``scanned_paths`` → finding goes unseen AND the
+        linked issue closes. No decoy finding keeps the file in the batch."""
+        finding_id = _ingest(db, "fp-fix")  # src/a.py
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        assert not _is_done(db, issue.id)
+
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[],
+            scanned_paths=["src/a.py"],
+            mark_unseen=True,
+        )
+
+        assert db.get_finding(finding_id)["status"] == "unseen_in_latest"
+        assert _is_done(db, issue.id)
+
+    def test_mixed_file_closes_only_the_disappeared_finding(self, db: FiligreeDB) -> None:
+        """A file with one surviving and one fixed finding: only the disappeared
+        finding goes unseen and only its issue closes; the survivor is untouched."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/a.py", "fp-stays"), _wln("src/a.py", "fp-goes")],
+        )
+        f_stays = db.find_finding_by_fingerprint("wardline", "fp-stays")["id"]  # type: ignore[index]
+        f_goes = db.find_finding_by_fingerprint("wardline", "fp-goes")["id"]  # type: ignore[index]
+        issue_stays = db.promote_finding_to_issue(f_stays, actor="t")["issue"]
+        issue_goes = db.promote_finding_to_issue(f_goes, actor="t")["issue"]
+
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/a.py", "fp-stays")],
+            scanned_paths=["src/a.py"],
+            mark_unseen=True,
+        )
+
+        assert db.get_finding(f_goes)["status"] == "unseen_in_latest"
+        assert db.get_finding(f_stays)["status"] != "unseen_in_latest"
+        assert _is_done(db, issue_goes.id)
+        assert not _is_done(db, issue_stays.id)
+
+    def test_reingest_reopens_after_close_from_ingest(self, db: FiligreeDB) -> None:
+        """Reopen-on-regress still works on top of the ingest close: a finding
+        that reappears reopens the issue the ingest cascade had closed."""
+        finding_id = _ingest(db, "fp-re")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.process_scan_results(scan_source="wardline", findings=[], scanned_paths=["src/a.py"], mark_unseen=True)
+        assert _is_done(db, issue.id)
+
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-re")])
+
+        assert not _is_done(db, issue.id)
+        assert db.get_finding(finding_id)["status"] == "open"
+
+    def test_human_closed_issue_neither_reclosed_nor_reopened(self, db: FiligreeDB) -> None:
+        """A human's terminal decision is the authority: the ingest cascade does
+        not re-close it (the ``== "done"`` guard), and a later regress does not
+        reopen it (the reopen gate sees the human actor, not the cascade)."""
+        finding_id = _ingest(db, "fp-h")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.close_issue(issue.id, actor="human", force=True)
+
+        # Clean re-scan: cascade must not touch a human-closed issue.
+        db.process_scan_results(scan_source="wardline", findings=[], scanned_paths=["src/a.py"], mark_unseen=True)
+        assert _is_done(db, issue.id)
+
+        # Finding regresses: must not reopen over the human decision.
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-h")])
+        assert _is_done(db, issue.id)
+
+    def test_idempotent_with_clean_stale(self, db: FiligreeDB) -> None:
+        """After the ingest cascade closes an issue, clean-stale archiving the
+        now-unseen finding to ``fixed`` must not error or re-close (the issue is
+        already done — clean-stale's close hits the ``== "done"`` guard)."""
+        finding_id = _ingest(db, "fp-idem")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.process_scan_results(scan_source="wardline", findings=[], scanned_paths=["src/a.py"], mark_unseen=True)
+        assert _is_done(db, issue.id)
+
+        # Age the unseen finding into the stale window, then sweep.
+        db.conn.execute(
+            "UPDATE scan_findings SET last_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (finding_id,),
+        )
+        db.conn.commit()
+        result = db.clean_stale_findings(days=30)
+
+        assert result["findings_fixed"] == 1
+        assert db.get_finding(finding_id)["status"] == "fixed"
+        assert issue.id not in result["closed_issue_ids"]  # already done → no re-close
+        assert _is_done(db, issue.id)
+
+    def test_no_spurious_close_when_finding_still_present(self, db: FiligreeDB) -> None:
+        """A re-POST that re-includes the finding (and its file in scanned_paths)
+        closes nothing: the finding is still seen, so it never transitions."""
+        finding_id = _ingest(db, "fp-keep")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/a.py", "fp-keep")],
+            scanned_paths=["src/a.py"],
+            mark_unseen=True,
+        )
+
+        assert db.get_finding(finding_id)["status"] == "open"
+        assert not _is_done(db, issue.id)
+
+    def test_empty_batch_without_scanned_paths_still_rejected(self, db: FiligreeDB) -> None:
+        """The empty-batch guard still fires when there is genuinely nothing to
+        sweep — no findings AND no scanned_paths."""
+        with pytest.raises(ValueError, match="at least one finding or scanned path"):
+            db.process_scan_results(scan_source="wardline", findings=[], scanned_paths=[], mark_unseen=True)
+
+    def test_unknown_scanned_path_is_a_noop(self, db: FiligreeDB) -> None:
+        """A scanned path with no prior file record is skipped (lookup, not
+        upsert) — no error, nothing swept."""
+        stats = db.process_scan_results(
+            scan_source="wardline",
+            findings=[],
+            scanned_paths=["never/seen.py"],
+            mark_unseen=True,
+        )
+        assert stats["findings_created"] == 0
+
+    def test_close_cascade_failure_surfaced_in_warnings_and_logged(
+        self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed best-effort close rides out in ``stats["warnings"]`` (the
+        wire) and is logged per-failure, mirroring the reopen path."""
+        finding_id = _ingest(db, "fp-failclose")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise ValueError("workflow forbids close")
+
+        monkeypatch.setattr(db, "close_issue", boom)
+        with caplog.at_level(logging.WARNING, logger="filigree.db_files"):
+            stats = db.process_scan_results(scan_source="wardline", findings=[], scanned_paths=["src/a.py"], mark_unseen=True)
+
+        assert any(f"cascade close of issue {issue.id} failed" in w for w in stats["warnings"])
+        assert any("close cascade" in r.message for r in caplog.records)
+        assert not _is_done(db, issue.id)  # close genuinely failed → issue open
+
+    def test_sibling_open_finding_blocks_close(self, db: FiligreeDB) -> None:
+        """An issue linked to two findings must NOT close when only one resolves:
+        a still-open sibling finding is an active defect. (An issue can link more
+        than one finding via ``update_finding(..., issue_id=...)``.)"""
+        a_id = _ingest(db, "fp-sibA")  # src/a.py
+        issue = db.promote_finding_to_issue(a_id, actor="t")["issue"]
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/b.py", "fp-sibB")])
+        b_id = db.find_finding_by_fingerprint("wardline", "fp-sibB")["id"]  # type: ignore[index]
+        db.update_finding(b_id, issue_id=issue.id, actor="t")  # second finding on the same issue
+
+        # A's file is now clean (A absent); B is still present and open.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/b.py", "fp-sibB")],
+            scanned_paths=["src/a.py", "src/b.py"],
+            mark_unseen=True,
+        )
+
+        assert db.get_finding(a_id)["status"] == "unseen_in_latest"
+        assert db.get_finding(b_id)["status"] == "open"
+        assert not _is_done(db, issue.id)  # sibling B still open → issue stays open
+
+    def test_same_batch_regress_and_resolve_keeps_issue_open(self, db: FiligreeDB) -> None:
+        """When one finding regresses and another resolves on the SAME issue in
+        one batch, reopen wins over close — a regress is an active defect."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/a.py", "fp-colA"), _wln("src/a.py", "fp-colB")],
+        )
+        a_id = db.find_finding_by_fingerprint("wardline", "fp-colA")["id"]  # type: ignore[index]
+        b_id = db.find_finding_by_fingerprint("wardline", "fp-colB")["id"]  # type: ignore[index]
+        issue = db.promote_finding_to_issue(a_id, actor="t")["issue"]
+        db.update_finding(b_id, issue_id=issue.id, actor="t")
+        # A was resolved on a prior scan (unseen) but the issue stayed open (B open).
+        db.conn.execute("UPDATE scan_findings SET status = 'unseen_in_latest' WHERE id = ?", (a_id,))
+        db.conn.commit()
+
+        # Collision batch: A reappears (regress → open), B disappears (resolve → unseen).
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/a.py", "fp-colA")],
+            scanned_paths=["src/a.py"],
+            mark_unseen=True,
+        )
+
+        assert db.get_finding(a_id)["status"] == "open"  # regressed
+        assert db.get_finding(b_id)["status"] == "unseen_in_latest"  # resolved
+        assert not _is_done(db, issue.id)  # active regressed defect → not closed
+
+    def test_issue_with_open_sibling_finding_not_closed(self, db: FiligreeDB) -> None:
+        """One issue linked to two findings (different files); fixing one must NOT
+        close the issue while the other finding is still open."""
+        f1 = _ingest(db, "fp-sib1")  # src/a.py
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/c.py", "fp-sib2")])
+        f2 = db.find_finding_by_fingerprint("wardline", "fp-sib2")["id"]  # type: ignore[index]
+        issue = db.promote_finding_to_issue(f1, actor="t")["issue"]
+        db.update_finding(f2, issue_id=issue.id)  # link the second finding to the SAME issue
+        # Clean a.py (f1 disappears); c.py still carries f2.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/c.py", "fp-sib2")],
+            mark_unseen=True,
+            scanned_paths=["src/a.py", "src/c.py"],
+        )
+        assert db.get_finding(f1)["status"] == "unseen_in_latest"
+        assert db.get_finding(f2)["status"] == "open"
+        assert not _is_done(db, issue.id)  # MUST stay open — f2 is still active

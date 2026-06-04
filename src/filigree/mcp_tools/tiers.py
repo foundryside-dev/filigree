@@ -139,6 +139,7 @@ _NICHE: frozenset[str] = frozenset(
         "get_file_timeline",
         "dismiss_finding",
         "promote_finding",
+        "promote_finding_and_attach_entity",
         "update_finding",
         # annotations (whole subsystem is niche)
         "annotate_file",

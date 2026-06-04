@@ -15,6 +15,9 @@
   },
   "shape_decl": {
     "request_type": "ScanIngestRequest (identical to classic)",
+    "request_optional_fields": {
+      "scanned_paths": "list[str]  # OPTIONAL. The authoritative set of files the scanner visited this run, including clean files with zero findings. Wire-compatible addition (omitting it preserves prior behaviour). When mark_unseen is true, the absent-fingerprint sweep is driven off {files-with-findings} ∪ {scanned_paths}, so a file whose last/only finding was fixed (and is therefore absent from findings) is still reconciled to unseen_in_latest and its linked issue cascade-closes. With scanned_paths non-empty, mark_unseen=true + findings=[] is a valid fully-clean scan (no longer a 400). Unknown clean paths (no prior file record) are skipped, never created."
+    },
     "response_type": "ScanIngestResponseLoom",
     "response_shape": {
       "succeeded": "list[str]  # server-generated finding ids for newly-created findings (was: new_finding_ids in classic)",
@@ -29,6 +32,7 @@
       },
       "warnings": "list[str]  # validation warnings from db._validate_scan_findings (e.g. unknown severity coerced to 'info')"
     },
+    "external_adapter_contract": "Filigree does not parse SARIF on this endpoint. External SARIF adapters MUST map SARIF result.partialFingerprints or result.fingerprints into each scan-results finding.fingerprint before POSTing. Filigree then preserves finding.fingerprint through ingest, readback, promotion, fingerprint dedup, stale/fixed transitions, and reopen-on-regress lifecycle handling. Fingerprint-less legacy findings remain accepted and use the file/source/rule/line heuristic.",
     "rationale": "BatchResponse-style wrapper per ADR-002 §1 and work-package Phase A2. Scan-results has mixed semantics (batch ingest + summary counts); the envelope honours the batch-semantics-where-applicable rule by exposing succeeded/failed (per-finding granularity) while preserving the counts signal in a stats sibling. Named subtype so future loom endpoints with similar mixed semantics have a pattern to follow."
   },
   "examples": [
@@ -102,6 +106,88 @@
             "files_created": 1,
             "files_updated": 0,
             "findings_created": 1,
+            "findings_updated": 0,
+            "observations_created": 0,
+            "observations_failed": 0
+          },
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "success_wardline_sarif_adapter_fingerprint",
+      "note": "Representative Wardline SARIF-adapter case. Filigree does not parse SARIF here; the external adapter maps SARIF partialFingerprints/fingerprints to finding.fingerprint before POSTing so fingerprint identity survives Filigree ingestion and later lifecycle operations.",
+      "request": {
+        "method": "POST",
+        "path": "/api/loom/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "scan_run_id": "wardline-20260604-sarif-a1b2c3",
+          "mark_unseen": true,
+          "findings": [
+            {
+              "path": "src/example/flow.py",
+              "rule_id": "WLN-TAINT",
+              "severity": "high",
+              "message": "Tainted source reaches sink",
+              "line_start": 21,
+              "line_end": 21,
+              "fingerprint": "wardline:v1:3fd0f7f0b4b84567",
+              "metadata": {
+                "sarif": {
+                  "ruleId": "WLN-TAINT",
+                  "partialFingerprints": {
+                    "primaryLocationLineHash": "3fd0f7f0b4b84567"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": ["sf_example_generated_id"],
+          "failed": [],
+          "stats": {
+            "files_created": 1,
+            "files_updated": 0,
+            "findings_created": 1,
+            "findings_updated": 0,
+            "observations_created": 0,
+            "observations_failed": 0
+          },
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "success_clean_file_via_scanned_paths",
+      "note": "Close-on-fixed driver. An agent fixed the only finding in src/a.py; the re-scan carries no findings for it but lists it in scanned_paths with mark_unseen=true. Filigree flips the now-absent finding to unseen_in_latest and cascade-closes its linked issue. Cascade outcomes are logged, not surfaced in the envelope.",
+      "request": {
+        "method": "POST",
+        "path": "/api/loom/scan-results",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "scan_source": "wardline",
+          "mark_unseen": true,
+          "findings": [],
+          "scanned_paths": ["src/a.py"]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+          "succeeded": [],
+          "failed": [],
+          "stats": {
+            "files_created": 0,
+            "files_updated": 0,
+            "findings_created": 0,
             "findings_updated": 0,
             "observations_created": 0,
             "observations_failed": 0

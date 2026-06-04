@@ -41,7 +41,30 @@ class TestFederationSemanticCoupling:
         db.add_entity_association(issue.id, "not-a-valid-clarion-id", content_hash="h")
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
+        assert rows[0]["entity_id"] == "not-a-valid-clarion-id"
         assert rows[0]["clarion_entity_id"] == "not-a-valid-clarion-id"
+
+    def test_caller_supplied_entity_kind_round_trips_without_inference(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Kind metadata", priority=2)
+
+        db.add_entity_association(
+            issue.id,
+            "not-a-valid-clarion-id",
+            content_hash="h",
+            entity_kind="function",
+        )
+
+        rows = db.list_entity_associations(issue.id)
+        assert rows[0]["entity_id"] == "not-a-valid-clarion-id"
+        assert rows[0]["entity_kind"] == "function"
+
+    def test_absent_entity_kind_stays_empty_for_locator_like_ids(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("No kind inference", priority=2)
+
+        db.add_entity_association(issue.id, "py:class:LooksLikeKind", content_hash="h")
+
+        rows = db.list_entity_associations(issue.id)
+        assert rows[0]["entity_kind"] == ""
 
     def test_grammar_violations_round_trip_unchanged(self, db: FiligreeDB) -> None:
         """Strings that look syntactically wrong (wrong segment count,
@@ -190,5 +213,33 @@ class TestFederationPipelineCoupling:
         )
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
+        assert rows[0]["orphan_status"] == "unknown"
+        assert rows[0]["freshness_status"] == "unknown"
         assert rows[0]["clarion_entity_id"] == "py:func:long-since-deleted::very-much-removed"
         assert rows[0]["content_hash_at_attach"] == "abandoned-hash"
+
+    def test_current_hash_comparison_is_caller_supplied(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Caller supplied freshness", priority=2)
+        entity_id = "clarion:eid:abc123"
+        db.add_entity_association(issue.id, entity_id, content_hash="hash-old")
+
+        fresh = db.list_associations_by_entity(entity_id, current_content_hash="hash-old")
+        stale = db.list_associations_by_entity(entity_id, current_content_hash="hash-new")
+
+        assert fresh[0]["freshness_status"] == "fresh"
+        assert stale[0]["freshness_status"] == "stale"
+
+    def test_migration_orphan_marker_is_exposed(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Orphan marker", priority=2)
+        entity_id = "py:func:removed"
+        db.add_entity_association(issue.id, entity_id, content_hash="h")
+        db.conn.execute(
+            "UPDATE entity_associations SET migration_orphaned_at = ? WHERE issue_id = ? AND clarion_entity_id = ?",
+            ("2026-06-04T00:00:00+00:00", issue.id, entity_id),
+        )
+        db.conn.commit()
+
+        rows = db.list_entity_associations(issue.id)
+
+        assert rows[0]["migration_orphaned_at"] == "2026-06-04T00:00:00+00:00"
+        assert rows[0]["orphan_status"] == "orphaned"

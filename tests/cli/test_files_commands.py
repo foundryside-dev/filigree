@@ -1709,6 +1709,7 @@ class TestPromoteFindingCommand:
             assert data["issue_id"]
             assert "Test finding" in data["title"] or data["title"]
             assert "from-finding" in data["labels"]
+            assert data["fields"]["severity"] == "major"
         finally:
             os.chdir(original)
 

@@ -198,6 +198,7 @@ class TestEntityAssociationsSchema:
             "attached_at",
             "attached_by",
             "migration_orphaned_at",
+            "entity_kind",
         }
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
@@ -317,6 +318,32 @@ class TestEntityAssociationsSchema:
         # Column already present (fresh schema) — re-running add_column is a no-op.
         migrate_v21_to_v22(conn)
         assert "migration_orphaned_at" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v22_to_v23_adds_entity_kind_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN entity_kind")
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'not-a-clarion-id', 'h', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+
+        applied = apply_pending_migrations(conn, 23)
+
+        assert applied == 1
+        assert _get_schema_version(conn) == 23
+        assert "entity_kind" in _get_table_columns(conn, "entity_associations")
+        row = conn.execute("SELECT entity_kind FROM entity_associations WHERE issue_id = 'iss-1'").fetchone()
+        assert row["entity_kind"] == ""
         conn.close()
 
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
@@ -1904,8 +1931,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_22(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 22
+    def test_current_schema_version_is_23(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 23
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

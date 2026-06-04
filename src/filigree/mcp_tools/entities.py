@@ -11,8 +11,9 @@ Four tools binding Filigree issues to Clarion entities:
 - ``list_associations_by_entity`` — reverse lookup from opaque entity ID
   to every bound issue in this project.
 
-The Clarion entity ID is opaque to Filigree — these tools do not parse
-or validate the grammar (federation enrich-only rule, ``loom.md`` §5).
+The entity ID is opaque to Filigree — these tools do not parse or validate
+its grammar. It may be a Clarion SEI, a legacy locator, or another external
+ID. Caller-supplied ``entity_kind`` metadata is stored only when provided.
 """
 
 from __future__ import annotations
@@ -54,11 +55,10 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="add_entity_association",
             description=(
-                "Attach a Clarion entity to a Filigree issue (ADR-029). "
+                "Attach an opaque external entity to a Filigree issue (ADR-029). "
                 "Idempotent on (issue_id, entity_id): re-attaching refreshes "
                 "content_hash and timestamp while preserving the original actor. "
-                "The entity_id is opaque to Filigree — its grammar is Clarion's "
-                "contract (ADR-003)."
+                "The entity_id is opaque to Filigree and may be an SEI or legacy locator."
             ),
             inputSchema={
                 "type": "object",
@@ -66,7 +66,15 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "issue_id": {"type": "string", "description": "Filigree issue ID"},
                     "entity_id": {
                         "type": "string",
-                        "description": "Clarion entity ID (opaque string; not parsed)",
+                        "description": "Opaque external entity ID; not parsed",
+                    },
+                    "entity_kind": {
+                        "type": "string",
+                        "description": "Optional caller-supplied kind metadata; never inferred from entity_id",
+                    },
+                    "external_entity_kind": {
+                        "type": "string",
+                        "description": "Compatibility synonym for entity_kind",
                     },
                     "content_hash": {
                         "type": "string",
@@ -93,7 +101,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "issue_id": {"type": "string", "description": "Filigree issue ID"},
                     "entity_id": {
                         "type": "string",
-                        "description": "Clarion entity ID (opaque string)",
+                        "description": "Opaque external entity ID",
                     },
                     "actor": {
                         "type": "string",
@@ -106,7 +114,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         Tool(
             name="list_entity_associations",
             description=(
-                "Return all Clarion entity bindings attached to an issue. "
+                "Return all opaque external entity bindings attached to an issue. "
                 "Returns raw rows — drift detection is the caller's job per "
                 'ADR-029 §"Decision 3" (Clarion\'s issues_for compares '
                 "content_hash_at_attach against the live hash)."
@@ -134,7 +142,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "properties": {
                     "entity_id": {
                         "type": "string",
-                        "description": "Clarion entity ID (opaque string)",
+                        "description": "Opaque external entity ID",
+                    },
+                    "current_content_hash": {
+                        "type": "string",
+                        "description": "Optional caller-supplied current content hash for freshness_status comparison",
                     },
                 },
                 "required": ["entity_id"],
@@ -165,6 +177,7 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
     issue_id = args.get("issue_id", "")
     entity_id = args.get("entity_id", "")
     content_hash = args.get("content_hash", "")
+    entity_kind = args.get("entity_kind", args.get("external_entity_kind"))
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
@@ -176,6 +189,8 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
     ):
         if err is not None:
             return err
+    if entity_kind is not None and not isinstance(entity_kind, str):
+        return _text(ErrorResponse(error="entity_kind must be a string", code=ErrorCode.VALIDATION))
 
     try:
         row = tracker.add_entity_association(
@@ -183,6 +198,7 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
             make_clarion_entity_id(entity_id),
             make_content_hash(content_hash),
             actor=actor,
+            entity_kind=entity_kind,
         )
     except WrongProjectError as exc:
         # 2.1.0 §1.2: untrusted-surface serialisation uses safe_message.
@@ -261,13 +277,19 @@ async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list
     args = _parse_args(arguments, ListAssociationsByEntityArgs)
     tracker = get_db()
     entity_id = args.get("entity_id", "")
+    current_content_hash = args.get("current_content_hash")
 
     err = _require_nonempty_str(entity_id, "entity_id")
     if err is not None:
         return err
+    if current_content_hash is not None and (not isinstance(current_content_hash, str) or not current_content_hash.strip()):
+        return _text(ErrorResponse(error="current_content_hash must be a non-empty string when provided", code=ErrorCode.VALIDATION))
 
     try:
-        rows = tracker.list_associations_by_entity(make_clarion_entity_id(entity_id))
+        rows = tracker.list_associations_by_entity(
+            make_clarion_entity_id(entity_id),
+            current_content_hash=make_content_hash(current_content_hash) if current_content_hash is not None else None,
+        )
     except ValueError as exc:
         return _text(ErrorResponse(error=str(exc), code=ErrorCode.VALIDATION))
     return _text({"associations": [dict(row) for row in rows]})

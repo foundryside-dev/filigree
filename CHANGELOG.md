@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`scanned_paths` on `POST /api/loom/scan-results` (and the classic/living
+  aliases) — close-on-fixed now fires from scan ingest.** A scanner can now send
+  `scanned_paths`: the authoritative set of files it visited this run, including
+  clean files with zero findings. When `mark_unseen` is true, the
+  absent-fingerprint sweep is driven off the union of files-with-findings and
+  `scanned_paths`, so a file whose **last/only** finding was fixed (and is
+  therefore absent from `findings`) is still reconciled to `unseen_in_latest` and
+  its linked issue **cascade-closes** — eagerly, from ingest, no longer only via
+  the age-gated `clean-stale` sweep. With `scanned_paths` non-empty, a fully-clean
+  scan (`findings: []`, `mark_unseen: true`) is now valid instead of `400`.
+  Optional and wire-compatible: a body omitting `scanned_paths` behaves exactly as
+  before. Unknown clean paths (no prior file record) are skipped, never created.
+  Wardline already emits this field; Filigree previously dropped it silently.
+
+### Fixed
+
+- **Finding→issue close cascade was unreachable from scan ingest.** Re-ingest
+  wired reopen-on-regress but never close-on-fixed: fixing code and re-scanning
+  flipped the finding to `unseen_in_latest` while leaving the linked issue open
+  (the close helper had a single caller — the `clean-stale` sweep — that Wardline
+  never invokes). Ingest now runs a close cascade symmetric to the existing
+  reopen cascade (best-effort, in its own transaction, preserving terminal human
+  decisions via the `done`-category guard, surfacing failures in `warnings` and
+  per-failure logs).
+
+- **Finding→issue close cascade no longer closes an issue with an active sibling
+  defect.** An issue can link more than one finding (`update_finding(...,
+  issue_id=...)`; see `get_issue_findings`). The close cascade now skips the
+  close when any *other* linked finding is still open (a non-terminal,
+  non-`unseen_in_latest` status), checked under the writer lock — so resolving
+  one of an issue's findings cannot close it while another is an active defect.
+  This also resolves the same-batch reopen-then-close collision (a finding
+  regressing in the same ingest now blocks the close). The guard lives in the
+  shared close transaction, so the age-gated `clean-stale` sweep gets the same
+  protection.
+
 ## [2.3.0] - 2026-06-02
 
 ### Added

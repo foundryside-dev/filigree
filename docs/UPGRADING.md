@@ -14,8 +14,9 @@ first 2.1.1 open applies a single in-place migration:
 
 The migration is an additive `ALTER TABLE ... ADD COLUMN` (`NOT NULL DEFAULT
 '[]'`) that backfills existing tombstones; `FiligreeDB.initialize()` applies it
-automatically on first open, or run `filigree doctor --fix` for an
-operator-controlled upgrade. No application-level action is required. A
+automatically on first normal database open after the binary is upgraded. Use
+`filigree doctor` before and after the upgrade to validate local configuration;
+`doctor --fix` is limited to local binding and dashboard-pointer repair. No application-level action is required. A
 federation consumer of `/api/loom/changes` should begin honouring the new
 `affected_entities` field on `issue_deleted` records — purge the listed entity
 bindings on reconcile; see `docs/federation/contracts.md` §F5.
@@ -35,9 +36,10 @@ Filigree 2.1.0 ships database schema `user_version` 20. Databases from the
 | 18 to 19 | v19 | Adds `scan_findings.fingerprint` and partitions the dedup index |
 | 19 to 20 | v20 | Adds the `deleted_issues` tombstone behind the `issue_deleted` changes-feed signal |
 
-`FiligreeDB.initialize()` applies pending migrations automatically. For an
-operator-controlled upgrade, use `filigree doctor --fix` so the schema step is
-visible in the terminal and uses the database declared by `.filigree.conf`.
+`FiligreeDB.initialize()` applies pending migrations automatically on the first
+normal database open after the binary is upgraded. `filigree doctor` validates
+the configured database path and reports schema state; `doctor --fix` does not
+apply schema migrations.
 
 ### Before You Upgrade
 
@@ -65,7 +67,7 @@ Run these commands from each project root:
 
 ```bash
 filigree doctor
-filigree doctor --fix
+filigree stats
 filigree doctor
 filigree stats
 filigree session-context
@@ -75,17 +77,27 @@ For source checkouts, prefix the same commands with `uv run`:
 
 ```bash
 uv run filigree doctor
-uv run filigree doctor --fix
+uv run filigree stats
 uv run filigree doctor
 uv run filigree stats
 uv run filigree session-context
 ```
 
-`doctor --fix` is the supported in-place upgrader. It opens the existing
-database, applies pending schema migrations, refreshes generated context, and
-repairs install metadata where possible. Do not run `filigree init`, edit
-`PRAGMA user_version` by hand, or delete and recreate `.filigree/` to upgrade
-an existing project.
+The first normal DB command after the binary upgrade opens the existing
+database and applies pending schema migrations through the standard
+`FiligreeDB.initialize()` path. Do not edit `PRAGMA user_version` by hand or
+delete and recreate `.filigree/` to upgrade an existing project.
+
+Automation can use `filigree doctor --fix --json` for the shared doctor summary
+contract when it wants local binding/dashboard-pointer repair:
+
+```json
+{"ok": true, "checks": [{"id": "mcp.registration", "status": "fixed", "fixed": true}], "next_actions": []}
+```
+
+`--fix` repairs only local agent bindings and stale dashboard pointers. It does
+not mutate issue rows, scan findings, scanner results, entity associations, or
+database schema.
 
 An automation wrapper should do only the safe orchestration around this built-in
 path:
@@ -95,7 +107,7 @@ path:
 stop_filigree_writers
 backup_configured_database
 upgrade_filigree_binary_to_2_1_0
-filigree doctor --fix
+filigree stats
 filigree doctor
 restart_mcp_or_dashboard_processes
 ```

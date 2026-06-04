@@ -80,6 +80,19 @@ Valid `assoc_type` values:
 
 `trigger_scan` registers the file and returns `file_id` + `scan_run_id` for correlation.
 
+External producers that post directly to `POST /api/scan-results` should send
+a globally unique, non-empty `scan_run_id` when they want the run to appear in
+`GET /api/scan-runs`. Omitting it or sending `""` is still accepted for
+fire-and-forget findings, but those findings are intentionally excluded from
+scan-run history.
+
+Filigree's scan-results endpoint ingests Filigree finding JSON, not raw SARIF.
+If a Wardline or SARIF producer wants stable dedup and lifecycle behavior, its
+adapter must map SARIF `result.partialFingerprints` or `result.fingerprints`
+into each posted finding's `fingerprint` field before calling
+`POST /api/scan-results`. Filigree preserves that `finding.fingerprint` through
+readback, promotion, dedup, stale/fixed cleanup, and reopen-on-regress handling.
+
 ### 5) Verify from issue and file sides
 
 Issue -> files:
@@ -172,7 +185,9 @@ Checklist:
 Checklist:
 
 1. Confirm dashboard API was reachable from scanner process at trigger time.
-2. Check scan run history via `GET /api/scan-runs`.
+2. Check scan run history via `GET /api/scan-runs`. If the producer sent an
+   empty `scan_run_id`, this history is intentionally empty; query findings
+   directly instead.
 3. Query `GET /api/files/{file_id}/findings` directly to confirm ingestion.
 4. If scanner sends no findings, a `202` response can be expected.
 

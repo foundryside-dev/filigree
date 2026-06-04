@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
@@ -38,7 +39,14 @@ from filigree.registry import (
     RegistryResolutionError,
     resolve_files_batch_via_loop,
 )
-from filigree.types.core import AssocType, FindingStatus, Severity
+from filigree.types.core import (
+    AssocType,
+    FindingStatus,
+    Severity,
+    make_clarion_entity_id,
+    make_content_hash,
+    make_issue_id,
+)
 from filigree.types.files import ScanIngestResult
 
 if TYPE_CHECKING:
@@ -1328,18 +1336,46 @@ class FilesMixin(DBMixinProtocol):
         seen_finding_ids: dict[str, list[str]],
         now: str,
         actor: str,
+        resolved: set[tuple[str, str]],
     ) -> None:
-        """Mark findings not in current batch as unseen_in_latest."""
+        """Mark findings not in current batch as unseen_in_latest.
+
+        Captures into *resolved* the ``(finding_id, issue_id)`` pairs whose
+        status genuinely transitions open/new → ``unseen_in_latest``
+        (issue-linked only), so the caller runs the close-on-fixed cascade
+        post-commit. A file with an empty seen-set — a clean file folded in via
+        ``scanned_paths`` — sweeps ALL its non-terminal findings; the
+        ``id NOT IN`` clause is dropped in that case to avoid the
+        ``id NOT IN ()`` SQLite syntax error.
+        """
         terminal = tuple(TERMINAL_FINDING_STATUSES)
         terminal_ph = ",".join("?" * len(terminal))
         for fid, fids in seen_finding_ids.items():
-            placeholders = ",".join("?" * len(fids))
+            not_in_clause = ""
+            extra_params: list[Any] = []
+            if fids:
+                placeholders = ",".join("?" * len(fids))
+                not_in_clause = f" AND id NOT IN ({placeholders})"
+                extra_params = list(fids)
+            # Capture genuine open/new → unseen transitions on issue-linked
+            # findings BEFORE the UPDATE rewrites their status. The
+            # ``status != 'unseen_in_latest'`` guard keeps an already-unseen
+            # finding from re-firing the close cascade every batch (idempotency).
+            for row in conn.execute(
+                f"SELECT id, issue_id FROM scan_findings "
+                f"WHERE file_id = ? AND scan_source = ? AND issue_id IS NOT NULL "
+                f"AND status NOT IN ({terminal_ph}) "
+                f"AND status != 'unseen_in_latest'"
+                f"{not_in_clause}",
+                [fid, scan_source, *terminal, *extra_params],
+            ).fetchall():
+                resolved.add((row["id"], str(row["issue_id"])))
             conn.execute(
                 f"UPDATE scan_findings SET status = 'unseen_in_latest', updated_at = ?, updated_by = ? "
                 f"WHERE file_id = ? AND scan_source = ? "
-                f"AND status NOT IN ({terminal_ph}) "
-                f"AND id NOT IN ({placeholders})",
-                [now, actor, fid, scan_source, *terminal, *fids],
+                f"AND status NOT IN ({terminal_ph})"
+                f"{not_in_clause}",
+                [now, actor, fid, scan_source, *terminal, *extra_params],
             )
 
     def process_scan_results(
@@ -1352,6 +1388,7 @@ class FilesMixin(DBMixinProtocol):
         create_observations: bool = False,
         complete_scan_run: bool = True,
         observation_actor: str = "",
+        scanned_paths: Sequence[str] = (),
     ) -> ScanIngestResult:
         """Ingest scan results: create/update file records and findings.
 
@@ -1366,6 +1403,15 @@ class FilesMixin(DBMixinProtocol):
         that are NOT in this batch are set to ``unseen_in_latest`` status.
         Only findings with a non-terminal status are affected (``fixed`` and
         ``false_positive`` are left alone).
+
+        *scanned_paths* is the authoritative set of files the scanner visited
+        this run, including clean files with zero findings. The sweep above only
+        visits files present in *findings*; *scanned_paths* widens it so a file
+        whose last/only finding was fixed (and is therefore absent from this
+        batch) is still swept — its prior findings flip to ``unseen_in_latest``,
+        which the close-on-fixed cascade then resolves. Unknown clean paths (no
+        prior file record) are skipped, not created. Only consulted when
+        *mark_unseen* is ``True``.
 
         When *create_observations* is ``True``, each new finding is promoted to
         an observation for triage tracking. Pass *observation_actor* to set the
@@ -1386,9 +1432,10 @@ class FilesMixin(DBMixinProtocol):
             raise ValueError("scan_source must be a non-empty string")
         if not isinstance(scan_run_id, str):
             raise ValueError(f"scan_run_id must be a string, got {type(scan_run_id).__name__}")
-        if mark_unseen and not findings:
+        if mark_unseen and not findings and not scanned_paths:
             raise ValueError(
-                "mark_unseen=True requires at least one finding; an empty batch cannot identify which (file, scan_source) pairs to sweep"
+                "mark_unseen=True requires at least one finding or scanned path; "
+                "without either, an empty batch cannot identify which (file, scan_source) pairs to sweep"
             )
         if scan_run_id:
             scan_run = self.conn.execute("SELECT scan_source FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
@@ -1415,6 +1462,10 @@ class FilesMixin(DBMixinProtocol):
             warnings=warnings,
         )
         regressed_issue_ids: set[str] = set()
+        # (finding_id, issue_id) pairs whose finding genuinely transitioned to
+        # ``unseen_in_latest`` in the sweep below — the close-on-fixed cascade
+        # resolves these post-commit, symmetric to regressed_issue_ids/reopen.
+        resolved: set[tuple[str, str]] = set()
 
         # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Clarion HTTP round
         # trip) BEFORE the writer lock so concurrent ingests overlap. The write
@@ -1435,6 +1486,8 @@ class FilesMixin(DBMixinProtocol):
             actor=actor,
             stats=stats,
             regressed_issue_ids=regressed_issue_ids,
+            resolved=resolved,
+            scanned_paths=scanned_paths,
         )
 
         # Post-commit finding→issue cascade: reopen issues whose linked finding
@@ -1461,6 +1514,35 @@ class FilesMixin(DBMixinProtocol):
                 len(reopened_issue_ids),
                 scan_source,
                 ", ".join(reopened_issue_ids),
+            )
+
+        # Post-commit close cascade, symmetric to the reopen above: close issues
+        # whose linked finding just resolved (flipped to ``unseen_in_latest`` in
+        # the sweep). Same best-effort discipline — each close owns its own
+        # BEGIN IMMEDIATE, the ``== "done"`` guard preserves terminal human
+        # decisions, and a forbidden transition rides out in ``warnings`` (the
+        # wire) plus a per-failure log line rather than failing the ingest.
+        #
+        # Skip any issue that ALSO had a finding regress in this same batch: a
+        # regress means an active defect, so reopen wins over close. The
+        # sibling-open guard in ``_close_issue_for_fixed_finding_tx`` is the
+        # authoritative backstop (it re-reads sibling state under the writer
+        # lock); this exclusion just avoids a doomed close attempt and the
+        # reconciliation-debt churn it would log.
+        warnings_before_close = len(stats["warnings"])
+        closed_issue_ids = [
+            issue_id
+            for finding_id, issue_id in sorted(resolved)
+            if issue_id not in regressed_issue_ids and self._close_issue_for_fixed_finding(finding_id, issue_id, warnings=stats["warnings"])
+        ]
+        for warning in stats["warnings"][warnings_before_close:]:
+            logger.warning("finding→issue close cascade: %s", warning)
+        if closed_issue_ids:
+            logger.info(
+                "finding→issue cascade: closed %d issue(s) on fix (scan_source=%r): %s",
+                len(closed_issue_ids),
+                scan_source,
+                ", ".join(closed_issue_ids),
             )
 
         if scan_run_id and complete_scan_run:
@@ -1505,6 +1587,8 @@ class FilesMixin(DBMixinProtocol):
         actor: str,
         stats: ScanIngestResult,
         regressed_issue_ids: set[str],
+        resolved: set[tuple[str, str]],
+        scanned_paths: Sequence[str] = (),
     ) -> None:
         """Write window for :meth:`process_scan_results`.
 
@@ -1524,8 +1608,9 @@ class FilesMixin(DBMixinProtocol):
         stats["observations_failed"] = 0
         stats["new_finding_ids"] = []
         # Reset on every entry so a @_retry_busy re-run after a rolled-back
-        # transient SQLITE_BUSY does not double-accumulate regressed issues.
+        # transient SQLITE_BUSY does not double-accumulate regressed/resolved issues.
         regressed_issue_ids.clear()
+        resolved.clear()
 
         seen_finding_ids: dict[str, list[str]] = {}
         counted_file_ids: set[str] = set()
@@ -1557,12 +1642,24 @@ class FilesMixin(DBMixinProtocol):
             )
 
         if mark_unseen:
+            # Widen the sweep to the union of files-with-findings and scanned_paths.
+            # A clean file (scanned, zero findings this batch) gets an empty
+            # seen-set so all its prior non-terminal findings flip to unseen —
+            # this is how close-on-fixed fires when the last/only finding in a
+            # file is fixed. Resolve clean paths by lookup, not upsert: a path
+            # with no prior file record can hold no findings, so skip it.
+            for path in scanned_paths:
+                record = self.get_file_by_path(path)
+                if record is None:
+                    continue
+                seen_finding_ids.setdefault(record.id, [])
             self._mark_unseen_findings(
                 self.conn,
                 scan_source=scan_source,
                 seen_finding_ids=seen_finding_ids,
                 now=now,
                 actor=actor,
+                resolved=resolved,
             )
 
         # Accumulate findings_count on the scan_run row per batch.
@@ -1832,19 +1929,38 @@ class FilesMixin(DBMixinProtocol):
     @_retry_busy()
     @_in_immediate_tx("close_issue_for_fixed_finding")
     def _close_issue_for_fixed_finding_tx(self, finding_id: str, issue_id: str) -> bool:
-        """Atomically verify the finding is still fixed before closing its issue.
+        """Atomically verify the finding is still resolved before closing its issue.
 
-        The stale sweep and scan ingest intentionally commit before their
-        best-effort issue cascades. This transaction closes the post-commit
-        race: if ingest reopened the same finding after the sweep, the status
-        check observes ``open`` under the writer lock and skips the stale close.
+        Resolved means ``fixed`` (the age-gated clean-stale sweep) or
+        ``unseen_in_latest`` (the eager scan-ingest sweep). Both callers commit
+        before their best-effort issue cascades; this transaction closes the
+        post-commit race: if a later ingest reopened the same finding to
+        ``open`` after the sweep, the status check observes ``open`` under the
+        writer lock and skips the close.
         """
         finding = self.conn.execute(
             "SELECT status FROM scan_findings WHERE id = ? AND issue_id = ?",
             (finding_id, issue_id),
         ).fetchone()
-        if finding is None or finding["status"] != "fixed":
+        if finding is None or finding["status"] not in ("fixed", "unseen_in_latest"):
             return False
+
+        # Sibling-open guard: an issue may link more than one finding (a second
+        # finding can be attached via ``update_finding(..., issue_id=...)``; see
+        # ``get_issue_findings``). Resolving ONE of them does not mean the issue
+        # is fixed — if any other linked finding is still an active defect
+        # (non-terminal and not itself resolved-as-unseen), leave the issue open.
+        # This also closes the same-batch reopen-then-close race: a sibling that
+        # regressed to ``open`` in this ingest now blocks the close under the
+        # writer lock.
+        resolved_statuses = (*TERMINAL_FINDING_STATUSES, "unseen_in_latest")
+        resolved_ph = ",".join("?" * len(resolved_statuses))
+        sibling_open = self.conn.execute(
+            f"SELECT 1 FROM scan_findings WHERE issue_id = ? AND id != ? AND status NOT IN ({resolved_ph}) LIMIT 1",
+            (issue_id, finding_id, *resolved_statuses),
+        ).fetchone()
+        if sibling_open is not None:
+            return False  # another linked finding is still an active defect
 
         issue = self.get_issue(issue_id)
         if self._resolve_status_category(issue.type, issue.status) == "done":
@@ -2061,6 +2177,13 @@ class FilesMixin(DBMixinProtocol):
         "low": 3,
         "info": 3,
     }
+    _FINDING_SEVERITY_TO_BUG_SEVERITY: ClassVar[dict[str, str]] = {
+        "critical": "critical",
+        "high": "major",
+        "medium": "major",
+        "low": "minor",
+        "info": "cosmetic",
+    }
 
     def get_finding(self, finding_id: str) -> ScanFindingDict:
         """Get a single finding by ID.  Raises *KeyError* if not found."""
@@ -2268,6 +2391,7 @@ class FilesMixin(DBMixinProtocol):
             priority=priority,
             description="\n\n".join(description_parts),
             fields={
+                "severity": self._FINDING_SEVERITY_TO_BUG_SEVERITY.get(finding["severity"], "minor"),
                 "source_finding_id": finding_id,
                 "scan_source": finding["scan_source"],
                 "rule_id": finding["rule_id"],
@@ -2284,6 +2408,53 @@ class FilesMixin(DBMixinProtocol):
         if warnings:
             result["warnings"] = warnings
         return result
+
+    def promote_finding_and_attach_entity(
+        self,
+        finding_id: str,
+        entity_id: str,
+        content_hash: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+        labels: list[str] | None = None,
+        entity_kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote a finding to an issue and attach an opaque entity binding.
+
+        This composes the existing idempotent primitives so retrying the same
+        request returns the existing issue and refreshes the association hash.
+        Public HTTP routes run this on a private worker-thread connection.
+
+        **Partial-state contract.** This is deliberately *not* a single
+        transaction — ``promote_finding_to_issue`` commits the issue before
+        ``add_entity_association`` runs. If the attach step raises, the issue
+        is already promoted and committed, with no association attached. This
+        is safe because both primitives are idempotent and converge on retry:
+        ``promote_finding_to_issue`` reuses the existing issue via the
+        finding's ``source_finding_id`` lookup, and ``add_entity_association``
+        upserts on ``(issue_id, entity_id)`` and refreshes the stored content
+        hash. Re-issuing the same request after a mid-operation failure
+        therefore returns the existing issue with the association now present
+        (see ``test_promote_and_attach_retry_converges_after_attach_failure``).
+        """
+        result = self.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
+        issue = result["issue"]
+        association = self.add_entity_association(
+            make_issue_id(issue.id),
+            make_clarion_entity_id(entity_id),
+            make_content_hash(content_hash),
+            actor=actor,
+            entity_kind=entity_kind,
+        )
+        payload: dict[str, Any] = {
+            "issue": self.get_issue(issue.id),
+            "created": result["created"],
+            "association": association,
+        }
+        if result.get("warnings"):
+            payload["warnings"] = result["warnings"]
+        return payload
 
     def _file_path_for_finding(self, file_id: str) -> str:
         """Look up the file path for a file_id, returning empty string if not found."""

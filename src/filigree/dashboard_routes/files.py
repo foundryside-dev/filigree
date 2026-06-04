@@ -31,6 +31,7 @@ from filigree.dashboard_routes.common import (
     _safe_int,
     _validate_actor,
 )
+from filigree.issue_payloads import issue_to_public
 from filigree.registry import (
     REGISTRY_BACKEND_FEATURES,
     RegistryBriefingBlockedError,
@@ -40,12 +41,13 @@ from filigree.registry import (
 )
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode
-from filigree.types.core import AssocType, FindingStatus, Severity
+from filigree.types.core import AssocType, FindingStatus, Severity, make_issue_id
 
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+_MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
 
@@ -153,6 +155,42 @@ def _promote_finding_on_private_conn(
         return {"issue_id": result["issue"].id, "created": result["created"]}
 
 
+def _promote_finding_and_attach_on_private_conn(
+    db: FiligreeDB,
+    *,
+    scan_source: str,
+    fingerprint: str,
+    entity_id: str,
+    content_hash: str,
+    priority: int | None,
+    labels: list[str] | None,
+    actor: str,
+    entity_kind: str | None,
+) -> dict[str, Any] | None:
+    """Resolve ``(scan_source, fingerprint)`` then promote and attach an entity."""
+    with db.borrow_for_worker_thread() as worker_db:
+        finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
+        if finding is None:
+            return None
+        result = worker_db.promote_finding_and_attach_entity(
+            finding["id"],
+            entity_id,
+            content_hash,
+            priority=priority,
+            labels=labels,
+            actor=actor,
+            entity_kind=entity_kind,
+        )
+        response: dict[str, Any] = {
+            "issue_id": result["issue"].id,
+            "created": result["created"],
+            "association": dict(result["association"]),
+        }
+        if result.get("warnings"):
+            response["warnings"] = result["warnings"]
+        return response
+
+
 def _parse_promote_priority(raw: Any) -> tuple[int | None, str | None]:
     """Normalize an optional ``"P2"``/``"2"``/``2`` priority to an int 0-4.
 
@@ -225,6 +263,18 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     scan_run_id = body.get("scan_run_id", "")
     if not isinstance(scan_run_id, str):
         return "scan_run_id must be a string"
+    # scanned_paths: the authoritative scanned-file set (incl. clean files with
+    # no findings) so the absent-fingerprint sweep can reconcile a file whose
+    # last finding disappeared — the close-on-fixed cascade's clean-file signal.
+    # Optional; a body without it yields [] (back-compat with classic callers).
+    scanned_paths = body.get("scanned_paths", [])
+    if not isinstance(scanned_paths, list):
+        return "scanned_paths must be a JSON array"
+    if len(scanned_paths) > _MAX_SCANNED_PATHS_PER_REQUEST:
+        return f"scanned_paths must contain at most {_MAX_SCANNED_PATHS_PER_REQUEST} paths"
+    for index, scanned_path in enumerate(scanned_paths):
+        if not isinstance(scanned_path, str) or not scanned_path:
+            return f"scanned_paths[{index}] must be a non-empty string"
     return {
         "scan_source": scan_source,
         "findings": findings,
@@ -232,6 +282,7 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
         "mark_unseen": mark_unseen,
         "create_observations": create_observations,
         "complete_scan_run": complete_scan_run,
+        "scanned_paths": scanned_paths,
     }
 
 
@@ -326,7 +377,10 @@ def create_classic_router() -> APIRouter:
                     "request_body": {
                         "scan_source": "string (required)",
                         "findings": "array (required)",
-                        "scan_run_id": "string (optional)",
+                        "scan_run_id": (
+                            "string (optional). Send a globally unique non-empty scan_run_id when this POST should appear "
+                            "in /api/scan-runs history; empty is accepted for fire-and-forget findings and intentionally excluded."
+                        ),
                         "mark_unseen": "boolean (optional)",
                         "create_observations": "boolean (optional, default false)",
                         "complete_scan_run": "boolean (optional, default true)",
@@ -673,6 +727,128 @@ def create_loom_router() -> APIRouter:
         items = [scan_finding_to_loom(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
+    @router.get("/findings/{finding_id}/dossier")
+    async def api_loom_finding_dossier(finding_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Return finding, file, linked issue, file associations, and entity bindings."""
+        try:
+            finding = db.get_finding(finding_id)
+        except KeyError:
+            return _error_response(f"Finding not found: {finding_id}", ErrorCode.NOT_FOUND, 404)
+
+        file_payload: dict[str, Any] | None = None
+        file_associations: list[dict[str, Any]] = []
+        try:
+            detail = db.get_file_detail(finding["file_id"])
+            raw_file = dict(detail["file"])
+            file_payload = {"file_id": raw_file.pop("id"), **raw_file}
+            file_associations = [dict(item) for item in detail.get("associations", [])]
+        except KeyError:
+            file_payload = None
+
+        linked_issue: dict[str, Any] | None = None
+        issue_file_associations: list[dict[str, Any]] = []
+        entity_associations: list[dict[str, Any]] = []
+        issue_id = finding.get("issue_id")
+        if issue_id:
+            try:
+                issue = db.get_issue(str(issue_id))
+                linked_issue = dict(issue_to_public(issue))
+                issue_file_associations = [dict(item) for item in db.get_issue_files(issue.id)]
+                entity_associations = [dict(row) for row in db.list_entity_associations(make_issue_id(issue.id))]
+            except KeyError:
+                linked_issue = None
+
+        return JSONResponse(
+            {
+                "finding": scan_finding_to_loom(finding),
+                "file": file_payload,
+                "linked_issue": linked_issue,
+                "file_associations": issue_file_associations or file_associations,
+                "entity_associations": entity_associations,
+            }
+        )
+
+    @router.get("/session-evidence")
+    async def api_loom_session_evidence(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """V0 session evidence bundle by actor and optional time window."""
+        params = request.query_params
+        actor = params.get("actor", "")
+        if not isinstance(actor, str) or not actor.strip():
+            return _error_response("actor query parameter is required", ErrorCode.VALIDATION, 400)
+        since = params.get("since")
+        until = params.get("until")
+        limit = _safe_int(params.get("limit", "100"), "limit", min_value=1, max_value=_MAX_PAGINATION_LIMIT)
+        if isinstance(limit, JSONResponse):
+            return limit
+
+        time_clause = ""
+        time_params: list[Any] = []
+        if since:
+            time_clause += " AND created_at >= ?"
+            time_params.append(since)
+        if until:
+            time_clause += " AND created_at <= ?"
+            time_params.append(until)
+
+        issue_rows = db.conn.execute(
+            f"""
+            SELECT DISTINCT issue_id
+            FROM events
+            WHERE actor = ?{time_clause}
+            ORDER BY issue_id ASC
+            LIMIT ?
+            """,
+            [actor, *time_params, limit],
+        ).fetchall()
+        issues = []
+        for row in issue_rows:
+            try:
+                issues.append(dict(issue_to_public(db.get_issue(row["issue_id"]))))
+            except KeyError:
+                continue
+
+        finding_rows = db.conn.execute(
+            """
+            SELECT id
+            FROM scan_findings
+            WHERE created_by = ? OR updated_by = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (actor, actor, limit),
+        ).fetchall()
+        # Route through the public ``get_finding`` accessor rather than the
+        # private ``_build_scan_finding`` row-builder. This costs one extra
+        # SELECT per finding (N+1), which is acceptable on this diagnostic
+        # session-evidence surface and keeps the route off the DB internals.
+        findings = [scan_finding_to_loom(db.get_finding(row["id"])) for row in finding_rows]
+
+        assoc_rows = db.conn.execute(
+            """
+            SELECT issue_id
+            FROM entity_associations
+            WHERE attached_by = ?
+            ORDER BY attached_at DESC
+            LIMIT ?
+            """,
+            (actor, limit),
+        ).fetchall()
+        entity_associations: list[dict[str, Any]] = []
+        for row in assoc_rows:
+            entity_associations.extend(dict(item) for item in db.list_entity_associations(row["issue_id"]))
+
+        return JSONResponse(
+            {
+                "query": {"actor": actor, "since": since, "until": until, "limit": limit},
+                "issues": issues,
+                "findings": findings,
+                "entity_associations": entity_associations,
+                "observations": [],
+                "annotations": [],
+                "commands": [],
+            }
+        )
+
     @router.post("/findings/promote")
     async def api_loom_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Promote a finding to a tracked issue, keyed by ``(scan_source, fingerprint)``.
@@ -742,6 +918,57 @@ def create_loom_router() -> APIRouter:
             scan_source,
             actor,
         )
+        return JSONResponse(result)
+
+    @router.post("/findings/promote-and-attach")
+    async def api_loom_promote_finding_and_attach(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Promote a finding by fingerprint and attach an opaque entity binding."""
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        fingerprint = body.get("fingerprint", "")
+        entity_id = body.get("entity_id", "")
+        content_hash = body.get("content_hash", "")
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            return _error_response("fingerprint is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            return _error_response("entity_id is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(content_hash, str) or not content_hash.strip():
+            return _error_response("content_hash is required and must be a string", ErrorCode.VALIDATION, 400)
+        entity_kind = body.get("entity_kind", body.get("external_entity_kind"))
+        if entity_kind is not None and not isinstance(entity_kind, str):
+            return _error_response("entity_kind must be a string", ErrorCode.VALIDATION, 400)
+        priority, priority_err = _parse_promote_priority(body.get("priority"))
+        if priority_err is not None:
+            return _error_response(priority_err, ErrorCode.VALIDATION, 400)
+        labels = body.get("labels")
+        if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
+            return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        try:
+            result = await asyncio.to_thread(
+                _promote_finding_and_attach_on_private_conn,
+                db,
+                scan_source=scan_source,
+                fingerprint=fingerprint,
+                entity_id=entity_id,
+                content_hash=content_hash,
+                priority=priority,
+                labels=labels,
+                actor=actor,
+                entity_kind=entity_kind,
+            )
+        except ValueError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        except sqlite3.Error as e:
+            return _error_response(f"database error promoting finding and attaching entity: {e}", ErrorCode.IO, 500)
+        if result is None:
+            return _error_response("no finding for fingerprint", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(result)
 
     @router.post("/findings/clean-stale")
