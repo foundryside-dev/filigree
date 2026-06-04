@@ -2061,6 +2061,13 @@ class FilesMixin(DBMixinProtocol):
         "low": 3,
         "info": 3,
     }
+    _FINDING_SEVERITY_TO_BUG_SEVERITY: ClassVar[dict[str, str]] = {
+        "critical": "critical",
+        "high": "major",
+        "medium": "major",
+        "low": "minor",
+        "info": "cosmetic",
+    }
 
     def get_finding(self, finding_id: str) -> ScanFindingDict:
         """Get a single finding by ID.  Raises *KeyError* if not found."""
@@ -2268,6 +2275,7 @@ class FilesMixin(DBMixinProtocol):
             priority=priority,
             description="\n\n".join(description_parts),
             fields={
+                "severity": self._FINDING_SEVERITY_TO_BUG_SEVERITY.get(finding["severity"], "minor"),
                 "source_finding_id": finding_id,
                 "scan_source": finding["scan_source"],
                 "rule_id": finding["rule_id"],
@@ -2284,6 +2292,41 @@ class FilesMixin(DBMixinProtocol):
         if warnings:
             result["warnings"] = warnings
         return result
+
+    def promote_finding_and_attach_entity(
+        self,
+        finding_id: str,
+        entity_id: str,
+        content_hash: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+        labels: list[str] | None = None,
+        entity_kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote a finding to an issue and attach an opaque entity binding.
+
+        This composes the existing idempotent primitives so retrying the same
+        request returns the existing issue and refreshes the association hash.
+        Public HTTP routes run this on a private worker-thread connection.
+        """
+        result = self.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
+        issue = result["issue"]
+        association = self.add_entity_association(
+            issue.id,
+            entity_id,
+            content_hash,
+            actor=actor,
+            entity_kind=entity_kind,
+        )
+        payload: dict[str, Any] = {
+            "issue": self.get_issue(issue.id),
+            "created": result["created"],
+            "association": association,
+        }
+        if result.get("warnings"):
+            payload["warnings"] = result["warnings"]
+        return payload
 
     def _file_path_for_finding(self, file_id: str) -> str:
         """Look up the file path for a file_id, returning empty string if not found."""

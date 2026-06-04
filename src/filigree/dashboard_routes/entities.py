@@ -105,10 +105,16 @@ def create_classic_router() -> APIRouter:
         §"Decision 3".
         """
         entity_id = request.query_params.get("entity_id", "")
+        current_content_hash = request.query_params.get("current_content_hash")
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
+        if current_content_hash is not None and (not isinstance(current_content_hash, str) or not current_content_hash.strip()):
+            return _error_response("current_content_hash must be a non-empty string when provided", ErrorCode.VALIDATION, 400)
         try:
-            rows = db.list_associations_by_entity(make_clarion_entity_id(entity_id))
+            rows = db.list_associations_by_entity(
+                make_clarion_entity_id(entity_id),
+                current_content_hash=make_content_hash(current_content_hash) if current_content_hash is not None else None,
+            )
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"associations": [dict(row) for row in rows]})
@@ -119,17 +125,20 @@ def create_classic_router() -> APIRouter:
         key — re-attach refreshes ``content_hash_at_attach`` and ``attached_at``
         while preserving the original ``attached_by``.
 
-        Body: ``{"entity_id": str, "content_hash": str, "actor": str?}``.
+        Body: ``{"entity_id": str, "content_hash": str, "entity_kind": str?, "actor": str?}``.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
         entity_id = body.get("entity_id", "")
         content_hash = body.get("content_hash", "")
+        entity_kind = body.get("entity_kind", body.get("external_entity_kind"))
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id is required", ErrorCode.VALIDATION, 400)
         if not isinstance(content_hash, str) or not content_hash.strip():
             return _error_response("content_hash is required", ErrorCode.VALIDATION, 400)
+        if entity_kind is not None and not isinstance(entity_kind, str):
+            return _error_response("entity_kind must be a string", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -144,6 +153,7 @@ def create_classic_router() -> APIRouter:
                 make_clarion_entity_id(entity_id),
                 make_content_hash(content_hash),
                 actor=actor,
+                entity_kind=entity_kind,
             )
         except WrongProjectError as exc:
             return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)

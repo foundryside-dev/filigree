@@ -76,11 +76,12 @@ either catalogue. The verbs you will reach for most:
   `entity_association_remove`, `entity_association_list`,
   `entity_association_list_by_entity`. Used when a sibling tool (e.g.
   Clarion) needs to bind a Filigree issue to a function, class, or
-  module identifier it owns. The `entity_id` is an opaque string
-  from Filigree's perspective; the consumer (the sibling tool's read
+  module identifier it owns. The `entity_id` is an opaque external string
+  from Filigree's perspective and may be a `clarion:eid:...` SEI or a legacy
+  locator; callers may also supply `entity_kind` explicitly. The consumer (the sibling tool's read
   path) does drift detection against the stored
   `content_hash_at_attach`. `entity_association_list_by_entity` is the
-  reverse-lookup surface — given a Clarion entity ID, return every
+  reverse-lookup surface — given an opaque external entity ID, return every
   Filigree issue bound to it (project isolation is by DB file). Also
   reachable over HTTP as
   `GET/POST /api/issue/{issue_id}/entity-associations`,

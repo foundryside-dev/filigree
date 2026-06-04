@@ -639,6 +639,8 @@ class AddEntityAssociationArgs(TypedDict):
     issue_id: IssueId
     entity_id: ClarionEntityId
     content_hash: ContentHash
+    entity_kind: NotRequired[str]
+    external_entity_kind: NotRequired[str]
     actor: NotRequired[str]
 
 
@@ -654,6 +656,7 @@ class ListEntityAssociationsArgs(TypedDict):
 
 class ListAssociationsByEntityArgs(TypedDict):
     entity_id: ClarionEntityId
+    current_content_hash: NotRequired[ContentHash]
 
 
 class TriggerScanArgs(TypedDict):
@@ -707,6 +710,17 @@ class PromoteFindingArgs(TypedDict):
     finding_id: str
     priority: NotRequired[int]
     labels: NotRequired[list[str]]
+    actor: NotRequired[str]
+
+
+class PromoteFindingAttachEntityArgs(TypedDict):
+    finding_id: str
+    entity_id: str
+    content_hash: str
+    priority: NotRequired[int]
+    labels: NotRequired[list[str]]
+    entity_kind: NotRequired[str]
+    external_entity_kind: NotRequired[str]
     actor: NotRequired[str]
 
 
@@ -939,6 +953,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "update_finding": UpdateFindingArgs,
     "batch_update_findings": BatchUpdateFindingsArgs,
     "promote_finding": PromoteFindingArgs,
+    "promote_finding_and_attach_entity": PromoteFindingAttachEntityArgs,
     "dismiss_finding": DismissFindingArgs,
     # scanners.py (list_scanners has no args — excluded)
     "enable_scanner": EnableScannerArgs,

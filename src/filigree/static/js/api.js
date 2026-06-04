@@ -137,6 +137,17 @@ export async function fetchIssueFiles(issueId) {
   }
 }
 
+export async function fetchIssueEntityAssociations(issueId) {
+  try {
+    const resp = await fetch(apiUrl(`/issue/${issueId}/entity-associations`));
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (err) {
+    console.warn("[fetchIssueEntityAssociations] Network error:", err);
+    return null;
+  }
+}
+
 export async function fetchTransitions(issueId) {
   try {
     const resp = await fetch(apiUrl(`/issue/${issueId}/transitions`));

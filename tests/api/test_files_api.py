@@ -17,6 +17,7 @@ from tests.conftest import PopulatedDB
 _OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
 
 _CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "findings-clean-stale.json"
+_SCAN_RESULTS_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "scan-results.json"
 
 
 class TestFilesSchemaAPI:
@@ -216,6 +217,18 @@ class TestScanRunsAPI:
         paths = [ep["path"] for ep in data["endpoints"]]
         assert "/api/scan-runs" in paths
 
+    async def test_schema_documents_empty_scan_run_id_history_tradeoff(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+        scan_results = next(ep for ep in data["endpoints"] if ep["path"] == "/api/v1/scan-results")
+        scan_run_id_doc = scan_results["request_body"]["scan_run_id"]
+
+        assert "globally unique non-empty" in scan_run_id_doc
+        assert "/api/scan-runs" in scan_run_id_doc
+        assert "empty" in scan_run_id_doc
+        assert "fire-and-forget" in scan_run_id_doc
+        assert "excluded" in scan_run_id_doc
+
 
 class TestUnknownScanRunIdContract:
     """POST scan-results with a client-supplied scan_run_id Filigree has never
@@ -402,6 +415,126 @@ class TestScanResultsFingerprintAPI:
         )
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
+
+    async def test_wardline_fingerprint_survives_native_ingest_readback_promote_dedup_and_lifecycle(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        fingerprint = "wardline:sarif:partial-fingerprint:v1"
+        first = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-001",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "tainted source reaches sink",
+                        "severity": "high",
+                        "line_start": 12,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["stats"]["findings_created"] == 1
+
+        listing = await client.get(f"/api/loom/findings?scan_source=wardline&fingerprint={fingerprint}")
+        assert listing.status_code == 200
+        items = listing.json()["items"]
+        assert len(items) == 1
+        finding = items[0]
+        assert finding["scan_run_id"] == "wardline-native-run-001"
+        assert finding["fingerprint"] == fingerprint
+
+        promoted = await client.post(
+            "/api/loom/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": fingerprint, "actor": "wardline"},
+        )
+        assert promoted.status_code == 200
+        issue_id = promoted.json()["issue_id"]
+
+        second = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-002",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "same taint path after line movement",
+                        "severity": "high",
+                        "line_start": 48,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["stats"]["findings_updated"] == 1
+        assert second.json()["succeeded"] == []
+
+        listing = await client.get(f"/api/loom/findings?scan_source=wardline&fingerprint={fingerprint}")
+        finding = listing.json()["items"][0]
+        assert finding["seen_count"] == 2
+        assert finding["line_start"] == 48
+        assert finding["issue_id"] == issue_id
+        # First attribution wins: later dedup/readback must not erase the run
+        # that originally introduced this finding.
+        assert finding["scan_run_id"] == "wardline-native-run-001"
+
+        dashboard_db.db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE fingerprint = ?",
+            (_OLD_TS, fingerprint),
+        )
+        dashboard_db.db.conn.commit()
+        swept = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
+        assert swept.status_code == 200
+        fixed = (await client.get(f"/api/loom/findings?scan_source=wardline&fingerprint={fingerprint}")).json()["items"][0]
+        assert fixed["status"] == "fixed"
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) == "done"
+
+        reopened = await client.post(
+            "/api/loom/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-003",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "same taint path regressed",
+                        "severity": "high",
+                        "line_start": 50,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert reopened.status_code == 200
+        current = (await client.get(f"/api/loom/findings?scan_source=wardline&fingerprint={fingerprint}")).json()["items"][0]
+        assert current["status"] == "open"
+        assert current["seen_count"] == 3
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) != "done"
+
+    def test_scan_results_fixture_pins_sarif_adapter_fingerprint_contract(self) -> None:
+        fixture = json.loads(_SCAN_RESULTS_FIXTURE.read_text())
+        adapter_contract = fixture["shape_decl"]["external_adapter_contract"]
+        assert "SARIF" in adapter_contract
+        assert "partialFingerprints" in adapter_contract
+        assert "finding.fingerprint" in adapter_contract
+
+        wardline_example = next(
+            example for example in fixture["examples"] if example["name"] == "success_wardline_sarif_adapter_fingerprint"
+        )
+        finding = wardline_example["request"]["body"]["findings"][0]
+        assert finding["fingerprint"]
+        assert "partialFingerprints" in wardline_example["note"]
+        assert wardline_example["response"]["body"]["stats"]["findings_created"] == 1
 
 
 class TestLoomCleanStaleFindingsAPI:
@@ -636,7 +769,7 @@ class TestLoomPromoteFindingAPI:
         )
         assert resp.status_code == 200
 
-    async def test_promote_returns_issue_id_created(self, client: AsyncClient) -> None:
+    async def test_promote_returns_issue_id_created(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         await self._ingest(client)
         resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert resp.status_code == 200
@@ -644,6 +777,8 @@ class TestLoomPromoteFindingAPI:
         assert body["created"] is True
         assert body["issue_id"]
         assert set(body.keys()) == {"issue_id", "created"}
+        issue = dashboard_db.db.get_issue(body["issue_id"])
+        assert issue.fields["severity"] == "major"
 
     async def test_promote_is_idempotent(self, client: AsyncClient) -> None:
         await self._ingest(client)
@@ -653,6 +788,103 @@ class TestLoomPromoteFindingAPI:
         assert second.status_code == 200
         assert second.json()["created"] is False
         assert second.json()["issue_id"] == first.json()["issue_id"]
+
+    async def test_promote_and_attach_entity_is_idempotent(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+
+        first = await client.post(
+            "/api/loom/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "clarion:eid:abc123",
+                "content_hash": "hash-v1",
+                "entity_kind": "function",
+                "actor": "wardline",
+            },
+        )
+        assert first.status_code == 200
+        body = first.json()
+        assert body["created"] is True
+        assert body["association"]["entity_id"] == "clarion:eid:abc123"
+        assert body["association"]["entity_kind"] == "function"
+
+        second = await client.post(
+            "/api/loom/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "clarion:eid:abc123",
+                "content_hash": "hash-v2",
+                "actor": "wardline",
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["issue_id"] == body["issue_id"]
+        assert second.json()["created"] is False
+        assert second.json()["association"]["content_hash_at_attach"] == "hash-v2"
+
+        rows = dashboard_db.db.list_entity_associations(body["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == "hash-v2"
+
+    async def test_finding_dossier_includes_file_issue_and_entity_context(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+        listing = await client.get("/api/loom/findings", params={"scan_source": "wardline", "fingerprint": "fp-http"})
+        finding_id = listing.json()["items"][0]["finding_id"]
+        promoted = await client.post(
+            "/api/loom/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "clarion:eid:dossier",
+                "content_hash": "hash-v1",
+                "entity_kind": "function",
+            },
+        )
+        issue_id = promoted.json()["issue_id"]
+        dashboard_db.db.add_file_association(listing.json()["items"][0]["file_id"], issue_id, "scan_finding", actor="tester")
+
+        resp = await client.get(f"/api/loom/findings/{finding_id}/dossier")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["finding"]["finding_id"] == finding_id
+        assert body["file"]["file_id"] == listing.json()["items"][0]["file_id"]
+        assert body["linked_issue"]["issue_id"] == issue_id
+        assert body["entity_associations"][0]["entity_id"] == "clarion:eid:dossier"
+        assert body["file_associations"][0]["issue_id"] == issue_id
+
+    async def test_session_evidence_bundle_actor_window(self, client: AsyncClient) -> None:
+        await self._ingest(client, fingerprint="fp-session")
+        promoted = await client.post(
+            "/api/loom/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-session",
+                "entity_id": "clarion:eid:session",
+                "content_hash": "hash-v1",
+                "actor": "session-agent",
+            },
+        )
+        assert promoted.status_code == 200
+
+        resp = await client.get("/api/loom/session-evidence", params={"actor": "session-agent"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["query"]["actor"] == "session-agent"
+        assert {issue["issue_id"] for issue in body["issues"]} == {promoted.json()["issue_id"]}
+        assert body["findings"]
+        assert body["entity_associations"][0]["entity_id"] == "clarion:eid:session"
+
+    async def test_session_evidence_empty_bundle(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/loom/session-evidence", params={"actor": "no-such-agent"})
+
+        assert resp.status_code == 200
+        assert resp.json()["issues"] == []
+        assert resp.json()["findings"] == []
+        assert resp.json()["entity_associations"] == []
 
     async def test_unknown_fingerprint_404(self, client: AsyncClient) -> None:
         await self._ingest(client)

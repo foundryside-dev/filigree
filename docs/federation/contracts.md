@@ -405,6 +405,10 @@ of the external producer contract.
   can never collide with Filigree's own `scan_trigger`-minted ids.
 - **Keep `scan_source` stable across a run.** History groups on
   `(scan_run_id, scan_source)`; a mid-run `scan_source` change splits the run.
+- **Empty `scan_run_id` means fire-and-forget.** The field is optional and `""`
+  is accepted for legacy or fire-and-forget findings, but empty values are
+  intentionally excluded from `GET /api/scan-runs`. External producers that
+  want scan-run history MUST send a globally unique, non-empty id.
 - **No completion warning for an unknown run.** With `complete_scan_run=true`
   (the default), an unknown run has no `scan_runs` row to transition to
   `completed`, so Filigree **skips the completion attempt silently** — the
@@ -426,6 +430,27 @@ and at the core-method level by `tests/core/test_files.py::TestScanRunId`
 
 **Clarion may drop its "pending Filigree's confirmation" caveat** on
 `docs/federation/contracts.md` (scan-results intake) and `REQ-FINDING-05`.
+
+### SARIF-to-scan-results fingerprint adapter contract
+
+Filigree does not implement a SARIF parser on `/api/v1/scan-results`,
+`/api/loom/scan-results`, or `/api/scan-results`. The native scan-results
+contract accepts Filigree finding JSON. SARIF producers such as Wardline must
+translate SARIF before POSTing, including mapping SARIF
+`result.partialFingerprints` or `result.fingerprints` into each posted
+finding's `fingerprint` field.
+
+Once supplied as `finding.fingerprint`, Filigree treats the fingerprint as the
+finding's cross-run identity for that `scan_source`. It is preserved through
+ingestion, `GET /api/loom/findings` readback, promote-by-fingerprint, dedup
+across line movement, stale/fixed cleanup, and reopen-on-regress lifecycle
+transitions. Fingerprint-less legacy findings remain supported and continue to
+dedup by the file/source/rule/line heuristic.
+
+Pinned by
+`tests/api/test_files_api.py::TestScanResultsFingerprintAPI::test_wardline_fingerprint_survives_native_ingest_readback_promote_dedup_and_lifecycle`
+and by the `success_wardline_sarif_adapter_fingerprint` example in
+`tests/fixtures/contracts/loom/scan-results.json`.
 
 ## When a contract evolves
 

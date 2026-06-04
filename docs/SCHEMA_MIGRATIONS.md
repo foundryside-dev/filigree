@@ -31,6 +31,7 @@ without grepping source. The source of truth remains
 
 | Release | Ships `user_version` | Notes |
 |---------|----------------------|-------|
+| 2.3.0 | 23 | Migration 22 to 23: `entity_associations.entity_kind` caller-supplied metadata; public projections expose canonical `entity_id` with `clarion_entity_id` compatibility alias |
 | 2.1.1 | 21 | Migration 20 to 21: `deleted_issues.entity_ids`, surfaced as `affected_entities` on the `issue_deleted` deletion-signal record (F5 amplifier) |
 | 2.1.0 | 20 | Migrations 14 to 20: entity associations (v15), event sequencing (v16), file registry metadata (v17), `application_id` stamp (v18), scan-finding fingerprints (v19), and the `deleted_issues` tombstone (v20) |
 | 2.0.0 to 2.0.3 | 14 | Loom/API generation and 2.0 surface releases |

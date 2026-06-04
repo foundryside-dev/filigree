@@ -445,6 +445,146 @@ class TestDoctorCli:
         result = runner.invoke(cli, ["doctor", "--fix"])
         assert result.exit_code == 0
 
+    def test_doctor_json_emits_shared_summary_contract(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        from filigree.install_support.doctor import CheckResult
+
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult("Claude Code MCP", True, "configured"),
+                CheckResult("Bundled scanner registrations", False, "stale", fix_hint="run scanner enable"),
+            ],
+        )
+
+        result = runner.invoke(cli, ["doctor", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert set(payload) == {"ok", "checks", "next_actions"}
+        assert payload["ok"] is False
+        assert isinstance(payload["checks"], list)
+        assert isinstance(payload["next_actions"], list)
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks["mcp.registration"] == {"id": "mcp.registration", "status": "ok", "fixed": False}
+        assert checks["scanner.registration"] == {"id": "scanner.registration", "status": "failed", "fixed": False}
+        assert "api.availability" in checks
+        assert "auth.config" in checks
+        assert "entity_associations.routes" in checks
+
+    def test_doctor_json_real_project_includes_stable_route_ids(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["doctor", "--json"])
+
+        assert result.output
+        payload = json.loads(result.output)
+        check_ids = {check["id"] for check in payload["checks"]}
+        assert {
+            "dashboard.port",
+            "mcp.registration",
+            "api.availability",
+            "scanner.results",
+            "entity_associations.routes",
+        }.issubset(check_ids)
+
+    def test_doctor_fix_json_reports_repair_and_is_idempotent(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        from filigree.install_support.doctor import CheckResult
+
+        repaired = False
+
+        def fake_run_doctor(**_kw: object) -> list[CheckResult]:
+            if repaired:
+                return [CheckResult("Claude Code MCP", True, "configured")]
+            return [CheckResult("Claude Code MCP", False, "missing", fix_hint="hint")]
+
+        def fake_install_claude_code_mcp(*_args: object, **_kwargs: object) -> tuple[bool, str]:
+            nonlocal repaired
+            repaired = True
+            return True, "Configured .mcp.json"
+
+        monkeypatch.setattr("filigree.install.run_doctor", fake_run_doctor)
+        monkeypatch.setattr("filigree.install.install_claude_code_mcp", fake_install_claude_code_mcp)
+
+        first = runner.invoke(cli, ["doctor", "--fix", "--json"])
+        second = runner.invoke(cli, ["doctor", "--fix", "--json"])
+
+        assert first.exit_code == 0
+        first_payload = json.loads(first.output)
+        assert first_payload["ok"] is True
+        assert {"id": "mcp.registration", "status": "fixed", "fixed": True} in first_payload["checks"]
+
+        assert second.exit_code == 0
+        second_payload = json.loads(second.output)
+        assert second_payload["ok"] is True
+        assert {"id": "mcp.registration", "status": "ok", "fixed": False} in second_payload["checks"]
+
+    def test_doctor_fix_json_does_not_mutate_scanner_results_by_default(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        from filigree.install_support.doctor import CheckResult
+
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult(
+                    "Bundled scanner registrations",
+                    False,
+                    "Stale bundled scanner registration(s): codex",
+                    fix_hint="Run: filigree scanner enable codex --force",
+                    code="stale_bundled_scanner",
+                )
+            ],
+        )
+
+        result = runner.invoke(cli, ["doctor", "--fix", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert {"id": "scanner.registration", "status": "failed", "fixed": False} in payload["checks"]
+        assert payload["next_actions"] == ["scanner.registration: Run: filigree scanner enable codex --force"]
+
+    def test_doctor_fix_json_only_repairs_local_bindings_and_stale_dashboard_pointers(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _ = cli_in_project
+
+        from filigree.install_support.doctor import CheckResult
+
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult(".gitignore", False, "missing", fix_hint="Run: filigree install --gitignore"),
+                CheckResult("Claude Code MCP", False, "missing", fix_hint="Run: filigree install --claude-code"),
+                CheckResult("Ephemeral port", False, "stale", fix_hint="Remove .filigree/ephemeral.port"),
+            ],
+        )
+
+        def fail_gitignore(_root: Path) -> tuple[bool, str]:
+            raise AssertionError("doctor --fix must not repair .gitignore")
+
+        monkeypatch.setattr("filigree.install.ensure_gitignore", fail_gitignore)
+        monkeypatch.setattr("filigree.install.install_claude_code_mcp", lambda *_args, **_kwargs: (True, "repaired MCP"))
+
+        result = runner.invoke(cli, ["doctor", "--fix", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks["git.ignore"] == {"id": "git.ignore", "status": "failed", "fixed": False}
+        assert checks["mcp.registration"] == {"id": "mcp.registration", "status": "fixed", "fixed": True}
+        assert checks["dashboard.port"] == {"id": "dashboard.port", "status": "fixed", "fixed": True}
+
     def test_doctor_fix_reports_manual_intervention_on_fixer_failure(
         self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -453,25 +593,25 @@ class TestDoctorCli:
 
         from filigree.install_support.doctor import CheckResult
 
-        # Two fixable failures: .gitignore (will fail to fix) and CLAUDE.md (will succeed)
+        # Two fixable failures: MCP binding (will fail to fix) and stale dashboard pointer (will succeed)
         mock_results = [
-            CheckResult(".gitignore", False, "missing", fix_hint="hint"),
-            CheckResult("CLAUDE.md", False, "missing", fix_hint="hint"),
+            CheckResult("Claude Code MCP", False, "missing", fix_hint="hint"),
+            CheckResult("Ephemeral port", False, "stale", fix_hint="hint"),
         ]
         monkeypatch.setattr("filigree.install.run_doctor", lambda **_kw: mock_results)
         monkeypatch.setattr(
-            "filigree.install.ensure_gitignore",
-            lambda _root: (False, "Permission denied"),
+            "filigree.install.install_claude_code_mcp",
+            lambda *_args, **_kwargs: (False, "Permission denied"),
         )
         monkeypatch.setattr(
-            "filigree.install.inject_instructions",
-            lambda _path: (True, "Injected"),
+            "filigree.cli_commands.admin._remove_stale_doctor_pointer",
+            lambda _path: (True, "Removed stale pointer"),
         )
 
         result = runner.invoke(cli, ["doctor", "--fix"])
 
-        assert "!! .gitignore: Permission denied" in result.output
-        assert "OK CLAUDE.md: Injected" in result.output
+        assert "!! Claude Code MCP: Permission denied" in result.output
+        assert "OK Ephemeral port: Removed stale pointer" in result.output
         assert "Fixed 1/2 issues" in result.output
         assert "1 require manual intervention" in result.output
 
@@ -521,11 +661,11 @@ class TestDoctorCli:
 
         monkeypatch.setattr(
             "filigree.install.run_doctor",
-            lambda **_kw: [CheckResult(".gitignore", False, "missing", fix_hint="hint")],
+            lambda **_kw: [CheckResult("Claude Code MCP", False, "missing", fix_hint="hint")],
         )
         monkeypatch.setattr(
-            "filigree.install.ensure_gitignore",
-            lambda _root: (True, "Added .filigree/ to .gitignore"),
+            "filigree.install.install_claude_code_mcp",
+            lambda *_args, **_kwargs: (True, "Configured .mcp.json"),
         )
 
         result = runner.invoke(cli, ["doctor", "--fix"])
@@ -833,9 +973,11 @@ class TestInitSchemaMigration:
 
 
 class TestDoctorFixHonoursConfDbPath:
-    """filigree-fa6309d551: --fix schema repair must use the conf-declared DB."""
+    """filigree-fa6309d551: --fix must not touch a phantom legacy DB."""
 
-    def test_doctor_fix_migrates_conf_relocated_db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+    def test_doctor_fix_diagnoses_conf_relocated_schema_without_migrating(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
         import shutil
         import sqlite3
 
@@ -868,22 +1010,26 @@ class TestDoctorFixHonoursConfDbPath:
         assert result.exit_code in (0, 1), result.output
         assert not legacy_db.exists(), "doctor --fix must not create a phantom legacy DB"
 
-        # The custom DB should now be at the current schema.
+        # Schema repair is now validate-and-report only; doctor --fix must not
+        # mutate the database schema while repairing local bindings/pointers.
         conn = sqlite3.connect(str(custom_db))
         try:
-            from filigree.db_schema import CURRENT_SCHEMA_VERSION
-
             ver = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert ver == CURRENT_SCHEMA_VERSION, f"custom DB still at v{ver}"
+            assert ver == 1
         finally:
             conn.close()
+        assert "Schema version: v1" in result.output
 
 
 class TestDoctorFixSchema:
-    """Test that `filigree doctor --fix` can repair outdated schemas."""
+    """Test `filigree doctor --fix` schema handling."""
 
-    def test_doctor_fix_upgrades_outdated_schema(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
-        """doctor --fix should apply migrations when schema is outdated."""
+    def test_doctor_fix_reports_outdated_schema_without_migrating(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """doctor --fix should diagnose outdated schema without applying migrations."""
+        import sqlite3
+
         monkeypatch.chdir(tmp_path)
         cli_runner.invoke(cli, ["init"])
         _downgrade_db(tmp_path, target_version=1)
@@ -891,9 +1037,15 @@ class TestDoctorFixSchema:
         result = cli_runner.invoke(cli, ["doctor", "--fix"])
         # filigree-467d1e7487: doctor exits 1 when unfixable env checks
         # remain (e.g. duplicate venv+uv-tool install in test env). Assert
-        # the schema-fix payload happened, not the global exit code.
-        assert result.exit_code in (0, 1)
-        assert "Schema upgraded v1" in result.output
+        # the schema diagnostic happened, not the global exit code.
+        assert result.exit_code == 1
+        assert "Schema version: v1" in result.output
+        assert "Schema upgraded v1" not in result.output
+        conn = sqlite3.connect(str(tmp_path / ".filigree" / "filigree.db"))
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        finally:
+            conn.close()
 
     def test_doctor_fix_no_schema_issue_when_current(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         """doctor --fix on a current schema should not mention schema upgrades."""

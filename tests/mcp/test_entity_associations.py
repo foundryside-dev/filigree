@@ -39,9 +39,26 @@ class TestAddEntityAssociationMCP:
             )
         )
         assert result["issue_id"] == issue.id
+        assert result["entity_id"] == "py:func:parser.tokenize"
         assert result["clarion_entity_id"] == "py:func:parser.tokenize"
         assert result["content_hash_at_attach"] == "abc123"
         assert result["attached_by"] == "alice"
+
+    async def test_attach_accepts_entity_kind(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Refactor parser", priority=2)
+        result = _parse(
+            await call_tool(
+                "add_entity_association",
+                {
+                    "issue_id": issue.id,
+                    "entity_id": "not-a-clarion-locator",
+                    "content_hash": "abc123",
+                    "entity_kind": "function",
+                },
+            )
+        )
+        assert result["entity_id"] == "not-a-clarion-locator"
+        assert result["entity_kind"] == "function"
 
     async def test_attach_idempotent_preserves_attached_by(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("t", priority=2)
@@ -216,6 +233,7 @@ class TestListAssociationsByEntityMCP:
         result = _parse(await call_tool("list_associations_by_entity", {"entity_id": target}))
         issue_ids = {row["issue_id"] for row in result["associations"]}
         assert issue_ids == {a.id, b.id}
+        assert all(row["entity_id"] == target for row in result["associations"])
 
     async def test_rejects_blank_entity_id(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "   "}))

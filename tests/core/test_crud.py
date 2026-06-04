@@ -1420,6 +1420,7 @@ class TestImportJsonl:
                 "attached_at": attached["attached_at"],
                 "attached_by": "alice",
                 "migration_orphaned_at": None,
+                "entity_kind": "",
             }
         ]
 

@@ -46,6 +46,7 @@ from filigree.types.inputs import (
     ListFilesArgs,
     ListFindingsArgs,
     PromoteFindingArgs,
+    PromoteFindingAttachEntityArgs,
     RegisterFileArgs,
     UpdateFindingArgs,
 )
@@ -278,6 +279,36 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             },
         ),
         Tool(
+            name="promote_finding_and_attach_entity",
+            description="Promote a scan finding to a tracked issue and attach an opaque external entity binding in one operation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "finding_id": {"type": "string", "description": "Finding ID"},
+                    "entity_id": {"type": "string", "description": "Opaque external entity ID"},
+                    "content_hash": {"type": "string", "description": "Current content hash to snapshot on the association"},
+                    "entity_kind": {
+                        "type": "string",
+                        "description": "Optional caller-supplied kind metadata; never inferred from entity_id",
+                    },
+                    "external_entity_kind": {"type": "string", "description": "Compatibility synonym for entity_kind"},
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Override priority (default: inferred from severity)",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional labels to attach to the promoted issue",
+                    },
+                    "actor": {"type": "string", "description": "Actor identity"},
+                },
+                "required": ["finding_id", "entity_id", "content_hash"],
+            },
+        ),
+        Tool(
             name="dismiss_finding",
             description=(
                 "Dismiss a finding by transitioning it to a non-open status. Default status is "
@@ -319,6 +350,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "update_finding": _handle_update_finding,
         "batch_update_findings": _handle_batch_update_findings,
         "promote_finding": _handle_promote_finding,
+        "promote_finding_and_attach_entity": _handle_promote_finding_and_attach_entity,
         "dismiss_finding": _handle_dismiss_finding,
     }
 
@@ -742,6 +774,58 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=f"Database error promoting finding: {exc}", code=ErrorCode.IO))
     refresh_summary()
     response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    if result.get("warnings"):
+        response["warnings"] = result["warnings"]
+    return _text(response)
+
+
+async def _handle_promote_finding_and_attach_entity(arguments: dict[str, Any]) -> list[TextContent]:
+    args = _parse_args(arguments, PromoteFindingAttachEntityArgs)
+    finding_id = args.get("finding_id", "")
+    entity_id = args.get("entity_id", "")
+    content_hash = args.get("content_hash", "")
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
+    if not isinstance(entity_id, str) or not entity_id.strip():
+        return _text(ErrorResponse(error="entity_id is required", code=ErrorCode.VALIDATION))
+    if not isinstance(content_hash, str) or not content_hash.strip():
+        return _text(ErrorResponse(error="content_hash is required", code=ErrorCode.VALIDATION))
+    priority = args.get("priority")
+    priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
+    if priority_err:
+        return priority_err
+    labels = args.get("labels")
+    if labels is not None and (not isinstance(labels, list) or not all(isinstance(lbl, str) for lbl in labels)):
+        return _text(ErrorResponse(error="labels must be a list of strings", code=ErrorCode.VALIDATION))
+    entity_kind = args.get("entity_kind", args.get("external_entity_kind"))
+    if entity_kind is not None and not isinstance(entity_kind, str):
+        return _text(ErrorResponse(error="entity_kind must be a string", code=ErrorCode.VALIDATION))
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
+
+    tracker = get_db()
+    try:
+        result = tracker.promote_finding_and_attach_entity(
+            finding_id,
+            entity_id,
+            content_hash,
+            priority=priority,
+            actor=actor,
+            labels=labels,
+            entity_kind=entity_kind,
+        )
+    except KeyError:
+        return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
+    except ValueError as exc:
+        _logger.warning("Failed to promote finding and attach entity %s: %s", finding_id, exc)
+        return _text(ErrorResponse(error=f"Failed to promote finding and attach entity: {exc}", code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        _logger.exception("Database error promoting finding and attaching entity %s", finding_id)
+        return _text(ErrorResponse(error=f"Database error promoting finding and attaching entity: {exc}", code=ErrorCode.IO))
+    refresh_summary()
+    response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    response["association"] = dict(result["association"])
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
     return _text(response)

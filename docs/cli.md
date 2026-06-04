@@ -1,6 +1,6 @@
 # CLI Reference
 
-Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
+Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command and by `doctor`; setup commands like `install` and session bootstrap commands like `session-context` produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
 
 ## Contents
 
@@ -85,7 +85,8 @@ filigree install --skills                  # Install Claude Code skills only
 filigree install --codex-skills            # Install Codex skills only
 filigree install --mode=server             # Switch MCP/hook configuration to server mode
 filigree doctor                            # Health check
-filigree doctor --fix                      # Auto-fix what's possible
+filigree doctor --fix                      # Repair local bindings and stale dashboard pointers
+filigree doctor --fix --json               # Machine-readable repair summary
 filigree doctor --verbose                  # Show all checks including passed
 ```
 
@@ -124,9 +125,35 @@ are reported with `filigree scanner enable <name> --force`, and enabled bundled
 scanners whose runner command is missing point at `uv tool install --upgrade
 filigree`.
 
+`doctor --fix` repairs local agent bindings and stale dashboard pointers only:
+Claude/Codex MCP registration, Claude Code hooks, and stale ephemeral dashboard
+PID/port files. It does not apply schema migrations, refresh generated context,
+rewrite docs/instruction files, update `.gitignore`, change scanner
+registrations, or mutate issues, observations, files, scan findings, scanner
+results, or entity associations.
+
+In JSON mode, `doctor` emits the shared agent-readiness summary contract:
+
+```json
+{
+  "ok": true,
+  "checks": [
+    {"id": "mcp.registration", "status": "ok", "fixed": false},
+    {"id": "dashboard.port", "status": "fixed", "fixed": true}
+  ],
+  "next_actions": []
+}
+```
+
+The status vocabulary is `ok`, `failed`, and `fixed`. Stable check IDs include
+`dashboard.port`, `mcp.registration`, `api.availability`, `auth.config`,
+`scanner.results`, and `entity_associations.routes`; Filigree may include
+additional product-specific IDs for local setup checks.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `--fix` | flag | Auto-fix what's possible |
+| `--fix` | flag | Repair local bindings and stale dashboard pointers |
+| `--json` | flag | Emit the shared machine-readable doctor summary |
 | `--verbose` | flag | Show all checks including passed |
 
 ## Automation and Server
@@ -1253,6 +1280,13 @@ legacy fallback outside an initialized Filigree project. If a future runner flag
 changes, refresh managed project registrations with `filigree scanner enable
 <name> --force`; `filigree doctor` reports bundled registrations that look
 stale.
+
+Scanner POSTs that need `GET /api/scan-runs` history must send a globally
+unique, non-empty `scan_run_id`. Empty run IDs are accepted for
+fire-and-forget findings but are intentionally absent from scan-run history.
+Filigree does not ingest raw SARIF at this endpoint; SARIF adapters must map
+SARIF `partialFingerprints` or `fingerprints` into each posted
+`finding.fingerprint` before sending scan-results.
 
 ### `trigger-scan`
 

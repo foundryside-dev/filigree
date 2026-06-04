@@ -217,11 +217,43 @@ class TestPromoteFindingToIssue:
 
         assert issue.type == "bug"
         assert issue.priority == 0
+        assert issue.fields["severity"] == "critical"
         assert "SQL injection" in issue.title
         assert issue.fields["source_finding_id"] == ids["sqli"]
         assert db.get_finding(ids["sqli"])["issue_id"] == issue.id
         labels = db.conn.execute("SELECT label FROM labels WHERE issue_id = ?", (issue.id,)).fetchall()
         assert any(row["label"] == "from-finding" for row in labels)
+
+    @pytest.mark.parametrize(
+        ("finding_severity", "bug_severity"),
+        [
+            ("critical", "critical"),
+            ("high", "major"),
+            ("medium", "major"),
+            ("low", "minor"),
+            ("info", "cosmetic"),
+        ],
+    )
+    def test_maps_finding_severity_to_bug_workflow_severity(
+        self,
+        db: FiligreeDB,
+        finding_severity: str,
+        bug_severity: str,
+    ) -> None:
+        result = db.process_scan_results(
+            scan_source="test-scanner",
+            findings=[
+                {
+                    "path": f"src/{finding_severity}.py",
+                    "rule_id": "R1",
+                    "severity": finding_severity,
+                    "message": "finding",
+                }
+            ],
+        )
+        issue = db.promote_finding_to_issue(result["new_finding_ids"][0])["issue"]
+
+        assert issue.fields["severity"] == bug_severity
 
     def test_reuses_existing_issue_on_retry(self, db: FiligreeDB) -> None:
         ids = _seed_findings(db)

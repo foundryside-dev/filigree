@@ -94,11 +94,12 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "delete_file_record": "file_delete",
     "get_file_timeline": "file_timeline_get",
     "get_file_annotations": "file_annotation_list",
-    # finding (7)
+    # finding (8)
     "list_findings": "finding_list",
     "get_finding": "finding_get",
     "dismiss_finding": "finding_dismiss",
     "promote_finding": "finding_promote",
+    "promote_finding_and_attach_entity": "finding_promote_and_attach_entity",
     "update_finding": "finding_update",
     "batch_update_findings": "finding_batch_update",
     "report_finding": "finding_report",

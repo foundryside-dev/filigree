@@ -32,6 +32,7 @@ from filigree.core import (
     write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
+from filigree.install_support.doctor import CheckResult, build_doctor_summary, doctor_check_id
 from filigree.install_support.version_marker import (
     format_schema_mismatch_guidance,
     read_install_version,
@@ -369,158 +370,172 @@ def install(
     click.echo('Next: filigree create "My first issue"')
 
 
+def _emit_doctor_json(
+    results: list[CheckResult],
+    *,
+    fixed_check_ids: set[str] | None = None,
+    fixed_check_names: set[str] | None = None,
+) -> None:
+    click.echo(
+        json_mod.dumps(
+            build_doctor_summary(
+                results,
+                fixed_check_ids=fixed_check_ids,
+                fixed_check_names=fixed_check_names,
+            ),
+            indent=2,
+        )
+    )
+
+
+def _remove_stale_doctor_pointer(path: Path) -> tuple[bool, str]:
+    try:
+        if path.exists():
+            path.unlink()
+            return True, f"Removed {path}"
+        return True, f"{path} already absent"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _apply_doctor_fixes(
+    results: list[CheckResult],
+    *,
+    emit: Callable[[str], None] | None,
+) -> tuple[int, set[str], set[str]]:
+    from filigree.install import (
+        install_claude_code_hooks,
+        install_claude_code_mcp,
+        install_codex_mcp,
+    )
+
+    try:
+        filigree_dir = find_filigree_root()
+    except ProjectNotInitialisedError as exc:
+        if emit is not None:
+            click.echo(str(exc), err=True)
+        raise click.ClickException(str(exc)) from exc
+
+    project_root = filigree_dir.parent
+    try:
+        mode = get_mode(filigree_dir)
+    except ValueError as exc:
+        if emit is not None:
+            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
+        mode = "ethereal"
+    server_port = 8377
+    if mode == "server":
+        try:
+            from filigree.server import read_server_config
+
+            server_port = read_server_config().port
+        except Exception:
+            logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
+
+    fixable: dict[str, str] = {
+        "Claude Code MCP": "claude_code_mcp",
+        "Codex MCP": "codex_mcp",
+        "Claude Code hooks": "hooks",
+        "Ephemeral PID": "ephemeral_pid",
+        "Ephemeral port": "ephemeral_port",
+    }
+
+    fixed = 0
+    fixed_check_ids: set[str] = set()
+    fixed_check_names: set[str] = set()
+    for r in results:
+        if r.passed or r.name not in fixable:
+            continue
+
+        fix_key = fixable[r.name]
+        ok = False
+        try:
+            if fix_key == "claude_code_mcp":
+                ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "codex_mcp":
+                ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "hooks":
+                ok, msg = install_claude_code_hooks(project_root)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "ephemeral_pid":
+                ok, msg = _remove_stale_doctor_pointer(filigree_dir / "ephemeral.pid")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "ephemeral_port":
+                ok, msg = _remove_stale_doctor_pointer(filigree_dir / "ephemeral.port")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            if ok:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
+
+    return fixed, fixed_check_ids, fixed_check_names
+
+
 @click.command()
 @click.option("--fix", is_flag=True, help="Auto-fix issues where possible")
 @click.option("--verbose", is_flag=True, help="Show all checks including passed")
-def doctor(fix: bool, verbose: bool) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable doctor summary")
+def doctor(fix: bool, verbose: bool, as_json: bool) -> None:
     """Run health checks on the filigree installation."""
     from filigree.install import run_doctor
-    from filigree.summary import write_summary as _write_summary
 
     results = run_doctor()
 
     passed = sum(1 for r in results if r.passed)
     failed = sum(1 for r in results if not r.passed)
 
-    click.echo(f"filigree doctor  ──  {passed} passed  {failed} issues")
-    click.echo()
+    if not as_json:
+        click.echo(f"filigree doctor  ──  {passed} passed  {failed} issues")
+        click.echo()
 
-    for r in results:
-        if r.passed and not verbose:
-            continue
-        icon = "OK" if r.passed else "!!"
-        click.echo(f"  {icon}  {r.name}: {r.message}")
-        if not r.passed and r.fix_hint:
-            click.echo(f"       -> {r.fix_hint}")
+        for r in results:
+            if r.passed and not verbose:
+                continue
+            icon = "OK" if r.passed else "!!"
+            click.echo(f"  {icon}  {r.name}: {r.message}")
+            if not r.passed and r.fix_hint:
+                click.echo(f"       -> {r.fix_hint}")
 
     # Schema-mismatch (v+1) is a distinct exit code (3) from generic check
     # failures (1). Don't attempt --fix on this — there's nothing to fix
     # forward when the DB is newer than the installed filigree.
     if any(r.code == "schema_mismatch_forward" for r in results):
+        if as_json:
+            _emit_doctor_json(results)
         sys.exit(3)
 
     fixed = 0
+    fixed_check_ids: set[str] = set()
+    fixed_check_names: set[str] = set()
     if fix and failed > 0:
-        click.echo("\nApplying fixes...")
+        if not as_json:
+            click.echo("\nApplying fixes...")
         try:
-            filigree_dir = find_filigree_root()
-        except ProjectNotInitialisedError as exc:
-            # filigree-dad647cf35: surface the rich ForeignDatabaseError
-            # message instead of the generic "Cannot fix" line, matching
-            # scanners.py and the run_doctor() check above.
-            click.echo(str(exc), err=True)
+            fixed, fixed_check_ids, fixed_check_names = _apply_doctor_fixes(results, emit=None if as_json else click.echo)
+        except click.ClickException:
+            if as_json:
+                _emit_doctor_json(results)
             sys.exit(1)
 
-        from filigree.install import (
-            ensure_gitignore,
-            inject_instructions,
-            install_claude_code_hooks,
-            install_claude_code_mcp,
-            install_codex_mcp,
-            install_codex_skills,
-            install_skills,
-        )
-
-        project_root = filigree_dir.parent
-        try:
-            mode = get_mode(filigree_dir)
-        except ValueError as exc:
-            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
-            mode = "ethereal"
-        server_port = 8377
-        if mode == "server":
-            try:
-                from filigree.server import read_server_config
-
-                server_port = read_server_config().port
-            except Exception:
-                logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
-
-        # Map check names to their fix functions
-        fixable: dict[str, tuple[str, ...]] = {
-            "context.md": ("context.md",),
-            ".gitignore": ("gitignore",),
-            "Schema version": ("schema",),
-            "Claude Code MCP": ("claude_code_mcp",),
-            "Codex MCP": ("codex_mcp",),
-            "Claude Code hooks": ("hooks",),
-            "Claude Code skills": ("skills",),
-            "Codex skills": ("codex_skills",),
-            "CLAUDE.md": ("claude_md",),
-            "AGENTS.md": ("agents_md",),
-        }
-
-        for r in results:
-            if r.passed or r.name not in fixable:
-                continue
-
-            fix_key = fixable[r.name][0]
-            ok = False
-            try:
-                if fix_key == "context.md":
-                    with get_db() as db:
-                        _write_summary(db, filigree_dir / SUMMARY_FILENAME)
-                    click.echo(f"  OK  Fixed: {r.name}")
-                    ok = True
-                elif fix_key == "schema":
-                    # filigree-fa6309d551: route DB open through the v2.0
-                    # anchor-aware constructors. Without this, --fix would
-                    # initialize/migrate a phantom .filigree/filigree.db
-                    # while the project's actual DB (declared in the conf)
-                    # stays un-migrated.
-                    conf_path = project_root / CONF_FILENAME
-                    if conf_path.is_file():
-                        conf_data = read_conf(conf_path)
-                        db_path = (conf_path.parent / conf_data["db"]).resolve()
-                    else:
-                        db_path = filigree_dir / DB_FILENAME
-                    raw_conn = sqlite3.connect(str(db_path))
-                    try:
-                        old_ver = read_schema_version(raw_conn)
-                    finally:
-                        raw_conn.close()
-                    db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
-                    try:
-                        new_ver = db.get_schema_version()
-                    finally:
-                        db.close()
-                    if new_ver > old_ver:
-                        click.echo(f"  OK  Schema upgraded v{old_ver} → v{new_ver}")
-                    else:
-                        click.echo(f"  OK  Schema already current (v{new_ver})")
-                    ok = True
-                elif fix_key == "gitignore":
-                    ok, msg = ensure_gitignore(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "claude_code_mcp":
-                    ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "codex_mcp":
-                    ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "hooks":
-                    ok, msg = install_claude_code_hooks(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "skills":
-                    ok, msg = install_skills(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "codex_skills":
-                    ok, msg = install_codex_skills(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "claude_md":
-                    ok, msg = inject_instructions(project_root / "CLAUDE.md")
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "agents_md":
-                    ok, msg = inject_instructions(project_root / "AGENTS.md")
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                if ok:
-                    fixed += 1
-            except Exception as e:
-                click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
-
         unfixed = failed - fixed
-        if unfixed > 0:
+        if unfixed > 0 and not as_json:
             click.echo(f"\n  Fixed {fixed}/{failed} issues. {unfixed} require manual intervention.")
+
+    if as_json:
+        _emit_doctor_json(results, fixed_check_ids=fixed_check_ids, fixed_check_names=fixed_check_names)
+        if failed == 0 or (fix and (failed - fixed) == 0):
+            return
+        sys.exit(1)
 
     if failed == 0:
         click.echo("\nAll checks passed.")

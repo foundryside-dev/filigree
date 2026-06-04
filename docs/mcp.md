@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 114 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 115 tools, 1 resource, and 1 prompt.
 
 ## Contents
 
@@ -777,18 +777,20 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 
 | Tool | Description |
 |------|-------------|
-| `entity_association_add` | Attach a Clarion entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
+| `entity_association_add` | Attach an opaque external entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
 | `entity_association_remove` | Remove the binding identified by `(issue_id, entity_id)` |
 | `entity_association_list` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
-| `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given Clarion entity (the surface Clarion's `issues_for` calls) |
+| `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given opaque external entity ID |
+| `finding_promote_and_attach_entity` | Promote a scan finding to an issue and attach an opaque external entity binding |
 
 #### `entity_association_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
-| `entity_id` | string | yes | Opaque Clarion entity ID; not parsed |
-| `content_hash` | string | yes | Snapshot of Clarion's current content hash for drift detection at query time |
+| `entity_id` | string | yes | Opaque external entity ID; may be a `clarion:eid:...` SEI or a legacy locator; not parsed |
+| `content_hash` | string | yes | Snapshot of the caller's current content hash for drift detection at query time |
+| `entity_kind` / `external_entity_kind` | string | no | Caller-supplied kind metadata; never inferred from `entity_id` |
 | `actor` | string | no | Actor identity recorded as `attached_by` on first attach |
 
 #### `entity_association_remove`
@@ -796,7 +798,7 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
-| `entity_id` | string | yes | Clarion entity ID |
+| `entity_id` | string | yes | Opaque external entity ID |
 
 #### `entity_association_list`
 
@@ -812,7 +814,8 @@ is required (or accepted).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `entity_id` | string | yes | Opaque Clarion entity ID; not parsed |
+| `entity_id` | string | yes | Opaque external entity ID; not parsed |
+| `current_content_hash` | string | no | Caller-supplied current hash; response `freshness_status` is `fresh`, `stale`, or `unknown` |
 
 ### Agent Context Notes
 
@@ -1027,6 +1030,17 @@ create a linked triage observation; full responses then include
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
 **Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Loom generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+
+External scanner producers should include a globally unique, non-empty
+`scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`
+history. An omitted or empty `scan_run_id` is accepted for fire-and-forget
+findings, but those findings are intentionally excluded from scan-run history.
+
+Filigree does not parse SARIF on the scan-results endpoint. Wardline/SARIF
+adapters must map SARIF `partialFingerprints` or `fingerprints` into each
+posted finding's `fingerprint` field before POSTing. Filigree preserves that
+`finding.fingerprint` through readback, promote-by-fingerprint, dedup, stale
+cleanup, and reopen-on-regress lifecycle transitions.
 
 **Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 

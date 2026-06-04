@@ -367,8 +367,13 @@ def post_to_api(
     Args:
         api_url: Base URL (e.g., "http://localhost:8377").
         scan_source: Scanner identifier (e.g., "codex", "claude").
-        scan_run_id: Unique run identifier.
+        scan_run_id: Globally unique run identifier. Use a non-empty value for
+            scan-run history; an empty string is accepted by Filigree for
+            fire-and-forget findings but is excluded from ``GET /api/scan-runs``.
         findings: List of finding dicts.
+            Filigree expects native scan-results findings. SARIF adapters must
+            map SARIF ``partialFingerprints``/``fingerprints`` into each
+            finding's ``fingerprint`` before calling this helper.
         create_observations: If True, auto-promote findings to observations for triage.
         complete_scan_run: If False, don't mark the scan run as completed.
             Use for batch scans where multiple POSTs share a scan_run_id.

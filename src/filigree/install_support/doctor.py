@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -59,10 +61,107 @@ class CheckResult:
     message: str
     fix_hint: str = ""
     code: str | None = None  # machine-readable check identifier; e.g. "schema_mismatch_forward"
+    check_id: str | None = None
 
     @property
     def icon(self) -> str:
         return "OK" if self.passed else "!!"
+
+
+_RESERVED_SUMMARY_CHECK_IDS = (
+    "dashboard.port",
+    "mcp.registration",
+    "api.availability",
+    "auth.config",
+    "scanner.results",
+    "entity_associations.routes",
+)
+
+_CHECK_ID_BY_NAME = {
+    ".filigree/ directory": "project.directory",
+    ".filigree.conf anchor": "project.anchor",
+    "Home-directory .filigree.conf": "project.home_anchor",
+    "config.json": "project.config",
+    "filigree.db": "database.access",
+    "Schema version": "database.schema",
+    "File registry backend state": "file_registry.backend",
+    "context.md": "context.summary",
+    ".gitignore": "git.ignore",
+    "Claude Code MCP": "mcp.registration",
+    "Codex MCP": "mcp.registration",
+    "Claude Code hooks": "hooks.session_context",
+    "Claude Code skills": "skills.claude_code",
+    "Codex skills": "skills.codex",
+    "CLAUDE.md": "instructions.claude_md",
+    "AGENTS.md": "instructions.agents_md",
+    "Ephemeral PID": "dashboard.port",
+    "Ephemeral port": "dashboard.port",
+    "Server daemon": "dashboard.port",
+    "API routes": "api.availability",
+    "Auth config": "auth.config",
+    "Scan results routes": "scanner.results",
+    "Entity association routes": "entity_associations.routes",
+    "Bundled scanner registrations": "scanner.registration",
+    "Git working tree": "git.working_tree",
+    "Installation": "installation.method",
+    "Installation method": "installation.method",
+}
+
+
+def doctor_check_id(result: CheckResult) -> str:
+    """Return the stable JSON-contract check id for a human doctor result."""
+    if result.check_id:
+        return result.check_id
+    mapped = _CHECK_ID_BY_NAME.get(result.name)
+    if mapped is not None:
+        return mapped
+    normalized = re.sub(r"[^a-z0-9]+", ".", result.name.lower()).strip(".")
+    return normalized or "unknown"
+
+
+def build_doctor_summary(
+    results: list[CheckResult],
+    *,
+    fixed_check_ids: set[str] | None = None,
+    fixed_check_names: set[str] | None = None,
+) -> dict[str, Any]:
+    """Build the shared machine-readable doctor summary contract.
+
+    The contract is intentionally compact so other agent-side tools can consume
+    it without parsing Filigree's human diagnostic text.
+    """
+    fixed = fixed_check_ids or set()
+    fixed_names = fixed_check_names or set()
+    by_id: dict[str, dict[str, Any]] = {}
+    next_actions: list[str] = []
+    seen_actions: set[str] = set()
+
+    for result in results:
+        check_id = doctor_check_id(result)
+        entry = by_id.setdefault(check_id, {"id": check_id, "status": "ok", "fixed": False})
+        if check_id in fixed or result.name in fixed_names:
+            if entry["status"] != "failed":
+                entry["status"] = "fixed"
+                entry["fixed"] = True
+            continue
+        if not result.passed:
+            entry["status"] = "failed"
+            entry["fixed"] = False
+            if result.fix_hint:
+                action = f"{check_id}: {result.fix_hint}"
+                if action not in seen_actions:
+                    next_actions.append(action)
+                    seen_actions.add(action)
+
+    for check_id in _RESERVED_SUMMARY_CHECK_IDS:
+        by_id.setdefault(check_id, {"id": check_id, "status": "ok", "fixed": False})
+
+    checks = [by_id[check_id] for check_id in sorted(by_id)]
+    return {
+        "ok": all(check["status"] != "failed" for check in checks),
+        "checks": checks,
+        "next_actions": next_actions,
+    }
 
 
 def _is_venv_binary(path: str) -> bool:
@@ -140,7 +239,7 @@ def _doctor_file_registry_backend_state(
             "File registry backend state",
             False,
             f"Could not inspect file registry backend state: {exc}",
-            fix_hint="Database may be corrupted. Restore from backup or run: filigree doctor --fix",
+            fix_hint="Database may be corrupted. Restore from backup.",
         )
     if local_count:
         return CheckResult(
@@ -228,6 +327,108 @@ def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
             fix_hint="Run: filigree scanner available",
         )
     ]
+
+
+def _route_supports(route_table: dict[str, set[str]], path: str, method: str) -> bool:
+    return method.upper() in route_table.get(path, set())
+
+
+def _doctor_dashboard_contract_checks() -> list[CheckResult]:
+    """Validate dashboard/API route registration without issuing mutating calls."""
+    try:
+        from filigree.dashboard import FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR, create_app
+
+        app = create_app(server_mode=False)
+        route_table: dict[str, set[str]] = {}
+        for route in getattr(app, "routes", []):
+            path = getattr(route, "path", "")
+            if not isinstance(path, str) or not path:
+                continue
+            methods = getattr(route, "methods", None)
+            if methods is None:
+                continue
+            route_table.setdefault(path, set()).update(str(method).upper() for method in methods)
+    except Exception as exc:
+        message = f"Could not inspect dashboard route table: {exc}"
+        return [
+            CheckResult("API routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Scan results routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Entity association routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Auth config", False, message, fix_hint="Run: filigree doctor --verbose"),
+        ]
+
+    results: list[CheckResult] = []
+
+    if _route_supports(route_table, "/api/health", "GET"):
+        results.append(CheckResult("API routes", True, "GET /api/health registered"))
+    else:
+        results.append(
+            CheckResult(
+                "API routes",
+                False,
+                "GET /api/health is not registered",
+                fix_hint="Reinstall or upgrade filigree; dashboard route registration is incomplete.",
+            )
+        )
+
+    scanner_routes = (
+        ("/api/loom/scan-results", "POST"),
+        ("/api/scan-results", "POST"),
+        ("/api/files/_schema", "GET"),
+    )
+    missing_scanner = [f"{method} {path}" for path, method in scanner_routes if not _route_supports(route_table, path, method)]
+    if missing_scanner:
+        results.append(
+            CheckResult(
+                "Scan results routes",
+                False,
+                f"Missing route(s): {', '.join(missing_scanner)}",
+                fix_hint="Reinstall or upgrade filigree; scanner/result API route registration is incomplete.",
+            )
+        )
+    else:
+        results.append(CheckResult("Scan results routes", True, "scan-results and file schema routes registered"))
+
+    entity_routes = (
+        ("/api/issue/{issue_id}/entity-associations", "GET"),
+        ("/api/issue/{issue_id}/entity-associations", "POST"),
+        ("/api/issue/{issue_id}/entity-associations", "DELETE"),
+        ("/api/entity-associations", "GET"),
+    )
+    missing_entity = [f"{method} {path}" for path, method in entity_routes if not _route_supports(route_table, path, method)]
+    if missing_entity:
+        results.append(
+            CheckResult(
+                "Entity association routes",
+                False,
+                f"Missing route(s): {', '.join(missing_entity)}",
+                fix_hint="Reinstall or upgrade filigree; entity-association API route registration is incomplete.",
+            )
+        )
+    else:
+        results.append(CheckResult("Entity association routes", True, "entity-association routes registered"))
+
+    auth_envs = {
+        FEDERATION_API_ENV_VAR: os.environ.get(FEDERATION_API_ENV_VAR),
+        LEGACY_API_ENV_VAR: os.environ.get(LEGACY_API_ENV_VAR),
+    }
+    empty_envs = sorted(name for name, value in auth_envs.items() if value is not None and not value.strip())
+    configured_envs = sorted(name for name, value in auth_envs.items() if value is not None and value.strip())
+    if empty_envs:
+        results.append(
+            CheckResult(
+                "Auth config",
+                False,
+                f"Empty auth token environment variable(s): {', '.join(empty_envs)}",
+                fix_hint=f"Unset {', '.join(empty_envs)} or set a non-empty token before starting the dashboard.",
+            )
+        )
+    elif configured_envs:
+        results.append(CheckResult("Auth config", True, f"Federation bearer auth configured via {configured_envs[0]}"))
+    else:
+        results.append(CheckResult("Auth config", True, "Federation auth disabled; loopback dashboard remains open by default"))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +782,10 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                             "Schema version",
                             False,
                             f"v{schema_version} (current: v{CURRENT_SCHEMA_VERSION})",
-                            fix_hint="Database schema is outdated. Run: filigree doctor --fix",
+                            fix_hint=(
+                                "Database schema is outdated. After backing up, run a normal DB command "
+                                "with the upgraded binary (for example: filigree stats)."
+                            ),
                         )
                     )
                 else:
@@ -624,7 +828,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "context.md",
                     False,
                     f"Found at {summary_path} but not a file",
-                    fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                    fix_hint="Run any filigree mutation command to refresh generated context.",
                 )
             )
         else:
@@ -636,7 +840,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                         "context.md",
                         False,
                         f"Found at {summary_path} but unreadable: {exc}",
-                        fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                        fix_hint="Run any filigree mutation command to refresh generated context.",
                     )
                 )
             else:
@@ -647,7 +851,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                             "context.md",
                             False,
                             f"Stale ({int(age_minutes)} minutes old)",
-                            fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                            fix_hint="Run any filigree mutation command to refresh generated context.",
                         )
                     )
                 else:
@@ -658,7 +862,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                 "context.md",
                 False,
                 "Missing",
-                fix_hint="Run: filigree doctor --fix",
+                fix_hint="Run any filigree mutation command to refresh generated context.",
             )
         )
 
@@ -937,10 +1141,13 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     elif mode == "server":
         results.extend(_doctor_server_checks(filigree_dir))
 
-    # 13. Check scanner registration drift
+    # 13. Check dashboard/API route registration without mutating records.
+    results.extend(_doctor_dashboard_contract_checks())
+
+    # 14. Check scanner registration drift
     results.extend(_doctor_bundled_scanner_checks(filigree_dir))
 
-    # 14. Check git working tree status
+    # 15. Check git working tree status
     try:
         result = subprocess.run(
             ["git", "-C", str(filigree_dir.parent), "status", "--porcelain"],
@@ -974,7 +1181,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
             )
         )
 
-    # 15. Check installation method
+    # 16. Check installation method
     results.extend(_doctor_install_method())
 
     return results

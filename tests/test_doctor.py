@@ -33,6 +33,7 @@ from filigree.install_support.doctor import (
     _find_all_filigree_binaries,
     _is_absolute_command_path,
     _is_venv_binary,
+    doctor_check_id,
     run_doctor,
 )
 
@@ -488,7 +489,7 @@ class TestDoctorContextMd:
         ctx_result = next(r for r in results if r.name == "context.md")
         assert ctx_result.passed is False
         assert "not a file" in ctx_result.message
-        assert "filigree doctor --fix" in ctx_result.fix_hint
+        assert "generated context" in ctx_result.fix_hint
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1020,23 @@ class TestDoctorResultStructure:
         for r in results:
             if not r.passed and r.name not in {"Git working tree", "Installation"}:
                 assert r.fix_hint.strip(), f"Failed check '{r.name}' has no fix_hint"
+
+
+class TestDoctorSharedContractChecks:
+    def test_run_doctor_emits_real_route_and_auth_checks(self, tmp_path: Path) -> None:
+        project = _make_project(tmp_path)
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+
+        assert by_id["api.availability"].name == "API routes"
+        assert by_id["scanner.results"].name == "Scan results routes"
+        assert by_id["entity_associations.routes"].name == "Entity association routes"
+        assert by_id["auth.config"].name == "Auth config"
+        assert by_id["api.availability"].passed is True
+        assert by_id["scanner.results"].passed is True
+        assert by_id["entity_associations.routes"].passed is True
+        assert by_id["auth.config"].passed is True
 
 
 # ---------------------------------------------------------------------------

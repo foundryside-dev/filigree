@@ -777,6 +777,17 @@ def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
     add_column(conn, "entity_associations", "migration_orphaned_at", "TEXT", default=None)
 
 
+def migrate_v22_to_v23(conn: sqlite3.Connection) -> None:
+    """v22 -> v23: Add caller-supplied ``entity_associations.entity_kind``.
+
+    Entity IDs are opaque external identifiers: they may be SEIs, legacy
+    locators, or non-Clarion IDs. Filigree must not parse kind out of the ID,
+    but callers that already know the kind can now store it explicitly for UI
+    and API presentation. Empty string means unknown/not supplied.
+    """
+    add_column(conn, "entity_associations", "entity_kind", "TEXT NOT NULL", default="''")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -799,6 +810,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     19: migrate_v19_to_v20,
     20: migrate_v20_to_v21,
     21: migrate_v21_to_v22,
+    22: migrate_v22_to_v23,
 }
 
 
