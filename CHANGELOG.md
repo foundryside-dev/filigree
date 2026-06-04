@@ -752,8 +752,8 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   A module-level `_SCAN_RESULTS_LOCK` (`asyncio.Lock`) serialises
   concurrent scan-results POSTs to protect the shared
   `sqlite3.Connection` from the race the move-off-event-loop would
-  otherwise enable. True parallelism of scan-results awaits a
-  per-thread connection pool, filed as a 2.2 follow-up
+  otherwise enable. True parallelism of scan-results awaited a
+  per-thread connection pool, later landed in 2.3.0
   (filigree-d4237f486f).
 
 - **Clarion path-normalisation contract documented (CONTRACT-4).**
@@ -918,7 +918,7 @@ Upgrade guide: [Upgrading from 2.0.x to 2.1.0](docs/UPGRADING.md#upgrading-from-
   (`tests/mcp/test_boundary_validation.py`), and HTTP
   (`tests/api/test_api.py::TestActorLengthCapAtHTTPBoundary`).
   Transport-bound identity verification — the "verified actor"
-  enhancement — is tracked as a 2.2+ work package in the filigree
+  enhancement — is tracked as a 2.3.0+ work package in the filigree
   tracker.
 
 - **Batch handlers abort envelope-level on foreign-prefix IDs (2.1.0

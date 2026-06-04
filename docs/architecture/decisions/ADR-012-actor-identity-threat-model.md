@@ -10,7 +10,7 @@
 The `actor` string carried on every Filigree write is an **identifier**, not an
 **authentication credential**. The audit trail records *claims* about who acted,
 not *proofs*. Transport-level identity verification (binding a transport to a
-proven actor) is a 2.2+ work package, not a 2.1.0 deliverable. 2.1.0 closes the
+proven actor) is a 2.3.0+ work package, not a 2.1.0 deliverable. 2.1.0 closes the
 narrowest hole (overlong / control-char actors making the audit trail unreadable
 or feeding a downstream injection) by pinning the length cap at every entry
 point: CLI, MCP, and HTTP.
@@ -62,7 +62,7 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
    downstream consumer; control characters breaking log parsers; empty values
    collapsing actor accountability). 2.1.0 §1.4 pins all three guarantees with
    tests at the CLI, MCP, and HTTP entry points.
-5. **Transport-bound identity (the "verified actor" enhancement) is a 2.2+
+5. **Transport-bound identity (the "verified actor" enhancement) is a 2.3.0+
    work package.** It would require: OS-user lookup on CLI invocations; MCP
    peer attribution from the transport; HTTP authentication (sessions, tokens,
    or mTLS) on the dashboard. Each surface needs its own decision and is too
@@ -86,7 +86,7 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
   field is what the caller wrote, sanitised but not verified.
 - The length-cap + control-char invariants are pinned at every entry point and
   cannot regress silently.
-- The 2.2+ scope for transport-bound identity has a clear starting point
+- The 2.3.0+ scope for transport-bound identity has a clear starting point
   rather than being implied by ambiguous prose elsewhere.
 
 ### Negative
@@ -104,7 +104,7 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
   `127.0.0.1:9111`, Filigree `127.0.0.1:8377`; the registry-backend runbook
   spawns Clarion on a free loopback port same-host). While that topology
   holds, "the trust boundary is the transport" (§Decision 3) is true and
-  transport-bound identity stays legitimately 2.2+. **The trigger that voids
+  transport-bound identity stays legitimately 2.3.0+. **The trigger that voids
   the premise and re-opens this ADR is any federation peer binding
   off-loopback (cross-host).** At that point inbound HTTP authentication
   (transport-bound identity, tracked as `filigree-81d3971467`) becomes

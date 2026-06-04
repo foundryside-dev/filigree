@@ -29,7 +29,7 @@ configured a token that did nothing on the Filigree side — a dishonest contrac
 (one side authenticates, the other discards the credential).
 
 ADR-012 established that for Filigree 2.x the trust boundary is the transport,
-and that HTTP authentication is a 2.2+ work package. That posture is correct
+and that HTTP authentication is a 2.3.0+ work package. That posture is correct
 **while the federation is co-located on loopback** (Clarion `127.0.0.1:9111`,
 Filigree `127.0.0.1:8377`, same host). But honouring the token Clarion already
 sends is cheap, removes the contract dishonesty, and gives operators a real gate
