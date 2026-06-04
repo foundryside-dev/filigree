@@ -61,3 +61,26 @@ def test_recent_events_read_path_exposes_verified_actor(db: FiligreeDB) -> None:
     events = db.get_recent_events()
     created = next(e for e in events if e["event_type"] == "created" and e["issue_id"] == issue_id)
     assert created["verified_actor"] == "alice"
+
+
+def test_add_comment_stamps_verified_author(db: FiligreeDB) -> None:
+    db.set_verified_actor("alice")
+    issue_id = _create_issue(db)
+    db.add_comment(issue_id, "hello", author="agent-x")
+    row = db.conn.execute("SELECT verified_author FROM comments WHERE issue_id = ?", (issue_id,)).fetchone()
+    assert row["verified_author"] == "alice"
+
+
+def test_get_comments_exposes_verified_author(db: FiligreeDB) -> None:
+    db.set_verified_actor("alice")
+    issue_id = _create_issue(db)
+    db.add_comment(issue_id, "hello", author="agent-x")
+    comments = db.get_comments(issue_id)
+    assert comments[0]["verified_author"] == "alice"
+
+
+def test_comment_verified_author_null_when_unset(db: FiligreeDB) -> None:
+    issue_id = _create_issue(db)
+    db.add_comment(issue_id, "hello", author="agent-x")
+    comments = db.get_comments(issue_id)
+    assert comments[0]["verified_author"] is None

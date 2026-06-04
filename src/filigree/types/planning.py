@@ -141,6 +141,7 @@ class CommentRecord(TypedDict):
 
     id: int
     author: str
+    verified_author: str | None
     text: str
     created_at: ISOTimestamp
 

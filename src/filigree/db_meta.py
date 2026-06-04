@@ -56,8 +56,8 @@ class MetaMixin(DBMixinProtocol):
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=author)
         now = _now_iso()
         cursor = self.conn.execute(
-            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-            (issue_id, author, text, now),
+            "INSERT INTO comments (issue_id, author, verified_author, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (issue_id, author, self._verified_actor, text, now),
         )
         rowid = cursor.lastrowid
         if rowid is None:  # pragma: no cover — INSERT always sets lastrowid
@@ -67,20 +67,35 @@ class MetaMixin(DBMixinProtocol):
 
     def get_comments(self, issue_id: str) -> list[CommentRecord]:
         rows = self.conn.execute(
-            "SELECT id, author, text, created_at FROM comments WHERE issue_id = ? ORDER BY created_at",
+            "SELECT id, author, verified_author, text, created_at FROM comments WHERE issue_id = ? ORDER BY created_at",
             (issue_id,),
         ).fetchall()
-        return [CommentRecord(id=r["id"], author=r["author"], text=r["text"], created_at=r["created_at"]) for r in rows]
+        return [
+            CommentRecord(
+                id=r["id"],
+                author=r["author"],
+                verified_author=r["verified_author"],
+                text=r["text"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
 
     def get_comment(self, comment_id: int) -> CommentRecord:
         row = self.conn.execute(
-            "SELECT id, author, text, created_at FROM comments WHERE id = ?",
+            "SELECT id, author, verified_author, text, created_at FROM comments WHERE id = ?",
             (comment_id,),
         ).fetchone()
         if row is None:
             msg = f"Comment not found: {comment_id}"
             raise KeyError(msg)
-        return CommentRecord(id=row["id"], author=row["author"], text=row["text"], created_at=row["created_at"])
+        return CommentRecord(
+            id=row["id"],
+            author=row["author"],
+            verified_author=row["verified_author"],
+            text=row["text"],
+            created_at=row["created_at"],
+        )
 
     # -- Labels --------------------------------------------------------------
 
