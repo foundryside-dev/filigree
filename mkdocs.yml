@@ -9,18 +9,24 @@ theme:
   name: material
   custom_dir: overrides
   palette:
-    - scheme: default
-      primary: amber
-      accent: amber
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
+    # Dark-first: slate is listed first, so it is the default scheme. primary/
+    # accent are `custom` so Material paints no colour of its own — the vendored
+    # loom-mkdocs.css owns --md-primary/--md-accent (= the suite's sky thread).
     - scheme: slate
-      primary: amber
-      accent: amber
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  # Bundled JetBrains Mono + Space Grotesk (vendored in stylesheets/fonts/ via
+  # loom-mkdocs.css) own typography now — disable Material's Google Fonts.
+  font: false
   features:
     - navigation.sections
     - navigation.top
@@ -40,6 +46,9 @@ markdown_extensions:
       alternate_style: true
 
 extra_css:
+  # Shared Loom Federation docs theme (vendored) first, Filigree identity layer
+  # on top.
+  - stylesheets/loom-mkdocs.css
   - stylesheets/extra.css
 
 exclude_docs: |

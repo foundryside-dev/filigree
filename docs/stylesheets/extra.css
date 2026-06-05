@@ -1,35 +1,38 @@
 /* ==========================================================================
-   Filigree — Loom design system + Filigree accent, layered on Material.
+   Filigree — thin identity layer over the shared Loom docs theme.
 
-   Strategy (shared with Wardline so the suite stays visually coherent):
-   - Material owns the light/dark toggle. We do NOT add a custom toggle and we
-     do NOT use light-dark()/[data-theme]; we map semantic tokens under
-     Material's own scheme selectors ([data-md-color-scheme="default"|"slate"])
-     and override Material's --md-primary/--md-accent variables there.
-   - The OKLCH ink ramp + spacing/type/radius scale are the shared Loom system,
-     identical to Wardline. The ONLY divergence is the accent hue:
-     Wardline = teal (~195); Filigree = gold/amber (~82) — "filigree" is fine
-     ornamental gold metalwork.
+   This file is layered ON TOP OF the vendored `loom-mkdocs.css` (loaded first
+   in mkdocs.yml). loom-mkdocs.css owns the base chrome: Material --md-* surface/
+   text/code/footer tokens per scheme, the JetBrains Mono / Space Grotesk faces,
+   headings, links, admonitions, tables, radii. We do NOT re-declare any of that,
+   and we do NOT define --md-accent/--md-primary — the shared theme owns them.
+
+   Filigree is the SIMPLEST case in the federation: its thread colour, sky
+   (#38BDF8), IS the shared theme's default accent — the dashboard is the
+   canonical origin of the whole palette. So there is no per-product accent
+   override here: vendoring loom-mkdocs.css gives sky on dark AND the AA-safe
+   deepened sky (#0284C7) on light for free. Our --fg-accent simply reads the
+   shared --md-accent-fg-color, so it tracks the scheme automatically.
+
+   (This retires Filigree's former gold/amber accent — the "filigree =
+   ornamental goldwork" pun — in favour of its design-system thread, sky.)
+
+   What stays here is purely Filigree's bespoke landing-page identity: the .fg-*
+   components (hero, feature cards, install body, the Loom suite grid, the
+   footer suite strip), recoloured onto the Loom dark-teal surface ramp + the
+   3 / 6 / 8 radii + the mono/display faces.
+
+   Strategy (shared with the rest of the suite): Material owns the light/dark
+   toggle. We add NO custom toggle and use NO light-dark()/[data-theme]; the
+   --fg-* semantic tokens are redefined under Material's own scheme selectors
+   (which Material sets on <body>) so they resolve against the body-level scheme
+   — the same hook loom-mkdocs uses. A token set on <body> overrides one
+   inherited from :root for every descendant, so theme-varying tokens MUST live
+   inside the scheme selectors, not in :root.
    ========================================================================== */
 
 :root {
-  /* ---- Loom primitive ramp (OKLCH, perceptually uniform) — shared ---- */
-  /* Slate/ink — shared Loom neutral hue (~255) */
-  --loom-ink-50:  oklch(0.97 0.010 255);
-  --loom-ink-100: oklch(0.93 0.018 255);
-  --loom-ink-200: oklch(0.86 0.028 255);
-  --loom-ink-700: oklch(0.40 0.060 255);
-  --loom-ink-900: oklch(0.22 0.040 255);
-
-  /* Filigree accent — gold/amber (~82) */
-  --fg-gold-200: oklch(0.90 0.060 82);
-  --fg-gold-300: oklch(0.84 0.090 82);
-  --fg-gold-400: oklch(0.77 0.115 82);
-  --fg-gold-500: oklch(0.68 0.120 78);
-  --fg-gold-600: oklch(0.58 0.105 72);
-  --fg-gold-700: oklch(0.50 0.090 68);
-
-  /* ---- Spacing scale (4px base) — shared ---- */
+  /* ---- Spacing scale (4px base) ---- */
   --fg-space-1: 0.25rem;
   --fg-space-2: 0.5rem;
   --fg-space-3: 0.75rem;
@@ -39,54 +42,77 @@
   --fg-space-8: 3rem;
   --fg-space-10: 4rem;
 
-  /* ---- Fluid type — shared ---- */
+  /* ---- Fluid type (landing hero) ---- */
   --fg-text-hero: clamp(2.25rem, 1.6rem + 3vw, 3.5rem);
   --fg-text-lead: clamp(1.1rem, 1rem + 0.6vw, 1.375rem);
 
-  --fg-radius: 10px;
+  /* ---- Radii — the Loom 3 / 6 / 8 system ---- */
+  --fg-radius-sm: 3px;   /* chips, inline code, small surfaces */
+  --fg-radius:    6px;   /* buttons, cards                     */
+  --fg-radius-lg: 8px;   /* large panels                       */
+
   --fg-content-width: 52rem;
-}
 
-/* ---- Material variable overrides: LIGHT scheme ---- */
-[data-md-color-scheme="default"] {
-  /* Deep amber/bronze on white = AA contrast; used for links/headers */
-  --md-primary-fg-color:        var(--fg-gold-700);
-  --md-primary-fg-color--light: var(--fg-gold-500);
-  --md-primary-fg-color--dark:  var(--fg-gold-700);
-  --md-accent-fg-color:         var(--fg-gold-600);
-
-  /* Semantic tokens for landing markup */
-  --fg-bg:          oklch(0.99 0.003 255);
-  --fg-bg-subtle:   oklch(0.975 0.006 255);
-  --fg-bg-card:     oklch(1 0 0);
-  --fg-text:        var(--loom-ink-900);
-  --fg-text-muted:  oklch(0.46 0.020 255);
-  --fg-border:      var(--loom-ink-200);
-  --fg-accent:      var(--fg-gold-700);
-  --fg-accent-soft: oklch(0.95 0.035 85);
-  --fg-on-accent:   oklch(0.99 0.005 85);
-}
-
-/* ---- Material variable overrides: DARK (slate) scheme ---- */
-[data-md-color-scheme="slate"] {
-  --md-primary-fg-color:        var(--fg-gold-400);
-  --md-primary-fg-color--light: var(--fg-gold-300);
-  --md-primary-fg-color--dark:  var(--fg-gold-500);
-  --md-accent-fg-color:         var(--fg-gold-300);
-
-  --fg-bg:          oklch(0.21 0.022 255);
-  --fg-bg-subtle:   oklch(0.25 0.022 255);
-  --fg-bg-card:     oklch(0.27 0.024 255);
-  --fg-text:        oklch(0.94 0.012 255);
-  --fg-text-muted:  oklch(0.80 0.018 255);
-  --fg-border:      oklch(0.36 0.024 255);
-  --fg-accent:      var(--fg-gold-300);
-  --fg-accent-soft: oklch(0.32 0.045 78);
-  --fg-on-accent:   oklch(0.18 0.030 78);
+  /* Body face = JetBrains Mono (from loom-mkdocs); display = Space Grotesk for
+     the big landing headlines (matches the design system's brand-display rule). */
+  --fg-font-mono: var(--md-code-font-family, 'JetBrains Mono', 'Fira Code',
+    ui-monospace, 'SF Mono', Menlo, monospace);
+  --fg-font-display: 'Space Grotesk', 'JetBrains Mono', ui-sans-serif,
+    system-ui, sans-serif;
 }
 
 /* ==========================================================================
-   Landing page
+   Filigree semantic tokens — redefined per Material scheme, mapped onto the
+   shared Loom surface ramp. The accent is NOT overridden: --fg-accent reads
+   the shared --md-accent-fg-color, so it resolves to sky on dark and the
+   AA-safe deepened sky on light automatically.
+   ========================================================================== */
+
+/* ---- DARK (slate) scheme — the canonical default ---- */
+[data-md-color-scheme="slate"] {
+  /* Loom dark surface ramp (design-system: base / raised / overlay / hover) */
+  --fg-bg:           #0B1215;  /* surface-base    */
+  --fg-bg-subtle:    #131E24;  /* surface-raised  */
+  --fg-bg-card:      #1A2B34;  /* surface-overlay */
+  --fg-bg-hover:     #243A45;  /* surface-hover   */
+
+  /* Text ramp */
+  --fg-text:         #E2EEF2;  /* text-primary    */
+  --fg-text-muted:   #8FAAB8;  /* text-secondary  */
+
+  /* Borders — Loom hairlines */
+  --fg-border:        #1E3340;  /* border-default  */
+  --fg-border-strong: #2A4454;  /* border-strong   */
+
+  /* Sky accent (the Filigree thread) — inherited from the shared theme so it
+     tracks the scheme; plus a soft tint for chips/pills and a fill foreground. */
+  --fg-accent:       var(--md-accent-fg-color);   /* #38BDF8 sky */
+  --fg-accent-soft:  rgba(56, 189, 248, 0.14);
+  --fg-on-accent:    #0B1215;                      /* dark text on sky fill */
+}
+
+/* ---- LIGHT (default) scheme — the documented alternate ---- */
+[data-md-color-scheme="default"] {
+  /* Loom light surface ramp */
+  --fg-bg:           #F0F6F8;  /* surface-base    */
+  --fg-bg-subtle:    #E8F1F4;  /* surface-overlay */
+  --fg-bg-card:      #FFFFFF;  /* surface-raised  */
+  --fg-bg-hover:     #DCE9EE;  /* surface-hover   */
+
+  --fg-text:         #0F2027;  /* text-primary (light) */
+  --fg-text-muted:   #3D6070;  /* text-secondary       */
+
+  --fg-border:        #C5D8E0;  /* border-default (light) */
+  --fg-border-strong: #9BBBC8;  /* border-strong          */
+
+  /* Inherited deepened sky (#0284C7) — AA-safe as link/accent on white. */
+  --fg-accent:       var(--md-accent-fg-color);   /* #0284C7 deepened sky */
+  --fg-accent-soft:  rgba(2, 132, 199, 0.10);
+  --fg-on-accent:    #FFFFFF;                       /* white text on sky fill */
+}
+
+/* ==========================================================================
+   LANDING PAGE
    ========================================================================== */
 
 .fg-landing {
@@ -102,10 +128,12 @@
 }
 
 .fg-hero__title {
+  font-family: var(--fg-font-display);
   font-size: var(--fg-text-hero);
   line-height: 1.05;
   margin: 0 0 var(--fg-space-4);
   letter-spacing: -0.02em;
+  font-weight: 700;
   color: var(--fg-text);
 }
 
@@ -144,18 +172,20 @@
 }
 .fg-btn--primary:hover,
 .fg-btn--primary:focus-visible {
-  background: var(--fg-gold-600);
+  /* Light scheme: darken the sky fill on hover. */
+  background: color-mix(in oklch, var(--fg-accent) 82%, #000 18%);
   color: var(--fg-on-accent);
 }
 [data-md-color-scheme="slate"] .fg-btn--primary:hover,
 [data-md-color-scheme="slate"] .fg-btn--primary:focus-visible {
-  background: var(--fg-gold-200);
+  /* Dark scheme: lighten the sky fill against the dark base. */
+  background: color-mix(in oklch, var(--fg-accent) 82%, #fff 18%);
 }
 
 .fg-btn--secondary {
   background: transparent;
   color: var(--fg-text);
-  border-color: var(--fg-border);
+  border-color: var(--fg-border-strong);
 }
 .fg-btn--secondary:hover,
 .fg-btn--secondary:focus-visible {
@@ -164,7 +194,7 @@
 }
 
 .fg-btn:focus-visible {
-  outline: 3px solid var(--fg-text);
+  outline: 3px solid var(--fg-accent);
   outline-offset: 2px;
 }
 
@@ -181,6 +211,10 @@
   border: 1px solid var(--fg-border);
   border-radius: var(--fg-radius);
   background: var(--fg-bg-subtle);
+  transition: border-color 150ms ease;
+}
+.fg-feature-card:hover {
+  border-color: var(--fg-border-strong);
 }
 
 .fg-feature-card h3 {
@@ -199,8 +233,9 @@
   background: var(--fg-accent-soft);
   color: var(--fg-accent);
   padding: 0.1em 0.35em;
-  border-radius: 4px;
+  border-radius: var(--fg-radius-sm);
   font-size: 0.85em;
+  font-family: var(--fg-font-mono);
 }
 
 /* ---- Embedded markdown body (install + quick example) ---- */
@@ -224,7 +259,9 @@
 }
 
 .fg-suite h2 {
+  font-family: var(--fg-font-display);
   margin: 0 0 var(--fg-space-2);
+  font-weight: 600;
 }
 
 .fg-suite__intro {
@@ -264,6 +301,7 @@
 
 .fg-suite-card h3 {
   margin: 0 0 var(--fg-space-2);
+  font-family: var(--fg-font-mono);
   font-size: 1.1rem;
   color: var(--fg-accent);
 }
@@ -286,6 +324,7 @@
 .fg-suite-card__badge {
   display: inline-block;
   margin-top: var(--fg-space-3);
+  font-family: var(--fg-font-mono);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -309,8 +348,12 @@
 }
 
 .fg-footer-suite__label {
+  font-family: var(--fg-font-mono);
   font-weight: 700;
-  opacity: 0.8;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+  opacity: 0.7;
 }
 
 .fg-footer-suite a {
@@ -322,6 +365,7 @@
 .fg-footer-suite a:hover,
 .fg-footer-suite a:focus-visible {
   text-decoration: underline;
+  text-decoration-color: var(--fg-accent);
   opacity: 1;
 }
 
@@ -330,7 +374,8 @@
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   .fg-btn,
-  .fg-suite-card {
+  .fg-suite-card,
+  .fg-feature-card {
     transition: none;
   }
 }
