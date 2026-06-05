@@ -81,9 +81,7 @@ async def test_mcp_batch_close_reports_blocked(mcp_db: FiligreeDB, monkeypatch: 
     assert gov.id in failed_ids
 
 
-async def test_mcp_batch_foreign_prefix_aborts_under_governance_on(
-    mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_mcp_batch_foreign_prefix_aborts_under_governance_on(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
     """With governance ON, a foreign-prefix id in the batch still triggers the
     envelope-level WrongProjectError abort (VALIDATION), not an unhandled crash."""
     valid = mcp_db.create_issue("Valid", priority=2)

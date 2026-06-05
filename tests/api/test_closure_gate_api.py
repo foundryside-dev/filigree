@@ -130,8 +130,6 @@ class TestClosureGateBatchClose:
         the gate's WrongProjectError flows through to batch_close, not a 500."""
         valid = dashboard_db.ids["a"]
         _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
-        resp = await client.post(
-            "/api/batch/close", json={"issue_ids": ["other-1234567890", valid], "actor": "x"}
-        )
+        resp = await client.post("/api/batch/close", json={"issue_ids": ["other-1234567890", valid], "actor": "x"})
         assert resp.status_code == 400, resp.text
         assert resp.json()["code"] == ErrorCode.VALIDATION
