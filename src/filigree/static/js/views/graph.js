@@ -4,7 +4,7 @@
 
 import { fetchCriticalPath } from "../api.js";
 import { CATEGORY_COLORS, state, THEME_COLORS } from "../state.js";
-import { resolveGraphScope, handleGhostClick } from "./graphSidebar.js";
+import { handleGhostClick, resolveGraphScope } from "./graphSidebar.js";
 
 // --- Callbacks for functions not yet available at import time ---
 
@@ -319,7 +319,7 @@ export function renderGraph() {
   const filteredIds = new Set(filteredNodes.map((n) => n.id));
   const search = document.getElementById("filterSearch")?.value?.toLowerCase().trim() || "";
 
-  let cyNodes = filteredNodes.map((n) => {
+  const cyNodes = filteredNodes.map((n) => {
     const title = n.title || n.id;
     const isGhost = ghostIds.has(n.id);
     const matchesSearch =
@@ -340,7 +340,7 @@ export function renderGraph() {
     };
   });
 
-  let cyEdges = scopeEdges
+  const cyEdges = scopeEdges
     .filter((e) => filteredIds.has(e.source) && filteredIds.has(e.target))
     .map((e) => ({
       data: {
@@ -407,8 +407,7 @@ export function renderGraph() {
       state.cy.destroy();
 
       const canReusePositions =
-        cyNodes.length > 0 &&
-        cyNodes.every((n) => Object.prototype.hasOwnProperty.call(previousPositions, n.data.id));
+        cyNodes.length > 0 && cyNodes.every((n) => Object.hasOwn(previousPositions, n.data.id));
       const graphMinZoom = computeGraphMinZoom(cyNodes.length);
       state.cy = cytoscape({
         container,
@@ -495,7 +494,7 @@ export function showHealthBreakdown() {
   panel.innerHTML =
     '<div class="flex items-center justify-between mb-3">' +
     `<span class="text-base font-semibold" style="color:var(--text-primary)">System Health: ${b.score}/100</span>` +
-    '<button onclick="closeDetail()" class="text-muted text-primary-hover text-lg">&times;</button></div>' +
+    '<button onclick="closeDetail()" class="text-muted text-primary-hover text-lg" aria-label="Close system health detail" title="Close">&times;</button></div>' +
     ["blocked", "freshness", "ready", "balance"]
       .map((k) => {
         const f = b[k];

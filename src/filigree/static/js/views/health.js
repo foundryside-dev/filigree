@@ -2,7 +2,7 @@
 // Code Health view — hotspots, severity donut, scan coverage, recent scans.
 // ---------------------------------------------------------------------------
 
-import { fetchFiles, fetchFileStats, fetchHotspots, fetchScanRuns } from "../api.js";
+import { fetchFileStats, fetchFiles, fetchHotspots, fetchScanRuns } from "../api.js";
 import { SEVERITY_COLORS, state } from "../state.js";
 import { escHtml, escJsSingleAttr, relativeTime } from "../ui.js";
 
