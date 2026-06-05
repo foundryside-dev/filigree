@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/issues/{issue_id}/comments",
+    "endpoint": "GET /api/weft/issues/{issue_id}/comments",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic dashboard exposes only POST /api/issue/{id}/comments (no GET). Loom adds the GET counterpart and uses CommentRecordLoom (comment_id replacing classic id). Validates parent issue exists (404 NOT_FOUND if not) so missing issues do not silently return an empty list."
   },
@@ -22,7 +22,7 @@
       "note": "Missing issue id → 404 NOT_FOUND. db.get_comments returns [] for unknown ids; the handler validates upfront so consumers see a real 404 instead of a misleading empty list.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/issues/genp-deadbeef00/comments",
+        "path": "/api/weft/issues/genp-deadbeef00/comments",
         "headers": {},
         "body": null
       },

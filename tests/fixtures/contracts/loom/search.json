@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/search",
+    "endpoint": "GET /api/weft/search",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/search returns {results, total}. Loom wraps in ListResponse[IssueLoom] and DROPS total per the strict envelope; consumers needing a count hit /api/stats. Classic stays unchanged."
   },
@@ -22,7 +22,7 @@
       "note": "Empty q short-circuits to the empty list response.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/search",
+        "path": "/api/weft/search",
         "headers": {},
         "body": null
       },

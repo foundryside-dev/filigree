@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "filigree-loom",
-    "endpoint": "POST /api/loom/scan-results",
+    "endpoint": "POST /api/weft/scan-results",
     "status": "DECLARED — implementation lands in Phase C1 of the 2.0 federation work package.",
     "stability": "Frozen for the loom-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
     "authority": [
@@ -41,7 +41,7 @@
       "note": "Clean scan: no findings submitted, succeeded + failed both empty, all stats counters zero.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/scan-results",
+        "path": "/api/weft/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "example-scanner",
@@ -71,7 +71,7 @@
       "note": "Representative federation-emitter case. succeeded contains the server-generated finding id (was: new_finding_ids in classic); stats mirrors ScanIngestResult counts minus new_finding_ids (now surfaced as succeeded) and warnings (now top-level).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/scan-results",
+        "path": "/api/weft/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "loomweave",
@@ -119,7 +119,7 @@
       "note": "Representative Wardline SARIF-adapter case. Filigree does not parse SARIF here; the external adapter maps SARIF partialFingerprints/fingerprints to finding.fingerprint before POSTing so fingerprint identity survives Filigree ingestion and later lifecycle operations.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/scan-results",
+        "path": "/api/weft/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "wardline",
@@ -169,7 +169,7 @@
       "note": "Close-on-fixed driver. An agent fixed the only finding in src/a.py; the re-scan carries no findings for it but lists it in scanned_paths with mark_unseen=true. Filigree flips the now-absent finding to unseen_in_latest and cascade-closes its linked issue. Cascade outcomes are logged, not surfaced in the envelope.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/scan-results",
+        "path": "/api/weft/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "wardline",
@@ -201,7 +201,7 @@
       "note": "Loom uses the same flat error envelope as classic (ErrorResponse TypedDict: error + code + NotRequired details). ErrorCode enum value VALIDATION.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/scan-results",
+        "path": "/api/weft/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "example-scanner"

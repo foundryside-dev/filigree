@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-05-30",
-    "endpoint": "GET /api/loom/changes",
+    "endpoint": "GET /api/weft/changes",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic /api/activity (analytics) returns events; loom /api/changes mirrors MCP's get_changes semantics. event_id replaces id at the entity primary-key level. Cursor is the 'since' timestamp plus optional after_event_id tie-breaker; offset is not exposed."
   },
@@ -22,7 +22,7 @@
       "note": "since is required.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/changes",
+        "path": "/api/weft/changes",
         "headers": {},
         "body": null
       },
@@ -37,7 +37,7 @@
       "note": "since must be ISO format.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/changes?since=not-a-timestamp",
+        "path": "/api/weft/changes?since=not-a-timestamp",
         "headers": {},
         "body": null
       },
@@ -52,7 +52,7 @@
       "note": "Valid since with no events → empty list.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/changes?since=2099-01-01T00:00:00",
+        "path": "/api/weft/changes?since=2099-01-01T00:00:00",
         "headers": {},
         "body": null
       },

@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/issues/{issue_id}/files",
+    "endpoint": "GET /api/weft/issues/{issue_id}/files",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/issue/{id}/files (singular path) returns a bare list of IssueFileAssociation rows. Loom uses /issues/{id}/files (plural, symmetric with the /issues collection) and wraps in ListResponse[FileAssocLoom] (assoc_id replaces id at the row's primary key; cross-entity refs file_id and issue_id keep their names)."
   },
@@ -22,7 +22,7 @@
       "note": "Missing issue id → 404. Loom validates upfront unlike db.get_issue_files, matching classic /api/issue/{id}/files behavior.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/issues/genp-deadbeef00/files",
+        "path": "/api/weft/issues/genp-deadbeef00/files",
         "headers": {},
         "body": null
       },

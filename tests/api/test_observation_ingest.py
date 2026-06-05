@@ -2,7 +2,7 @@
 
 Covers:
 - POST /api/v1/observations (classic alias)
-- POST /api/loom/observations (loom generation)
+- POST /api/weft/observations (loom generation)
 - POST /api/observations (living surface alias)
 - Input validation (missing summary, invalid priority, invalid line, non-project-relative paths)
 - Idempotency (duplicate inserts return 200 and the existing mapped record)
@@ -52,7 +52,7 @@ class TestObservationIngest:
         test_db.conn.execute("UPDATE observations SET expires_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", obs["id"]))
         test_db.conn.commit()
 
-        resp = await client.get("/api/loom/observations")
+        resp = await client.get("/api/weft/observations")
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["items"] == []
@@ -90,7 +90,7 @@ class TestObservationIngest:
             "priority": 3,
             "actor": "reporter-2",
         }
-        resp = await client.post("/api/loom/observations", json=payload)
+        resp = await client.post("/api/weft/observations", json=payload)
         assert resp.status_code == 201, resp.text
         data = resp.json()
         assert "observation_id" in data

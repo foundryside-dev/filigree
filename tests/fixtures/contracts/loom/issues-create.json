@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/issues",
+    "endpoint": "POST /api/weft/issues",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape as classic POST /api/issues. Response shape changes from IssueDict to IssueLoom (issue_id replaces id)."
   },
@@ -23,7 +23,7 @@
       "note": "Validation: title must be a string.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues",
+        "path": "/api/weft/issues",
         "headers": {
           "Content-Type": "application/json"
         },

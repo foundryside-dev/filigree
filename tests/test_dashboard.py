@@ -795,12 +795,12 @@ class TestSafeBoundedIntReexport:
 
 
 # ---------------------------------------------------------------------------
-# /api/loom/scanners — relocated-DB resolution (filigree-641037692a)
+# /api/weft/scanners — relocated-DB resolution (filigree-641037692a)
 # ---------------------------------------------------------------------------
 
 
 class TestLoomScannersRelocatedDB:
-    """``GET /api/loom/scanners`` must resolve scanner TOMLs from
+    """``GET /api/weft/scanners`` must resolve scanner TOMLs from
     ``project_root / ".filigree" / "scanners"``, not ``db.db_path.parent /
     "scanners"`` — otherwise ``.filigree.conf`` projects with a relocated
     ``db = ...`` path return an empty scanner list while the CLI/MCP
@@ -844,11 +844,11 @@ class TestLoomScannersRelocatedDB:
             app = create_app()
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.get("/api/loom/scanners")
+                resp = await client.get("/api/weft/scanners")
             assert resp.status_code == 200, resp.text
             body = resp.json()
             names = [item["name"] for item in body["items"]]
-            assert "demo" in names, f"scanners not found via /api/loom/scanners: {body!r}"
+            assert "demo" in names, f"scanners not found via /api/weft/scanners: {body!r}"
         finally:
             dash_module._db = None
             db.close()
@@ -873,7 +873,7 @@ class TestLoomScannersRelocatedDB:
             app = create_app()
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.get("/api/loom/scanners")
+                resp = await client.get("/api/weft/scanners")
             assert resp.status_code == 200
             names = [item["name"] for item in resp.json()["items"]]
             assert "legacy" in names

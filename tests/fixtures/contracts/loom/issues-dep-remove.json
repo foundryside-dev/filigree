@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-05-30",
-    "endpoint": "DELETE /api/loom/issues/{issue_id}/dependencies/{dep_issue_id}",
+    "endpoint": "DELETE /api/weft/issues/{issue_id}/dependencies/{dep_issue_id}",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Path parameter renamed dep_id → dep_issue_id (loom vocabulary at the URL level). The removed:bool field is unchanged from classic. Idempotent: removing a non-existent dependency between two valid-prefix ids returns 200 {removed: false}, not 404. That edge-absent idempotency is shared with classic; this handler ADDITIONALLY absorbs the KeyError raised when a referenced issue is wholly missing (classic and the CLI/MCP surfaces convert that to NOT_FOUND) — a deliberate retry-safety tradeoff that can mask a typo'd id. The loom-only issue_found:bool field (added 2026-05-30, wire-compatible per the stability clause) is false exactly in that missing-issue case, so callers can tell a typo from a genuinely-absent edge."
   },
@@ -23,7 +23,7 @@
       "note": "Removing a non-existent dependency between two valid-prefix ids returns 200 with removed=false. This is the only fixture-replayable case (the populated success path requires seeded issues + a real dependency); see the seeded full-lifecycle test for that. Note these ids are non-existent ISSUES, not merely a missing edge between existing issues: the loom handler absorbs the resulting KeyError to stay idempotent here, whereas classic and the CLI/MCP surfaces convert a missing issue to NOT_FOUND. That divergence is loom-specific and intentional; see the handler docstring.",
       "request": {
         "method": "DELETE",
-        "path": "/api/loom/issues/genp-deadbeef00/dependencies/genp-deadbeef01",
+        "path": "/api/weft/issues/genp-deadbeef00/dependencies/genp-deadbeef01",
         "headers": {},
         "body": null
       },

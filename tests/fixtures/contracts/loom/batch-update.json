@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "filigree-loom",
-    "endpoint": "POST /api/loom/batch/update",
+    "endpoint": "POST /api/weft/batch/update",
     "status": "live as of Phase C2; ?response_detail=slim|full added in Phase C5.",
     "stability": "Frozen for the loom-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
     "authority": [
@@ -28,7 +28,7 @@
       "note": "issue_ids must be a JSON array — same validation as classic.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/update",
+        "path": "/api/weft/batch/update",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "issue_ids": "not-a-list",
@@ -49,7 +49,7 @@
       "note": "Missing issue_ids field is the same shape as the not-a-list case.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/update",
+        "path": "/api/weft/batch/update",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "priority": 1
@@ -69,7 +69,7 @@
       "note": "Two non-existent issue_ids: succeeded is empty, failed has one BatchFailure per id with code NOT_FOUND. Pins BatchFailure shape; SlimIssueLoom shape is pinned by the seeded test method.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/update",
+        "path": "/api/weft/batch/update",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "issue_ids": ["genp-deadbeef00", "genp-deadbeef01"],
@@ -96,7 +96,7 @@
       "note": "Unknown response_detail value rejected before body parsing — 400 VALIDATION (Phase C5).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/update?response_detail=banana",
+        "path": "/api/weft/batch/update?response_detail=banana",
         "headers": {"Content-Type": "application/json"},
         "body": {"issue_ids": ["genp-deadbeef00"], "priority": 1}
       },
@@ -114,7 +114,7 @@
       "note": "response_detail=full with all-missing ids: response shape stays {succeeded:[], failed:[BatchFailure...]} — the param affects succeeded[] item shape only, not envelope keys. Populated-success shape (full IssueLoom) is pinned by test_response_detail_full_succeeded_shape (seeded test).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/update?response_detail=full",
+        "path": "/api/weft/batch/update?response_detail=full",
         "headers": {"Content-Type": "application/json"},
         "body": {"issue_ids": ["genp-deadbeef00"], "priority": 1}
       },

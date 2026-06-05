@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/files",
+    "endpoint": "GET /api/weft/files",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/files returns PaginatedResult ({results, total, limit, offset, has_more}). Loom wraps in ListResponse[FileRecordLoom] and DROPS total/limit/offset siblings per the unified envelope; next_offset is computed when has_more is true. file_id replaces id at the entity primary-key level."
   },
@@ -22,7 +22,7 @@
       "note": "Empty project → no file records yet.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/files",
+        "path": "/api/weft/files",
         "headers": {},
         "body": null
       },
@@ -37,7 +37,7 @@
       "note": "Negative min_findings fails validation.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/files?min_findings=-1",
+        "path": "/api/weft/files?min_findings=-1",
         "headers": {},
         "body": null
       },

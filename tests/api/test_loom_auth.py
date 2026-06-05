@@ -26,11 +26,11 @@ class TestIsLoomScopedPath:
     @pytest.mark.parametrize(
         "path",
         [
-            "/api/loom/issues",
-            "/api/loom/scan-results",
-            "/api/loom/findings/clean-stale",
-            "/api/loom/issues/filigree-abc123/close",
-            "/api/p/acme/loom/issues",  # server-mode project mount
+            "/api/weft/issues",
+            "/api/weft/scan-results",
+            "/api/weft/findings/clean-stale",
+            "/api/weft/issues/filigree-abc123/close",
+            "/api/p/acme/weft/issues",  # server-mode project mount
             "/api/scan-results",  # living-surface federation alias
             "/api/p/acme/scan-results",  # alias under server-mode mount
             "/api/observations",  # living-surface observation ingest alias
@@ -53,7 +53,7 @@ class TestIsLoomScopedPath:
             "/",
             "/api/p/acme/issue/x",  # classic under server-mode mount
             "/api",  # no trailing segment
-            "/api/loomish/x",  # must not prefix-match "loom" loosely
+            "/api/weftish/x",  # must not prefix-match "weft" loosely
         ],
     )
     def test_non_loom_paths_are_false(self, path: str) -> None:
@@ -61,7 +61,7 @@ class TestIsLoomScopedPath:
 
     def test_every_living_surface_route_is_loom_scoped(self) -> None:
         """Drift guard: the LIVING_FEDERATION_ALIASES allowlist must cover every
-        route on the living-surface router. Without this, the next off-/api/loom/
+        route on the living-surface router. Without this, the next off-/api/weft/
         federation alias added to ``create_living_surface_router`` would ship
         UNAUTHENTICATED when a token is set — and the hardcoded-path tests above
         would not catch it. Derives the expectation from the router itself.
@@ -130,13 +130,13 @@ class TestLoomAuthEnforcement:
         """Back-compat: with no token configured, loom routes need no auth."""
         app = app_factory(None)
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues")
+            resp = await c.get("/api/weft/issues")
         assert resp.status_code == 200
 
     async def test_loom_route_correct_token(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         app = app_factory(TOKEN)
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues", headers={"Authorization": f"Bearer {TOKEN}"})
+            resp = await c.get("/api/weft/issues", headers={"Authorization": f"Bearer {TOKEN}"})
         assert resp.status_code == 200
 
     async def test_mcp_endpoint_not_mounted_when_token_unset(self, app_factory: Callable[[str | None], FastAPI]) -> None:
@@ -149,7 +149,7 @@ class TestLoomAuthEnforcement:
     async def test_loom_route_absent_header_rejected(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         app = app_factory(TOKEN)
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues")
+            resp = await c.get("/api/weft/issues")
         assert resp.status_code == 401
         assert resp.json()["code"] == "PERMISSION"
         assert resp.headers.get("WWW-Authenticate") == "Bearer"
@@ -157,14 +157,14 @@ class TestLoomAuthEnforcement:
     async def test_loom_route_wrong_token_rejected(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         app = app_factory(TOKEN)
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues", headers={"Authorization": "Bearer wrong"})
+            resp = await c.get("/api/weft/issues", headers={"Authorization": "Bearer wrong"})
         assert resp.status_code == 401
 
     async def test_loom_route_malformed_header_rejected(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         """A token without the ``Bearer`` scheme is not honoured."""
         app = app_factory(TOKEN)
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues", headers={"Authorization": TOKEN})
+            resp = await c.get("/api/weft/issues", headers={"Authorization": TOKEN})
         assert resp.status_code == 401
 
     async def test_living_alias_scan_results_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
@@ -241,7 +241,7 @@ class TestLoomAuthEnforcement:
         with caplog.at_level(logging.WARNING):
             app = app_factory("   ")  # create_app reads the env var here
         async with _client(app) as c:
-            resp = await c.get("/api/loom/issues")
+            resp = await c.get("/api/weft/issues")
         assert resp.status_code == 200  # open: a blank token gates nothing
         assert any("FILIGREE_API_TOKEN is set but empty" in r.message for r in caplog.records)
 
@@ -297,7 +297,7 @@ class TestLoomAuthScopeBoundary:
         app = app_factory(TOKEN)
         async with _client(app) as c:
             resp = await c.options(
-                "/api/loom/issues",
+                "/api/weft/issues",
                 headers={
                     "Origin": "http://localhost:8377",
                     "Access-Control-Request-Method": "GET",

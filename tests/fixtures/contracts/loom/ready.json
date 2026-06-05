@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/ready",
+    "endpoint": "GET /api/weft/ready",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/ready returns a bare list of IssueDicts. Loom wraps in ListResponse[IssueLoom] with has_more always false (the underlying get_ready() is unbounded today)."
   },
@@ -22,7 +22,7 @@
       "note": "Empty project (or one with auto-seeded planning issues) returns the unified envelope. Items shape is asserted by seeded shape-pin tests, not the fixture.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/ready",
+        "path": "/api/weft/ready",
         "headers": {},
         "body": null
       },

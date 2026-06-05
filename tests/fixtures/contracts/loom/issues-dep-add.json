@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/issues/{issue_id}/dependencies",
+    "endpoint": "POST /api/weft/issues/{issue_id}/dependencies",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape and response shape as classic ({added: bool}). No entity primary keys in the response so no rename applies."
   },
@@ -23,7 +23,7 @@
       "note": "Body validation runs before issue lookup, so depends_on must be provided.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues/genp-deadbeef00/dependencies",
+        "path": "/api/weft/issues/genp-deadbeef00/dependencies",
         "headers": {
           "Content-Type": "application/json"
         },

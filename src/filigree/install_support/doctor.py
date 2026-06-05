@@ -382,7 +382,7 @@ def _doctor_dashboard_contract_checks() -> list[CheckResult]:
         )
 
     scanner_routes = (
-        ("/api/loom/scan-results", "POST"),
+        ("/api/weft/scan-results", "POST"),
         ("/api/scan-results", "POST"),
         ("/api/files/_schema", "GET"),
     )

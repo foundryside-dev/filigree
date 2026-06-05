@@ -50,7 +50,7 @@ def is_loom_scoped_path(path: str) -> bool:
     if rest.startswith("p/"):
         parts = rest.split("/", 2)  # ['p', key, remainder]
         rest = parts[2] if len(parts) == 3 else ""
-    return rest == "loom" or rest.startswith("loom/") or rest in LIVING_FEDERATION_ALIASES or rest in CLASSIC_FEDERATION_ALIASES
+    return rest == "weft" or rest.startswith("weft/") or rest in LIVING_FEDERATION_ALIASES or rest in CLASSIC_FEDERATION_ALIASES
 
 
 def _extract_bearer(header: str | None) -> str | None:

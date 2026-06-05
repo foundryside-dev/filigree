@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/claim-next",
+    "endpoint": "POST /api/weft/claim-next",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Classic returns 404 NOT_FOUND when nothing is ready (not 200 with empty body); loom matches that, just with the IssueLoom shape on success. The fresh-DB-after-initialize() state is NOT empty: filigree's workflow packs auto-seed a default 'Future' release issue, so claim-next on an unmodified test DB returns that issue. The success-shape replay below relies on that seeding."
   },
@@ -23,7 +23,7 @@
       "note": "Replays against the dashboard_surface fixture, which has an initialized DB with the auto-seeded 'Future' release as the highest-priority (P4) ready issue. The IssueLoom shape is pinned by _assert_shape_matches against the body below; values are placeholders (only types are checked).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/claim-next",
+        "path": "/api/weft/claim-next",
         "headers": {"Content-Type": "application/json"},
         "body": {"assignee": "tester"}
       },

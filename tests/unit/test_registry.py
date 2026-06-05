@@ -86,6 +86,13 @@ def test_file_record_documents_content_hash_backend_invariant() -> None:
     assert "non-empty" in doc
 
 
+def test_default_token_env_is_weft_token() -> None:
+    """T1/Task 8: the hub-locked short-form federation token env var."""
+    from filigree.registry import DEFAULT_LOOMWEAVE_TOKEN_ENV
+
+    assert DEFAULT_LOOMWEAVE_TOKEN_ENV == "WEFT_TOKEN"  # noqa: S105
+
+
 def test_filigree_db_reads_loomweave_token_from_named_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """CONTRACT-2: ``LoomweaveConfig.token_env`` names the env var; the resolved
     token threads into ``LoomweaveRegistry.auth_token``."""

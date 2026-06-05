@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "filigree-loom",
-    "endpoint": "POST /api/loom/findings/clean-stale",
+    "endpoint": "POST /api/weft/findings/clean-stale",
     "status": "LIVE — loom-generation federation retention surface (ADR-015).",
     "stability": "Frozen for the loom-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
     "authority": [
@@ -38,7 +38,7 @@
       "note": "Clarion sweeps its own stale findings with the default 30-day window. findings_fixed counts what moved to 'fixed' (0 when nothing is stale; the shape is identical either way).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/findings/clean-stale",
+        "path": "/api/weft/findings/clean-stale",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "scan_source": "loomweave",
@@ -62,7 +62,7 @@
       "note": "scan_source is mandatory on the HTTP surface — without it a caller could sweep every tool's findings, violating scan_source isolation. Flat ErrorResponse envelope (error + code), ErrorCode enum value VALIDATION.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/findings/clean-stale",
+        "path": "/api/weft/findings/clean-stale",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "older_than_days": 30

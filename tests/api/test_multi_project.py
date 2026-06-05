@@ -647,7 +647,7 @@ class TestServerModeCrossProjectReadBlocking:
         """The loom mirror enforces the same guard."""
         from filigree.core import WrongProjectError
 
-        resp = await multi_client.get("/api/p/alpha/loom/issues/bravo-deadbeef00")
+        resp = await multi_client.get("/api/p/alpha/weft/issues/bravo-deadbeef00")
         assert resp.status_code == 404, resp.text
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body

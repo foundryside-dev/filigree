@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-05-07",
-    "endpoint": "POST /api/loom/issues/{issue_id}/release",
+    "endpoint": "POST /api/weft/issues/{issue_id}/release",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape; response shape changes from IssueDict to IssueLoom."
   },
@@ -22,7 +22,7 @@
       "name": "error_not_found",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues/genp-deadbeef00/release",
+        "path": "/api/weft/issues/genp-deadbeef00/release",
         "headers": {
           "Content-Type": "application/json"
         },

@@ -88,7 +88,7 @@ class TestClosureGateSingleClose:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
         _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
-        resp = await client.post(f"/api/loom/issues/{issue_id}/close", json={"actor": "x"})
+        resp = await client.post(f"/api/weft/issues/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 409, resp.text
 
 
@@ -116,7 +116,7 @@ class TestClosureGateBatchClose:
         ungov = dashboard_db.ids["b"]
         _make_governed(dashboard_db, gov)
         _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
-        resp = await client.post("/api/loom/batch/close", json={"issue_ids": [gov, ungov], "actor": "x"})
+        resp = await client.post("/api/weft/batch/close", json={"issue_ids": [gov, ungov], "actor": "x"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         failed_ids = {e["id"] for e in body["failed"]}

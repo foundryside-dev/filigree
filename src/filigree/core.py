@@ -1169,7 +1169,7 @@ class FiligreeDB(
         """Resolve the Bearer token for Loomweave calls from the configured env var.
 
         Per the Loomweave 1.0 cross-product contract: ``LoomweaveConfig.token_env``
-        names the env var (default ``CLARION_LOOM_TOKEN``); if it resolves to
+        names the env var (default ``WEFT_TOKEN``); if it resolves to
         a non-empty value, send ``Authorization: Bearer <token>``; if it is
         unset or empty, send no auth header. When ``token_env`` was set
         explicitly in config but the env var is missing or empty, emit a WARN

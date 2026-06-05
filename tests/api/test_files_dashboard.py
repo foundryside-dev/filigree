@@ -206,7 +206,7 @@ class TestFileEndpoints:
         clean re-scan flips the finding unseen and cascade-closes its issue
         (proves the route threads ``scanned_paths`` into ingest)."""
         first = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "wardline",
                 "findings": [{"path": "src/a.py", "rule_id": "WLN-001", "message": "sink", "fingerprint": "fp-e2e"}],
@@ -218,7 +218,7 @@ class TestFileEndpoints:
         issue = api_db.promote_finding_to_issue(finding["id"], actor="t")["issue"]
 
         clean = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "wardline",
                 "findings": [],
@@ -245,7 +245,7 @@ class TestFileEndpoints:
 
     async def test_post_scan_results_scanned_paths_must_be_array(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={"scan_source": "wardline", "findings": [], "scanned_paths": "src/a.py", "mark_unseen": True},
         )
         assert resp.status_code == 400
@@ -253,7 +253,7 @@ class TestFileEndpoints:
 
     async def test_post_scan_results_scanned_paths_rejects_non_string_element(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={"scan_source": "wardline", "findings": [], "scanned_paths": ["ok.py", 42], "mark_unseen": True},
         )
         assert resp.status_code == 400

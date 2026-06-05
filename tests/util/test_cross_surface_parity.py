@@ -598,7 +598,7 @@ class TestBatchMixedValidityParity:
         mcp_missing = "mcp-ffffffffff"
         from filigree.mcp_tools.issues import _handle_batch_update
 
-        # MCP batch_update uses "issue_ids" matching the loom HTTP /api/loom/batch/update
+        # MCP batch_update uses "issue_ids" matching the loom HTTP /api/weft/batch/update
         # vocabulary (Phase D1 alignment). This test focuses on envelope shape only.
         mcp_body = _mcp_envelope(await _handle_batch_update({"issue_ids": [mcp_real, mcp_missing], "priority": 1}))
         # Container-key pin: MCP uses "failed" pre-2b.1. Paired with the
@@ -651,7 +651,7 @@ class TestBatchMixedValidityParity:
         dashboard_surface: AsyncClient,
         mcp_surface: FiligreeDB,
     ) -> None:
-        """Loom-side positive-shape pin: ``/api/loom/batch/update`` and
+        """Loom-side positive-shape pin: ``/api/weft/batch/update`` and
         MCP ``batch_update`` both expose ``{succeeded, failed}``
         (``BatchResponse[SlimIssueWeft]`` on the dashboard side,
         ``BatchResponse[SlimIssue]`` on the MCP side after Phase D1).
@@ -664,7 +664,7 @@ class TestBatchMixedValidityParity:
         dash_create = await dashboard_surface.post("/api/issues", json={"title": "Real"})
         dash_real = dash_create.json()["id"]
         dash_resp = await dashboard_surface.post(
-            "/api/loom/batch/update",
+            "/api/weft/batch/update",
             json={"issue_ids": [dash_real, "dash-ffffffffff"], "priority": 1},
         )
         assert dash_resp.status_code == 200, dash_resp.text
@@ -884,7 +884,7 @@ class TestListObservationsEnvelopeParity:
 
 @pytest.mark.asyncio
 class TestListFilesEnvelopeParity:
-    """CLI ``list-files --json`` and loom HTTP ``GET /api/loom/files`` agree on
+    """CLI ``list-files --json`` and loom HTTP ``GET /api/weft/files`` agree on
     ``ListResponse[T]`` shape: ``{items, has_more}`` with no legacy siblings."""
 
     async def test_cli_loom_http_envelope_parity(
@@ -893,7 +893,7 @@ class TestListFilesEnvelopeParity:
         cli_surface: Callable[..., Any],
     ) -> None:
         # Loom HTTP: empty project → zero items.
-        resp = await dashboard_surface.get("/api/loom/files")
+        resp = await dashboard_surface.get("/api/weft/files")
         assert resp.status_code == 200, resp.text
         http_body = resp.json()
         assert "items" in http_body, f"loom-http list-files missing 'items': {http_body!r}"

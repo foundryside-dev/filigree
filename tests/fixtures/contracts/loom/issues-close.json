@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/issues/{issue_id}/close",
+    "endpoint": "POST /api/weft/issues/{issue_id}/close",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Classic POST /api/issue/{id}/close returns IssueDict only. Loom returns IssueLoom + optional newly_unblocked: list[SlimIssueLoom] (omitted when empty), matching MCP close_issue semantics. Federation consumers learn about cascade effects in one round-trip."
   },
@@ -22,7 +22,7 @@
       "name": "error_not_found",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues/genp-deadbeef00/close",
+        "path": "/api/weft/issues/genp-deadbeef00/close",
         "headers": {
           "Content-Type": "application/json"
         },

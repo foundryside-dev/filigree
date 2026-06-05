@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/scanners",
+    "endpoint": "GET /api/weft/scanners",
     "status": "live as of Phase C4.",
     "relation_to_classic": "No classic dashboard counterpart — scanners are exposed only via MCP (list_scanners) and CLI in the classic generation. Loom drops MCP's 'errors' and 'hint' siblings per the strict envelope."
   },
@@ -22,7 +22,7 @@
       "note": "No scanners registered → empty list.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/scanners",
+        "path": "/api/weft/scanners",
         "headers": {},
         "body": null
       },

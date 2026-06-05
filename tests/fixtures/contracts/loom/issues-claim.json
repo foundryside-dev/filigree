@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/issues/{issue_id}/claim",
+    "endpoint": "POST /api/weft/issues/{issue_id}/claim",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape (assignee required); response shape changes from IssueDict to IssueLoom."
   },
@@ -23,7 +23,7 @@
       "note": "Body validation runs before issue lookup, so the not-found fixture must include a valid assignee.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues/genp-deadbeef00/claim",
+        "path": "/api/weft/issues/genp-deadbeef00/claim",
         "headers": {
           "Content-Type": "application/json"
         },

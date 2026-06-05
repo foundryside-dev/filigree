@@ -3,7 +3,7 @@
 Covers the shape transformations that feed the loom generation's HTTP
 responses. The tests here pin the adapter's key-set and field routing
 against the fixture at ``tests/fixtures/contracts/loom/scan-results.json``.
-When Phase C1 mounts ``POST /api/loom/scan-results``, these adapter
+When Phase C1 mounts ``POST /api/weft/scan-results``, these adapter
 tests plus the fixture-backed parity tests (added in B4) together gate
 the loom-generation contract.
 """

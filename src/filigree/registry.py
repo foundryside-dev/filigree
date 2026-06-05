@@ -15,7 +15,7 @@ successfully.
 Auth (CONTRACT-2)
 -----------------
 ``LoomweaveRegistry.auth_token`` is read at construction from the env var
-named by ``LoomweaveConfig.token_env`` (default ``CLARION_LOOM_TOKEN``).
+named by ``LoomweaveConfig.token_env`` (default ``WEFT_TOKEN``).
 When set, every outbound request carries ``Authorization: Bearer <token>``.
 When unset, no Authorization header is sent — Loomweave accepts unauthenticated
 calls on loopback bind and rejects them on non-loopback per the 1.0
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # Not a token value itself; the actual token lives in the operator's
 # environment under this name. Suppressing the hardcoded-secret lint
 # because this string is an env-var name, not a credential.
-DEFAULT_LOOMWEAVE_TOKEN_ENV = "CLARION_LOOM_TOKEN"  # noqa: S105
+DEFAULT_LOOMWEAVE_TOKEN_ENV = "WEFT_TOKEN"  # noqa: S105
 
 DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "loomweave")
 REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "loomweave")

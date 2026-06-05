@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/types",
+    "endpoint": "GET /api/weft/types",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/types returns a bare list of {type, display_name, pack, initial_state}. Loom wraps the same projection in ListResponse[TypeSummaryLoom] with has_more always false."
   },
@@ -22,7 +22,7 @@
       "note": "Default packs register several types; fixture pins envelope shape only.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/types",
+        "path": "/api/weft/types",
         "headers": {},
         "body": null
       },

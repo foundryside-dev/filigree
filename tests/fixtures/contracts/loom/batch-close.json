@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "filigree-loom",
-    "endpoint": "POST /api/loom/batch/close",
+    "endpoint": "POST /api/weft/batch/close",
     "status": "live as of Phase C2; ?response_detail=slim|full added in Phase C5 (newly_unblocked stays slim regardless — locked rule, see docs/federation/contracts.md).",
     "stability": "Frozen for the loom-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
     "authority": [
@@ -29,7 +29,7 @@
       "note": "Same validation as classic batch close.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/close",
+        "path": "/api/weft/batch/close",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "issue_ids": "not-a-list"
@@ -49,7 +49,7 @@
       "note": "All-missing close: succeeded empty, failed has one BatchFailure per id, newly_unblocked omitted (no real closes happened so nothing to unblock). Pins BatchFailure shape and the omitted-when-empty rule for newly_unblocked.",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/close",
+        "path": "/api/weft/batch/close",
         "headers": {"Content-Type": "application/json"},
         "body": {
           "issue_ids": ["genp-deadbeef00"],
@@ -76,7 +76,7 @@
       "note": "Unknown response_detail value rejected before body parsing — 400 VALIDATION (Phase C5).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/close?response_detail=banana",
+        "path": "/api/weft/batch/close?response_detail=banana",
         "headers": {"Content-Type": "application/json"},
         "body": {"issue_ids": ["genp-deadbeef00"], "reason": "test"}
       },
@@ -94,7 +94,7 @@
       "note": "response_detail=full with all-missing ids: succeeded[] is empty (so item-shape change is unobservable here); failed[] still uses BatchFailure. newly_unblocked must be omitted when empty per the C2 rule and stays SlimIssueLoom when populated regardless of response_detail (locked C5 decision — see docs/federation/contracts.md).",
       "request": {
         "method": "POST",
-        "path": "/api/loom/batch/close?response_detail=full",
+        "path": "/api/weft/batch/close?response_detail=full",
         "headers": {"Content-Type": "application/json"},
         "body": {"issue_ids": ["genp-deadbeef00"], "reason": "test"}
       },

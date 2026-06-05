@@ -14,6 +14,18 @@ from filigree.dashboard import STATIC_DIR, create_app
 from tests.conftest import PopulatedDB
 
 
+class TestWeftWireSurface:
+    """T1: the named generation is served under /api/weft; /api/loom is gone."""
+
+    async def test_weft_routes_mounted(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/ready")
+        assert resp.status_code != 404
+
+    async def test_loom_routes_are_gone(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/loom/ready")
+        assert resp.status_code == 404
+
+
 class TestDashboardIndex:
     async def test_serves_html(self, client: AsyncClient) -> None:
         resp = await client.get("/")
@@ -157,7 +169,7 @@ class TestIssuesAPI:
         dashboard_db.db.conn.commit()
 
         resp = await client.patch(
-            f"/api/loom/issues/{issue.id}",
+            f"/api/weft/issues/{issue.id}",
             json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
         )
 
@@ -355,7 +367,7 @@ class TestCreateIssueAPI:
 
     async def test_loom_create_rejects_priority_like_labels(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/api/loom/issues",
+            "/api/weft/issues",
             json={"title": "Bad labels", "labels": ["priority:1"]},
         )
 
@@ -465,7 +477,7 @@ class TestUpdateAPI:
     async def test_loom_update_surfaces_soft_transition_warning(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         issue = dashboard_db.db.create_issue("Warn me", type="bug")
 
-        resp = await client.patch(f"/api/loom/issues/{issue.id}", json={"status": "confirmed"})
+        resp = await client.patch(f"/api/weft/issues/{issue.id}", json={"status": "confirmed"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -578,7 +590,7 @@ class TestCloseReopenAPI:
             links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
         )
 
-        resp = await client.post(f"/api/loom/issues/{issue.id}/close", json={"reason": "completed"})
+        resp = await client.post(f"/api/weft/issues/{issue.id}/close", json={"reason": "completed"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -638,7 +650,7 @@ class TestCloseReopenAPI:
         dashboard_db.db.update_issue(issue.id, status="verifying", fields={"fix_verification": "regression added"})
         dashboard_db.db.close_issue(issue.id, reason="closed too early")
 
-        resp = await client.post(f"/api/loom/issues/{issue.id}/reopen", json={"actor": "api-test"})
+        resp = await client.post(f"/api/weft/issues/{issue.id}/reopen", json={"actor": "api-test"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -720,7 +732,7 @@ class TestClaimAPI:
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
 
         resp = await client.post(
-            f"/api/loom/issues/{ids['a']}/release",
+            f"/api/weft/issues/{ids['a']}/release",
             json={"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"},
         )
 
@@ -814,7 +826,7 @@ class TestCommentAPI:
         ("path_template", "id_field"),
         [
             ("/api/issue/{issue_id}/comments", "id"),
-            ("/api/loom/issues/{issue_id}/comments", "comment_id"),
+            ("/api/weft/issues/{issue_id}/comments", "comment_id"),
         ],
     )
     async def test_add_comment_expected_assignee_allows_coordinator(
@@ -839,7 +851,7 @@ class TestCommentAPI:
         "path_template",
         [
             "/api/issue/{issue_id}/comments",
-            "/api/loom/issues/{issue_id}/comments",
+            "/api/weft/issues/{issue_id}/comments",
         ],
     )
     async def test_add_comment_expected_assignee_must_be_string(
@@ -1208,7 +1220,7 @@ class TestBatchAPI:
         assert "force=true" in body["error"]
         # And the loom mirror behaves the same.
         resp_loom = await client.post(
-            "/api/loom/batch/close",
+            "/api/weft/batch/close",
             json={"issue_ids": [phase.id], "force": True},
         )
         assert resp_loom.status_code == 400

@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/issues",
+    "endpoint": "GET /api/weft/issues",
     "status": "live as of Phase C4.",
     "relation_to_classic": "Classic GET /api/issues streams every row in one shot (no pagination, no envelope). Loom adds real ?limit=&offset= pagination and wraps each item in IssueLoom; ListResponse[IssueLoom] envelope per ADR-002 §6. Classic stays unchanged."
   },
@@ -23,7 +23,7 @@
       "note": "limit=0 fails validation with VALIDATION error (must be >= 1).",
       "request": {
         "method": "GET",
-        "path": "/api/loom/issues?limit=0",
+        "path": "/api/weft/issues?limit=0",
         "headers": {},
         "body": null
       },

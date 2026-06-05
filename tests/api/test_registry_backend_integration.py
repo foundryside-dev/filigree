@@ -27,7 +27,7 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
         assert schema["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
 
         ingest_response = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "ruff",
                 "findings": [
@@ -232,7 +232,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
                     "scan_source": "ruff",
                     "findings": [{"path": "src/a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
                 }
-                scan_task = asyncio.create_task(client.post("/api/loom/scan-results", json=scan_body))
+                scan_task = asyncio.create_task(client.post("/api/weft/scan-results", json=scan_body))
                 # Tiny yield so scan-results starts its HTTP wait, then issue
                 # an unrelated GET — it must complete well before scan-results does.
                 await asyncio.sleep(0.05)
@@ -368,8 +368,8 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
 
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 resp_a, resp_b = await asyncio.gather(
-                    client.post("/api/loom/scan-results", json=scan_body(0)),
-                    client.post("/api/loom/scan-results", json=scan_body(1)),
+                    client.post("/api/weft/scan-results", json=scan_body(0)),
+                    client.post("/api/weft/scan-results", json=scan_body(1)),
                 )
 
             # The barrier was satisfied: both resolutions overlapped. A serialised
@@ -511,8 +511,8 @@ async def test_concurrent_same_path_local_scan_results_do_not_raise(tmp_path: Pa
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp_a, resp_b = await asyncio.gather(
-                client.post("/api/loom/scan-results", json=scan_body(0)),
-                client.post("/api/loom/scan-results", json=scan_body(1)),
+                client.post("/api/weft/scan-results", json=scan_body(0)),
+                client.post("/api/weft/scan-results", json=scan_body(1)),
             )
 
         assert resp_a.status_code == 200, resp_a.text
@@ -556,7 +556,7 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    "/api/loom/scan-results",
+                    "/api/weft/scan-results",
                     json={"scan_source": "ruff", "findings": findings},
                 )
             assert response.status_code == 200, response.text
@@ -604,7 +604,7 @@ async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
             with caplog.at_level(logging.WARNING, logger="filigree.core"):
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        "/api/loom/scan-results",
+                        "/api/weft/scan-results",
                         json={
                             "scan_source": "ruff",
                             "findings": [

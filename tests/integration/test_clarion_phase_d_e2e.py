@@ -3,7 +3,7 @@
 Closes review item F-2: the existing
 ``tests/api/test_registry_backend_integration.py`` exercises only the
 ThreadingHTTPServer stub. This file boots an actual ``loomweave`` binary
-on the loopback interface and verifies that ``POST /api/loom/scan-results``
+on the loopback interface and verifies that ``POST /api/weft/scan-results``
 threads Loomweave's entity ID (``core:file:...``) into the stored
 ``file_records.id``.
 
@@ -204,7 +204,7 @@ async def _post_scan_results(db: FiligreeDB, *, path: str) -> dict[str, object]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "ruff",
                 "findings": [

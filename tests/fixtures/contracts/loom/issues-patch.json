@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "PATCH /api/loom/issues/{issue_id}",
+    "endpoint": "PATCH /api/weft/issues/{issue_id}",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Same request shape as classic PATCH /api/issue/{id}. Response shape changes from IssueDict to IssueLoom (issue_id replaces id)."
   },
@@ -22,7 +22,7 @@
       "name": "error_not_found",
       "request": {
         "method": "PATCH",
-        "path": "/api/loom/issues/genp-deadbeef00",
+        "path": "/api/weft/issues/genp-deadbeef00",
         "headers": {
           "Content-Type": "application/json"
         },

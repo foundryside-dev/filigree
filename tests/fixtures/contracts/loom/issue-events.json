@@ -7,7 +7,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/issues/{issue_id}/events",
+    "endpoint": "GET /api/weft/issues/{issue_id}/events",
     "status": "live as of Phase C4.",
     "relation_to_classic": "No classic dashboard counterpart — issue events are exposed via MCP (get_issue_events) in the classic generation. Loom is the first HTTP surface. event_id replaces id at the entity primary-key level."
   },
@@ -22,7 +22,7 @@
       "note": "Missing issue id → 404 (db.get_issue_events validates via self.get_issue).",
       "request": {
         "method": "GET",
-        "path": "/api/loom/issues/genp-deadbeef00/events",
+        "path": "/api/weft/issues/genp-deadbeef00/events",
         "headers": {},
         "body": null
       },

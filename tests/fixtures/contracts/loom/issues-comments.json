@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "POST /api/loom/issues/{issue_id}/comments",
+    "endpoint": "POST /api/weft/issues/{issue_id}/comments",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Classic CommentRecord uses id (the comment's primary key); loom CommentRecordLoom uses comment_id (entity-typed primary key). Status 201 matches classic."
   },
@@ -22,7 +22,7 @@
       "name": "error_not_found",
       "request": {
         "method": "POST",
-        "path": "/api/loom/issues/genp-deadbeef00/comments",
+        "path": "/api/weft/issues/genp-deadbeef00/comments",
         "headers": {
           "Content-Type": "application/json"
         },

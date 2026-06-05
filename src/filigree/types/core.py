@@ -100,7 +100,7 @@ class LoomweaveConfig(TypedDict, total=False):
 
     ``token_env`` names the environment variable that carries the Bearer
     token the Loomweave read API expects (Authorization header). Defaults to
-    ``"CLARION_LOOM_TOKEN"``. Per the Loomweave 1.0 cross-product contract,
+    ``"WEFT_TOKEN"``. Per the Loomweave 1.0 cross-product contract,
     Loomweave accepts unauthenticated calls on loopback bind and rejects them
     on non-loopback; if the env var is unset, Filigree sends no header.
     """

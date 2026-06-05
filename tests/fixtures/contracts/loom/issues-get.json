@@ -8,7 +8,7 @@
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "updated": "2026-04-26",
-    "endpoint": "GET /api/loom/issues/{issue_id}",
+    "endpoint": "GET /api/weft/issues/{issue_id}",
     "status": "live as of Phase C3.",
     "relation_to_classic": "Classic GET /api/issue/{id} returns EnrichedIssueDetail (IssueDict + dep_details + events + comments). Loom returns the simpler IssueLoom (or IssueLoomWithFiles when include_files=true). Federation consumers do not need dashboard-UI enrichment; loom mirrors MCP get_issue's projection."
   },
@@ -23,7 +23,7 @@
       "note": "Missing issue id \u2192 404 NOT_FOUND with the standard ErrorResponse envelope.",
       "request": {
         "method": "GET",
-        "path": "/api/loom/issues/genp-deadbeef00",
+        "path": "/api/weft/issues/genp-deadbeef00",
         "headers": {},
         "body": null
       },

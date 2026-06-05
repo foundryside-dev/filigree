@@ -1,7 +1,7 @@
 """Loom /changes deletion-signal tests (F5, filigree-2183fea23a).
 
 A hard-deleted issue leaves no events/issues row, so federation consumers
-reconciling off ``GET /api/loom/changes`` must learn of the deletion from the
+reconciling off ``GET /api/weft/changes`` must learn of the deletion from the
 ``deleted_issues`` tombstone, surfaced as a synthetic ``issue_deleted`` change
 record. The record must:
 
@@ -177,7 +177,7 @@ class TestGetEventsSinceDeletionMerge:
 class TestLoomChangesHttpDeletion:
     async def test_deletion_appears_on_changes_feed(self, changes_db: FiligreeDB, client: AsyncClient) -> None:
         issue_id = _delete_terminal(changes_db, "doomed", actor="alice")
-        resp = await client.get("/api/loom/changes", params={"since": _EPOCH})
+        resp = await client.get("/api/weft/changes", params={"since": _EPOCH})
         assert resp.status_code == 200
         body = resp.json()
         deletions = [it for it in body["items"] if it["event_type"] == "issue_deleted"]
@@ -193,7 +193,7 @@ class TestLoomChangesHttpDeletion:
     async def test_type_filter_on_http(self, changes_db: FiligreeDB, client: AsyncClient) -> None:
         issue_id = _delete_terminal(changes_db, "doomed")
         changes_db.create_issue("survivor", type="task")
-        resp = await client.get("/api/loom/changes", params={"since": _EPOCH, "type": "issue_deleted"})
+        resp = await client.get("/api/weft/changes", params={"since": _EPOCH, "type": "issue_deleted"})
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert [it["issue_id"] for it in items] == [issue_id]
@@ -207,7 +207,7 @@ class TestLoomChangesHttpDeletion:
             params: dict[str, object] = {"since": since, "limit": 2}
             if after_event_id is not None:
                 params["after_event_id"] = after_event_id
-            resp = await client.get("/api/loom/changes", params=params)
+            resp = await client.get("/api/weft/changes", params=params)
             assert resp.status_code == 200
             body = resp.json()
             for it in body["items"]:
@@ -259,7 +259,7 @@ class TestDeletionCarriesAffectedEntities:
         changes_db.close_issue(issue.id, force=True)
         changes_db.delete_issue(issue.id, actor="alice")
 
-        resp = await client.get("/api/loom/changes", params={"since": _EPOCH, "type": "issue_deleted"})
+        resp = await client.get("/api/weft/changes", params={"since": _EPOCH, "type": "issue_deleted"})
         assert resp.status_code == 200
         rec = resp.json()["items"][0]
         assert rec["affected_entities"] == ["py:func:foo"]
@@ -267,7 +267,7 @@ class TestDeletionCarriesAffectedEntities:
     async def test_non_deletion_change_has_empty_affected_entities(self, changes_db: FiligreeDB, client: AsyncClient) -> None:
         """The wire shape is uniform: live-issue change records carry an empty list."""
         changes_db.create_issue("live", type="task")
-        resp = await client.get("/api/loom/changes", params={"since": _EPOCH, "type": "created"})
+        resp = await client.get("/api/weft/changes", params={"since": _EPOCH, "type": "created"})
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert items
