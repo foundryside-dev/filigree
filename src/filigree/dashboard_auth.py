@@ -11,8 +11,9 @@ and the local dashboard UI open.
 Design: docs/superpowers/specs/2026-06-03-loom-bearer-token-auth-design.md
 ADR-018 (the decision); ADR-012 (the threat model this partially lifts).
 
-The enforcement is **opt-in**: with the env var unset, ``create_app`` does not
-install the middleware at all, so behaviour is byte-identical to today.
+The loom-route enforcement is **opt-in**: with the env var unset, ``create_app``
+does not install the middleware for loom routes. The high-privilege MCP HTTP
+transport is stricter: it is only mounted when this bearer token exists.
 """
 
 from __future__ import annotations

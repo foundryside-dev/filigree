@@ -2322,6 +2322,25 @@ class TestInstallMcpServerMode:
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
 
+    def test_server_mode_warns_without_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server-mode points at the daemon's /mcp transport, which mounts only
+        when a federation bearer token is set; warn loudly if none is configured."""
+        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        assert "FILIGREE_FEDERATION_API_TOKEN" in msg
+        assert "404" in msg
+
+    def test_server_mode_no_warning_with_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With a token configured, the server-mode install message carries no warning."""
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        assert "WARNING" not in msg
+
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
