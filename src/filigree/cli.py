@@ -102,11 +102,11 @@ def cli(ctx: click.Context, actor: str) -> None:
     # by actor_mismatch_warning.
     from filigree import actor_identity
 
-    _verified = actor_identity.resolve_os_actor()
-    _warning = actor_identity.actor_mismatch_warning(cleaned, _verified)
-    if _warning is not None:
+    verified = actor_identity.resolve_os_actor()
+    mismatch = actor_identity.actor_mismatch_warning(cleaned, verified)
+    if mismatch is not None:
         click.echo(
-            f"warning: {_warning['code']} claimed={_warning['claimed']!r} verified={_warning['verified']!r}",
+            f"warning: {mismatch['code']} claimed={mismatch['claimed']!r} verified={mismatch['verified']!r}",
             err=True,
         )
 
