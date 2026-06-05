@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from filigree.core import find_filigree_command
+from filigree.install_support.safe_paths import (
+    UnsafeInstallPathError,
+    ensure_project_dir,
+    reject_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +318,15 @@ def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
     Idempotent — won't duplicate existing entries.  Re-running upgrades
     bare or stale absolute-path commands to the current binary location.
     """
-    claude_dir = project_root / ".claude"
-    claude_dir.mkdir(exist_ok=True)
+    try:
+        claude_dir = ensure_project_dir(project_root, ".claude")
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
     settings_path = claude_dir / "settings.json"
+    try:
+        reject_symlink(settings_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
 
     settings: dict[str, Any] = {}
     if settings_path.exists():
@@ -327,6 +338,10 @@ def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
             settings = parsed
         except (json.JSONDecodeError, ValueError):
             backup = settings_path.with_suffix(".json.bak")
+            try:
+                reject_symlink(backup)
+            except UnsafeInstallPathError as exc:
+                return False, str(exc)
             shutil.copy2(settings_path, backup)
             logger.warning("Malformed settings.json; backed up to %s", backup)
 
