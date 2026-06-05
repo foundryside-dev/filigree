@@ -1455,8 +1455,8 @@ class MetaMixin(DBMixinProtocol):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO observations "
                     "(id, summary, detail, file_id, file_path, line, source_issue_id, "
-                    "source_finding_id, priority, actor, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_finding_id, priority, actor, verified_actor, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["id"],
                         record["summary"],
@@ -1468,6 +1468,7 @@ class MetaMixin(DBMixinProtocol):
                         source_finding_id,
                         record.get("priority", 3),
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         _normalize_iso_to_utc(record.get("expires_at")) or _expires_iso(),
                     ),
@@ -1636,13 +1637,15 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(annotation_events):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO annotation_events "
-                    "(id, annotation_id, event_type, actor, reason, old_value, new_value, target_type, target_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, annotation_id, event_type, actor, verified_actor, reason, "
+                    "old_value, new_value, target_type, target_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["id"],
                         record["annotation_id"],
                         record["event_type"],
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         record.get("reason", ""),
                         record.get("old_value"),
                         record.get("new_value"),

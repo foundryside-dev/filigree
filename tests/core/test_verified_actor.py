@@ -144,9 +144,17 @@ def test_export_import_round_trips_verified_actor(tmp_path: Path) -> None:
     src_dir = tmp_path / "src" / ".filigree"
     src_dir.mkdir(parents=True)
     src = FiligreeDB.from_filigree_dir(src_dir)
+    src.project_root = tmp_path
+    (tmp_path / "foo.py").write_text("one\ntwo\nthree\n")
     src.set_verified_actor("alice")
     issue = src.create_issue(title="t", actor="agent-x")
     src.add_comment(issue.id, "hello", author="agent-x")
+    src.create_observation(summary="smell in foo.py", actor="agent-x")
+    # file_metadata_update file_event (re-register with changed metadata).
+    src.register_file("foo.py")
+    src.register_file("foo.py", metadata={"k": "v"})
+    # annotation_event (real file under project_root).
+    src.annotate_file("foo.py", "smell here", line_start=1, actor="agent-x")
     export_path = tmp_path / "dump.jsonl"
     src.export_jsonl(export_path)
 
@@ -164,3 +172,12 @@ def test_export_import_round_trips_verified_actor(tmp_path: Path) -> None:
     assert ev["verified_actor"] == "alice"
     cm = dst.conn.execute("SELECT verified_author FROM comments WHERE issue_id = ?", (issue.id,)).fetchone()
     assert cm["verified_author"] == "alice"
+    fe = dst.conn.execute("SELECT verified_actor FROM file_events WHERE event_type = 'file_metadata_update'").fetchone()
+    assert fe is not None
+    assert fe["verified_actor"] == "alice"
+    obs = dst.conn.execute("SELECT verified_actor FROM observations").fetchone()
+    assert obs is not None
+    assert obs["verified_actor"] == "alice"
+    ae = dst.conn.execute("SELECT verified_actor FROM annotation_events ORDER BY rowid DESC LIMIT 1").fetchone()
+    assert ae is not None
+    assert ae["verified_actor"] == "alice"
