@@ -1,0 +1,296 @@
+/* ============================================================================
+   loom-mkdocs.css  ·  v1  ·  2026-06-05
+   ----------------------------------------------------------------------------
+   The Loom Federation shared docs theme for MkDocs Material.
+
+   DERIVED FROM the design system — do not hand-edit the token VALUES below;
+   re-copy from `design-system/project/colors_and_type.css` on update and bump
+   the version stamp above. Per THEMING.md this is the *reference shared docs
+   theme* that filigree / wardline / legis / charter vendor in (replacing their
+   divergent `docs/stylesheets/extra.css`). Keep it portable: it assumes only
+   (a) these token values and (b) the two bundled fonts living in `./fonts/`
+   beside this file.
+
+   MECHANISM (shared with the rest of the suite):
+   - Material owns the light/dark toggle. We add NO custom toggle and use NO
+     light-dark()/[data-theme]. We map the handoff tokens onto Material's own
+     scheme selectors: [data-md-color-scheme="slate"]  = dark  (CANONICAL),
+                       [data-md-color-scheme="default"] = light.
+   - Token VALUES are lifted verbatim from the design system (terminal-grade
+     dark-teal surfaces, sky accent, the per-member thread palette, radii).
+   - Fonts: JetBrains Mono = product/body face; Space Grotesk = brand/headings.
+     Bundled locally (OFL) so the site works fully offline; mkdocs.yml sets
+     `font: false` so Material pulls no Google Fonts.
+
+   Contrast: the source tokens were verified >=4.5:1 in both themes by the
+   design-system handoff; this file inherits that guarantee (no re-check).
+   ============================================================================ */
+
+/* ---------------------------------------------------------------------------
+   Bundled faces (paths relative to THIS file → ./fonts/)
+   --------------------------------------------------------------------------- */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Variable.ttf') format('truetype');
+  font-weight: 100 800; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('fonts/JetBrainsMono-Italic-Variable.ttf') format('truetype');
+  font-weight: 100 800; font-style: italic; font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('fonts/SpaceGrotesk-Variable.ttf') format('truetype');
+  font-weight: 300 700; font-style: normal; font-display: swap;
+}
+
+/* ---------------------------------------------------------------------------
+   Token primitives — lifted verbatim from the design system. Theme-agnostic
+   (thread palette, radii, type families, motion).
+   --------------------------------------------------------------------------- */
+:root {
+  --loom-font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
+  --loom-font-display: 'Space Grotesk', 'JetBrains Mono', ui-sans-serif, system-ui, sans-serif;
+
+  /* Radii (3 / 6 / 8) */
+  --loom-radius-sm: 3px;
+  --loom-radius:    6px;
+  --loom-radius-lg: 8px;
+
+  /* The Loom thread palette — one accent per member (legible on dark base). */
+  --thread-clarion:  #4ECDC4;
+  --thread-filigree: #38BDF8;
+  --thread-wardline: #F4845F;
+  --thread-legis:    #A78BFA;
+  --thread-charter:  #E3B341;
+  --thread-shuttle:  #6B7C8C;
+  --lacuna-accent:   #CE7AAE;
+
+  /* Wire Material's own font slots to the Loom faces (font:false in mkdocs.yml
+     means Material emits --md-text/code-font-family but loads no webfont). */
+  --md-text-font-family: var(--loom-font-mono);
+  --md-code-font-family: var(--loom-font-mono);
+}
+
+/* ===========================================================================
+   DARK / slate scheme — the CANONICAL DEFAULT
+   Surfaces, text ramp, accent: design-system dark tokens.
+   =========================================================================== */
+[data-md-color-scheme="slate"] {
+  /* hue used by Material to derive its own slate ramp; keep it teal-leaning */
+  --md-hue: 200;
+
+  /* Surfaces (design-system: base/raised/overlay/hover) */
+  --md-default-bg-color:          #0B1215;  /* surface-base   */
+  --md-default-bg-color--light:   #131E24;  /* surface-raised */
+  --md-default-bg-color--lighter: #1A2B34;  /* surface-overlay */
+  --md-default-bg-color--lightest:#243A45;  /* surface-hover  */
+
+  /* Text ramp (primary / secondary / muted) */
+  --md-default-fg-color:          #E2EEF2;  /* text-primary  */
+  --md-default-fg-color--light:   #8FAAB8;  /* text-secondary*/
+  --md-default-fg-color--lighter: #5A7D8C;  /* text-muted    */
+  --md-default-fg-color--lightest:#1E3340;  /* hairline tint */
+
+  /* Primary chrome (header/nav) = raised surface, sky accent for marks/links */
+  --md-primary-fg-color:        #131E24;
+  --md-primary-fg-color--light: #1A2B34;
+  --md-primary-fg-color--dark:  #0B1215;
+  --md-primary-bg-color:        #E2EEF2;
+  --md-primary-bg-color--light: #8FAAB8;
+
+  /* Accent — sky (the suite's interactive blue) */
+  --md-accent-fg-color:         #38BDF8;
+  --md-accent-fg-color--transparent: rgba(56, 189, 248, 0.10);
+  --md-accent-bg-color:         #0B1215;
+  --md-accent-bg-color--light:  #131E24;
+
+  /* Links resolve through the typeset link var below */
+  --md-typeset-a-color:         #38BDF8;
+
+  /* Code surfaces */
+  --md-code-bg-color:           #131E24;
+  --md-code-fg-color:           #E2EEF2;
+  --md-code-hl-color:           rgba(56, 189, 248, 0.15);
+
+  /* Syntax highlight (Pygments) — dark, terminal-grade */
+  --md-code-hl-comment-color:   #5A7D8C;
+  --md-code-hl-keyword-color:   #A78BFA;  /* violet  */
+  --md-code-hl-string-color:    #4ECDC4;  /* aqua    */
+  --md-code-hl-number-color:    #E3B341;  /* gold    */
+  --md-code-hl-name-color:      #E2EEF2;
+  --md-code-hl-function-color:  #38BDF8;  /* sky     */
+  --md-code-hl-constant-color:  #F4845F;  /* coral   */
+  --md-code-hl-operator-color:  #8FAAB8;
+  --md-code-hl-punctuation-color:#8FAAB8;
+  --md-code-hl-variable-color:  #E2EEF2;
+  --md-code-hl-special-color:   #CE7AAE;
+
+  /* Selection / footer */
+  --md-typeset-mark-color:      rgba(227, 179, 65, 0.30);
+  --md-footer-bg-color:         #0B1215;
+  --md-footer-bg-color--dark:   #070D0F;
+  --md-footer-fg-color:         #E2EEF2;
+  --md-footer-fg-color--light:  #8FAAB8;
+  --md-footer-fg-color--lighter:#5A7D8C;
+}
+
+/* ===========================================================================
+   LIGHT / default scheme — the design system's documented alternate
+   =========================================================================== */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color:          #F0F6F8;  /* surface-base   (light) */
+  --md-default-bg-color--light:   #FFFFFF;  /* surface-raised */
+  --md-default-bg-color--lighter: #E8F1F4;  /* surface-overlay*/
+  --md-default-bg-color--lightest:#DCE9EE;  /* surface-hover  */
+
+  --md-default-fg-color:          #0F2027;  /* text-primary  */
+  --md-default-fg-color--light:   #3D6070;  /* text-secondary*/
+  --md-default-fg-color--lighter: #6B8D9C;  /* text-muted    */
+  --md-default-fg-color--lightest:#C5D8E0;  /* hairline tint */
+
+  --md-primary-fg-color:        #FFFFFF;
+  --md-primary-fg-color--light: #E8F1F4;
+  --md-primary-fg-color--dark:  #DCE9EE;
+  --md-primary-bg-color:        #0F2027;
+  --md-primary-bg-color--light: #3D6070;
+
+  /* Accent — deeper sky for AA contrast on white */
+  --md-accent-fg-color:         #0284C7;
+  --md-accent-fg-color--transparent: rgba(2, 132, 199, 0.10);
+  --md-accent-bg-color:         #FFFFFF;
+  --md-accent-bg-color--light:  #F0F6F8;
+
+  --md-typeset-a-color:         #0284C7;
+
+  --md-code-bg-color:           #E8F1F4;
+  --md-code-fg-color:           #0F2027;
+  --md-code-hl-color:           rgba(2, 132, 199, 0.12);
+
+  --md-code-hl-comment-color:   #6B8D9C;
+  --md-code-hl-keyword-color:   #7C3AED;
+  --md-code-hl-string-color:    #0F766E;
+  --md-code-hl-number-color:    #B45309;
+  --md-code-hl-function-color:  #0284C7;
+  --md-code-hl-constant-color:  #C2410C;
+  --md-code-hl-operator-color:  #3D6070;
+  --md-code-hl-punctuation-color:#3D6070;
+
+  --md-typeset-mark-color:      rgba(2, 132, 199, 0.18);
+  --md-footer-bg-color:         #0F2027;
+  --md-footer-bg-color--dark:   #0B1215;
+  --md-footer-fg-color:         #E2EEF2;
+  --md-footer-fg-color--light:  #8FAAB8;
+  --md-footer-fg-color--lighter:#5A7D8C;
+}
+
+/* ===========================================================================
+   Typography — brand face for headings, mono for everything else.
+   Sizes nudged up from the dashboard's dense chrome for long-form reading.
+   =========================================================================== */
+.md-typeset {
+  font-family: var(--loom-font-mono);
+  font-feature-settings: "liga" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+}
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-family: var(--loom-font-display);
+  letter-spacing: -0.015em;
+  font-weight: 600;
+}
+.md-typeset h1 { font-weight: 700; letter-spacing: -0.02em; }
+
+/* Brand wordmark in the header uses the display face */
+.md-header__title,
+.md-header__topic > .md-ellipsis {
+  font-family: var(--loom-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* ===========================================================================
+   State-by-left-rule grammar (THEMING.md): admonitions/quotes carry a 4px
+   rule, not a fill. Tune Material's admonition accents to the semantic ramp.
+   =========================================================================== */
+.md-typeset .admonition,
+.md-typeset details {
+  border-left-width: 4px;
+  border-radius: var(--loom-radius);
+  font-size: 0.72rem;
+}
+.md-typeset blockquote {
+  border-left: 4px solid var(--md-accent-fg-color);
+}
+
+/* note/info → sky */
+.md-typeset .admonition.note,
+.md-typeset .admonition.info { border-left-color: #38BDF8; }
+.md-typeset .note > .admonition-title,
+.md-typeset .info > .admonition-title { background-color: rgba(56,189,248,0.12); }
+
+/* tip/success → emerald (ready) */
+.md-typeset .admonition.tip,
+.md-typeset .admonition.success { border-left-color: #10B981; }
+.md-typeset .tip > .admonition-title,
+.md-typeset .success > .admonition-title { background-color: rgba(16,185,129,0.12); }
+
+/* warning → amber (aging) */
+.md-typeset .admonition.warning { border-left-color: #F59E0B; }
+.md-typeset .warning > .admonition-title { background-color: rgba(245,158,11,0.12); }
+
+/* danger/bug/failure → red (stale) */
+.md-typeset .admonition.danger,
+.md-typeset .admonition.bug,
+.md-typeset .admonition.failure { border-left-color: #EF4444; }
+.md-typeset .danger > .admonition-title,
+.md-typeset .bug > .admonition-title,
+.md-typeset .failure > .admonition-title { background-color: rgba(239,68,68,0.12); }
+
+/* ===========================================================================
+   Radii — apply the 3/6/8 system to the surfaces Material rounds.
+   =========================================================================== */
+.md-typeset pre > code,
+.md-typeset .highlight,
+.md-typeset .tabbed-set,
+.md-typeset table:not([class]) {
+  border-radius: var(--loom-radius);
+}
+.md-typeset code { border-radius: var(--loom-radius-sm); }
+.md-typeset .md-button { border-radius: var(--loom-radius); }
+
+/* Tables — hairline grid, raised header (terminal-grade, dense). */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--md-default-fg-color--lightest);
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--md-default-bg-color--light);
+  font-weight: 600;
+}
+
+/* Inline code — subtle accent tint, not a heavy fill. */
+.md-typeset code {
+  background-color: var(--md-code-bg-color);
+}
+
+/* ===========================================================================
+   Member thread accents — opt-in per page via front-matter body class, e.g.
+   `body class: thread-wardline`. Recolors the link/accent to that member's
+   strand so a member page reads in its own identity colour. Portable: members
+   that vendor this file inherit the same hook.
+   =========================================================================== */
+.thread-clarion  { --md-accent-fg-color: var(--thread-clarion);  --md-typeset-a-color: var(--thread-clarion); }
+.thread-filigree { --md-accent-fg-color: var(--thread-filigree); --md-typeset-a-color: var(--thread-filigree); }
+.thread-wardline { --md-accent-fg-color: var(--thread-wardline); --md-typeset-a-color: var(--thread-wardline); }
+.thread-legis    { --md-accent-fg-color: var(--thread-legis);    --md-typeset-a-color: var(--thread-legis); }
+.thread-charter  { --md-accent-fg-color: var(--thread-charter);  --md-typeset-a-color: var(--thread-charter); }
+.thread-shuttle  { --md-accent-fg-color: var(--thread-shuttle);  --md-typeset-a-color: var(--thread-shuttle); }
+
+/* ===========================================================================
+   Reduced motion
+   =========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset * { transition: none !important; animation: none !important; }
+}
