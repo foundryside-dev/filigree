@@ -233,6 +233,27 @@ class TestExecutableResolution:
         assert "filigree_user" not in cmd[0], f"Directory was mangled: {cmd[0]}"
         assert cmd[0] == expected_bin
 
+    def test_module_fallback_spawn_preserves_safe_path_flag(self, tmp_path: Path) -> None:
+        """When command resolution falls back to python -P -m, dashboard spawning must keep -P."""
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 11111
+        fallback = ["/usr/bin/python3", "-P", "-m", "filigree"]
+
+        with (
+            patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
+            patch("filigree.hooks._is_port_listening", return_value=False),
+            patch("filigree.hooks.subprocess.Popen", return_value=mock_proc) as mock_popen,
+            patch("filigree.hooks.find_filigree_command", return_value=fallback),
+            patch("filigree.hooks.time.sleep"),
+            patch.dict(os.environ, {"TMPDIR": str(tmp_path)}),
+        ):
+            ensure_dashboard_running()
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[:4] == fallback
+        assert cmd[4:7] == ["dashboard", "--no-browser", "--port"]
+
 
 class TestEnsureDashboardSubprocessVerification:
     """Bug filigree-20ad27: must verify subprocess actually started."""
