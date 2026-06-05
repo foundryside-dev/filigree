@@ -172,7 +172,7 @@ class SeiResolution(TypedDict):
       Loomweave refused; its sole consumer (``sei_backfill._orphan_reason``)
       classifies membership here as a ``reason="invalid"`` orphan.
 
-    Filigree never parses the SEI beyond the sanctioned ``clarion:eid:`` prefix
+    Filigree never parses the SEI beyond the sanctioned ``loomweave:eid:`` prefix
     check; the string is stored opaquely.
     """
 

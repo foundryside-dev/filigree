@@ -77,7 +77,7 @@ either catalogue. The verbs you will reach for most:
   `entity_association_list_by_entity`. Used when a sibling tool (e.g.
   Clarion) needs to bind a Filigree issue to a function, class, or
   module identifier it owns. The `entity_id` is an opaque external string
-  from Filigree's perspective and may be a `clarion:eid:...` SEI or a legacy
+  from Filigree's perspective and may be a `loomweave:eid:...` SEI or a legacy
   locator; callers may also supply `entity_kind` explicitly. The consumer (the sibling tool's read
   path) does drift detection against the stored
   `content_hash_at_attach`. `entity_association_list_by_entity` is the

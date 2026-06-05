@@ -24,6 +24,14 @@ from filigree.registry import RegistryUnavailableError
 from tests._fakes.clarion_http import clarion_stub
 
 
+def test_sei_prefix_is_loomweave() -> None:
+    """v26/T0: the emitter-match constant uses the loomweave:eid: namespace."""
+    from filigree.sei_backfill import SEI_PREFIX
+
+    assert SEI_PREFIX == "loomweave:eid:"
+    assert "loomweave:eid:abc".startswith(SEI_PREFIX)
+
+
 def _switch_to_loomweave_mode(project: Path, base_url: str) -> None:
     """Repoint a local-mode project's conf at a (live-stub) Loomweave authority."""
     conf_path = project / ".filigree.conf"
@@ -66,7 +74,7 @@ def test_sei_backfill_execute_human_reports_applied_and_lists_orphans(cli_in_pro
     runner, project = cli_in_project
     migrate_loc = "py:func:mod::kept"
     orphan_loc = "py:func:mod::gone"
-    sei = "clarion:eid:00000000000000000000000000000abc"
+    sei = "loomweave:eid:00000000000000000000000000000abc"
 
     # Seed two associations on a real issue while still in local mode.
     with get_db() as db:
@@ -106,7 +114,7 @@ def test_sei_backfill_execute_json_reports_migration(cli_in_project: tuple[CliRu
     """``--execute --json`` emits the structured report with ``dry_run`` false."""
     runner, project = cli_in_project
     loc = "py:func:mod::f"
-    sei = "clarion:eid:00000000000000000000000000000def"
+    sei = "loomweave:eid:00000000000000000000000000000def"
 
     with get_db() as db:
         issue = db.create_issue("t", priority=2)

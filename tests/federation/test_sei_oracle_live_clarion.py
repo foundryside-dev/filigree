@@ -8,7 +8,7 @@ asserted" gate of the §8 standard.
 What it asserts against live Loomweave:
   - the SEI capability handshake (``_capabilities.sei.supported``);
   - **identity_round_trip + opacity** — a real locator Loomweave knows is rewritten
-    in place to a real ``clarion:eid:`` SEI by the backfill;
+    in place to a real ``loomweave:eid:`` SEI by the backfill;
   - **orphan** (the ambiguous/delete producer shape) — a locator Loomweave cannot
     resolve is flagged ORPHAN and kept verbatim, never dropped.
 
@@ -172,7 +172,7 @@ def test_backfill_against_live_loomweave(tmp_path: Path) -> None:
         # A locator Loomweave genuinely knows (its minted file entity), bound to an
         # issue, must migrate in place to a real opaque SEI.
         locator = _real_file_locator(base_url, "src/sample.py")
-        if locator is None or locator.startswith("clarion:eid:"):
+        if locator is None or locator.startswith("loomweave:eid:"):
             _live_unavailable("live Loomweave did not surface a resolvable file locator (no language plugin / no entity minted)")
 
         known_issue = db.create_issue("known", priority=2)
@@ -191,7 +191,7 @@ def test_backfill_against_live_loomweave(tmp_path: Path) -> None:
             "SELECT loomweave_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
             (known_issue.id,),
         ).fetchone()
-        if not migrated["loomweave_entity_id"].startswith("clarion:eid:"):
+        if not migrated["loomweave_entity_id"].startswith("loomweave:eid:"):
             _live_unavailable("live Loomweave did not mint a SEI for the file entity; cannot prove round-trip on this build")
         assert migrated["migration_orphaned_at"] is None
         assert migrated["loomweave_entity_id"] != locator

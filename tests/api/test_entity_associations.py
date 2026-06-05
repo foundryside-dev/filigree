@@ -255,7 +255,7 @@ class TestListAssociationsByEntityHTTP:
 
     async def test_current_content_hash_marks_freshness(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         a_id = dashboard_db.ids["a"]
-        target = "clarion:eid:fresh"
+        target = "loomweave:eid:fresh"
         dashboard_db.db.add_entity_association(a_id, target, content_hash="hash-a")
 
         fresh = await client.get(

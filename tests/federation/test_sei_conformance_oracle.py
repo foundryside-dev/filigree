@@ -9,7 +9,7 @@ extended Loomweave stub:
 
 - **identity_round_trip_and_opacity** — the backfill rewrites a stored locator to
   the alive SEI in place; the value round-trips byte-for-byte, carries the
-  reserved ``clarion:eid:`` prefix, and is never parsed.
+  reserved ``loomweave:eid:`` prefix, and is never parsed.
 - **rename / move** — once stored as an SEI the binding is stable: a re-run never
   re-points it (the SEI is carried unchanged Loomweave-side; Filigree skips it on
   the prefix check). ``content_hash_at_attach`` is untouched.
@@ -117,7 +117,7 @@ def test_every_oracle_scenario_is_covered() -> None:
 
 def test_identity_round_trip_and_opacity(tmp_path: Path) -> None:
     locator = "py:func:auth.tokens::issue_token"
-    sei = "clarion:eid:deadbeefdeadbeefdeadbeefdeadbeef"
+    sei = "loomweave:eid:deadbeefdeadbeefdeadbeefdeadbeef"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
@@ -133,7 +133,7 @@ def test_identity_round_trip_and_opacity(tmp_path: Path) -> None:
         # Opacity + round-trip: the SEI is stored verbatim, carries the reserved
         # prefix, and is not the locator.
         assert stored == sei
-        assert stored.startswith("clarion:eid:")
+        assert stored.startswith("loomweave:eid:")
         assert stored != locator
         # Reverse lookup keys on the new SEI.
         assert [r["loomweave_entity_id"] for r in db.list_associations_by_entity(sei)] == [sei]
@@ -152,7 +152,7 @@ def test_stable_sei_is_never_repointed(tmp_path: Path, scenario: str) -> None:
     a value already SEI-shaped is skipped on re-run (prefix check), and its
     ``content_hash_at_attach`` is untouched — independent of Loomweave-side churn."""
     locator = "py:func:mod.a::f"
-    sei = "clarion:eid:00000000000000000000000000000001"
+    sei = "loomweave:eid:00000000000000000000000000000001"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue(scenario, priority=2)
@@ -270,7 +270,7 @@ def test_pk_collision_merges_to_single_row(tmp_path: Path) -> None:
     row (the duplicate is merged, not a PK crash)."""
     loc_a = "py:func:mod::f"
     loc_b = "py:func:mod::f_alias"
-    sei = "clarion:eid:00000000000000000000000000000002"
+    sei = "loomweave:eid:00000000000000000000000000000002"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
@@ -329,7 +329,7 @@ def test_merge_keeps_newest_attach_axis_and_preserves_attached_by(tmp_path: Path
     # becomes the survivor; loc_b collides onto it and is the incoming/merged row.
     loc_a = "py:func:mod::f"
     loc_b = "py:func:mod::f_alias"
-    sei = "clarion:eid:00000000000000000000000000000006"
+    sei = "loomweave:eid:00000000000000000000000000000006"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
@@ -372,8 +372,8 @@ def test_applied_run_rolls_back_all_writes_on_mid_apply_fault(tmp_path: Path, mo
     open onto the live production DB this irreversible migration runs against."""
     loc_a = "py:func:mod::a"
     loc_b = "py:func:mod::b"
-    sei_a = "clarion:eid:0000000000000000000000000000000a"
-    sei_b = "clarion:eid:0000000000000000000000000000000b"
+    sei_a = "loomweave:eid:0000000000000000000000000000000a"
+    sei_b = "loomweave:eid:0000000000000000000000000000000b"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei_a, loc_b: sei_b}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue_a = db.create_issue("a", priority=2)
@@ -417,7 +417,7 @@ def test_dry_run_merge_count_matches_apply_for_already_sei_survivor(tmp_path: Pa
     report it too — otherwise the preview undercounts a destructive collapse on
     a resumed/partial backfill (false-green on a row deletion)."""
     loc = "py:func:mod::f_alias"
-    sei = "clarion:eid:00000000000000000000000000000007"
+    sei = "loomweave:eid:00000000000000000000000000000007"
     with clarion_stub(sei_supported=True, sei_by_locator={loc: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
@@ -439,7 +439,7 @@ def test_deleted_issue_tombstones_are_rewritten(tmp_path: Path) -> None:
     locator→SEI (orphans kept verbatim) so the changes feed is SEI-only."""
     resolved_loc = "py:func:mod::kept"
     orphan_loc = "py:func:mod::gone"
-    sei = "clarion:eid:00000000000000000000000000000003"
+    sei = "loomweave:eid:00000000000000000000000000000003"
     with clarion_stub(sei_supported=True, sei_by_locator={resolved_loc: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         _insert_tombstone(db, "test-deleted-1", [resolved_loc, orphan_loc])
@@ -525,7 +525,7 @@ def test_empty_tombstone_entity_ids_is_not_flagged_corrupt(tmp_path: Path) -> No
 
 def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
     locator = "py:func:mod::f"
-    sei = "clarion:eid:00000000000000000000000000000004"
+    sei = "loomweave:eid:00000000000000000000000000000004"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, _state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
@@ -543,7 +543,7 @@ def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
 def test_already_migrated_db_is_a_noop(tmp_path: Path) -> None:
     """Resumability: a fully-migrated DB re-runs to a clean no-op (no resolve
     calls, nothing rewritten)."""
-    sei = "clarion:eid:00000000000000000000000000000005"
+    sei = "loomweave:eid:00000000000000000000000000000005"
     with clarion_stub(sei_supported=True) as (base_url, state):
         db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)

@@ -220,7 +220,7 @@ class TestFederationPipelineCoupling:
 
     def test_current_hash_comparison_is_caller_supplied(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Caller supplied freshness", priority=2)
-        entity_id = "clarion:eid:abc123"
+        entity_id = "loomweave:eid:abc123"
         db.add_entity_association(issue.id, entity_id, content_hash="hash-old")
 
         fresh = db.list_associations_by_entity(entity_id, current_content_hash="hash-old")

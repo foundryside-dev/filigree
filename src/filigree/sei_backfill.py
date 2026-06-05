@@ -2,7 +2,7 @@
 
 The Weft suite moves every cross-tool binding off the mutable **locator**
 (``{plugin}:{kind}:{qualname}``) onto the durable, opaque **SEI**
-(``clarion:eid:<hex>``). Filigree stores the binding id opaquely in
+(``loomweave:eid:<hex>``). Filigree stores the binding id opaquely in
 ``entity_associations.loomweave_entity_id`` (and, for hard-deleted issues, in the
 ``deleted_issues.entity_ids`` tombstone JSON array). This module rewrites those
 stored values *in place* — the column name, wire shape, and storage mechanism
@@ -21,7 +21,7 @@ this module is the machinery, not the trigger.
 
 Safety properties (the no-false-green ethos)
 --------------------------------------------
-- **Idempotent / resumable.** A value already carrying the ``clarion:eid:``
+- **Idempotent / resumable.** A value already carrying the ``loomweave:eid:``
   prefix is skipped without a network call; Loomweave additionally rejects
   SEI-shaped input with HTTP 400 (REQ-F-02), so a partially-run backfill simply
   re-runs to convergence.
@@ -30,7 +30,7 @@ Safety properties (the no-false-green ethos)
   ``migration_orphaned_at`` (associations) or kept verbatim and reported
   (tombstones) for human review.
 - **Opacity preserved.** The only inspection performed on a stored id is the
-  sanctioned ``clarion:eid:`` prefix check.
+  sanctioned ``loomweave:eid:`` prefix check.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # The reserved SEI prefix. The ONLY substring of a stored id the backfill is
 # permitted to inspect (ADR-038 / the migration playbook sanction this single
 # check); everything else about the id stays opaque.
-SEI_PREFIX = "clarion:eid:"
+SEI_PREFIX = "loomweave:eid:"
 
 
 class SeiBackfillError(RuntimeError):

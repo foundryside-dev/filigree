@@ -797,7 +797,7 @@ class TestLoomPromoteFindingAPI:
             json={
                 "scan_source": "wardline",
                 "fingerprint": "fp-http",
-                "entity_id": "clarion:eid:abc123",
+                "entity_id": "loomweave:eid:abc123",
                 "content_hash": "hash-v1",
                 "entity_kind": "function",
                 "actor": "wardline",
@@ -806,7 +806,7 @@ class TestLoomPromoteFindingAPI:
         assert first.status_code == 200
         body = first.json()
         assert body["created"] is True
-        assert body["association"]["entity_id"] == "clarion:eid:abc123"
+        assert body["association"]["entity_id"] == "loomweave:eid:abc123"
         assert body["association"]["entity_kind"] == "function"
 
         second = await client.post(
@@ -814,7 +814,7 @@ class TestLoomPromoteFindingAPI:
             json={
                 "scan_source": "wardline",
                 "fingerprint": "fp-http",
-                "entity_id": "clarion:eid:abc123",
+                "entity_id": "loomweave:eid:abc123",
                 "content_hash": "hash-v2",
                 "actor": "wardline",
             },
@@ -837,7 +837,7 @@ class TestLoomPromoteFindingAPI:
             json={
                 "scan_source": "wardline",
                 "fingerprint": "fp-http",
-                "entity_id": "clarion:eid:dossier",
+                "entity_id": "loomweave:eid:dossier",
                 "content_hash": "hash-v1",
                 "entity_kind": "function",
             },
@@ -852,7 +852,7 @@ class TestLoomPromoteFindingAPI:
         assert body["finding"]["finding_id"] == finding_id
         assert body["file"]["file_id"] == listing.json()["items"][0]["file_id"]
         assert body["linked_issue"]["issue_id"] == issue_id
-        assert body["entity_associations"][0]["entity_id"] == "clarion:eid:dossier"
+        assert body["entity_associations"][0]["entity_id"] == "loomweave:eid:dossier"
         assert body["file_associations"][0]["issue_id"] == issue_id
 
     async def test_session_evidence_bundle_actor_window(self, client: AsyncClient) -> None:
@@ -862,7 +862,7 @@ class TestLoomPromoteFindingAPI:
             json={
                 "scan_source": "wardline",
                 "fingerprint": "fp-session",
-                "entity_id": "clarion:eid:session",
+                "entity_id": "loomweave:eid:session",
                 "content_hash": "hash-v1",
                 "actor": "session-agent",
             },
@@ -876,7 +876,7 @@ class TestLoomPromoteFindingAPI:
         assert body["query"]["actor"] == "session-agent"
         assert {issue["issue_id"] for issue in body["issues"]} == {promoted.json()["issue_id"]}
         assert body["findings"]
-        assert body["entity_associations"][0]["entity_id"] == "clarion:eid:session"
+        assert body["entity_associations"][0]["entity_id"] == "loomweave:eid:session"
 
     async def test_session_evidence_empty_bundle(self, client: AsyncClient) -> None:
         resp = await client.get("/api/loom/session-evidence", params={"actor": "no-such-agent"})

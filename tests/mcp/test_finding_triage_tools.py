@@ -516,7 +516,7 @@ class TestPromoteFindingTool:
                 "promote_finding_and_attach_entity",
                 {
                     "finding_id": ids["sqli"],
-                    "entity_id": "clarion:eid:mcp",
+                    "entity_id": "loomweave:eid:mcp",
                     "content_hash": "hash-v1",
                     "entity_kind": "function",
                     "actor": "mcp-agent",
@@ -525,7 +525,7 @@ class TestPromoteFindingTool:
         )
 
         assert data["issue_id"]
-        assert data["association"]["entity_id"] == "clarion:eid:mcp"
+        assert data["association"]["entity_id"] == "loomweave:eid:mcp"
         assert data["association"]["entity_kind"] == "function"
         assert mcp_db.list_entity_associations(data["issue_id"])[0]["content_hash_at_attach"] == "hash-v1"
 

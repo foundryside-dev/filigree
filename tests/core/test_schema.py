@@ -466,7 +466,7 @@ class TestEntityAssociationsSchema:
         """v25→v26 (Loomweave/Weft rebrand data pass): rename the
         entity-association column ``clarion_entity_id`` -> ``loomweave_entity_id``
         (PK rewritten by SQLite RENAME COLUMN), rewrite stored SEI prefixes
-        ``clarion:eid:`` -> ``loomweave:eid:`` and finding rule-id prefixes
+        ``loomweave:eid:`` -> ``loomweave:eid:`` and finding rule-id prefixes
         ``CLA-`` -> ``LMWV-`` in place, suffixes preserved."""
         from filigree.migrations import migrate_v25_to_v26
 
@@ -504,7 +504,7 @@ class TestEntityAssociationsSchema:
         assert rid == "LMWV-PY-UNSAFE-EVAL"  # CLA- -> LMWV-, suffix preserved
         empty = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f2'").fetchone()[0]
         assert empty == ""  # untouched
-        # F5 tombstone array rewritten (both elements), no clarion:eid: survives.
+        # F5 tombstone array rewritten (both elements), no loomweave:eid: survives.
         ids = conn.execute("SELECT entity_ids FROM deleted_issues").fetchone()[0]
         assert ids == '["loomweave:eid:abc", "loomweave:eid:def"]'
         # audit events rewritten in new_value (added) and old_value (removed)
