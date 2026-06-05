@@ -808,6 +808,24 @@ def migrate_v23_to_v24(conn: sqlite3.Connection) -> None:
     add_column(conn, "observations", "verified_actor", "TEXT", default=None)
 
 
+def migrate_v24_to_v25(conn: sqlite3.Connection) -> None:
+    """v24 -> v25: Add nullable ``signature`` / ``signoff_seq`` columns to
+    ``entity_associations`` (B1 — Legis governed-sign-off binding).
+
+    When Legis clears a *governed* sign-off and binds an entity-association to
+    an issue, it sends an opaque HMAC ``signature`` over
+    ``{issue_id, entity_id, content_hash, signoff_seq}`` plus the
+    ``signoff_seq``. Both are OPTIONAL on the wire — Legis omits them when no
+    key is configured — so both columns are nullable (``default=None`` adds no
+    DEFAULT clause); existing rows and non-governed bindings read NULL with no
+    backfill. Filigree stores them verbatim and never verifies the signature
+    (it has no key), exactly as it treats ``content_hash_at_attach``.
+    Idempotent: ``add_column`` no-ops if the column already exists.
+    """
+    add_column(conn, "entity_associations", "signature", "TEXT", default=None)
+    add_column(conn, "entity_associations", "signoff_seq", "INTEGER", default=None)
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -832,6 +850,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     21: migrate_v21_to_v22,
     22: migrate_v22_to_v23,
     23: migrate_v23_to_v24,
+    24: migrate_v24_to_v25,
 }
 
 

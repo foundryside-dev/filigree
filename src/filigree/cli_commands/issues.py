@@ -10,6 +10,7 @@ from typing import Any
 
 import click
 
+from filigree import governance
 from filigree.cli_common import ActorCommand, get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
@@ -662,6 +663,15 @@ def close(
         ready_before = {i.id for i in db.get_ready()} if as_json else set()
         for issue_id in issue_ids:
             try:
+                # B5: a governed issue cannot be closed without verified Legis
+                # binding evidence (DECISION 3 — report + skip, don't abort).
+                gate = governance.evaluate_closure_gate(db, issue_id)
+                if not gate.allowed:
+                    code = ErrorCode.INTERNAL if gate.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+                    errors.append({"id": issue_id, "error": gate.reason, "code": code})
+                    if not as_json:
+                        click.echo(gate.reason, err=True)
+                    continue
                 annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
                 issue = db.close_issue(
                     issue_id,

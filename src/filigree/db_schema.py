@@ -425,6 +425,13 @@ CREATE TABLE IF NOT EXISTS entity_associations (
     attached_by             TEXT NOT NULL,
     migration_orphaned_at   TEXT,
     entity_kind             TEXT NOT NULL DEFAULT '',
+    -- v25 (B1): the opaque Legis HMAC signature and sign-off sequence sent
+    -- when a *governed* sign-off is bound. Both nullable: Legis omits them
+    -- when no key is configured, and pre-v25 / non-governed rows read NULL.
+    -- Filigree never interprets or verifies the signature (it has no key) —
+    -- stored verbatim and echoed back, exactly like content_hash_at_attach.
+    signature               TEXT,
+    signoff_seq             INTEGER,
     PRIMARY KEY (issue_id, clarion_entity_id)
 );
 
@@ -577,4 +584,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25

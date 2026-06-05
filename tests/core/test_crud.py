@@ -1421,6 +1421,8 @@ class TestImportJsonl:
                 "attached_by": "alice",
                 "migration_orphaned_at": None,
                 "entity_kind": "",
+                "signature": None,
+                "signoff_seq": None,
             }
         ]
 

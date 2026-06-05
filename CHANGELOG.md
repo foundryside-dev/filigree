@@ -19,6 +19,37 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Added
 
+- **Legis governed-sign-off binding fields (B1, schema v25).** The
+  entity-association attach surface (`POST /api/issue/{id}/entity-associations`)
+  now accepts and persists two optional opaque fields Legis sends when it binds
+  a cleared *governed* sign-off: `signature` (an HMAC over
+  `{issue_id, entity_id, content_hash, signoff_seq}`) and `signoff_seq`. Filigree
+  stores both verbatim and echoes them back on every read (HTTP + MCP
+  `entity_association_list` / `_list_by_entity`) — it has no key and **never**
+  verifies the signature, exactly as it treats `content_hash_at_attach`. Both
+  columns are nullable: Legis omits them when no key is configured, and
+  pre-v25 / non-governed bindings read `NULL`. Re-attach refreshes them to the
+  latest binding (a signatureless re-attach clears a prior signature); the attach
+  idempotency key `(issue_id, entity_id)` is unchanged. `export`/`import`
+  round-trips the new columns. Wrong-typed `signature`/`signoff_seq` (incl. a
+  `bool` for the sequence) are rejected `400 VALIDATION`.
+
+- **Legis closure-gate enforcement (B5).** Closing a *governed* issue — one with
+  at least one entity-association carrying a Legis `signature` — now consults
+  Legis's read-only, fail-closed closure-gate first and refuses the close
+  unless Legis confirms a verified binding. Enforced at **every** close surface
+  (HTTP single + loom single + classic/loom batch, MCP `close_issue` /
+  `batch_close`, and the CLI `close` command) via a shared transport-neutral
+  policy, so no surface is a bypass; the data layer makes no network calls.
+  Governance is **off** until `LEGIS_URL` is set ("invisible until wanted"):
+  ungoverned closes are unaffected and make no network call. When governance is
+  on, a governed close is blocked (`409`) if Legis says no; if Legis is disabled
+  (`404`) or unreachable it **fails closed** for governed issues (`409`,
+  "governance backend unavailable") so the gate cannot be dodged by taking Legis
+  offline; a tampered-ledger integrity failure surfaces as `502`. Batch closes
+  report a blocked issue per-item without aborting the batch. New env:
+  `LEGIS_URL`, optional `LEGIS_API_TOKEN`.
+
 - **Transport-bound actor identity (ADR-012, schema v24).** Every runtime write
   now records a `verified_*` column alongside the claimed `actor`/`author`,
   holding the OS-user identity the process verifiably ran as (or `NULL` when no

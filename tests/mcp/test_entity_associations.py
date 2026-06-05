@@ -44,6 +44,16 @@ class TestAddEntityAssociationMCP:
         assert result["content_hash_at_attach"] == "abc123"
         assert result["attached_by"] == "alice"
 
+    async def test_list_surfaces_signature_and_signoff_seq(self, mcp_db: FiligreeDB) -> None:
+        """B1 parity: the MCP list tool echoes signature/signoff_seq, so the
+        response shape matches the HTTP surface reported to Legis."""
+        issue = mcp_db.create_issue("Governed", priority=2)
+        mcp_db.add_entity_association(issue.id, "sei:gov", content_hash="h1", actor="legis", signature="deadbeef", signoff_seq=7)
+        result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        row = result["associations"][0]
+        assert row["signature"] == "deadbeef"
+        assert row["signoff_seq"] == 7
+
     async def test_attach_accepts_entity_kind(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Refactor parser", priority=2)
         result = _parse(

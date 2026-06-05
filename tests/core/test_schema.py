@@ -199,6 +199,8 @@ class TestEntityAssociationsSchema:
             "attached_by",
             "migration_orphaned_at",
             "entity_kind",
+            "signature",
+            "signoff_seq",
         }
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
@@ -402,6 +404,62 @@ class TestEntityAssociationsSchema:
         assert "verified_actor" in _get_table_columns(conn, "annotation_events")
         assert "verified_author" in _get_table_columns(conn, "comments")
         assert "verified_actor" in _get_table_columns(conn, "observations")
+        conn.close()
+
+    def test_migration_v24_to_v25_adds_signature_and_signoff_seq_columns(self, tmp_path: Path) -> None:
+        """Pin the v24->v25 migration: ALTER adds the nullable
+        ``entity_associations.signature`` (TEXT) and ``signoff_seq`` (INTEGER)
+        Legis governed-signoff binding fields (B1). Existing rows read NULL;
+        the opaque ``clarion_entity_id`` is untouched."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v24 DB: drop the new columns and stamp the prior version.
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signature")
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signoff_seq")
+        conn.execute("PRAGMA user_version = 24")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "signature" not in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" not in _get_table_columns(conn, "entity_associations")
+
+        # Target v25 explicitly to isolate the v24->v25 migration.
+        applied = apply_pending_migrations(conn, 25)
+        assert applied == 1
+        assert _get_schema_version(conn) == 25
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        row = conn.execute("SELECT signature, signoff_seq FROM entity_associations WHERE issue_id = 'iss-1'").fetchone()
+        assert row["signature"] is None
+        assert row["signoff_seq"] is None
+        conn.close()
+
+    def test_migration_v24_to_v25_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v24_to_v25
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Columns already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v24_to_v25(conn)
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_v25_signature_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
         conn.close()
 
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
@@ -1989,8 +2047,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_24(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 24
+    def test_current_schema_version_is_25(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 25
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

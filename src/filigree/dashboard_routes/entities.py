@@ -139,6 +139,16 @@ def create_classic_router() -> APIRouter:
             return _error_response("content_hash is required", ErrorCode.VALIDATION, 400)
         if entity_kind is not None and not isinstance(entity_kind, str):
             return _error_response("entity_kind must be a string", ErrorCode.VALIDATION, 400)
+        # v25 (B1): opaque Legis governed-sign-off binding fields. Optional on
+        # the wire — Legis omits them when no key is configured — so missing →
+        # None, stored verbatim. Validate type when present; reject bool for
+        # signoff_seq since bool is an int subclass.
+        signature = body.get("signature")
+        if signature is not None and not isinstance(signature, str):
+            return _error_response("signature must be a string", ErrorCode.VALIDATION, 400)
+        signoff_seq = body.get("signoff_seq")
+        if signoff_seq is not None and (not isinstance(signoff_seq, int) or isinstance(signoff_seq, bool)):
+            return _error_response("signoff_seq must be an integer", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -154,6 +164,8 @@ def create_classic_router() -> APIRouter:
                 make_content_hash(content_hash),
                 actor=actor,
                 entity_kind=entity_kind,
+                signature=signature,
+                signoff_seq=signoff_seq,
             )
         except WrongProjectError as exc:
             return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)

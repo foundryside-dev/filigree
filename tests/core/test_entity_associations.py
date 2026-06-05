@@ -334,3 +334,89 @@ class TestListAssociationsByEntity:
 # using a raw issues row with no other FK dependents. Replicating it here would
 # need an isolated fixture that doesn't create dependencies/events/labels —
 # overkill for a property already covered.
+
+
+class TestSignatureAndSignoffSeq:
+    """B1: opaque Legis HMAC ``signature`` + ``signoff_seq`` persistence.
+
+    Filigree stores both verbatim and echoes them on read; it never verifies
+    the signature (it has no key), exactly as it treats content_hash_at_attach.
+    """
+
+    def test_attach_persists_signature_and_signoff_seq(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Governed work", priority=2)
+        row = db.add_entity_association(
+            issue.id,
+            "sei:abc",
+            content_hash="h1",
+            actor="legis",
+            signature="deadbeef",
+            signoff_seq=7,
+        )
+        assert row["signature"] == "deadbeef"
+        assert row["signoff_seq"] == 7
+        # Echoed back through both read surfaces.
+        listed = db.list_entity_associations(issue.id)
+        assert listed[0]["signature"] == "deadbeef"
+        assert listed[0]["signoff_seq"] == 7
+        by_entity = db.list_associations_by_entity("sei:abc")
+        assert by_entity[0]["signature"] == "deadbeef"
+        assert by_entity[0]["signoff_seq"] == 7
+
+    def test_attach_without_signature_stores_null(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Ungoverned work", priority=2)
+        row = db.add_entity_association(issue.id, "sei:plain", content_hash="h1", actor="x")
+        assert row["signature"] is None
+        assert row["signoff_seq"] is None
+        listed = db.list_entity_associations(issue.id)
+        assert listed[0]["signature"] is None
+        assert listed[0]["signoff_seq"] is None
+
+    def test_reattach_updates_signature_but_preserves_attached_by(self, db: FiligreeDB) -> None:
+        """Re-attach refreshes signature/signoff_seq to the latest binding
+        (they pertain to the latest sign-off), mirroring content_hash_at_attach,
+        while attached_by stays the original first-attach attribution."""
+        issue = db.create_issue("Governed work", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="alice", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="bob", signature="sig2", signoff_seq=2)
+        assert second["signature"] == "sig2"
+        assert second["signoff_seq"] == 2
+        assert second["attached_by"] == "alice"  # preserved
+
+    def test_reattach_without_signature_clears_prior(self, db: FiligreeDB) -> None:
+        """A signatureless re-attach (Legis sends none when no key configured)
+        refreshes signature/signoff_seq to NULL, mirroring content_hash. This is
+        the documented governed->ungoverned flip noted in the B1 plan."""
+        issue = db.create_issue("Governed then not", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="alice", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="bob")
+        assert second["signature"] is None
+        assert second["signoff_seq"] is None
+
+    def test_export_import_round_trips_signature_and_signoff_seq(self, tmp_path: object) -> None:
+        """B1: a governed binding's signature/signoff_seq survive a JSONL
+        backup/restore verbatim (export uses SELECT *; import threads them)."""
+        from pathlib import Path
+
+        src_dir = Path(str(tmp_path)) / "src" / ".filigree"
+        src_dir.mkdir(parents=True)
+        src = FiligreeDB.from_filigree_dir(src_dir)
+        issue = src.create_issue(title="Governed", priority=2)
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
+        export_path = Path(str(tmp_path)) / "dump.jsonl"
+        src.export_jsonl(export_path)
+
+        dst_dir = Path(str(tmp_path)) / "dst" / ".filigree"
+        dst_dir.mkdir(parents=True)
+        dst = FiligreeDB.from_filigree_dir(dst_dir)
+        dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+        # Read via raw conn: the imported issue keeps its source prefix, which
+        # the dst project's _check_id_prefix would reject on the public read path.
+        row = dst.conn.execute(
+            "SELECT signature, signoff_seq FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchone()
+        assert row is not None
+        assert row["signature"] == "sigX"
+        assert row["signoff_seq"] == 9

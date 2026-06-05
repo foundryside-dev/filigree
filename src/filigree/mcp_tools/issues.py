@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from mcp.types import TextContent, Tool
 
+from filigree import governance
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
@@ -31,6 +32,7 @@ from filigree.mcp_tools.common import (
 from filigree.mcp_tools.payloads import file_assoc_to_mcp
 from filigree.types.api import (
     AmbiguousTransitionError,
+    BatchFailure,
     BatchResponse,
     ClaimConflictError,
     ClaimNextEmptyResponse,
@@ -86,6 +88,39 @@ def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
 
 def _claim_conflict_response(exc: ClaimConflictError) -> list[TextContent]:
     return _text(claim_conflict_envelope(exc))
+
+
+def _closure_gate_error(decision: governance.GateDecision) -> ErrorResponse:
+    """Map a non-PROCEED closure-gate verdict to an MCP ErrorResponse (B5).
+
+    Blocked / unavailable fail closed with CONFLICT; a tampered-ledger
+    integrity failure surfaces as INTERNAL so an operator notices the backend.
+    """
+    code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+    return ErrorResponse(error=decision.reason, code=code)
+
+
+def _gate_batch_failures(tracker: Any, issue_ids: list[str]) -> tuple[list[str], list[BatchFailure]]:
+    """Partition *issue_ids* into (allowed, gate_failures) per B5 DECISION 3.
+
+    Governed issues the gate rejects are reported per-item rather than
+    aborting the batch; errors reading governed-ness are left for
+    ``batch_close`` to classify with its existing per-item handling.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_closure_gate(tracker, issue_id)
+        except (ValueError, KeyError):
+            allowed.append(issue_id)
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            err = _closure_gate_error(decision)
+            failures.append(BatchFailure(id=issue_id, error=err["error"], code=err["code"]))
+    return allowed, failures
 
 
 def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) -> list[TextContent]:
@@ -1022,6 +1057,9 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
+        gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
+        if not gate.allowed:
+            return _text(_closure_gate_error(gate))
         ready_before = {i.id for i in tracker.get_ready()}
         annotation_warnings = tracker.get_annotation_closeout_warnings(args["issue_id"])
         issue = tracker.close_issue(
@@ -1430,10 +1468,13 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
+    # B5 DECISION 3: gate each issue first; rejected governed issues are
+    # reported per-item instead of aborting the batch.
+    allowed_ids, gate_failures = _gate_batch_failures(tracker, issue_ids)
     ready_before = {i.id for i in tracker.get_ready()}
     try:
         closed, failed = tracker.batch_close(
-            issue_ids,
+            allowed_ids,
             reason=args.get("reason", ""),
             actor=actor,
             expected_assignee=expected_assignee,
@@ -1442,6 +1483,7 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
+    failed = [*gate_failures, *failed]
     refresh_summary()
     ready_after = tracker.get_ready()
     newly_unblocked = [i for i in ready_after if i.id not in ready_before]

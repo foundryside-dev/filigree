@@ -1386,8 +1386,9 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(entity_associations):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO entity_associations "
-                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, migration_orphaned_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, "
+                    "migration_orphaned_at, signature, signoff_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["issue_id"],
                         record["clarion_entity_id"],
@@ -1398,6 +1399,10 @@ class MetaMixin(DBMixinProtocol):
                         # verbatim across a backup/restore so an unreviewed orphan
                         # survives. Absent in pre-v22 exports → NULL.
                         record.get("migration_orphaned_at"),
+                        # Legis governed-sign-off binding (v25, B1). Opaque,
+                        # preserved verbatim; absent in pre-v25 exports → NULL.
+                        record.get("signature"),
+                        record.get("signoff_seq"),
                     ),
                 )
                 count += cursor.rowcount

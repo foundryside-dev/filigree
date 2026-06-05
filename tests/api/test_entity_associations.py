@@ -88,6 +88,72 @@ class TestAddEntityAssociationHTTP:
         assert body["entity_id"] == "not-a-clarion-locator"
         assert body["entity_kind"] == "function"
 
+    async def test_attach_persists_and_echoes_signature(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """B1: POST with signature/signoff_seq → 201 echoes them; a follow-up
+        GET returns them verbatim (the response shape reported to Legis)."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={
+                "entity_id": "sei:gov",
+                "content_hash": "hash-a",
+                "actor": "legis",
+                "signature": "deadbeef",
+                "signoff_seq": 7,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["signature"] == "deadbeef"
+        assert body["signoff_seq"] == 7
+
+        listed = await client.get(f"/api/issue/{issue_id}/entity-associations")
+        assert listed.status_code == 200
+        row = next(r for r in listed.json()["associations"] if r["clarion_entity_id"] == "sei:gov")
+        assert row["signature"] == "deadbeef"
+        assert row["signoff_seq"] == 7
+
+    async def test_attach_without_signature_returns_nulls(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Back-compat: omitting the new fields still works and returns nulls."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "py:func:plain", "content_hash": "h"},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["signature"] is None
+        assert body["signoff_seq"] is None
+
+    async def test_attach_rejects_non_string_signature(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signature": 123},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_attach_rejects_non_int_signoff_seq(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signoff_seq": "7"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_attach_rejects_bool_signoff_seq(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """bool is an int subclass; reject it so True/False can't masquerade
+        as a sign-off sequence."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signoff_seq": True},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
     async def test_attach_idempotent_refreshes_hash(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         issue_id = dashboard_db.ids["a"]
         await client.post(

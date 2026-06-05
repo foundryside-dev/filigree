@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from fastapi.responses import JSONResponse
 
+from filigree import governance
 from filigree.core import FiligreeDB, WrongProjectError
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_OFFSET,
@@ -35,6 +36,7 @@ from filigree.dashboard_routes.common import (
 from filigree.db_planning import NotAMilestoneError
 from filigree.models import Issue
 from filigree.types.api import (
+    BatchFailure,
     ClaimConflictError,
     DepDetail,
     EnrichedIssueDetail,
@@ -71,6 +73,43 @@ def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, ClaimConflictError):
         return claim_conflict_details(exc)
     return _invalid_transition_details(exc)
+
+
+def _closure_gate_block(decision: governance.GateDecision) -> JSONResponse:
+    """Render a non-PROCEED closure-gate verdict as an error response (B5).
+
+    Blocked / unavailable (governed issue, Legis says no or is offline) fail
+    closed with CONFLICT (409); a tampered-ledger integrity failure surfaces
+    as 502 so an operator notices the backend, not the issue.
+    """
+    if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE:
+        return _error_response(decision.reason, ErrorCode.INTERNAL, 502)
+    return _error_response(decision.reason, ErrorCode.CONFLICT, 409)
+
+
+def _gate_batch_failures(db: FiligreeDB, issue_ids: list[str]) -> tuple[list[str], list[BatchFailure]]:
+    """Partition *issue_ids* into (allowed_to_close, gate_failures) per DECISION 3.
+
+    A governed issue the gate rejects is pulled out and reported as a per-item
+    ``BatchFailure`` (CONFLICT for blocked/unavailable, INTERNAL for integrity
+    failure) instead of aborting the whole batch. Errors reading governed-ness
+    (e.g. WrongProjectError) are left in the list so ``batch_close`` surfaces
+    them with its existing per-item handling.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_closure_gate(db, issue_id)
+        except (ValueError, KeyError):
+            allowed.append(issue_id)  # let batch_close classify it
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            failures.append(BatchFailure(id=issue_id, error=decision.reason, code=code))
+    return allowed, failures
 
 
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
@@ -525,6 +564,9 @@ def create_classic_router() -> APIRouter:
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
+            gate = governance.evaluate_closure_gate(db, issue_id)
+            if not gate.allowed:
+                return _closure_gate_block(gate)
             annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,
@@ -700,14 +742,17 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # B5 DECISION 3: gate each issue first; governed issues the gate rejects
+        # are reported per-item instead of aborting the batch.
+        allowed_ids, gate_errors = _gate_batch_failures(db, issue_ids)
         try:
-            closed, errors = db.batch_close(issue_ids, **parsed)
+            closed, errors = db.batch_close(allowed_ids, **parsed)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse(
             {
                 "closed": [i.to_dict() for i in closed],
-                "errors": errors,
+                "errors": [*gate_errors, *errors],
             }
         )
 
@@ -1174,9 +1219,12 @@ def create_loom_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # B5 DECISION 3: gate per-issue; rejected governed issues are reported
+        # in ``failed`` rather than aborting the batch.
+        allowed_ids, gate_errors = _gate_batch_failures(db, issue_ids)
         ready_before = {i.id for i in db.get_ready()}
         try:
-            closed, errors = db.batch_close(issue_ids, **parsed)
+            closed, errors = db.batch_close(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
@@ -1185,7 +1233,7 @@ def create_loom_router() -> APIRouter:
         project = issue_to_loom if detail == "full" else slim_issue_to_loom
         response: dict[str, Any] = {
             "succeeded": [project(i) for i in closed],
-            "failed": errors,
+            "failed": [*gate_errors, *errors],
         }
         if newly_unblocked:
             response["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
@@ -1353,6 +1401,9 @@ def create_loom_router() -> APIRouter:
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
+            gate = governance.evaluate_closure_gate(db, issue_id)
+            if not gate.allowed:
+                return _closure_gate_block(gate)
             annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,

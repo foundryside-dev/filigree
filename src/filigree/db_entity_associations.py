@@ -57,6 +57,13 @@ class EntityAssociationRow(TypedDict):
     # liveness it does not own. See ``_row_to_entity_association``.
     orphan_status: str
     freshness_status: str
+    # v25 (B1): opaque Legis governed-sign-off binding fields. ``signature`` is
+    # an HMAC over ``{issue_id, entity_id, content_hash, signoff_seq}`` that
+    # Filigree stores verbatim and NEVER verifies (it has no key); ``signoff_seq``
+    # is Legis's sign-off sequence. Both NULL when Legis sends no key / for
+    # non-governed bindings. Echoed on read, treated like content_hash_at_attach.
+    signature: str | None
+    signoff_seq: int | None
 
 
 def _normalise_optional_entity_kind(entity_kind: str | None) -> str:
@@ -91,6 +98,8 @@ def _row_to_entity_association(r: Mapping[str, Any], *, current_content_hash: st
         # see the ADR-017 note on ``EntityAssociationRow.orphan_status``.
         orphan_status="orphaned" if migration_orphaned_at else "unknown",
         freshness_status=_freshness_status(str(content_hash_at_attach), current_content_hash),
+        signature=r["signature"],
+        signoff_seq=r["signoff_seq"],
     )
 
 
@@ -112,6 +121,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
         *,
         actor: str = "",
         entity_kind: str | None = None,
+        signature: str | None = None,
+        signoff_seq: int | None = None,
         _skip_begin: bool = False,
     ) -> EntityAssociationRow:
         """Attach a Clarion entity to a Filigree issue (or refresh an existing
@@ -167,20 +178,27 @@ class EntityAssociationsMixin(DBMixinProtocol):
         # excluded.* alias is the row we tried to insert; we
         # deliberately do NOT update attached_by, preserving the
         # original attribution.
+        # signature/signoff_seq (v25, B1) are refreshed on re-attach because
+        # they pertain to the *latest* binding, mirroring content_hash_at_attach.
+        # A signatureless re-attach therefore clears a prior signature back to
+        # NULL — the documented governed->ungoverned flip.
         self.conn.execute(
             """
             INSERT INTO entity_associations
-                (issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, entity_kind)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by,
+                 entity_kind, signature, signoff_seq)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(issue_id, clarion_entity_id) DO UPDATE SET
                 content_hash_at_attach = excluded.content_hash_at_attach,
                 attached_at = excluded.attached_at,
                 entity_kind = CASE
                     WHEN excluded.entity_kind <> '' THEN excluded.entity_kind
                     ELSE entity_associations.entity_kind
-                END
+                END,
+                signature = excluded.signature,
+                signoff_seq = excluded.signoff_seq
             """,
-            (issue_id, entity_id, content_hash, now, actor, entity_kind),
+            (issue_id, entity_id, content_hash, now, actor, entity_kind, signature, signoff_seq),
         )
 
         # Re-read the row — necessary because re-attach preserves the
@@ -189,7 +207,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         stored = self.conn.execute(
             """
             SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
             WHERE issue_id = ? AND clarion_entity_id = ?
             """,
@@ -266,7 +284,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         rows = self.conn.execute(
             """
             SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
             WHERE issue_id = ?
             ORDER BY attached_at ASC, clarion_entity_id ASC
@@ -302,7 +320,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         rows = self.conn.execute(
             """
             SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
             WHERE clarion_entity_id = ?
             ORDER BY attached_at ASC, issue_id ASC

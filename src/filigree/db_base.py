@@ -490,6 +490,8 @@ class DBMixinProtocol(Protocol):
         *,
         actor: str = "",
         entity_kind: str | None = None,
+        signature: str | None = None,
+        signoff_seq: int | None = None,
         _skip_begin: bool = False,
     ) -> EntityAssociationRow: ...
 
