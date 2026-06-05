@@ -809,7 +809,7 @@ def find_filigree_command() -> list[str]:
     1. uv tool binary (~/.local/bin/filigree) -- stable global install
     2. shutil.which("filigree") -- absolute path if on PATH
     3. Sibling of running Python interpreter (covers venv case)
-    4. sys.executable -m filigree -- module invocation fallback
+    4. sys.executable -P -m filigree -- safe-path module invocation fallback
     """
     # Prefer uv tool install — stable path that survives venv changes
     uv_tool_bin = Path.home() / ".local" / "bin" / "filigree"
@@ -826,7 +826,11 @@ def find_filigree_command() -> list[str]:
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return [str(candidate)]
 
-    return [sys.executable, "-m", "filigree"]
+    # Use Python's safe-path mode for the module fallback.  ``python -m``
+    # otherwise prepends the current working directory to sys.path, allowing an
+    # untrusted project-local ``filigree.py`` or ``filigree/__main__.py`` to
+    # shadow the installed package when hooks run from the project root.
+    return [sys.executable, "-P", "-m", "filigree"]
 
 
 def write_atomic(path: Path, content: str) -> None:

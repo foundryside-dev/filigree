@@ -454,7 +454,7 @@ class TestFindFiligreeCommand:
         monkeypatch.setenv("PATH", os.devnull)
         monkeypatch.setattr(sys, "executable", str(python_exe))
 
-        assert find_filigree_command() == [str(python_exe), "-m", "filigree"]
+        assert find_filigree_command() == [str(python_exe), "-P", "-m", "filigree"]
 
 
 class TestWriteAtomic:
