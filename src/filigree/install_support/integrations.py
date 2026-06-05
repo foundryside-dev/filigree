@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -284,7 +285,20 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
-    return True, f"Wrote {mcp_json_path} (streamable-http, port {port})"
+    msg = f"Wrote {mcp_json_path} (streamable-http, port {port})"
+    # Server-mode points Claude/Codex at the dashboard daemon's /mcp transport,
+    # which is only mounted when a federation bearer token is configured. Warn
+    # loudly if none is set, or the MCP endpoint will 404 at runtime.
+    if not (os.environ.get("FILIGREE_FEDERATION_API_TOKEN") or os.environ.get("FILIGREE_API_TOKEN")):
+        logger.warning(
+            "Server-mode MCP installed but no federation bearer token is set; the "
+            "daemon will not mount /mcp until FILIGREE_FEDERATION_API_TOKEN is configured."
+        )
+        msg += (
+            " (WARNING: set FILIGREE_FEDERATION_API_TOKEN and restart the daemon — "
+            "the /mcp HTTP transport is not mounted without it, so this config will 404)"
+        )
+    return True, msg
 
 
 def install_claude_code_mcp(
