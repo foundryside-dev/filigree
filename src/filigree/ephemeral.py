@@ -299,6 +299,32 @@ def is_pid_alive(pid: int) -> bool:
         return False
 
 
+def _windows_wmic_path() -> str | None:
+    """Return the trusted absolute path to Windows WMIC, if available."""
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
+        return None
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        return None
+
+    wmic_path = Path(buffer.value) / "wbem" / "WMIC.exe"
+    try:
+        if wmic_path.is_file():
+            return str(wmic_path)
+    except OSError:
+        return None
+    return None
+
+
 def _read_os_command_line(pid: int) -> list[str] | None:
     """Best-effort read of OS process command line tokens.
 
@@ -337,10 +363,15 @@ def _read_os_command_line(pid: int) -> list[str] | None:
         except ValueError:
             return [cmdline]
 
-    # Windows: use wmic (available on all supported Windows versions).
+    # Windows: use WMIC via its trusted system location.  Do not invoke a bare
+    # executable name here: PID verification can run from untrusted project
+    # directories, and Windows process creation may search those directories.
+    wmic = _windows_wmic_path()
+    if wmic is None:
+        return None
     try:
         result = subprocess.run(
-            ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/VALUE"],
+            [wmic, "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/VALUE"],
             capture_output=True,
             text=True,
             timeout=2.0,

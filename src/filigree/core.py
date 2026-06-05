@@ -658,6 +658,15 @@ VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[Regi
 class _ClarionLocalFallbackRegistry:
     """Try Clarion first, then fall back to local IDs for availability failures."""
 
+    @staticmethod
+    def _should_fallback(exc: RegistryUnavailableError) -> bool:
+        # ``invalid_response`` means Clarion was reachable but violated the
+        # resolver contract. Treat that as a fail-closed protocol error rather
+        # than an availability failure; falling back locally could mask
+        # security-bearing outcomes such as ``briefing_blocked`` embedded in an
+        # ambiguous malformed batch response.
+        return exc.cause_kind != "invalid_response"
+
     def __init__(self, primary: RegistryProtocol, fallback: LocalRegistry, *, base_url: str) -> None:
         self._primary = primary
         self._fallback = fallback
@@ -673,6 +682,8 @@ class _ClarionLocalFallbackRegistry:
         try:
             return self._primary.resolve_file(path, language=language, actor=actor)
         except RegistryUnavailableError as exc:
+            if not self._should_fallback(exc):
+                raise
             logger.warning(
                 "Clarion registry backend unavailable; using local file registry fallback",
                 extra={
@@ -699,6 +710,9 @@ class _ClarionLocalFallbackRegistry:
         from a *successful* batch call pass through verbatim — those are not
         availability failures and must NOT be silently re-attached locally
         (briefing-blocked in particular is a security-bearing refusal).
+        Likewise, reachable malformed Clarion responses (``cause_kind``
+        ``invalid_response``) fail closed instead of falling back because they
+        may contain ambiguous security-bearing outcomes.
 
         For primaries that only implement ``resolve_file`` (test fakes
         predating CONTRACT-1), the loop helper from ``filigree.registry``
@@ -711,6 +725,8 @@ class _ClarionLocalFallbackRegistry:
                 return result
             return resolve_files_batch_via_loop(self._primary, queries, actor=actor)
         except RegistryUnavailableError as exc:
+            if not self._should_fallback(exc):
+                raise
             logger.warning(
                 "Clarion registry backend unavailable for batch resolve; using local file registry fallback",
                 extra={
@@ -824,7 +840,7 @@ def find_filigree_command() -> list[str]:
     1. uv tool binary (~/.local/bin/filigree) -- stable global install
     2. shutil.which("filigree") -- absolute path if on PATH
     3. Sibling of running Python interpreter (covers venv case)
-    4. sys.executable -m filigree -- module invocation fallback
+    4. sys.executable -P -m filigree -- safe-path module invocation fallback
     """
     # Prefer uv tool install — stable path that survives venv changes
     uv_tool_bin = Path.home() / ".local" / "bin" / "filigree"
@@ -841,7 +857,11 @@ def find_filigree_command() -> list[str]:
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return [str(candidate)]
 
-    return [sys.executable, "-m", "filigree"]
+    # Use Python's safe-path mode for the module fallback.  ``python -m``
+    # otherwise prepends the current working directory to sys.path, allowing an
+    # untrusted project-local ``filigree.py`` or ``filigree/__main__.py`` to
+    # shadow the installed package when hooks run from the project root.
+    return [sys.executable, "-P", "-m", "filigree"]
 
 
 def write_atomic(path: Path, content: str) -> None:

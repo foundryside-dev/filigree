@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,11 @@ from typing import Any
 from urllib.parse import quote
 
 from filigree.core import FILIGREE_DIR_NAME, read_config
+from filigree.install_support.safe_paths import (
+    UnsafeInstallPathError,
+    project_path,
+    reject_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +199,7 @@ def _upsert_toml_table(content: str, table_name: str, table_block: str) -> str:
 
 def _read_mcp_json(mcp_json_path: Path) -> dict[str, Any]:
     """Read existing .mcp.json or return a default structure."""
+    reject_symlink(mcp_json_path)
     if mcp_json_path.exists():
         try:
             raw = json.loads(mcp_json_path.read_text())
@@ -202,6 +209,7 @@ def _read_mcp_json(mcp_json_path: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, ValueError):
             # Back up the corrupt/non-object file and start fresh
             backup_path = mcp_json_path.parent / (mcp_json_path.name + ".bak")
+            reject_symlink(backup_path)
             shutil.copy2(mcp_json_path, backup_path)
             logger.warning(
                 "Malformed .mcp.json detected; backed up to %s and creating fresh config",
@@ -260,8 +268,11 @@ def _install_mcp_ethereal_mode(project_root: Path) -> tuple[bool, str]:
             logger.warning("claude binary disappeared between which() and run()")
 
     # Fall back to writing .mcp.json directly
-    mcp_json_path = project_root / ".mcp.json"
-    mcp_config = _read_mcp_json(mcp_json_path)
+    try:
+        mcp_json_path = project_path(project_root, ".mcp.json")
+        mcp_config = _read_mcp_json(mcp_json_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
 
     mcp_config["mcpServers"]["filigree"] = {
         "type": "stdio",
@@ -275,8 +286,11 @@ def _install_mcp_ethereal_mode(project_root: Path) -> tuple[bool, str]:
 
 def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     """Write streamable-http MCP config pointing to the daemon."""
-    mcp_json_path = project_root / ".mcp.json"
-    mcp_config = _read_mcp_json(mcp_json_path)
+    try:
+        mcp_json_path = project_path(project_root, ".mcp.json")
+        mcp_config = _read_mcp_json(mcp_json_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
 
     mcp_config["mcpServers"]["filigree"] = {
         "type": "streamable-http",
@@ -284,7 +298,20 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
-    return True, f"Wrote {mcp_json_path} (streamable-http, port {port})"
+    msg = f"Wrote {mcp_json_path} (streamable-http, port {port})"
+    # Server-mode points Claude/Codex at the dashboard daemon's /mcp transport,
+    # which is only mounted when a federation bearer token is configured. Warn
+    # loudly if none is set, or the MCP endpoint will 404 at runtime.
+    if not (os.environ.get("FILIGREE_FEDERATION_API_TOKEN") or os.environ.get("FILIGREE_API_TOKEN")):
+        logger.warning(
+            "Server-mode MCP installed but no federation bearer token is set; the "
+            "daemon will not mount /mcp until FILIGREE_FEDERATION_API_TOKEN is configured."
+        )
+        msg += (
+            " (WARNING: set FILIGREE_FEDERATION_API_TOKEN and restart the daemon — "
+            "the /mcp HTTP transport is not mounted without it, so this config will 404)"
+        )
+    return True, msg
 
 
 def install_claude_code_mcp(
@@ -321,7 +348,12 @@ def install_codex_mcp(
     the current project.
     """
     config_path = _codex_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        reject_symlink(config_path.parent)
+        reject_symlink(config_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
     desired = _build_codex_server_config()
 
     # Read existing config if present

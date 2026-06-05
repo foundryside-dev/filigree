@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -899,14 +901,48 @@ class TestFindFiligreeCommand:
             result = find_filigree_command()
             assert result == [str(sibling)]
 
-    def test_default_fallback(self) -> None:
-        """When nothing found, return python -m filigree tokens."""
+    def test_default_fallback_uses_safe_path_module_invocation(self) -> None:
+        """When nothing found, use ``python -P -m filigree`` to avoid cwd module shadowing."""
         with (
             patch("filigree.core.shutil.which", return_value=None),
             patch("filigree.core.sys.executable", "/nonexistent/python3"),
         ):
             result = find_filigree_command()
-            assert result == ["/nonexistent/python3", "-m", "filigree"]
+            assert result == ["/nonexistent/python3", "-P", "-m", "filigree"]
+
+    def test_safe_path_fallback_does_not_execute_project_local_filigree(self, tmp_path: Path) -> None:
+        """The fallback command must not let an untrusted project shadow the installed package."""
+        project = tmp_path / "project"
+        malicious_pkg = project / "filigree"
+        malicious_pkg.mkdir(parents=True)
+        marker = tmp_path / "module_hijacked"
+        payload = f"from pathlib import Path\nPath({str(marker)!r}).write_text('hijacked')\nraise SystemExit(88)\n"
+        (malicious_pkg / "__init__.py").write_text(payload)
+        (malicious_pkg / "__main__.py").write_text(payload)
+
+        with (
+            patch("filigree.core.shutil.which", return_value=None),
+            patch("filigree.core.os.access", return_value=False),
+            patch("filigree.core.sys.executable", sys.executable),
+        ):
+            result = find_filigree_command()
+
+        env = os.environ.copy()
+        src_path = str(Path(__file__).resolve().parents[2] / "src")
+        env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+        proc = subprocess.run(
+            [*result, "--help"],
+            cwd=project,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result[1:] == ["-P", "-m", "filigree"]
+        assert proc.returncode == 0, proc.stderr
+        assert "Usage:" in proc.stdout
+        assert not marker.exists()
 
 
 class TestInstallClaudeCodeMcp:
@@ -1245,6 +1281,19 @@ class TestInstallClaudeCodeHooks:
         data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
         cmds = [h["command"] for m in data["hooks"]["SessionStart"] for h in m["hooks"]]
         assert any("ensure-dashboard" in c and self.MOCK_BIN in c for c in cmds)
+
+    def test_safe_path_module_fallback_is_written_to_hooks(self, tmp_path: Path) -> None:
+        """Installed hooks must preserve the safe-path fallback token sequence."""
+        fallback = ["/usr/bin/python3", "-P", "-m", "filigree"]
+        with patch("filigree.install_support.hooks.find_filigree_command", return_value=fallback):
+            ok, _msg = install_claude_code_hooks(tmp_path)
+        assert ok
+        data = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        session_cmds = [h["command"] for m in data["hooks"]["SessionStart"] for h in m["hooks"]]
+        pre_tool_cmds = [h["command"] for m in data["hooks"]["PreToolUse"] for h in m["hooks"]]
+        assert "/usr/bin/python3 -P -m filigree session-context" in session_cmds
+        assert "/usr/bin/python3 -P -m filigree ensure-dashboard" in session_cmds
+        assert "/usr/bin/python3 -P -m filigree ensure-dashboard" in pre_tool_cmds
 
     def test_upgrades_bare_to_absolute(self, tmp_path: Path) -> None:
         """Bare hook commands should be upgraded to resolved versions."""
@@ -1783,6 +1832,16 @@ class TestHasHookCommand:
         settings = {"hooks": {"SessionStart": [{"hooks": [{"command": "/usr/bin/python3 -m filigree session-context"}]}]}}
         assert _has_hook_command(settings, "filigree session-context") is True
 
+    def test_matches_safe_path_module_form(self) -> None:
+        """Should detect the safe 'python -P -m filigree session-context' fallback as a match."""
+        settings = {"hooks": {"SessionStart": [{"hooks": [{"command": "/usr/bin/python3 -P -m filigree session-context"}]}]}}
+        assert _has_hook_command(settings, "filigree session-context") is True
+
+    def test_rejects_module_form_with_unsafe_extra_prefix(self) -> None:
+        """Should still reject wrapper/prefix commands even if they contain '-P -m filigree'."""
+        settings = {"hooks": {"SessionStart": [{"hooks": [{"command": "env FOO=bar python -P -m filigree session-context"}]}]}}
+        assert _has_hook_command(settings, "filigree session-context") is False
+
     def test_matches_quoted_path_with_spaces(self) -> None:
         """Should detect quoted paths containing spaces."""
         import shlex
@@ -1796,6 +1855,14 @@ class TestHasHookCommand:
         import shlex
 
         cmd = shlex.join(["/Program Files/python", "-m", "filigree"]) + " session-context"
+        settings = {"hooks": {"SessionStart": [{"hooks": [{"command": cmd}]}]}}
+        assert _has_hook_command(settings, "filigree session-context") is True
+
+    def test_matches_safe_path_module_form_with_spaces(self) -> None:
+        """Should detect quoted python -P -m form with spaces in python path."""
+        import shlex
+
+        cmd = shlex.join(["/Program Files/python", "-P", "-m", "filigree"]) + " session-context"
         settings = {"hooks": {"SessionStart": [{"hooks": [{"command": cmd}]}]}}
         assert _has_hook_command(settings, "filigree session-context") is True
 
@@ -2254,6 +2321,25 @@ class TestInstallMcpServerMode:
         server_config = mcp["mcpServers"]["filigree"]
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
+
+    def test_server_mode_warns_without_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Server-mode points at the daemon's /mcp transport, which mounts only
+        when a federation bearer token is set; warn loudly if none is configured."""
+        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        assert "FILIGREE_FEDERATION_API_TOKEN" in msg
+        assert "404" in msg
+
+    def test_server_mode_no_warning_with_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With a token configured, the server-mode install message carries no warning."""
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        assert "WARNING" not in msg
 
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path

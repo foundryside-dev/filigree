@@ -749,6 +749,8 @@ class TestReadOsCommandLine:
 class TestReadOsCommandLineWmic:
     """M6: tests for _read_os_command_line Windows wmic branch."""
 
+    _TRUSTED_WMIC = r"C:\Windows\System32\wbem\WMIC.exe"
+
     @staticmethod
     def _make_noproc_path_factory(tmp_path: Path) -> object:
         _orig_path = Path
@@ -766,9 +768,10 @@ class TestReadOsCommandLineWmic:
 
         monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
         monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
 
         fake_result = _subprocess.CompletedProcess(
-            args=["wmic"],
+            args=[self._TRUSTED_WMIC],
             returncode=0,
             stdout="\r\nCommandLine=python -m filigree dashboard --port 8377\r\n\r\n",
             stderr="",
@@ -784,8 +787,9 @@ class TestReadOsCommandLineWmic:
 
         monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
         monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
 
-        fake_result = _subprocess.CompletedProcess(args=["wmic"], returncode=1, stdout="", stderr="error")
+        fake_result = _subprocess.CompletedProcess(args=[self._TRUSTED_WMIC], returncode=1, stdout="", stderr="error")
         monkeypatch.setattr("filigree.ephemeral.subprocess.run", lambda *a, **kw: fake_result)
 
         result = _read_os_command_line(12345)
@@ -795,6 +799,7 @@ class TestReadOsCommandLineWmic:
         """OSError from wmic subprocess returns None."""
         monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
         monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
 
         def _raise_oserror(*args: object, **kwargs: object) -> None:
             raise OSError("wmic not found")
@@ -810,8 +815,14 @@ class TestReadOsCommandLineWmic:
 
         monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
         monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
 
-        fake_result = _subprocess.CompletedProcess(args=["wmic"], returncode=0, stdout="No Instance(s) Available.\r\n", stderr="")
+        fake_result = _subprocess.CompletedProcess(
+            args=[self._TRUSTED_WMIC],
+            returncode=0,
+            stdout="No Instance(s) Available.\r\n",
+            stderr="",
+        )
         monkeypatch.setattr("filigree.ephemeral.subprocess.run", lambda *a, **kw: fake_result)
 
         result = _read_os_command_line(12345)
@@ -823,10 +834,11 @@ class TestReadOsCommandLineWmic:
 
         monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
         monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
 
         # Unclosed quote triggers shlex.split ValueError
         fake_result = _subprocess.CompletedProcess(
-            args=["wmic"],
+            args=[self._TRUSTED_WMIC],
             returncode=0,
             stdout='CommandLine=python -c "unclosed\r\n',
             stderr="",
@@ -836,6 +848,42 @@ class TestReadOsCommandLineWmic:
         result = _read_os_command_line(12345)
         assert result is not None
         assert len(result) == 1  # raw string in a list
+
+    def test_wmic_uses_trusted_absolute_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Windows fallback invokes the trusted WMIC path, not a bare executable name."""
+        import subprocess as _subprocess
+
+        monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
+        monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: self._TRUSTED_WMIC)
+
+        seen_args: list[str] | None = None
+
+        def _fake_run(args: list[str], **kwargs: object) -> _subprocess.CompletedProcess[str]:
+            nonlocal seen_args
+            seen_args = args
+            return _subprocess.CompletedProcess(args=args, returncode=0, stdout="CommandLine=filigree dashboard\r\n", stderr="")
+
+        monkeypatch.setattr("filigree.ephemeral.subprocess.run", _fake_run)
+
+        assert _read_os_command_line(12345) == ["filigree", "dashboard"]
+        assert seen_args is not None
+        assert seen_args[0] == self._TRUSTED_WMIC
+        assert seen_args[0].lower().endswith(r"\system32\wbem\wmic.exe")
+        assert seen_args[0].lower() != "wmic"
+
+    def test_wmic_missing_trusted_path_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Windows fallback does not search PATH when trusted WMIC is unavailable."""
+        monkeypatch.setattr("filigree.ephemeral.Path", self._make_noproc_path_factory(tmp_path))
+        monkeypatch.setattr("filigree.ephemeral.sys.platform", "win32")
+        monkeypatch.setattr("filigree.ephemeral._windows_wmic_path", lambda: None)
+
+        def _unexpected_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("subprocess.run must not be called without a trusted WMIC path")
+
+        monkeypatch.setattr("filigree.ephemeral.subprocess.run", _unexpected_run)
+
+        assert _read_os_command_line(12345) is None
 
 
 class TestLegacyCleanup:

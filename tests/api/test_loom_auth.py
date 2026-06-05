@@ -139,6 +139,13 @@ class TestLoomAuthEnforcement:
             resp = await c.get("/api/loom/issues", headers={"Authorization": f"Bearer {TOKEN}"})
         assert resp.status_code == 200
 
+    async def test_mcp_endpoint_not_mounted_when_token_unset(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        """MCP HTTP is high privilege and must not be exposed without auth."""
+        app = app_factory(None)
+        async with _client(app) as c:
+            resp = await c.post("/mcp", json={})
+        assert resp.status_code == 404
+
     async def test_loom_route_absent_header_rejected(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         app = app_factory(TOKEN)
         async with _client(app) as c:

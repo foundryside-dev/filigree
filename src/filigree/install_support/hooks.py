@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from filigree.core import find_filigree_command
+from filigree.install_support.safe_paths import (
+    UnsafeInstallPathError,
+    ensure_project_dir,
+    reject_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +46,11 @@ def _hook_cmd_matches(hook_command: str, bare_command: str) -> bool:
     - Exact: ``"filigree session-context"``
     - Path:  ``"/path/to/filigree session-context"``
     - Quoted path: ``"'/path with spaces/filigree' session-context"``
-    - Module: ``"<python> -m filigree session-context"`` — interpreter token
-      is unconstrained because ``-m filigree`` is itself the discriminator
-      (works for ``python``, ``python3``, ``pypy3``, ``uv run python``-style
-      wrappers, etc.).
+    - Module: ``"<python> -m filigree session-context"`` — accepted for
+      upgrading hooks written by older releases.
+    - Safe-path module: ``"<python> -P -m filigree session-context"`` — the
+      current fallback shape, which avoids prepending the project directory
+      during Python module resolution.
     """
     if hook_command == bare_command:
         return True
@@ -68,14 +74,14 @@ def _hook_cmd_matches(hook_command: str, bare_command: str) -> bool:
         hook_base = hook_bin.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         return hook_base.lower() in {bare_bin.lower(), f"{bare_bin.lower()}.exe"}
 
-    # Module form: ``<python> -m <bare_bin> <subcommand args>``. The pair
-    # ``-m <bare_bin>`` is the sole discriminator — anything else with a
-    # ``filigree`` token in the prefix (``echo filigree``, ``time filigree``,
-    # ``env FOO=bar filigree``, ``bash filigree``) is rejected.
-    if len(hook_tokens) == n + 2:
-        if hook_tokens[1] != "-m" or hook_tokens[2] != bare_bin:
-            return False
-        return hook_tokens[3:] == bare_tokens[1:]
+    # Module forms: accept the historical ``<python> -m <bare_bin>`` shape so
+    # old hooks can be detected/upgraded, and the current safe-path fallback
+    # ``<python> -P -m <bare_bin>``.  Keep the interpreter as exactly one token
+    # so wrappers such as ``env``/``time``/``bash`` remain rejected.
+    module_prefixes = (["-m", bare_bin], ["-P", "-m", bare_bin])
+    for prefix in module_prefixes:
+        if len(hook_tokens) == n + len(prefix) and hook_tokens[1 : 1 + len(prefix)] == prefix:
+            return hook_tokens[1 + len(prefix) :] == bare_tokens[1:]
 
     return False
 
@@ -313,9 +319,15 @@ def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
     Idempotent — won't duplicate existing entries.  Re-running upgrades
     bare or stale absolute-path commands to the current binary location.
     """
-    claude_dir = project_root / ".claude"
-    claude_dir.mkdir(exist_ok=True)
+    try:
+        claude_dir = ensure_project_dir(project_root, ".claude")
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
     settings_path = claude_dir / "settings.json"
+    try:
+        reject_symlink(settings_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
 
     settings: dict[str, Any] = {}
     if settings_path.exists():
@@ -327,6 +339,10 @@ def install_claude_code_hooks(project_root: Path) -> tuple[bool, str]:
             settings = parsed
         except (json.JSONDecodeError, ValueError):
             backup = settings_path.with_suffix(".json.bak")
+            try:
+                reject_symlink(backup)
+            except UnsafeInstallPathError as exc:
+                return False, str(exc)
             shutil.copy2(settings_path, backup)
             logger.warning("Malformed settings.json; backed up to %s", backup)
 

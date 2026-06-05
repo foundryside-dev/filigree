@@ -126,6 +126,43 @@ checklist is complete and a coordinated consumer-migration window is published.
   `gitdir` back-pointer resolves back to *this* `.git` file before redirecting;
   on mismatch or read failure the `.git` entry stands as a project boundary.
 
+- **Dashboard `/mcp` HTTP transport now requires a federation bearer token (#56).**
+  The streamable-HTTP MCP endpoint exposes high-privilege agent tools and was
+  previously mounted unconditionally on the loopback interface even with no auth
+  configured. It is now mounted only when `FILIGREE_FEDERATION_API_TOKEN` (or
+  legacy `FILIGREE_API_TOKEN`) is set; otherwise `/mcp` returns `404`. Bearer
+  enforcement on the mounted endpoint is unchanged (ADR-018; the loopback
+  boundary remains ADR-012). **Migration:** if you use **server-mode** MCP
+  (`.mcp.json` with `type: streamable-http` pointing at the daemon), set
+  `FILIGREE_FEDERATION_API_TOKEN` before starting the dashboard or the client
+  receives `404`; the installer (`filigree doctor`/`init`) now warns when it
+  writes a server-mode config while no token is configured. Ethereal (stdio) MCP
+  is unaffected.
+
+- **Installer / `doctor --fix` writes reject symlinked targets (#54).** The
+  maintenance write paths (`CLAUDE.md`/`AGENTS.md`, `.gitignore`, `.mcp.json`,
+  `.claude/settings.json`, skill directories, Codex `config.toml`, and their
+  `.bak` backups) now refuse to follow or write through symlinks, so a malicious
+  repository cannot redirect those writes outside the resolved project root.
+
+- **Clarion registry fails closed on malformed responses (#53).** A reachable but
+  protocol-violating Clarion response (`cause_kind="invalid_response"`) is no
+  longer treated as an availability failure: the local-fallback wrapper re-raises
+  instead of silently re-attaching files to the local registry, which could
+  otherwise mask a security-bearing `briefing_blocked` outcome.
+
+- **Hook module fallback uses Python safe-path mode (#57).** When command
+  resolution falls back to `python -m filigree`, it now emits `python -P -m
+  filigree`, preventing an attacker-controlled project-local `filigree/` package
+  from shadowing the installed one during cwd-based module resolution when hooks
+  run from the project root.
+
+- **Windows PID checks use a trusted absolute WMIC path (#55).** Process
+  command-line verification now invokes `%SystemRoot%\System32\wbem\WMIC.exe`
+  by absolute path instead of a bare `wmic`, closing a Windows executable
+  search-path / current-directory hijack when filigree runs from an untrusted
+  project directory.
+
 ### Dependencies
 
 - **Bumped `starlette` 0.52.1 → 1.0.1** (major). Full test suite green against
