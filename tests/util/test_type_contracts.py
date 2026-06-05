@@ -1168,7 +1168,10 @@ class TestAddCommentResultShape:
         result = _parse(await call_tool("add_comment", {"issue_id": issue_id, "text": "hello"}))
         public_issue_keys = set(get_type_hints(PublicIssue).keys())
         assert set(result.keys()) == public_issue_keys | {"comment_id", "comment"}
-        assert set(result["comment"].keys()) == {"comment_id", "author", "text", "created_at"}
+        # ADR-012 (schema v24): the MCP comment result surfaces the
+        # transport-verified identity alongside the claimed author. ``comment_to_mcp``
+        # spreads the full CommentRecord, so ``verified_author`` rides along.
+        assert set(result["comment"].keys()) == {"comment_id", "author", "verified_author", "text", "created_at"}
 
     async def test_value_types(self, mcp_db: FiligreeDB) -> None:
         from filigree.mcp_server import call_tool
