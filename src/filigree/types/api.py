@@ -462,10 +462,10 @@ class ErrorCode(StrEnum):
     FILE_REGISTRY_DISPLACED = "FILE_REGISTRY_DISPLACED"
     REGISTRY_UNAVAILABLE = "REGISTRY_UNAVAILABLE"
     CLARION_REGISTRY_VERSION_MISMATCH = "CLARION_REGISTRY_VERSION_MISMATCH"
-    # Surfaces a Clarion 403 + code="BRIEFING_BLOCKED" response. Distinct from
-    # NOT_FOUND (the file exists, Clarion is intentionally withholding it) and
+    # Surfaces a Loomweave 403 + code="BRIEFING_BLOCKED" response. Distinct from
+    # NOT_FOUND (the file exists, Loomweave is intentionally withholding it) and
     # distinct from PERMISSION (the caller's auth is fine; the *file* is
-    # blocked by Clarion-side briefing policy). The auto-create path MUST
+    # blocked by Loomweave-side briefing policy). The auto-create path MUST
     # propagate this rather than re-attaching the file under a local file_id.
     BRIEFING_BLOCKED = "BRIEFING_BLOCKED"
     STOP_FAILED = "STOP_FAILED"

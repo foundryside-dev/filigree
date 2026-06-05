@@ -53,7 +53,7 @@ _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity",
 
 # CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
 # router factories, and the findings/clean-stale sweep) run via
-# asyncio.to_thread so the event loop stays responsive during the Clarion HTTP
+# asyncio.to_thread so the event loop stays responsive during the Loomweave HTTP
 # wait / bulk write. They do their DB work on a PRIVATE connection obtained from
 # FiligreeDB.borrow_for_worker_thread() — NOT the shared event-loop connection.
 # That closes the cross-thread shared-connection race for good: the connection
@@ -73,9 +73,9 @@ _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity",
 # ``busy_timeout`` (5 s) makes the loser wait for the brief write window rather
 # than raise SQLITE_BUSY. No application-level lock is taken, so the worker
 # paths run fully in parallel right up to that window — the bulk of each call
-# (the Clarion HTTP resolution, which happens BEFORE any write transaction
+# (the Loomweave HTTP resolution, which happens BEFORE any write transaction
 # opens) overlaps freely. The shared registry's ``httpx.Client`` is safe for
-# concurrent use, so two workers may resolve against Clarion simultaneously.
+# concurrent use, so two workers may resolve against Loomweave simultaneously.
 # The post-commit clean-stale finding→issue close cascade re-checks that the
 # finding is still ``fixed`` inside its own writer transaction before closing
 # the issue, so a concurrent re-ingest cannot leave an open finding on a newly
@@ -364,9 +364,9 @@ def create_classic_router() -> APIRouter:
                 "registry_backend": db.registry_backend,
                 "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
                 "allow_local_fallback": db.allow_local_fallback,
-                "clarion_instance_id": db.clarion_instance_id,
-                "clarion_api_version": db.clarion_api_version,
-                "clarion_instance_rotated": db.clarion_instance_rotated,
+                "loomweave_instance_id": db.loomweave_instance_id,
+                "loomweave_api_version": db.loomweave_api_version,
+                "loomweave_instance_rotated": db.loomweave_instance_rotated,
             },
             "endpoints": [
                 {
@@ -574,7 +574,7 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
@@ -645,7 +645,7 @@ def create_loom_router() -> APIRouter:
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
@@ -1125,7 +1125,7 @@ def create_living_surface_router() -> APIRouter:
         if isinstance(parsed, str):
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='clarion'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the

@@ -36,7 +36,7 @@ class TestReadConfig:
 
         assert config["registry_backend"] == "local"
 
-    def test_read_config_preserves_clarion_registry_settings(self, tmp_path: Path) -> None:
+    def test_read_config_preserves_loomweave_registry_settings(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -60,7 +60,7 @@ class TestReadConfig:
         assert config["clarion"]["timeout_seconds"] == 3
         assert config["clarion"]["allow_local_fallback"] is True
 
-    def test_read_config_rejects_invalid_clarion_base_url(self, tmp_path: Path) -> None:
+    def test_read_config_rejects_invalid_loomweave_base_url(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -76,7 +76,7 @@ class TestReadConfig:
         with pytest.raises(ValueError, match=r"base_url"):
             read_config(filigree_dir)
 
-    def test_read_config_rejects_unknown_clarion_keys(self, tmp_path: Path) -> None:
+    def test_read_config_rejects_unknown_loomweave_keys(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -92,7 +92,7 @@ class TestReadConfig:
         with pytest.raises(ValueError, match=r"base-url"):
             read_config(filigree_dir)
 
-    def test_read_config_requires_clarion_base_url_when_backend_is_clarion(self, tmp_path: Path) -> None:
+    def test_read_config_requires_loomweave_base_url_when_backend_is_loomweave(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(filigree_dir, {"prefix": "proj", "version": 1, "registry_backend": "clarion"})

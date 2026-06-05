@@ -11,8 +11,8 @@ Scope (from the 2026-04-23 continuation prompt):
   the bed-down commits (11cfb80, dc3917e). Each is one test class with
   three surface invocations plus a parity assertion.
 - The ``POST /api/v1/scan-results`` envelope, which is dashboard-only but
-  is Stage 2B's highest-risk Clarion-facing hop. Pinning the error
-  envelope shape here is the pre-release gate in lieu of a Clarion
+  is Stage 2B's highest-risk Loomweave-facing hop. Pinning the error
+  envelope shape here is the pre-release gate in lieu of a Loomweave
   staging environment.
 
 Each parity test creates three isolated per-surface projects (no shared
@@ -692,9 +692,9 @@ class TestBatchMixedValidityParity:
 # ---------------------------------------------------------------------------
 # Scenario 9: POST /api/v1/scan-results envelope pin (Stage 2B gate).
 #
-# This route is dashboard-only — there is no Clarion staging environment,
+# This route is dashboard-only — there is no Loomweave staging environment,
 # so the parity-test module doubles as the pre-release contract for the
-# Clarion-facing ingest endpoint. Any 2B shape change that breaks these
+# Loomweave-facing ingest endpoint. Any 2B shape change that breaks these
 # invariants must update the tests and the design doc together.
 # ---------------------------------------------------------------------------
 
@@ -749,7 +749,7 @@ class TestScanResultsEnvelope:
         (``ScanIngestResult`` in src/filigree/types/files.py). A 2B task
         that changes this shape must update the test in the same commit
         and list the breakage in CHANGELOG [Unreleased] ### Changed.
-        This is the Clarion-facing gate; there is no staging env.
+        This is the Loomweave-facing gate; there is no staging env.
         """
         resp = await dashboard_surface.post(
             "/api/v1/scan-results",
@@ -761,7 +761,7 @@ class TestScanResultsEnvelope:
 
         # Exact key set from ScanIngestResult (types/files.py:138). If you
         # see this assertion fail, either the test is wrong or the route's
-        # return shape changed — in which case Clarion consumers break.
+        # return shape changed — in which case Loomweave consumers break.
         expected_keys = {
             "files_created",
             "files_updated",

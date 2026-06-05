@@ -127,10 +127,10 @@ class FileRecord:
 
     ``content_hash == ''`` is the intentional sentinel for
     ``registry_backend == 'local'`` because the local backend cannot compute a
-    drift hash. Clarion-backed records must carry a non-empty hash. This
+    drift hash. Loomweave-backed records must carry a non-empty hash. This
     correlated invariant is enforced at construction by ``__post_init__`` — the
     two illegal cross combinations raise ``ValueError`` — so it holds on every
-    hydration path, not only where the Clarion registry client rejects blank
+    hydration path, not only where the Loomweave registry client rejects blank
     hashes before rows are written.
     """
 

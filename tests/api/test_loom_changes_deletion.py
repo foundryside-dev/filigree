@@ -226,7 +226,7 @@ class TestDeletionCarriesAffectedEntities:
     """F5 entity-association amplifier (filigree-f3bf56554c).
 
     ``delete_issue`` cascades ``entity_associations`` (ON DELETE CASCADE), so a
-    hard delete silently drops Filigree's side of every Clarion entity binding.
+    hard delete silently drops Filigree's side of every Loomweave entity binding.
     A consumer reconciling off ``issue_deleted`` only learns the *issue* is gone;
     without the dropped bindings it cannot purge its mirrored reverse lookup
     (``list_associations_by_entity``) and surfaces a user-facing phantom issue.

@@ -43,9 +43,9 @@ from filigree.types.core import (
     AssocType,
     FindingStatus,
     Severity,
-    make_clarion_entity_id,
     make_content_hash,
     make_issue_id,
+    make_loomweave_entity_id,
 )
 from filigree.types.files import ScanIngestResult
 
@@ -992,9 +992,9 @@ class FilesMixin(DBMixinProtocol):
                     # id between our pre-resolve and this write. A local-backend
                     # resolution mints a fresh, arbitrary id per resolve
                     # (LocalRegistry.resolve_file) — covering both pure-local and
-                    # Clarion-fallback rows — so the already-committed row is
+                    # Loomweave-fallback rows — so the already-committed row is
                     # authoritative and we adopt its id rather than raising. Only
-                    # a stable-id (Clarion) mismatch is genuine registry drift,
+                    # a stable-id (Loomweave) mismatch is genuine registry drift,
                     # for which migrate-registry is the right remedy.
                     if resolved["registry_backend"] != "local":
                         msg = (
@@ -1072,7 +1072,7 @@ class FilesMixin(DBMixinProtocol):
     def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
         """Resolve new scan file identities before the write transaction opens.
 
-        CONTRACT-1 (Clarion 1.0): unfamiliar paths are batched into a single
+        CONTRACT-1 (Loomweave 1.0): unfamiliar paths are batched into a single
         ``resolve_files_batch`` call (chunked at 256 by the protocol). One HTTP
         round-trip per chunk replaces the prior N-round-trip per-finding loop.
         Briefing-blocked / not_found / structured-error per-item failures are
@@ -1116,15 +1116,15 @@ class FilesMixin(DBMixinProtocol):
         messages = batch.get("messages", {})
         if batch["briefing_blocked"]:
             first = batch["briefing_blocked"][0]
-            msg = messages.get(first) or f"Clarion registry refuses briefing-blocked file at {first!r} (batch resolve)"
+            msg = messages.get(first) or f"Loomweave registry refuses briefing-blocked file at {first!r} (batch resolve)"
             raise RegistryBriefingBlockedError(msg, status_code=403, url="")
         if batch["not_found"]:
             first = batch["not_found"][0]
-            msg = messages.get(first) or f"Clarion registry could not resolve file at {first!r} (batch resolve)"
+            msg = messages.get(first) or f"Loomweave registry could not resolve file at {first!r} (batch resolve)"
             raise RegistryFileNotFoundError(msg, status_code=404, url="")
         if batch["errors"]:
             err = batch["errors"][0]
-            msg = f"Clarion registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
+            msg = f"Loomweave registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
             raise RegistryResolutionError(msg, status_code=400, url="")
         return batch["resolved"]
 
@@ -1467,7 +1467,7 @@ class FilesMixin(DBMixinProtocol):
         # resolves these post-commit, symmetric to regressed_issue_ids/reopen.
         resolved: set[tuple[str, str]] = set()
 
-        # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Clarion HTTP round
+        # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Loomweave HTTP round
         # trip) BEFORE the writer lock so concurrent ingests overlap. The write
         # window below then runs under its own BEGIN IMMEDIATE + busy-retry, the
         # same transaction discipline every other write surface uses; scan-run
@@ -1546,7 +1546,7 @@ class FilesMixin(DBMixinProtocol):
             )
 
         if scan_run_id and complete_scan_run:
-            # §F6 tolerate-unknown: an enrich-only producer (e.g. Clarion
+            # §F6 tolerate-unknown: an enrich-only producer (e.g. Loomweave
             # `clarion analyze`) POSTs findings under a scan_run_id Filigree
             # never created, so there is no scan_runs row to mark completed.
             # That is the normal path, not an error — skip the completion
@@ -2442,7 +2442,7 @@ class FilesMixin(DBMixinProtocol):
         issue = result["issue"]
         association = self.add_entity_association(
             make_issue_id(issue.id),
-            make_clarion_entity_id(entity_id),
+            make_loomweave_entity_id(entity_id),
             make_content_hash(content_hash),
             actor=actor,
             entity_kind=entity_kind,

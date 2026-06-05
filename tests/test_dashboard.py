@@ -408,7 +408,7 @@ class TestMainGlobalReset:
 
         def fake_run(*args: object, **kwargs: object) -> None:
             captured["config"] = dict(dash_module._config)
-            captured["clarion_config"] = dict(dash_module._db.clarion_config) if dash_module._db is not None else {}
+            captured["loomweave_config"] = dict(dash_module._db.loomweave_config) if dash_module._db is not None else {}
             captured["allow_local_fallback"] = dash_module._db.allow_local_fallback if dash_module._db is not None else False
             captured["registry_displaced"] = dash_module._db.registry.is_displaced() if dash_module._db is not None else False
 
@@ -418,18 +418,18 @@ class TestMainGlobalReset:
             dash_module.main(port=9999, no_browser=True, server_mode=False, allow_local_fallback=True)
 
         assert "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
-        # The post-startup *write-path* WARN (``_ClarionLocalFallbackRegistry``
+        # The post-startup *write-path* WARN (``_LoomweaveLocalFallbackRegistry``
         # logs this on every resolve_file fall-through) is still absent —
         # only the startup-time probe-failure WARN is in caplog.
-        assert "Clarion registry backend unavailable; using local file registry fallback" not in caplog.text
+        assert "Loomweave registry backend unavailable; using local file registry fallback" not in caplog.text
         assert captured["allow_local_fallback"] is True
         assert captured["registry_displaced"] is True
         assert captured["config"]["clarion"] == {"base_url": "http://clarion.test"}
         # ADR-014: ``--allow-local-fallback`` overrides whatever the project
         # config says about fallback *before* the capability probe runs, so
-        # the resulting in-memory ``clarion_config`` carries
+        # the resulting in-memory ``loomweave_config`` carries
         # ``allow_local_fallback: True``.
-        assert captured["clarion_config"] == {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        assert captured["loomweave_config"] == {"base_url": "http://clarion.test", "allow_local_fallback": True}
 
     def test_dashboard_structured_log_does_not_leak_paths(
         self,

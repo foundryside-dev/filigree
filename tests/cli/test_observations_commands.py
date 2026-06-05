@@ -78,7 +78,7 @@ class TestObserveCommand:
     ) -> None:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
-                "Clarion registry unavailable for test",
+                "Loomweave registry unavailable for test",
                 url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
                 path=path,
                 cause_kind="network",

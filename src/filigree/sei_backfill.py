@@ -10,22 +10,22 @@ are unchanged; only the value format changes.
 
 Why this is NOT a schema migration and NOT auto-run
 ---------------------------------------------------
-The rewrite resolves each locator through Clarion's
+The rewrite resolves each locator through Loomweave's
 ``POST /api/v1/identity/resolve:batch`` endpoint — an **outbound network call**.
 It therefore must never live in ``apply_pending_migrations`` or in the
 ``db_entity_associations`` layer (whose federation sentinel test forbids any
 outbound socket). It is an **operator-invoked** step, driven by the
 ``filigree sei-backfill`` CLI verb. The production run is owner-scheduled (a
-coordinated cross-tool freeze, see Clarion's ``sei-migration-playbook.md``);
+coordinated cross-tool freeze, see Loomweave's ``sei-migration-playbook.md``);
 this module is the machinery, not the trigger.
 
 Safety properties (the no-false-green ethos)
 --------------------------------------------
 - **Idempotent / resumable.** A value already carrying the ``clarion:eid:``
-  prefix is skipped without a network call; Clarion additionally rejects
+  prefix is skipped without a network call; Loomweave additionally rejects
   SEI-shaped input with HTTP 400 (REQ-F-02), so a partially-run backfill simply
   re-runs to convergence.
-- **Never silently drops an orphan.** A locator Clarion can no longer resolve
+- **Never silently drops an orphan.** A locator Loomweave can no longer resolve
   (``alive:false``) or rejects as invalid keeps its locator value and is stamped
   ``migration_orphaned_at`` (associations) or kept verbatim and reported
   (tombstones) for human review.
@@ -43,7 +43,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from filigree.db_base import _now_iso
-from filigree.registry import ClarionRegistry, RegistryResolutionError, RegistryUnavailableError, SeiResolution
+from filigree.registry import LoomweaveRegistry, RegistryResolutionError, RegistryUnavailableError, SeiResolution
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
@@ -61,15 +61,15 @@ class SeiBackfillError(RuntimeError):
 
     Raised for a clean, actionable refusal — not a partial write. The two
     cases: the project is not in ``clarion`` registry mode (no authority to
-    resolve against), or the reachable Clarion has not shipped SEI
+    resolve against), or the reachable Loomweave has not shipped SEI
     (``_capabilities.sei.supported`` false/absent). In the latter case the
     honest answer is "identity unavailable; nothing to migrate", per the
     oracle's ``capability_absent`` scenario.
     """
 
 
-class ClarionOutOfSyncError(SeiBackfillError):
-    """The local Clarion database is not synchronized or online."""
+class LoomweaveOutOfSyncError(SeiBackfillError):
+    """The local Loomweave database is not synchronized or online."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +80,8 @@ class OrphanRecord:
     ``"association"`` (a live ``entity_associations`` row, now stamped
     ``migration_orphaned_at``) or ``"tombstone"`` (a locator inside a
     ``deleted_issues.entity_ids`` array, left as a locator). ``reason`` is
-    ``"unresolved"`` (Clarion answered ``alive:false``) or ``"invalid"``
-    (Clarion rejected it as a malformed locator).
+    ``"unresolved"`` (Loomweave answered ``alive:false``) or ``"invalid"``
+    (Loomweave rejected it as a malformed locator).
     """
 
     source: Literal["association", "tombstone"]
@@ -125,10 +125,10 @@ def run_sei_backfill(db: FiligreeDB, *, dry_run: bool = True, actor: str = "") -
     With ``dry_run`` (the default) nothing is written; the returned report
     describes exactly what an applied run would do. Raises
     :class:`SeiBackfillError` if the project cannot resolve against a
-    SEI-capable Clarion.
+    SEI-capable Loomweave.
     """
     _require_sei_capable(db)
-    registry = _build_clarion_registry(db)
+    registry = _build_loomweave_registry(db)
     try:
         assoc_rows = db.conn.execute(
             "SELECT issue_id, clarion_entity_id FROM entity_associations WHERE migration_orphaned_at IS NULL"
@@ -157,27 +157,27 @@ def run_sei_backfill(db: FiligreeDB, *, dry_run: bool = True, actor: str = "") -
 def _require_sei_capable(db: FiligreeDB) -> None:
     if db.registry_backend != "clarion":
         msg = (
-            f"SEI backfill requires Clarion as the registry backend (project is {db.registry_backend!r}). "
+            f"SEI backfill requires Loomweave as the registry backend (project is {db.registry_backend!r}). "
             "There is no authority to resolve locators against; nothing to migrate."
         )
         raise SeiBackfillError(msg)
 
     # 1. Reachability & capabilities checks
     try:
-        capabilities = db.clarion_capabilities
+        capabilities = db.loomweave_capabilities
         if capabilities is None:
-            capabilities = db.reprobe_clarion_capabilities()
+            capabilities = db.reprobe_loomweave_capabilities()
     except (RegistryUnavailableError, RegistryResolutionError) as e:
-        raise ClarionOutOfSyncError(f"Clarion server is unreachable: {e}") from e
+        raise LoomweaveOutOfSyncError(f"Loomweave server is unreachable: {e}") from e
 
     if capabilities is None:
-        raise ClarionOutOfSyncError("Clarion server returned empty capabilities or is offline.")
+        raise LoomweaveOutOfSyncError("Loomweave server returned empty capabilities or is offline.")
 
     # 2. Local database sync checks (only run if db.project_root is not None and .git directory exists)
     if db.project_root is not None and (db.project_root / ".git").exists():
-        clarion_db_path = db.project_root / ".clarion" / "clarion.db"
-        if not clarion_db_path.is_file():
-            raise ClarionOutOfSyncError("Local Clarion database not found.")
+        loomweave_db_path = db.project_root / ".clarion" / "clarion.db"
+        if not loomweave_db_path.is_file():
+            raise LoomweaveOutOfSyncError("Local Loomweave database not found.")
 
         try:
             res = subprocess.run(
@@ -189,47 +189,47 @@ def _require_sei_capable(db: FiligreeDB) -> None:
             )
             git_head = res.stdout.strip()
         except (subprocess.SubprocessError, FileNotFoundError) as e:
-            raise ClarionOutOfSyncError(f"Failed to resolve git HEAD commit: {e}") from e
+            raise LoomweaveOutOfSyncError(f"Failed to resolve git HEAD commit: {e}") from e
 
         try:
-            clarion_conn = sqlite3.connect(f"file:{clarion_db_path}?mode=ro", uri=True)
-            clarion_conn.row_factory = sqlite3.Row
-            row = clarion_conn.execute(
+            loomweave_conn = sqlite3.connect(f"file:{loomweave_db_path}?mode=ro", uri=True)
+            loomweave_conn.row_factory = sqlite3.Row
+            row = loomweave_conn.execute(
                 "SELECT analyzed_at_commit FROM runs WHERE status = 'completed' ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
-            clarion_conn.close()
+            loomweave_conn.close()
         except sqlite3.Error as e:
-            raise ClarionOutOfSyncError(f"Failed to query local Clarion database: {e}") from e
+            raise LoomweaveOutOfSyncError(f"Failed to query local Loomweave database: {e}") from e
 
         if row is None or not row["analyzed_at_commit"] or row["analyzed_at_commit"] != git_head:
             last_commit = row["analyzed_at_commit"] if (row and row["analyzed_at_commit"]) else "none"
-            raise ClarionOutOfSyncError(
-                f"Clarion database is out of sync with git HEAD (latest run commit: {last_commit}, git HEAD: {git_head})."
+            raise LoomweaveOutOfSyncError(
+                f"Loomweave database is out of sync with git HEAD (latest run commit: {last_commit}, git HEAD: {git_head})."
             )
 
     if not capabilities.get("sei_supported", False):
         msg = (
-            "Connected Clarion has not shipped SEI (_capabilities.sei.supported is false/absent). "
+            "Connected Loomweave has not shipped SEI (_capabilities.sei.supported is false/absent). "
             "Identity is unavailable; keep working on locators — nothing to migrate yet."
         )
         raise SeiBackfillError(msg)
 
 
-def _build_clarion_registry(db: FiligreeDB) -> ClarionRegistry:
-    """Construct a dedicated resolve client from the project's Clarion config.
+def _build_loomweave_registry(db: FiligreeDB) -> LoomweaveRegistry:
+    """Construct a dedicated resolve client from the project's Loomweave config.
 
-    A fresh ``ClarionRegistry`` (rather than reusing ``db.registry``, which may
+    A fresh ``LoomweaveRegistry`` (rather than reusing ``db.registry``, which may
     be a local-fallback wrapper) keeps the resolve path explicit and decoupled;
     the one-shot client is closed by the caller.
     """
-    base_url = db._clarion_base_url()
+    base_url = db._loomweave_base_url()
     if base_url is None:  # pragma: no cover — guarded by _require_sei_capable
         msg = "clarion.base_url is not configured"
         raise SeiBackfillError(msg)
-    return ClarionRegistry(
+    return LoomweaveRegistry(
         base_url,
-        timeout_seconds=db._clarion_timeout_seconds(),
-        auth_token=db._resolve_clarion_auth_token(),
+        timeout_seconds=db._loomweave_timeout_seconds(),
+        auth_token=db._resolve_loomweave_auth_token(),
     )
 
 

@@ -114,7 +114,7 @@ class TestConfIO:
         write_conf(conf, data)
         assert read_conf(conf) == data
 
-    def test_read_accepts_registry_backend_and_clarion_settings(self, tmp_path: Path) -> None:
+    def test_read_accepts_registry_backend_and_loomweave_settings(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         data = {
             "version": 1,

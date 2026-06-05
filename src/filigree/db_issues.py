@@ -1347,7 +1347,7 @@ class IssuesMixin(DBMixinProtocol):
 
         now = _now_iso()
         # The final DELETE cascades this issue's entity_associations rows away
-        # (ON DELETE CASCADE). Capture the bound clarion_entity_ids BEFORE the
+        # (ON DELETE CASCADE). Capture the bound loomweave_entity_ids BEFORE the
         # cascade — sorted for a deterministic signal — so the tombstone (and the
         # synthetic issue_deleted change record built from it) can name them as
         # ``affected_entities``. Without this, a consumer mirroring the reverse

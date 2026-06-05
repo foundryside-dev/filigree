@@ -20,7 +20,7 @@ class TestObserveTool:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
+                    "Loomweave registry unavailable for test",
                     url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
                     path=path,
                     cause_kind="network",
@@ -28,7 +28,7 @@ class TestObserveTool:
 
             def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
+                    "Loomweave registry unavailable for test",
                     url="http://clarion.test/api/v1/files",
                     cause_kind="network",
                 )

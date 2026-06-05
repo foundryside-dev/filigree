@@ -13,12 +13,12 @@ def test_entity_association_newtypes_reject_positional_swaps(tmp_path: Path) -> 
     specimen.write_text(
         """
 from filigree.db_entity_associations import EntityAssociationsMixin
-from filigree.types.core import ClarionEntityId, ContentHash, IssueId
+from filigree.types.core import LoomweaveEntityId, ContentHash, IssueId
 
 
 def exercise(db: EntityAssociationsMixin) -> None:
     issue_id = IssueId("test-1234567890")
-    entity_id = ClarionEntityId("py:func:target")
+    entity_id = LoomweaveEntityId("py:func:target")
     content_hash = ContentHash("hash")
     db.add_entity_association(issue_id, entity_id, content_hash)
     db.add_entity_association(entity_id, issue_id, content_hash)

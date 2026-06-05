@@ -70,13 +70,13 @@ class TestFilesSchemaAPI:
             "allow_local_fallback": False,
             # F-1: probe identity is unset under local-mode; the keys are still
             # emitted so the dashboard JS does not need a separate code path.
-            "clarion_instance_id": None,
-            "clarion_api_version": None,
-            "clarion_instance_rotated": False,
+            "loomweave_instance_id": None,
+            "loomweave_api_version": None,
+            "loomweave_instance_rotated": False,
         }
 
-    async def test_schema_config_flags_reflect_project_backend(self, clarion_fallback_client: AsyncClient) -> None:
-        resp = await clarion_fallback_client.get("/api/files/_schema")
+    async def test_schema_config_flags_reflect_project_backend(self, loomweave_fallback_client: AsyncClient) -> None:
+        resp = await loomweave_fallback_client.get("/api/files/_schema")
         data = resp.json()
 
         assert data["config_flags"]["registry_backend"] == "clarion"
@@ -85,7 +85,7 @@ class TestFilesSchemaAPI:
 
 
 class TestScanResultsRegistryErrors:
-    async def test_scan_results_returns_not_found_for_unknown_clarion_file(
+    async def test_scan_results_returns_not_found_for_unknown_loomweave_file(
         self,
         client: AsyncClient,
         dashboard_db: PopulatedDB,
@@ -93,7 +93,7 @@ class TestScanResultsRegistryErrors:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
+                    "Loomweave registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
                     url="http://clarion.test/api/v1/files?path=missing.py",
                 )
@@ -125,7 +125,7 @@ class TestScanResultsRegistryErrors:
     ) -> None:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                raise RegistryUnavailableError("Clarion registry unavailable for test")
+                raise RegistryUnavailableError("Loomweave registry unavailable for test")
 
             def is_displaced(self) -> bool:
                 return True
@@ -234,7 +234,7 @@ class TestUnknownScanRunIdContract:
     """POST scan-results with a client-supplied scan_run_id Filigree has never
     seen — the permanent "tolerate-unknown" intake contract (F6, contracts.md).
 
-    Federation producers (Clarion `clarion analyze`) mint their own run_id and
+    Federation producers (Loomweave `clarion analyze`) mint their own run_id and
     POST findings carrying it with NO prior create handshake. Filigree ingests
     the findings and reconstructs the run in GET /api/scan-runs from
     scan_findings.scan_run_id. This is a supported, permanent contract — not a
@@ -379,7 +379,7 @@ class TestScanResultsFingerprintAPI:
     Exercises the native-emitter contract path — POST /api/loom/scan-results —
     rather than only the in-process db call, so the body parser and dedup wire
     end-to-end. The ``client`` fixture uses a local registry, so file_id
-    resolution works with no Clarion present (brief §3.C composability).
+    resolution works with no Loomweave present (brief §3.C composability).
     """
 
     async def test_fingerprint_dedup_over_loom_endpoint(self, client: AsyncClient) -> None:
@@ -544,7 +544,7 @@ class TestLoomCleanStaleFindingsAPI:
     Soft retention: stale ``unseen_in_latest`` findings move to ``fixed``,
     scoped to a single ``scan_source``. Reuses the existing core method —
     these tests assert the wire contract and the scan_source-isolation /
-    enrich-only invariants Clarion depends on.
+    enrich-only invariants Loomweave depends on.
     """
 
     def _status_by_rule(self, db: PopulatedDB, path: str) -> dict[str, str]:

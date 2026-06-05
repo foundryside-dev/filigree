@@ -1,4 +1,4 @@
-"""Tests for entity_associations CRUD (ADR-029, Clarion B.7 / WP9-A).
+"""Tests for entity_associations CRUD (ADR-029, Loomweave B.7 / WP9-A).
 
 Covers the data-layer surface of :class:`EntityAssociationsMixin`. The
 MCP tool layer and HTTP route layer have their own test files. The
@@ -273,7 +273,7 @@ class TestListEntityAssociations:
 
     def test_list_does_not_compute_drift(self, db: FiligreeDB) -> None:
         """ADR-029 §"Decision 3" — drift comparison is the consumer's job
-        (Clarion's issues_for after fetching). list_entity_associations
+        (Loomweave's issues_for after fetching). list_entity_associations
         returns raw rows; no drift_warning field exists.
         """
         issue = db.create_issue("t", priority=2)
@@ -285,7 +285,7 @@ class TestListEntityAssociations:
 
 
 class TestListAssociationsByEntity:
-    """Reverse lookup — the surface Clarion's issues_for (B.6) calls."""
+    """Reverse lookup — the surface Loomweave's issues_for (B.6) calls."""
 
     def test_empty_entity_returns_empty_list(self, db: FiligreeDB) -> None:
         assert db.list_associations_by_entity("py:func:never-attached") == []

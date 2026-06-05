@@ -1,4 +1,4 @@
-"""HTTP route tests for entity_associations (ADR-029, Clarion B.7 / WP9-A).
+"""HTTP route tests for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
 Mirrors the MCP-layer test surface against the FastAPI routes — same
 shapes, same idempotency, same error semantics. Federation §5 audit
@@ -230,7 +230,7 @@ class TestAddEntityAssociationHTTP:
 
 
 class TestListAssociationsByEntityHTTP:
-    """Reverse lookup — the route Clarion's issues_for (B.6) calls."""
+    """Reverse lookup — the route Loomweave's issues_for (B.6) calls."""
 
     async def test_returns_empty_for_unbound_entity(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         resp = await client.get("/api/entity-associations", params={"entity_id": "py:func:never"})

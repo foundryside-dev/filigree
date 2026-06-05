@@ -43,11 +43,11 @@ def test_error_code_enum_members() -> None:
     # typed SchemaVersionMismatchError and the catch-all except-Exception
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
     # FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
-    # conflict code for projects whose file registry is owned by Clarion.
+    # conflict code for projects whose file registry is owned by Loomweave.
     # CLARION_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
-    # Clarion advertises an api_version this Filigree was not built for.
-    # BRIEFING_BLOCKED is the Clarion 1.0 cross-product code (CONTRACT-3):
-    # Clarion returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
+    # Loomweave advertises an api_version this Filigree was not built for.
+    # BRIEFING_BLOCKED is the Loomweave 1.0 cross-product code (CONTRACT-3):
+    # Loomweave returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
     # intentionally withholds; surfaces as HTTP 403 to the dashboard caller
     # and MUST NOT engage the local-registry fallback.
     expected = {

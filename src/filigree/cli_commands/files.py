@@ -33,7 +33,7 @@ from filigree.mcp_tools.payloads import (
     timeline_entry_to_mcp,
 )
 from filigree.paths import safe_path
-from filigree.registry import clarion_file_read_url
+from filigree.registry import loomweave_file_read_url
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import AssocType, FindingStatus
 from filigree.validation import sanitize_actor
@@ -433,8 +433,8 @@ def register_file_cmd(
 
     with get_db() as db:
         if db.registry.is_displaced():
-            base_url = str(db.clarion_config.get("base_url", ""))
-            read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+            base_url = str(db.loomweave_config.get("base_url", ""))
+            read_url = loomweave_file_read_url(base_url, canonical_path, language=language or "")
             _logger.warning(
                 "file_registry_displaced_registration_rejected",
                 extra={
@@ -442,13 +442,13 @@ def register_file_cmd(
                     "file_path": canonical_path,
                     "language": language or "",
                     "registry_backend": db.registry_backend,
-                    "clarion_base_url": base_url,
+                    "loomweave_base_url": base_url,
                     "actor": ctx.obj["actor"],
                 },
             )
             msg = (
-                "File registration is displaced to Clarion for this project. "
-                f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+                "File registration is displaced to Loomweave for this project. "
+                f"Use Loomweave's read API instead: {read_url} (path: {canonical_path})"
             )
             if as_json:
                 click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.FILE_REGISTRY_DISPLACED}))
@@ -485,7 +485,7 @@ def register_file_cmd(
 def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
     """Build the migration plan via batched resolution.
 
-    CONTRACT-1 (Clarion 1.0): rows are resolved through ``resolve_files_batch``
+    CONTRACT-1 (Loomweave 1.0): rows are resolved through ``resolve_files_batch``
     rather than one HTTP round-trip per row. Batching is owned by the
     protocol (chunks at 256 internally). Per-row blockers (rewrite blockers,
     fallback downgrade) are still computed per-row.
@@ -523,9 +523,9 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
     # Promote per-item channels into per-row error diagnostics.
     item_errors: dict[str, str] = {}
     for path in batch.get("not_found", []):
-        item_errors[path] = f"Clarion could not resolve file at {path!r}"
+        item_errors[path] = f"Loomweave could not resolve file at {path!r}"
     for path in batch.get("briefing_blocked", []):
-        item_errors[path] = f"Clarion refuses briefing-blocked file at {path!r}"
+        item_errors[path] = f"Loomweave refuses briefing-blocked file at {path!r}"
     for err in batch.get("errors", []):
         item_errors[err["requested_path"]] = f"{err['code']}: {err['message']}"
 
@@ -541,14 +541,14 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
             continue
 
         # When ``allow_local_fallback=true`` is configured and the project's
-        # ``ClarionRegistry`` is wrapped in ``_ClarionLocalFallbackRegistry``,
-        # an unreachable Clarion is silently downgraded to a local resolution
+        # ``LoomweaveRegistry`` is wrapped in ``_LoomweaveLocalFallbackRegistry``,
+        # an unreachable Loomweave is silently downgraded to a local resolution
         # at the registry boundary. The migration plan must NOT accept that
         # downgrade — recording ``new_registry_backend=target_backend`` while
         # storing a local file_id and blank content_hash would silently
         # corrupt the file_records / file_associations metadata under the
         # operator's intent to migrate. Treat the row as unresolved with a
-        # diagnostic operators can act on (lift the fallback, bring Clarion
+        # diagnostic operators can act on (lift the fallback, bring Loomweave
         # up, re-run the plan).
         if resolved["registry_backend"] != target_backend:
             unresolved.append(
@@ -559,9 +559,9 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
                         f"Registry resolved {row['path']!r} to "
                         f"registry_backend={resolved['registry_backend']!r} "
                         f"(file_id={resolved['file_id']!r}); migration target is "
-                        f"{target_backend!r}. This typically means Clarion is "
+                        f"{target_backend!r}. This typically means Loomweave is "
                         "unreachable and the project is running with "
-                        "allow_local_fallback=true. Bring Clarion up, disable "
+                        "allow_local_fallback=true. Bring Loomweave up, disable "
                         "fallback for the migration, and re-run the plan."
                     ),
                 }

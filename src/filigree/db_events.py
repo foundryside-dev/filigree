@@ -267,7 +267,7 @@ class EventsMixin(DBMixinProtocol):
         records: list[EventRecordWithTitle] = []
         for r in rows:
             synthetic_id = self._TOMBSTONE_EVENT_ID_BASE + int(r["_seq"])
-            # ``entity_ids`` is the JSON array of clarion_entity_ids the delete
+            # ``entity_ids`` is the JSON array of loomweave_entity_ids the delete
             # cascade removed (schema v21). Surface it as ``affected_entities`` so
             # a consumer can purge its mirrored reverse lookup. ``or "[]"`` guards
             # pre-v21 tombstones whose column defaulted to '[]' but may read NULL on

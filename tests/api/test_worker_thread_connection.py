@@ -26,7 +26,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.core import FiligreeDB, _ClarionLocalFallbackRegistry
+from filigree.core import FiligreeDB, _LoomweaveLocalFallbackRegistry
 from filigree.dashboard import create_app
 from filigree.dashboard_routes.files import (
     _clean_stale_findings_on_private_conn,
@@ -84,7 +84,7 @@ class TestBorrowForWorkerThread:
         assert api_db.get_file_by_path("a.py") is not None
 
     def test_clone_does_not_own_or_close_shared_registry(self, api_db: FiligreeDB) -> None:
-        """Tearing down a borrowed clone must never close the shared Clarion
+        """Tearing down a borrowed clone must never close the shared Loomweave
         client — the clone borrows the registry by reference.
         """
 
@@ -121,17 +121,17 @@ class TestBorrowForWorkerThread:
         api_db.register_file("b.py", language="python")
         assert api_db.get_file_by_path("b.py") is not None
 
-    async def test_clone_rebinds_clarion_local_fallback_wrapper_to_private_conn(self, tmp_path: Path) -> None:
+    async def test_clone_rebinds_loomweave_local_fallback_wrapper_to_private_conn(self, tmp_path: Path) -> None:
         """The fallback-wrapper-under-concurrent-ingest config — the exact
         ``SQLITE_MISUSE`` shape the connection-isolation fix targets.
 
         ``_rebind_local_id_factory_to_self`` has three arms: pure ``LocalRegistry``
-        (covered by the other tests here), pure Clarion (no rebind), and the
-        ``_ClarionLocalFallbackRegistry`` wrapper. Only this last arm rebuilds the
-        wrapper for the clone: the shared Clarion ``_primary`` (an ``httpx.Client``)
+        (covered by the other tests here), pure Loomweave (no rebind), and the
+        ``_LoomweaveLocalFallbackRegistry`` wrapper. Only this last arm rebuilds the
+        wrapper for the clone: the shared Loomweave ``_primary`` (an ``httpx.Client``)
         is kept BY REFERENCE — a non-owning clone must never close it — while the
         local-fallback half is rebound to the clone's own connection, so a
-        worker-thread local-id mint (the fallback path under a Clarion outage)
+        worker-thread local-id mint (the fallback path under a Loomweave outage)
         uses the private connection, not the parent's shared one. A refactor that
         drops this ``elif`` arm would leave the clone sharing the parent's wrapper
         (and thus minting through the parent's connection) and regress silently."""
@@ -141,12 +141,12 @@ class TestBorrowForWorkerThread:
                 prefix="test",
                 check_same_thread=False,
                 registry_backend="clarion",
-                clarion_config={"base_url": base_url, "timeout_seconds": 0.5},
+                loomweave_config={"base_url": base_url, "timeout_seconds": 0.5},
             )
             db.initialize()
             db.enable_local_registry_fallback()
         # Stub is down now; the rebind itself needs no network.
-        assert isinstance(db.registry, _ClarionLocalFallbackRegistry)
+        assert isinstance(db.registry, _LoomweaveLocalFallbackRegistry)
         parent_wrapper = db.registry
         parent_primary = db.registry._primary
         parent_fallback = db.registry._fallback
@@ -157,7 +157,7 @@ class TestBorrowForWorkerThread:
         def worker() -> None:
             with db.borrow_for_worker_thread() as clone:
                 reg = clone.registry
-                assert isinstance(reg, _ClarionLocalFallbackRegistry)
+                assert isinstance(reg, _LoomweaveLocalFallbackRegistry)
                 captured["fresh_wrapper"] = reg is not parent_wrapper
                 captured["primary_shared"] = reg._primary is parent_primary
                 captured["fallback_rebound"] = reg._fallback is not parent_fallback
@@ -177,7 +177,7 @@ class TestBorrowForWorkerThread:
         # fresh_wrapper/fallback_rebound flip False and this fails deterministically.
         assert captured["fresh_wrapper"] is True
         assert captured["fallback_rebound"] is True
-        # The Clarion HTTP client is shared by reference, never re-created.
+        # The Loomweave HTTP client is shared by reference, never re-created.
         assert captured["primary_shared"] is True
         assert captured["base_url"] == parent_base_url
         assert captured["clone_conn_distinct"] is True

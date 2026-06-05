@@ -113,7 +113,7 @@ class TestReportFindingTool:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
+                    "Loomweave registry unavailable for test",
                     url="http://clarion.test/api/v1/files?path=src%2Freport_target.py",
                     path=path,
                     cause_kind="network",
@@ -151,7 +151,7 @@ class TestReportFindingTool:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
+                    "Loomweave registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
                     url="http://clarion.test/api/v1/files?path=missing.py",
                 )
@@ -183,7 +183,7 @@ class TestReportFindingTool:
         class BriefingBlockedRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryBriefingBlockedError(
-                    "Clarion registry refuses briefing-blocked file",
+                    "Loomweave registry refuses briefing-blocked file",
                     status_code=403,
                     url="http://clarion.test/api/v1/files?path=secret.py",
                 )

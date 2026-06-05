@@ -235,7 +235,7 @@ def _doctor_file_registry_backend_state(
         return CheckResult(
             "File registry backend state",
             True,
-            "Clarion is configured with local fallback enabled; local file_records may be intentional during fallback.",
+            "Loomweave is configured with local fallback enabled; local file_records may be intentional during fallback.",
         )
     try:
         local_count = int(
@@ -255,11 +255,11 @@ def _doctor_file_registry_backend_state(
         return CheckResult(
             "File registry backend state",
             False,
-            f"Project is configured for Clarion but {local_count} file_records row(s) still use local registry identity.",
+            f"Project is configured for Loomweave but {local_count} file_records row(s) still use local registry identity.",
             fix_hint="Run: filigree migrate-registry --to clarion --dry-run, then --execute after reviewing unresolved rows.",
             code="registry_backend_hybrid_state",
         )
-    return CheckResult("File registry backend state", True, "All file_records rows use Clarion registry identity.")
+    return CheckResult("File registry backend state", True, "All file_records rows use Loomweave registry identity.")
 
 
 def _is_absolute_command_path(path: str) -> bool:

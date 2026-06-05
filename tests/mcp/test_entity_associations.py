@@ -1,4 +1,4 @@
-"""MCP-layer tests for entity_associations (ADR-029, Clarion B.7 / WP9-A).
+"""MCP-layer tests for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
 Exercises the three tools via call_tool() — the same in-process MCP
 shape every other MCP test uses. Federation §5 audit tests live in
@@ -219,7 +219,7 @@ class TestListEntityAssociationsMCP:
 
 
 class TestListAssociationsByEntityMCP:
-    """Reverse lookup — the surface Clarion's issues_for (B.6) calls."""
+    """Reverse lookup — the surface Loomweave's issues_for (B.6) calls."""
 
     async def test_returns_empty_for_unbound_entity(self, mcp_db: FiligreeDB) -> None:
         result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "py:func:never"}))

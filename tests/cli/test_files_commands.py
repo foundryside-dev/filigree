@@ -319,12 +319,12 @@ class TestDeleteFileRecordCommand:
         assert missing.exit_code != 0
         assert json.loads(missing.output)["code"] == "NOT_FOUND"
 
-    def test_delete_file_record_allowed_under_clarion_mode(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_delete_file_record_allowed_under_loomweave_mode(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, project = cli_in_project
         from filigree.cli_common import get_db
 
         with get_db() as db:
-            file_record = db.register_file("src/delete_clarion_mode.py")
+            file_record = db.register_file("src/delete_loomweave_mode.py")
 
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
@@ -590,7 +590,7 @@ class TestRegisterFileCommand:
         assert data["path"] == "src/newfile.py"
         assert data["language"] == "python"
 
-    def test_register_file_displaced_under_clarion_mode(
+    def test_register_file_displaced_under_loomweave_mode(
         self, cli_in_project: tuple[CliRunner, Path], caplog: pytest.LogCaptureFixture
     ) -> None:
         runner, project = cli_in_project
@@ -600,8 +600,8 @@ class TestRegisterFileCommand:
         # ``allow_local_fallback`` is set so the ADR-014 capability probe at
         # ``FiligreeDB.__init__`` downgrades the http://localhost:9111
         # unreachability to a WARN — the test's intent is to verify the
-        # ``register-file`` CLI displaces on a Clarion-mode project, which
-        # is a state check independent of whether Clarion is reachable.
+        # ``register-file`` CLI displaces on a Loomweave-mode project, which
+        # is a state check independent of whether Loomweave is reachable.
         conf["clarion"] = {"base_url": "http://localhost:9111", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
@@ -753,7 +753,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/missing_manifest.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -773,7 +773,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -808,7 +808,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/apply_failure.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -828,7 +828,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -884,7 +884,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/malformed_scan_run.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -904,7 +904,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -1011,18 +1011,18 @@ class TestMigrateRegistryCommand:
             file_record = db.register_file("src/unresolved.py")
             old_file_id = file_record.id
 
-        class FailingClarionRegistry:
+        class FailingLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                raise RuntimeError(f"Clarion cannot resolve {path}")
+                raise RuntimeError(f"Loomweave cannot resolve {path}")
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FailingClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FailingLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -1042,20 +1042,20 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             assert db.get_file(old_file_id).id == old_file_id
 
-    def test_migrate_registry_rejects_local_fallback_resolution_under_clarion_target(
+    def test_migrate_registry_rejects_local_fallback_resolution_under_loomweave_target(
         self,
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Migration to ``clarion`` must NOT accept a local-fallback resolution.
 
-        Reproduces P1: when Clarion is unreachable and
+        Reproduces P1: when Loomweave is unreachable and
         ``allow_local_fallback=true``, the wrapping
-        ``_ClarionLocalFallbackRegistry`` silently returns a local
+        ``_LoomweaveLocalFallbackRegistry`` silently returns a local
         ``ResolvedFile`` with empty ``content_hash`` and a local-prefix
         ``file_id``. Without the guard in ``_registry_migration_plan``, the
         plan would record those rows as ``new_registry_backend=clarion`` and
-        rewrite issue/file associations to local IDs marked as Clarion-backed.
+        rewrite issue/file associations to local IDs marked as Loomweave-backed.
         The guard surfaces such rows as ``unresolved`` so operators can
         diagnose (and the migration aborts cleanly).
         """
@@ -1067,7 +1067,7 @@ class TestMigrateRegistryCommand:
             file_record = db.register_file("src/fallback_resolves.py")
             old_file_id = file_record.id
 
-        class UnreachableClarionRegistry:
+        class UnreachableLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1083,7 +1083,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", UnreachableClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", UnreachableLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -1131,7 +1131,7 @@ class TestMigrateRegistryCommand:
             source = db.register_file("src/conflict_a.py")
             existing_target = db.register_file("src/conflict_b.py")
 
-        class ConflictingClarionRegistry:
+        class ConflictingLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1152,7 +1152,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", ConflictingClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", ConflictingLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -1303,7 +1303,7 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             db.register_file("src/default_manifest.py")
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1323,7 +1323,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"
@@ -1378,7 +1378,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/migrate.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1398,7 +1398,7 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
         conf_path = project / ".filigree.conf"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "clarion"

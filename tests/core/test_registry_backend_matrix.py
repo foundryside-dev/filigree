@@ -44,7 +44,7 @@ def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tu
                 tmp_path / "filigree.db",
                 prefix="test",
                 registry_backend="clarion",
-                clarion_config={"base_url": base_url, "timeout_seconds": 1},
+                loomweave_config={"base_url": base_url, "timeout_seconds": 1},
                 project_root=tmp_path,
             )
             try:
@@ -78,7 +78,7 @@ def _assert_registry_file_record(db: FiligreeDB, registry_backend: RegistryBacke
         assert file_record.content_hash == ""
 
 
-def test_default_registry_backend_matrix_covers_local_and_clarion() -> None:
+def test_default_registry_backend_matrix_covers_local_and_loomweave() -> None:
     assert DEFAULT_TEST_REGISTRY_BACKENDS == ("local", "clarion")
     assert not hasattr(registry_module, "SUPPORTED_REGISTRY_BACKENDS")
 

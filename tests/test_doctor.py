@@ -340,7 +340,7 @@ class TestDoctorDatabase:
         assert schema_result.passed is False
         assert "newer" in schema_result.fix_hint.lower() or "Upgrade" in schema_result.fix_hint
 
-    def test_clarion_configured_project_warns_on_local_file_records(self, tmp_path: Path) -> None:
+    def test_loomweave_configured_project_warns_on_local_file_records(self, tmp_path: Path) -> None:
         _make_project(tmp_path)
         db_path = tmp_path / FILIGREE_DIR_NAME / DB_FILENAME
         db = FiligreeDB(db_path, prefix="tst")
@@ -365,7 +365,7 @@ class TestDoctorDatabase:
 
         registry_result = next(r for r in results if r.name == "File registry backend state")
         assert registry_result.passed is False
-        assert "configured for Clarion" in registry_result.message
+        assert "configured for Loomweave" in registry_result.message
         assert "1 file_records row(s)" in registry_result.message
         assert "migrate-registry --to clarion" in registry_result.fix_hint
 

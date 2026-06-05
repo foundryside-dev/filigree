@@ -11,7 +11,7 @@ ISOTimestamp = NewType("ISOTimestamp", str)
 IssueId = NewType("IssueId", str)
 FileId = NewType("FileId", str)
 EntityId = NewType("EntityId", str)
-ClarionEntityId = EntityId
+LoomweaveEntityId = EntityId
 ContentHash = NewType("ContentHash", str)
 
 _MAX_CONTENT_HASH_LEN = 512
@@ -36,7 +36,7 @@ def make_file_id(value: str) -> FileId:
 def make_entity_id(value: str) -> EntityId:
     """Validate and brand an opaque federated entity id.
 
-    Filigree deliberately does not parse Clarion's entity-id grammar; this only
+    Filigree deliberately does not parse Loomweave's entity-id grammar; this only
     rejects empty values at the local boundary.
     """
     if not isinstance(value, str) or not value.strip():
@@ -45,8 +45,8 @@ def make_entity_id(value: str) -> EntityId:
     return EntityId(value)
 
 
-def make_clarion_entity_id(value: str) -> ClarionEntityId:
-    """Backward-compatible alias for Clarion-specific entity branding."""
+def make_loomweave_entity_id(value: str) -> LoomweaveEntityId:
+    """Backward-compatible alias for Loomweave-specific entity branding."""
     return make_entity_id(value)
 
 
@@ -95,13 +95,13 @@ class _ProjectConfigRequired(TypedDict):
     version: int
 
 
-class ClarionConfig(TypedDict, total=False):
-    """ADR-014 Clarion registry backend configuration.
+class LoomweaveConfig(TypedDict, total=False):
+    """ADR-014 Loomweave registry backend configuration.
 
     ``token_env`` names the environment variable that carries the Bearer
-    token the Clarion read API expects (Authorization header). Defaults to
-    ``"CLARION_LOOM_TOKEN"``. Per the Clarion 1.0 cross-product contract,
-    Clarion accepts unauthenticated calls on loopback bind and rejects them
+    token the Loomweave read API expects (Authorization header). Defaults to
+    ``"CLARION_LOOM_TOKEN"``. Per the Loomweave 1.0 cross-product contract,
+    Loomweave accepts unauthenticated calls on loopback bind and rejects them
     on non-loopback; if the env var is unset, Filigree sends no header.
     """
 
@@ -122,7 +122,7 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     enabled_packs: list[str]
     mode: str
     registry_backend: RegistryBackend
-    clarion: ClarionConfig
+    clarion: LoomweaveConfig
 
 
 _T = TypeVar("_T")

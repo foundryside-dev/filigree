@@ -1106,7 +1106,7 @@ class TestInstallMode:
 
 class TestAdminProjectConfigValidation:
     @staticmethod
-    def _write_invalid_clarion_config(project_root: Path) -> None:
+    def _write_invalid_loomweave_config(project_root: Path) -> None:
         config_path = project_root / ".filigree" / "config.json"
         config_path.write_text(
             json.dumps(
@@ -1127,7 +1127,7 @@ class TestAdminProjectConfigValidation:
         monkeypatch.chdir(tmp_path)
         init_result = cli_runner.invoke(cli, ["init"])
         assert init_result.exit_code == 0
-        self._write_invalid_clarion_config(tmp_path)
+        self._write_invalid_loomweave_config(tmp_path)
 
         result = cli_runner.invoke(cli, ["init"])
 
@@ -1142,7 +1142,7 @@ class TestAdminProjectConfigValidation:
         monkeypatch.chdir(tmp_path)
         init_result = cli_runner.invoke(cli, ["init"])
         assert init_result.exit_code == 0
-        self._write_invalid_clarion_config(tmp_path)
+        self._write_invalid_loomweave_config(tmp_path)
 
         result = cli_runner.invoke(cli, ["install", "--mode", "server"])
 

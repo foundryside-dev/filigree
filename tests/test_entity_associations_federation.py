@@ -1,12 +1,12 @@
-"""Federation §5 audit for entity_associations (ADR-029, Clarion B.7 / WP9-A).
+"""Federation §5 audit for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
 The Loom federation doctrine (``clarion/docs/suite/loom.md`` §5) names
 three failure modes that the enrich-only rule must rule out:
 
-  1. **Semantic coupling** — does Filigree depend on Clarion to function?
-  2. **Initialisation coupling** — must Filigree wait for Clarion to start
+  1. **Semantic coupling** — does Filigree depend on Loomweave to function?
+  2. **Initialisation coupling** — must Filigree wait for Loomweave to start
      (or vice versa)?
-  3. **Pipeline coupling** — does Filigree's data become wrong if Clarion
+  3. **Pipeline coupling** — does Filigree's data become wrong if Loomweave
      goes away?
 
 ADR-029 §"Federation check" argues "no" on all three. This test module
@@ -14,7 +14,7 @@ encodes those arguments as named tests so the audit is mechanically
 visible — failing any one is a stop-the-line signal that the binding
 has gained an unintended cross-product dependency.
 
-Each test is deliberately self-contained and uses no Clarion fixtures.
+Each test is deliberately self-contained and uses no Loomweave fixtures.
 """
 
 from __future__ import annotations
@@ -28,13 +28,13 @@ from filigree.core import FiligreeDB
 
 class TestFederationSemanticCoupling:
     """Failure mode 1: Filigree must not parse, validate, or interpret
-    Clarion's entity-ID grammar. Storing any string as ``entity_id`` must
+    Loomweave's entity-ID grammar. Storing any string as ``entity_id`` must
     succeed; round-tripping it through the data layer must preserve it
     byte-for-byte.
     """
 
     def test_malformed_entity_id_is_accepted(self, db: FiligreeDB) -> None:
-        """A string with no Clarion structure at all must round-trip."""
+        """A string with no Loomweave structure at all must round-trip."""
         issue = db.create_issue("Federation §5 test", priority=2)
         # No colons, no plugin_id, no kind — the opposite of ADR-003's
         # three-segment composite. Filigree must not care.
@@ -91,7 +91,7 @@ class TestFederationSemanticCoupling:
         """Filigree stores content_hash verbatim — never hashes, parses, or
         interprets it. A caller could pass any non-empty string and
         Filigree returns it unchanged at query time. This is load-bearing
-        for ADR-029 §"Decision 3" (Clarion does the comparison).
+        for ADR-029 §"Decision 3" (Loomweave does the comparison).
         """
         issue = db.create_issue("t", priority=2)
         for h in ["sha256:abc", "blake3:def", "hash-with-no-prefix", "💩"]:
@@ -103,16 +103,16 @@ class TestFederationSemanticCoupling:
 
 class TestFederationInitialisationCoupling:
     """Failure mode 2: Filigree must start, run, and answer queries with no
-    Clarion process anywhere on the machine and no network reachability.
+    Loomweave process anywhere on the machine and no network reachability.
     The binding's existence on disk does not change Filigree's startup
     behaviour.
     """
 
-    def test_filigree_runs_with_no_outbound_clarion_calls(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_filigree_runs_with_no_outbound_loomweave_calls(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """Block all socket creation; exercise full CRUD on entity_associations.
 
         This is a sentinel test: any code path that quietly attempted a
-        network call to a Clarion service would raise ``OSError`` from
+        network call to a Loomweave service would raise ``OSError`` from
         the monkeypatched constructor and fail this test loudly.
         """
         original_socket_init = socket.socket.__init__
@@ -129,8 +129,8 @@ class TestFederationInitialisationCoupling:
             db.add_entity_association(issue.id, "py:func:b", content_hash="h2")
             rows = db.list_entity_associations(issue.id)
             assert len(rows) == 2
-            # Reverse lookup — the exact surface Clarion's issues_for
-            # calls — must run with no Clarion process on the box.
+            # Reverse lookup — the exact surface Loomweave's issues_for
+            # calls — must run with no Loomweave process on the box.
             reverse = db.list_associations_by_entity("py:func:a")
             assert len(reverse) == 1
             assert reverse[0]["issue_id"] == issue.id
@@ -143,9 +143,9 @@ class TestFederationInitialisationCoupling:
             "Filigree made an outbound network call during entity_associations CRUD — federation §5 (initialisation coupling) is broken."
         )
 
-    def test_no_clarion_module_import(self) -> None:
+    def test_no_loomweave_module_import(self) -> None:
         """The entity_associations module must not import anything named
-        'clarion' or attempt to dispatch onto a Clarion client. Smoke test
+        'clarion' or attempt to dispatch onto a Loomweave client. Smoke test
         the source for the obvious anti-pattern.
         """
         import filigree.db_entity_associations as mod
@@ -154,7 +154,7 @@ class TestFederationInitialisationCoupling:
         assert source is not None
         with open(source) as f:
             text = f.read()
-        # Comments mentioning Clarion are fine and expected; imports/calls
+        # Comments mentioning Loomweave are fine and expected; imports/calls
         # of a literal "clarion" Python module are not.
         assert "import clarion" not in text
         assert "from clarion" not in text
@@ -164,7 +164,7 @@ class TestFederationPipelineCoupling:
     """Failure mode 3: an issue's lifecycle (create, update, comment, label,
     close, reopen) must work the same whether or not it has entity
     associations attached. Filigree's data integrity does not depend on
-    Clarion being reachable, present, or even installed.
+    Loomweave being reachable, present, or even installed.
     """
 
     def test_issue_lifecycle_survives_with_associations_attached(self, db: FiligreeDB) -> None:
@@ -181,7 +181,7 @@ class TestFederationPipelineCoupling:
         # Update
         db.update_issue(issue.id, priority=1)
         # Comment
-        db.add_comment(issue.id, "still running without Clarion", author="t")
+        db.add_comment(issue.id, "still running without Loomweave", author="t")
         # Label
         db.add_label(issue.id, "no-clarion-needed")
         # Close
@@ -196,15 +196,15 @@ class TestFederationPipelineCoupling:
         assert ids == {"py:func:a", "py:func:b", "py:class:C"}
 
     def test_associations_table_with_orphaned_entity_ids_does_not_break_reads(self, db: FiligreeDB) -> None:
-        """An entity_id that no longer resolves on the Clarion side (a
+        """An entity_id that no longer resolves on the Loomweave side (a
         rename, a deletion, a missing scan) becomes a "stale reference"
-        from Clarion's perspective — but Filigree's read path returns the
-        row unchanged. The downstream consumer (Clarion's issues_for)
+        from Loomweave's perspective — but Filigree's read path returns the
+        row unchanged. The downstream consumer (Loomweave's issues_for)
         classifies it as ``not_found`` per ADR-029 §"Decision 3" without
         any participation from Filigree.
         """
         issue = db.create_issue("Stale-anchor issue", priority=2)
-        # Attach an entity_id that no real Clarion install would ever
+        # Attach an entity_id that no real Loomweave install would ever
         # resolve — Filigree must not care.
         db.add_entity_association(
             issue.id,

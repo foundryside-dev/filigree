@@ -192,7 +192,7 @@ def _open_db_for_filigree_dir(
     ``--allow-local-fallback`` flag flows into the ADR-014 capability probe
     *before* it runs at ``FiligreeDB.__init__`` — otherwise a project whose
     config disables fallback would fail to construct against an offline
-    Clarion even though the operator just asked for fallback at startup.
+    Loomweave even though the operator just asked for fallback at startup.
     """
     conf_path = filigree_dir.parent / CONF_FILENAME
     if conf_path.is_file():
@@ -938,8 +938,8 @@ def main(
     be used by the CLI or MCP, never by a passing HTTP client.
 
     ``allow_local_fallback`` is an ADR-014 recovery flag for single-project
-    ethereal mode: when the project is configured for Clarion registry mode
-    but Clarion is unavailable, auto-create paths use ``LocalRegistry``.
+    ethereal mode: when the project is configured for Loomweave registry mode
+    but Loomweave is unavailable, auto-create paths use ``LocalRegistry``.
     """
     import uvicorn
 

@@ -20,7 +20,7 @@ def registry_error_response(exc: RegistryPublicError, *, action: str) -> ErrorRe
     """Translate registry exceptions into the shared CLI/MCP/API error envelope."""
     if isinstance(exc, RegistryVersionMismatchError):
         return ErrorResponse(
-            error=f"Clarion registry API version mismatch while {action}: {exc}",
+            error=f"Loomweave registry API version mismatch while {action}: {exc}",
             code=ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH,
             details={
                 "cause": "clarion_registry_version_mismatch",

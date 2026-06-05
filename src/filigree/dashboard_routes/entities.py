@@ -1,8 +1,8 @@
-"""Entity-association HTTP routes (ADR-029, Clarion B.7 / WP9-A).
+"""Entity-association HTTP routes (ADR-029, Loomweave B.7 / WP9-A).
 
 Mirrors the four MCP tools on the HTTP surface so cross-product
-callers (notably Clarion's ``issues_for`` MCP tool, which runs on the
-Clarion side and reaches into Filigree via HTTP) can read and write
+callers (notably Loomweave's ``issues_for`` MCP tool, which runs on the
+Loomweave side and reaches into Filigree via HTTP) can read and write
 the binding without going through MCP.
 
 Routes:
@@ -41,7 +41,7 @@ from filigree.dashboard_routes.common import (
     _validate_actor,
 )
 from filigree.types.api import ErrorCode
-from filigree.types.core import make_clarion_entity_id, make_content_hash, make_issue_id
+from filigree.types.core import make_content_hash, make_issue_id, make_loomweave_entity_id
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def create_classic_router() -> APIRouter:
 
         The companion to ``GET /api/issue/{issue_id}/entity-associations``;
         the entity_id lives in the query string (URL-encoded) because
-        Clarion entity IDs contain colons. Project isolation is by DB
+        Loomweave entity IDs contain colons. Project isolation is by DB
         file. Drift detection is the consumer's job per ADR-029
         §"Decision 3".
         """
@@ -112,7 +112,7 @@ def create_classic_router() -> APIRouter:
             return _error_response("current_content_hash must be a non-empty string when provided", ErrorCode.VALIDATION, 400)
         try:
             rows = db.list_associations_by_entity(
-                make_clarion_entity_id(entity_id),
+                make_loomweave_entity_id(entity_id),
                 current_content_hash=make_content_hash(current_content_hash) if current_content_hash is not None else None,
             )
         except ValueError as exc:
@@ -121,7 +121,7 @@ def create_classic_router() -> APIRouter:
 
     @router.post("/issue/{issue_id}/entity-associations", status_code=201)
     async def api_add_entity_association(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Attach a Clarion entity to *issue_id*. Idempotent on the composite
+        """Attach a Loomweave entity to *issue_id*. Idempotent on the composite
         key — re-attach refreshes ``content_hash_at_attach`` and ``attached_at``
         while preserving the original ``attached_by``.
 
@@ -160,7 +160,7 @@ def create_classic_router() -> APIRouter:
         try:
             row = db.add_entity_association(
                 make_issue_id(issue_id),
-                make_clarion_entity_id(entity_id),
+                make_loomweave_entity_id(entity_id),
                 make_content_hash(content_hash),
                 actor=actor,
                 entity_kind=entity_kind,
@@ -192,7 +192,7 @@ def create_classic_router() -> APIRouter:
         try:
             removed = db.remove_entity_association(
                 make_issue_id(issue_id),
-                make_clarion_entity_id(entity_id),
+                make_loomweave_entity_id(entity_id),
                 actor=actor,
             )
         except WrongProjectError as exc:

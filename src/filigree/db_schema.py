@@ -413,7 +413,7 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
 -- ``migration_orphaned_at`` (v22) supports the locator→SEI backfill (ADR-038
 -- §7). NULL is the healthy/default state. A non-NULL ISO timestamp marks a row
 -- whose stored locator no longer resolved to an alive SEI at backfill time
--- (Clarion answered ``alive:false``): the locator is kept verbatim — never
+-- (Loomweave answered ``alive:false``): the locator is kept verbatim — never
 -- silently dropped — and stamped here so an operator can review the orphan.
 -- It is metadata about the migration, not part of the opaque ``clarion_entity_id``
 -- value or its wire shape, both of which are unchanged.
@@ -440,7 +440,7 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 
 -- ---- Deleted-issue tombstones (v20) --------------------------------------
 -- A hard-deleted issue leaves no events/issues row, so federation consumers
--- (Clarion / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
+-- (Loomweave / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
 -- would otherwise keep a stale reference forever. ``delete_issue`` writes a
 -- tombstone here in the same transaction it deletes the issue; the changes
 -- feed surfaces it as a synthetic ``issue_deleted`` record cursored on
@@ -460,7 +460,7 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 -- whose ``entity_associations`` rows the delete cascade removed. ``delete_issue``
 -- captures them BEFORE the cascade so the synthetic ``issue_deleted`` change record
 -- can name them as ``affected_entities`` — a consumer must purge its mirrored
--- reverse lookup (Clarion ``list_associations_by_entity``) for those entities or it
+-- reverse lookup (Loomweave ``list_associations_by_entity``) for those entities or it
 -- surfaces a phantom issue (filigree-f3bf56554c). Kept out of the column list as an
 -- inline comment on purpose: SQLite cannot re-parse a CREATE that carries comments,
 -- which would break any future ``ALTER TABLE … DROP/RENAME COLUMN`` on this table.

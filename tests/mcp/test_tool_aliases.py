@@ -71,7 +71,7 @@ class TestDegradedModeReachability:
     exempt. Two of the three exemptions are exercised here:
 
     * ``_schema_mismatch`` (startup found a v+1 DB), and
-    * ``_registry_startup_error`` (Clarion advertised an incompatible registry
+    * ``_registry_startup_error`` (Loomweave advertised an incompatible registry
       API version).
 
     The third — the per-call runtime-drift gate (live ``PRAGMA user_version``

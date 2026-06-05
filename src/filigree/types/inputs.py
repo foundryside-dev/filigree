@@ -23,11 +23,11 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from filigree.types.core import (
     AssocType,
-    ClarionEntityId,
     ContentHash,
     FindingStatus,
     ISOTimestamp,
     IssueId,
+    LoomweaveEntityId,
     Severity,
     StatusCategory,
 )
@@ -631,13 +631,13 @@ class RegisterFileArgs(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# entity_associations.py handlers (ADR-029, Clarion B.7)
+# entity_associations.py handlers (ADR-029, Loomweave B.7)
 # ---------------------------------------------------------------------------
 
 
 class AddEntityAssociationArgs(TypedDict):
     issue_id: IssueId
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
     content_hash: ContentHash
     entity_kind: NotRequired[str]
     external_entity_kind: NotRequired[str]
@@ -646,7 +646,7 @@ class AddEntityAssociationArgs(TypedDict):
 
 class RemoveEntityAssociationArgs(TypedDict):
     issue_id: IssueId
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
     actor: NotRequired[str]
 
 
@@ -655,7 +655,7 @@ class ListEntityAssociationsArgs(TypedDict):
 
 
 class ListAssociationsByEntityArgs(TypedDict):
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
     current_content_hash: NotRequired[ContentHash]
 
 

@@ -800,7 +800,7 @@ class TestProcessScanResults:
             prefix="test",
             registry=registry,
             registry_backend="clarion",
-            clarion_config={"base_url": "http://clarion.test"},
+            loomweave_config={"base_url": "http://clarion.test"},
         )
         registry.db = db
         try:

@@ -31,7 +31,7 @@ from filigree.mcp_tools.payloads import (
     finding_to_mcp,
     timeline_entry_to_mcp,
 )
-from filigree.registry import clarion_file_read_url
+from filigree.registry import loomweave_file_read_url
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
 from filigree.types.core import FindingStatus
 from filigree.types.inputs import (
@@ -581,8 +581,8 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
     if tracker.registry.is_displaced():
-        base_url = str(tracker.clarion_config.get("base_url", ""))
-        read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+        base_url = str(tracker.loomweave_config.get("base_url", ""))
+        read_url = loomweave_file_read_url(base_url, canonical_path, language=language or "")
         _logger.warning(
             "file_registry_displaced_registration_rejected",
             extra={
@@ -590,15 +590,15 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
                 "file_path": canonical_path,
                 "language": language or "",
                 "registry_backend": tracker.registry_backend,
-                "clarion_base_url": base_url,
+                "loomweave_base_url": base_url,
                 "actor": actor,
             },
         )
         return _text(
             ErrorResponse(
                 error=(
-                    "File registration is displaced to Clarion for this project. "
-                    f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+                    "File registration is displaced to Loomweave for this project. "
+                    f"Use Loomweave's read API instead: {read_url} (path: {canonical_path})"
                 ),
                 code=ErrorCode.FILE_REGISTRY_DISPLACED,
             )

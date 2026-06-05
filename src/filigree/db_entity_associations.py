@@ -1,9 +1,9 @@
-"""Entity-association CRUD (ADR-029, Clarion B.7 / WP9-A).
+"""Entity-association CRUD (ADR-029, Loomweave B.7 / WP9-A).
 
 Binds Filigree issues to opaque external entity IDs. The historical
 SQLite column is named ``clarion_entity_id`` for compatibility, but the
 public projection exposes canonical ``entity_id`` and treats the value
-as an opaque string. The value may be a Clarion SEI, a legacy locator, or
+as an opaque string. The value may be a Loomweave SEI, a legacy locator, or
 another caller-owned ID; Filigree never parses or validates its grammar.
 
 Four operations form the surface:
@@ -27,13 +27,13 @@ from typing import Any, TypedDict
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
 from filigree.types.core import (
-    ClarionEntityId,
     ContentHash,
     ISOTimestamp,
     IssueId,
-    make_clarion_entity_id,
+    LoomweaveEntityId,
     make_content_hash,
     make_issue_id,
+    make_loomweave_entity_id,
 )
 
 
@@ -41,8 +41,8 @@ class EntityAssociationRow(TypedDict):
     """One row of the entity_associations table."""
 
     issue_id: IssueId
-    entity_id: ClarionEntityId
-    clarion_entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
+    clarion_entity_id: LoomweaveEntityId
     entity_kind: str
     content_hash_at_attach: ContentHash
     attached_at: ISOTimestamp
@@ -50,7 +50,7 @@ class EntityAssociationRow(TypedDict):
     migration_orphaned_at: ISOTimestamp | None
     # ``orphan_status`` is two-state by design, per ADR-017's two-axis model.
     # Filigree owns only the *content* axis (``freshness_status``); the
-    # *identity* axis (ALIVE/ORPHANED) is Clarion's via ``resolve_sei``.
+    # *identity* axis (ALIVE/ORPHANED) is Loomweave's via ``resolve_sei``.
     # ``"orphaned"`` reports Filigree's own ``migration_orphaned_at`` marker;
     # the non-orphaned value is ``"unknown"`` — an explicit deferral, NOT
     # "active"/"healthy", because Filigree must never assert identity-axis
@@ -82,7 +82,7 @@ def _freshness_status(content_hash_at_attach: str, current_content_hash: str | N
 
 
 def _row_to_entity_association(r: Mapping[str, Any], *, current_content_hash: str | None = None) -> EntityAssociationRow:
-    entity_id = ClarionEntityId(r["clarion_entity_id"])
+    entity_id = LoomweaveEntityId(r["clarion_entity_id"])
     migration_orphaned_at = r["migration_orphaned_at"]
     content_hash_at_attach = ContentHash(r["content_hash_at_attach"])
     return EntityAssociationRow(
@@ -107,7 +107,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
     """CRUD for the ``entity_associations`` table (ADR-029).
 
     Composed into :class:`filigree.core.FiligreeDB` via MRO. The mixin
-    deliberately knows nothing about Clarion's entity-ID grammar; every
+    deliberately knows nothing about Loomweave's entity-ID grammar; every
     method treats ``entity_id`` as an opaque string.
     """
 
@@ -116,7 +116,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
     def add_entity_association(
         self,
         issue_id: IssueId,
-        entity_id: ClarionEntityId,
+        entity_id: LoomweaveEntityId,
         content_hash: ContentHash,
         *,
         actor: str = "",
@@ -125,7 +125,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         signoff_seq: int | None = None,
         _skip_begin: bool = False,
     ) -> EntityAssociationRow:
-        """Attach a Clarion entity to a Filigree issue (or refresh an existing
+        """Attach a Loomweave entity to a Filigree issue (or refresh an existing
         attachment).
 
         Idempotent on ``(issue_id, entity_id)``. Re-attaching updates
@@ -138,8 +138,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
 
         Args:
             issue_id: Filigree issue ID. Must exist; verified by FK.
-            entity_id: Clarion entity ID (opaque to Filigree).
-            content_hash: Clarion's current ``entities.content_hash`` for
+            entity_id: Loomweave entity ID (opaque to Filigree).
+            content_hash: Loomweave's current ``entities.content_hash`` for
                 the entity, snapshotted at attach time. Filigree stores
                 this verbatim and never interprets it.
             actor: Identity recorded as ``attached_by`` on first attach.
@@ -153,7 +153,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
             ValueError: arguments are blank or invalid where they must not be.
         """
         issue_id = make_issue_id(issue_id)
-        entity_id = make_clarion_entity_id(entity_id)
+        entity_id = make_loomweave_entity_id(entity_id)
         content_hash = make_content_hash(content_hash)
         entity_kind = _normalise_optional_entity_kind(entity_kind)
         self._check_id_prefix(issue_id)
@@ -244,7 +244,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
     def remove_entity_association(
         self,
         issue_id: IssueId,
-        entity_id: ClarionEntityId,
+        entity_id: LoomweaveEntityId,
         *,
         actor: str = "",
     ) -> bool:
@@ -255,7 +255,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
             did not exist (idempotent — no-op on missing).
         """
         issue_id = make_issue_id(issue_id)
-        entity_id = make_clarion_entity_id(entity_id)
+        entity_id = make_loomweave_entity_id(entity_id)
         self._check_id_prefix(issue_id)
         cursor = self.conn.execute(
             "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
@@ -276,7 +276,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         Returns raw rows in attach-time order. Drift detection is the
         caller's job — Filigree does not compute or surface
         ``drift_warning`` here per ADR-029 §"Decision 3"; that's the
-        consumer's (Clarion's ``issues_for``) responsibility after
+        consumer's (Loomweave's ``issues_for``) responsibility after
         fetching the rows.
         """
         issue_id = make_issue_id(issue_id)
@@ -295,15 +295,15 @@ class EntityAssociationsMixin(DBMixinProtocol):
 
     def list_associations_by_entity(
         self,
-        entity_id: ClarionEntityId,
+        entity_id: LoomweaveEntityId,
         *,
         current_content_hash: ContentHash | str | None = None,
     ) -> list[EntityAssociationRow]:
-        """Return all issue bindings for a given Clarion entity.
+        """Return all issue bindings for a given Loomweave entity.
 
         The reverse of :meth:`list_entity_associations`: given an
-        opaque Clarion entity ID, return every Filigree issue currently
-        bound to it. This is the surface Clarion's ``issues_for`` MCP
+        opaque Loomweave entity ID, return every Filigree issue currently
+        bound to it. This is the surface Loomweave's ``issues_for`` MCP
         tool (B.6) calls to answer "what issues are about this code I'm
         reading?" in one round trip.
 
@@ -314,7 +314,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         Raw rows are returned in attach-time order; drift detection is
         the consumer's job per ADR-029 §"Decision 3".
         """
-        entity_id = make_clarion_entity_id(entity_id)
+        entity_id = make_loomweave_entity_id(entity_id)
         if current_content_hash is not None:
             current_content_hash = make_content_hash(current_content_hash)
         rows = self.conn.execute(

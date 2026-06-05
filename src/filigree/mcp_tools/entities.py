@@ -1,8 +1,8 @@
-"""MCP tools for entity_associations (ADR-029, Clarion B.7 / WP9-A).
+"""MCP tools for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
-Four tools binding Filigree issues to Clarion entities:
+Four tools binding Filigree issues to Loomweave entities:
 
-- ``add_entity_association`` — attach (or refresh) a Clarion entity to
+- ``add_entity_association`` — attach (or refresh) a Loomweave entity to
   an issue, snapshotting the current content hash.
 - ``remove_entity_association`` — remove the binding by composite key.
 - ``list_entity_associations`` — enumerate bindings for an issue;
@@ -12,7 +12,7 @@ Four tools binding Filigree issues to Clarion entities:
   to every bound issue in this project.
 
 The entity ID is opaque to Filigree — these tools do not parse or validate
-its grammar. It may be a Clarion SEI, a legacy locator, or another external
+its grammar. It may be a Loomweave SEI, a legacy locator, or another external
 ID. Caller-supplied ``entity_kind`` metadata is stored only when provided.
 """
 
@@ -31,7 +31,7 @@ from filigree.mcp_tools.common import (
     get_db,
 )
 from filigree.types.api import ErrorCode, ErrorResponse
-from filigree.types.core import make_clarion_entity_id, make_content_hash, make_issue_id
+from filigree.types.core import make_content_hash, make_issue_id, make_loomweave_entity_id
 from filigree.types.inputs import (
     AddEntityAssociationArgs,
     ListAssociationsByEntityArgs,
@@ -79,8 +79,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "content_hash": {
                         "type": "string",
                         "description": (
-                            "Clarion's current entities.content_hash for the entity. "
-                            "Stored verbatim; used by the consumer (Clarion's issues_for) "
+                            "Loomweave's current entities.content_hash for the entity. "
+                            "Stored verbatim; used by the consumer (Loomweave's issues_for) "
                             "to compute drift at query time."
                         ),
                     },
@@ -116,7 +116,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Return all opaque external entity bindings attached to an issue. "
                 "Returns raw rows — drift detection is the caller's job per "
-                'ADR-029 §"Decision 3" (Clarion\'s issues_for compares '
+                'ADR-029 §"Decision 3" (Loomweave\'s issues_for compares '
                 "content_hash_at_attach against the live hash)."
             ),
             inputSchema={
@@ -131,7 +131,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="list_associations_by_entity",
             description=(
                 "Reverse lookup: return every Filigree issue currently bound "
-                "to a given Clarion entity_id. This is the surface Clarion's "
+                "to a given Loomweave entity_id. This is the surface Loomweave's "
                 "issues_for tool (B.6) calls to answer 'what issues are about "
                 "this code I'm reading?' in one round trip. Project isolation "
                 "is by DB file. Drift detection remains the consumer's job per "
@@ -195,7 +195,7 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
     try:
         row = tracker.add_entity_association(
             make_issue_id(issue_id),
-            make_clarion_entity_id(entity_id),
+            make_loomweave_entity_id(entity_id),
             make_content_hash(content_hash),
             actor=actor,
             entity_kind=entity_kind,
@@ -231,7 +231,7 @@ async def _handle_remove_entity_association(arguments: dict[str, Any]) -> list[T
     try:
         removed = tracker.remove_entity_association(
             make_issue_id(issue_id),
-            make_clarion_entity_id(entity_id),
+            make_loomweave_entity_id(entity_id),
             actor=actor,
         )
     except WrongProjectError as exc:
@@ -287,7 +287,7 @@ async def _handle_list_associations_by_entity(arguments: dict[str, Any]) -> list
 
     try:
         rows = tracker.list_associations_by_entity(
-            make_clarion_entity_id(entity_id),
+            make_loomweave_entity_id(entity_id),
             current_content_hash=make_content_hash(current_content_hash) if current_content_hash is not None else None,
         )
     except ValueError as exc:

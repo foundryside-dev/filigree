@@ -23,9 +23,9 @@ if TYPE_CHECKING:
     from filigree.templates import TemplateRegistry, TransitionOption
     from filigree.types.api import BatchFailure
     from filigree.types.core import (
-        ClarionEntityId,
         ContentHash,
         IssueId,
+        LoomweaveEntityId,
         ObservationDict,
         ObservationLinkDict,
         ScanFindingDict,
@@ -485,7 +485,7 @@ class DBMixinProtocol(Protocol):
     def add_entity_association(
         self,
         issue_id: IssueId,
-        entity_id: ClarionEntityId,
+        entity_id: LoomweaveEntityId,
         content_hash: ContentHash,
         *,
         actor: str = "",

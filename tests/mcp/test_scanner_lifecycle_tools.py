@@ -403,7 +403,7 @@ class TestTriggerScanBatchTool:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
+                    "Loomweave registry unavailable for test",
                     url="http://clarion.test/api/v1/files?path=batch_registry_a.py",
                     path=path,
                     cause_kind="network",
@@ -1089,7 +1089,7 @@ class TestTriggerScanCooldownReservation:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
+                    "Loomweave registry unavailable for test",
                     url="http://clarion.test/api/v1/files?path=trigger_registry.py",
                     path=path,
                     cause_kind="network",

@@ -874,7 +874,7 @@ class TestReportFindingCommand:
     ) -> None:
         def unavailable_registry(self: FiligreeDB, **kwargs: object) -> object:
             raise RegistryUnavailableError(
-                "Clarion registry unavailable for test",
+                "Loomweave registry unavailable for test",
                 url="http://clarion.test/api/v1/files?path=src%2Ffoo.py",
                 path="src/foo.py",
                 cause_kind="network",
@@ -903,7 +903,7 @@ class TestReportFindingCommand:
     ) -> None:
         def briefing_blocked(self: FiligreeDB, **kwargs: object) -> object:
             raise RegistryBriefingBlockedError(
-                "Clarion registry refuses briefing-blocked file",
+                "Loomweave registry refuses briefing-blocked file",
                 status_code=403,
                 url="http://clarion.test/api/v1/files?path=secret.py",
             )
@@ -1167,7 +1167,7 @@ class TestTriggerScanCommand:
     ) -> None:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
-                "Clarion registry unavailable for test",
+                "Loomweave registry unavailable for test",
                 url="http://clarion.test/api/v1/files?path=target.py",
                 path=path,
                 cause_kind="network",
@@ -1196,7 +1196,7 @@ class TestTriggerScanCommand:
     ) -> None:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
-                "Clarion registry unavailable for test",
+                "Loomweave registry unavailable for test",
                 url="http://clarion.test/api/v1/files?path=target.py",
                 path=path,
                 cause_kind="network",

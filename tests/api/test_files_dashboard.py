@@ -457,8 +457,8 @@ class TestScanResultsEndpointEnhancements:
         )
         assert resp.status_code == 200
 
-    async def test_clarion_registry_unavailable_returns_503(self, unavailable_clarion_client: AsyncClient) -> None:
-        resp = await unavailable_clarion_client.post(
+    async def test_loomweave_registry_unavailable_returns_503(self, unavailable_loomweave_client: AsyncClient) -> None:
+        resp = await unavailable_loomweave_client.post(
             "/api/v1/scan-results",
             json={
                 "scan_source": "ruff",
@@ -471,7 +471,7 @@ class TestScanResultsEndpointEnhancements:
         assert data["code"] == "REGISTRY_UNAVAILABLE"
         # CONTRACT-1: scan-results goes through the batch endpoint now;
         # the unreachable message has the batch-resolve prefix.
-        assert "Clarion batch resolve unreachable" in data["error"]
+        assert "Loomweave batch resolve unreachable" in data["error"]
 
     async def test_new_finding_ids_in_response(self, client: AsyncClient) -> None:
         resp = await client.post(

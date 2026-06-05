@@ -84,7 +84,7 @@ _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_di
 # structured ErrorResponse(code=SCHEMA_MISMATCH). Cleared on successful init.
 _schema_mismatch: SchemaVersionMismatchError | None = None
 
-# Set when Clarion advertises an incompatible registry API version at startup.
+# Set when Loomweave advertises an incompatible registry API version at startup.
 # Mirrors schema-mismatch degraded mode: list_tools stays available, while
 # call_tool surfaces a structured CLARION_REGISTRY_VERSION_MISMATCH envelope.
 _registry_startup_error: RegistryVersionMismatchError | None = None
@@ -277,7 +277,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": response["code"],
             "error": response["error"],
             "details": response.get("details"),
-            "guidance": "Upgrade Filigree or Clarion so their registry API versions match.",
+            "guidance": "Upgrade Filigree or Loomweave so their registry API versions match.",
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }

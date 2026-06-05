@@ -627,12 +627,12 @@ def migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
 
 
 def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
-    """v14 -> v15: Add entity_associations table (ADR-029, Clarion B.7).
+    """v14 -> v15: Add entity_associations table (ADR-029, Loomweave B.7).
 
-    Binds Filigree issues to Clarion entities via opaque string IDs.
+    Binds Filigree issues to Loomweave entities via opaque string IDs.
     Filigree does not parse the ID grammar — the federation enrich-only
-    rule (loom.md §5) requires that Clarion's entity-ID format remain
-    Clarion's contract with itself.
+    rule (loom.md §5) requires that Loomweave's entity-ID format remain
+    Loomweave's contract with itself.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS entity_associations (
@@ -739,7 +739,7 @@ def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
     """v20 -> v21: Add ``deleted_issues.entity_ids`` (F5 entity-association amplifier).
 
     ``delete_issue`` cascades ``entity_associations`` (``ON DELETE CASCADE``), so a
-    hard delete silently drops Filigree's side of every Clarion entity binding. The
+    hard delete silently drops Filigree's side of every Loomweave entity binding. The
     v20 tombstone recorded only the issue identity, so the synthetic ``issue_deleted``
     change record could not name *which* bindings the cascade removed — a consumer
     that mirrors the reverse lookup (``list_associations_by_entity``) would keep
@@ -763,7 +763,7 @@ def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
     The locator→SEI value migration (ADR-038 §7, driven by ``filigree
     sei-backfill``) rewrites each opaque ``clarion_entity_id`` from its locator to
     the resolved SEI *in place* — the column name, wire shape, and storage
-    mechanism are unchanged. A locator that no longer resolves (Clarion answers
+    mechanism are unchanged. A locator that no longer resolves (Loomweave answers
     ``alive:false``) must be kept verbatim and flagged for human review, never
     silently dropped (the suite's no-false-green ethos).
 
@@ -781,7 +781,7 @@ def migrate_v22_to_v23(conn: sqlite3.Connection) -> None:
     """v22 -> v23: Add caller-supplied ``entity_associations.entity_kind``.
 
     Entity IDs are opaque external identifiers: they may be SEIs, legacy
-    locators, or non-Clarion IDs. Filigree must not parse kind out of the ID,
+    locators, or non-Loomweave IDs. Filigree must not parse kind out of the ID,
     but callers that already know the kind can now store it explicitly for UI
     and API presentation. Empty string means unknown/not supplied.
     """

@@ -1,21 +1,21 @@
 """Producer-side SEI conformance oracle (ADR-038 §8) — fast lane.
 
 The shared fixture (``fixtures/sei-conformance-oracle.json``, vendored from
-Clarion) defines six scenarios written from Clarion's *authority* perspective
+Loomweave) defines six scenarios written from Loomweave's *authority* perspective
 (mint / carry / orphan / lineage). Filigree is a *producer*: it stores the SEI
-opaquely and degrades when Clarion lacks the capability. Producer-side, the six
+opaquely and degrades when Loomweave lacks the capability. Producer-side, the six
 scenarios reduce to a small set of obligations this module proves against the
-extended Clarion stub:
+extended Loomweave stub:
 
 - **identity_round_trip_and_opacity** — the backfill rewrites a stored locator to
   the alive SEI in place; the value round-trips byte-for-byte, carries the
   reserved ``clarion:eid:`` prefix, and is never parsed.
 - **rename / move** — once stored as an SEI the binding is stable: a re-run never
-  re-points it (the SEI is carried unchanged Clarion-side; Filigree skips it on
+  re-points it (the SEI is carried unchanged Loomweave-side; Filigree skips it on
   the prefix check). ``content_hash_at_attach`` is untouched.
 - **ambiguous / delete** — an unresolvable locator is flagged ORPHAN (stamped,
   kept verbatim), never dropped; the content axis stays inspectable.
-- **capability_absent** — against a pre-SEI / SEI-unsupported Clarion the backfill
+- **capability_absent** — against a pre-SEI / SEI-unsupported Loomweave the backfill
   refuses cleanly (no partial writes) and the tracker keeps working on locators.
 
 Plus the backfill-branch coverage the producer surface adds: prefix-skip /
@@ -23,7 +23,7 @@ resume, the ``invalid`` (REQ-F-02) channel, PK-collision merge, and the
 historical ``deleted_issues.entity_ids`` rewrite (REQ-F-01).
 
 The faithful "no grandfathering" gate — the same scenarios against a live
-``clarion serve`` — lives in ``test_sei_oracle_live_clarion.py``.
+``clarion serve`` — lives in ``test_sei_oracle_live_loomweave.py``.
 """
 
 from __future__ import annotations
@@ -55,12 +55,12 @@ COVERED_SCENARIOS = {
 }
 
 
-def _clarion_db(tmp_path: Path, base_url: str) -> FiligreeDB:
+def _loomweave_db(tmp_path: Path, base_url: str) -> FiligreeDB:
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
         registry_backend="clarion",
-        clarion_config={"base_url": base_url, "timeout_seconds": 2},
+        loomweave_config={"base_url": base_url, "timeout_seconds": 2},
     )
     db.initialize()
     return db
@@ -82,8 +82,8 @@ def _insert_tombstone(db: FiligreeDB, issue_id: str, entity_ids: list[str]) -> N
 # ---------------------------------------------------------------------------
 
 
-def _clarion_oracle_source() -> Path | None:
-    """Locate Clarion's canonical oracle fixture, if the repo is present."""
+def _loomweave_oracle_source() -> Path | None:
+    """Locate Loomweave's canonical oracle fixture, if the repo is present."""
     candidates = []
     env = os.environ.get("CLARION_REPO")
     if env:
@@ -93,13 +93,13 @@ def _clarion_oracle_source() -> Path | None:
     return next((c for c in candidates if c.exists()), None)
 
 
-def test_vendored_oracle_matches_clarion_source() -> None:
-    """The vendored copy must not drift from Clarion's canonical fixture."""
-    source = _clarion_oracle_source()
+def test_vendored_oracle_matches_loomweave_source() -> None:
+    """The vendored copy must not drift from Loomweave's canonical fixture."""
+    source = _loomweave_oracle_source()
     if source is None:
-        pytest.skip("Clarion repo not found (set CLARION_REPO to enable the drift check)")
+        pytest.skip("Loomweave repo not found (set CLARION_REPO to enable the drift check)")
     assert json.loads(ORACLE_PATH.read_text()) == json.loads(source.read_text()), (
-        "Vendored sei-conformance-oracle.json has drifted from Clarion's source; re-copy it."
+        "Vendored sei-conformance-oracle.json has drifted from Loomweave's source; re-copy it."
     )
 
 
@@ -119,7 +119,7 @@ def test_identity_round_trip_and_opacity(tmp_path: Path) -> None:
     locator = "py:func:auth.tokens::issue_token"
     sei = "clarion:eid:deadbeefdeadbeefdeadbeefdeadbeef"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, locator, content_hash="sha256:body")
 
@@ -147,20 +147,20 @@ def test_identity_round_trip_and_opacity(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("scenario", ["rename", "move"])
 def test_stable_sei_is_never_repointed(tmp_path: Path, scenario: str) -> None:
-    """After a rename/move Clarion carries the SAME SEI; Filigree must keep its
+    """After a rename/move Loomweave carries the SAME SEI; Filigree must keep its
     binding keyed on it and never silently re-point. Modelled producer-side as:
     a value already SEI-shaped is skipped on re-run (prefix check), and its
-    ``content_hash_at_attach`` is untouched — independent of Clarion-side churn."""
+    ``content_hash_at_attach`` is untouched — independent of Loomweave-side churn."""
     locator = "py:func:mod.a::f"
     sei = "clarion:eid:00000000000000000000000000000001"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue(scenario, priority=2)
         db.add_entity_association(issue.id, locator, content_hash="sha256:body")
         run_sei_backfill(db, dry_run=False, actor="op")
         hash_after_first = db.list_entity_associations(issue.id)[0]["content_hash_at_attach"]
 
-        # A rename/move on Clarion's side carries the same SEI to a new locator,
+        # A rename/move on Loomweave's side carries the same SEI to a new locator,
         # but the stored value is already that SEI. Re-running must be a no-op:
         # the prefix check skips it — no resolve call, no re-point.
         state.identity_resolve_requests.clear()
@@ -188,7 +188,7 @@ def test_unresolvable_locator_is_orphaned_not_dropped(tmp_path: Path, scenario: 
     # which is exactly how both the ambiguous (fail-closed, old binding orphaned)
     # and delete scenarios present to a producer.
     with clarion_stub(sei_supported=True) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue(scenario, priority=2)
         db.add_entity_association(issue.id, locator, content_hash="sha256:body")
 
@@ -225,7 +225,7 @@ def test_unresolvable_locator_is_orphaned_not_dropped(tmp_path: Path, scenario: 
 def test_capability_absent_refuses_cleanly(tmp_path: Path, include_sei_capability: bool, sei_supported: bool) -> None:
     locator = "py:func:mod::f"
     with clarion_stub(include_sei_capability=include_sei_capability, sei_supported=sei_supported) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, locator, content_hash="sha256:body")
 
@@ -250,12 +250,12 @@ def test_capability_absent_refuses_cleanly(tmp_path: Path, include_sei_capabilit
 
 
 def test_invalid_locator_is_orphaned_with_invalid_reason(tmp_path: Path) -> None:
-    """A locator Clarion rejects as malformed (REQ-F-02 ``invalid`` channel) is
+    """A locator Loomweave rejects as malformed (REQ-F-02 ``invalid`` channel) is
     orphaned with reason ``invalid`` — distinguished from ``unresolved``."""
     locator = "malformed-locator"
     with clarion_stub(sei_supported=True) as (base_url, state):
         state.invalid_locators.add(locator)
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, locator, content_hash="h")
 
@@ -272,7 +272,7 @@ def test_pk_collision_merges_to_single_row(tmp_path: Path) -> None:
     loc_b = "py:func:mod::f_alias"
     sei = "clarion:eid:00000000000000000000000000000002"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, loc_a, content_hash="h1")
         db.add_entity_association(issue.id, loc_b, content_hash="h2")
@@ -331,7 +331,7 @@ def test_merge_keeps_newest_attach_axis_and_preserves_attached_by(tmp_path: Path
     loc_b = "py:func:mod::f_alias"
     sei = "clarion:eid:00000000000000000000000000000006"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, loc_a, content_hash="sha256:seed_a")
         db.add_entity_association(issue.id, loc_b, content_hash="sha256:seed_b")
@@ -375,7 +375,7 @@ def test_applied_run_rolls_back_all_writes_on_mid_apply_fault(tmp_path: Path, mo
     sei_a = "clarion:eid:0000000000000000000000000000000a"
     sei_b = "clarion:eid:0000000000000000000000000000000b"
     with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei_a, loc_b: sei_b}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue_a = db.create_issue("a", priority=2)
         issue_b = db.create_issue("b", priority=2)
         db.add_entity_association(issue_a.id, loc_a, content_hash="sha256:a")
@@ -419,7 +419,7 @@ def test_dry_run_merge_count_matches_apply_for_already_sei_survivor(tmp_path: Pa
     loc = "py:func:mod::f_alias"
     sei = "clarion:eid:00000000000000000000000000000007"
     with clarion_stub(sei_supported=True, sei_by_locator={loc: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, sei, content_hash="h1")  # already SEI (survivor)
         db.add_entity_association(issue.id, loc, content_hash="h2")  # collapses onto it
@@ -441,7 +441,7 @@ def test_deleted_issue_tombstones_are_rewritten(tmp_path: Path) -> None:
     orphan_loc = "py:func:mod::gone"
     sei = "clarion:eid:00000000000000000000000000000003"
     with clarion_stub(sei_supported=True, sei_by_locator={resolved_loc: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         _insert_tombstone(db, "test-deleted-1", [resolved_loc, orphan_loc])
 
         report = run_sei_backfill(db, dry_run=False, actor="op")
@@ -486,7 +486,7 @@ def test_malformed_tombstone_entity_ids_is_surfaced_not_silently_dropped(
     ``tombstones_corrupt`` counter, and the row must be left verbatim (never
     rewritten to garbage). Holds on both the dry-run and applied paths."""
     with clarion_stub(sei_supported=True) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         _insert_raw_tombstone(db, "test-corrupt-1", raw_entity_ids)
 
         with caplog.at_level(logging.WARNING, logger="filigree.sei_backfill"):
@@ -512,7 +512,7 @@ def test_empty_tombstone_entity_ids_is_not_flagged_corrupt(tmp_path: Path) -> No
     """A legitimately empty tombstone (``"[]"`` or NULL) is a normal state — a
     deleted issue with no entity bindings — and must NOT be flagged corrupt."""
     with clarion_stub(sei_supported=True) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         _insert_raw_tombstone(db, "test-empty-arr", "[]")
         _insert_raw_tombstone(db, "test-null-ids", "")  # stored NULL/empty
 
@@ -527,7 +527,7 @@ def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
     locator = "py:func:mod::f"
     sei = "clarion:eid:00000000000000000000000000000004"
     with clarion_stub(sei_supported=True, sei_by_locator={locator: sei}) as (base_url, _state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, locator, content_hash="h")
 
@@ -545,7 +545,7 @@ def test_already_migrated_db_is_a_noop(tmp_path: Path) -> None:
     calls, nothing rewritten)."""
     sei = "clarion:eid:00000000000000000000000000000005"
     with clarion_stub(sei_supported=True) as (base_url, state):
-        db = _clarion_db(tmp_path, base_url)
+        db = _loomweave_db(tmp_path, base_url)
         issue = db.create_issue("t", priority=2)
         db.add_entity_association(issue.id, sei, content_hash="h")  # already an SEI
 

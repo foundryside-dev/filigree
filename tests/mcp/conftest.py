@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, SUMMARY_FILENAME, FiligreeDB, write_config
-from filigree.types.core import ClarionConfig, RegistryBackend
+from filigree.types.core import LoomweaveConfig, RegistryBackend
 from tests._seeds import SeededMCPClient, seed_observations, seed_open_bug
 
 # Re-export _parse so existing ``from tests.mcp.conftest import _parse``
@@ -23,14 +23,14 @@ def _make_mcp_db(
     monkeypatch: pytest.MonkeyPatch,
     *,
     registry_backend: RegistryBackend = "local",
-    clarion_config: ClarionConfig | None = None,
+    loomweave_config: LoomweaveConfig | None = None,
 ) -> FiligreeDB:
     filigree_dir = tmp_path / FILIGREE_DIR_NAME
     filigree_dir.mkdir()
     config: dict[str, Any] = {"prefix": "mcp", "version": 1}
     if registry_backend != "local":
         config["registry_backend"] = registry_backend
-        config["clarion"] = dict(clarion_config or {})
+        config["clarion"] = dict(loomweave_config or {})
     write_config(filigree_dir, config)
     (filigree_dir / SUMMARY_FILENAME).write_text("# test\n")
 
@@ -38,10 +38,10 @@ def _make_mcp_db(
         filigree_dir / DB_FILENAME,
         prefix="mcp",
         registry_backend=registry_backend,
-        clarion_config=clarion_config,
-        # MCP fixtures stub Clarion absence; skip the startup capability
+        loomweave_config=loomweave_config,
+        # MCP fixtures stub Loomweave absence; skip the startup capability
         # probe so the placeholder base_url doesn't abort __init__.
-        skip_clarion_capability_probe=True,
+        skip_loomweave_capability_probe=True,
     )
     d.initialize()
 
@@ -72,13 +72,13 @@ def mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Filigre
 
 
 @pytest.fixture
-def clarion_mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[FiligreeDB, None, None]:
-    """Set up MCP globals with a constructor-validated Clarion registry DB."""
+def loomweave_mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[FiligreeDB, None, None]:
+    """Set up MCP globals with a constructor-validated Loomweave registry DB."""
     d = _make_mcp_db(
         tmp_path,
         monkeypatch,
         registry_backend="clarion",
-        clarion_config={"base_url": "http://localhost:9111"},
+        loomweave_config={"base_url": "http://localhost:9111"},
     )
 
     try:

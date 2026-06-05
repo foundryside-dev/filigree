@@ -26,7 +26,7 @@ from filigree.core import (
     write_conf,
     write_config,
 )
-from filigree.registry import EXPECTED_CLARION_API_VERSION
+from filigree.registry import EXPECTED_LOOMWEAVE_API_VERSION
 from filigree.types.api import ErrorCode
 from tests._fakes.clarion_http import clarion_stub
 
@@ -164,19 +164,19 @@ class TestStdioStartupHonoursConf:
         assert isinstance(mcp_mod._db_open_error, ValueError)
         assert "must resolve under the project root" in str(mcp_mod._db_open_error)
 
-    def test_attempt_startup_clarion_version_mismatch_degrades_with_public_envelope(
+    def test_attempt_startup_loomweave_version_mismatch_degrades_with_public_envelope(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Clarion API mismatch must not escape MCP startup as a raw RuntimeError."""
+        """Loomweave API mismatch must not escape MCP startup as a raw RuntimeError."""
         import asyncio
 
         import filigree.mcp_server as mcp_mod
 
         filigree_dir = tmp_path / FILIGREE_DIR_NAME
         filigree_dir.mkdir()
-        with clarion_stub(api_version=EXPECTED_CLARION_API_VERSION + 1) as (base_url, _state):
+        with clarion_stub(api_version=EXPECTED_LOOMWEAVE_API_VERSION + 1) as (base_url, _state):
             write_config(
                 filigree_dir,
                 {
@@ -206,8 +206,8 @@ class TestStdioStartupHonoursConf:
             assert payload["details"] == {
                 "cause": "clarion_registry_version_mismatch",
                 "url": f"{base_url}/api/v1/_capabilities",
-                "expected": EXPECTED_CLARION_API_VERSION,
-                "advertised": EXPECTED_CLARION_API_VERSION + 1,
+                "expected": EXPECTED_LOOMWEAVE_API_VERSION,
+                "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
             }
 
             status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))

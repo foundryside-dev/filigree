@@ -1,19 +1,19 @@
 """SEI conformance oracle — faithful lane against a live ``clarion serve``.
 
 The fast lane (``test_sei_conformance_oracle.py``) proves every producer branch
-against the Clarion stub. This module re-proves the producer's obligations
-against a *real* Clarion authority — the "no grandfathering / demonstrated, not
+against the Loomweave stub. This module re-proves the producer's obligations
+against a *real* Loomweave authority — the "no grandfathering / demonstrated, not
 asserted" gate of the §8 standard.
 
-What it asserts against live Clarion:
+What it asserts against live Loomweave:
   - the SEI capability handshake (``_capabilities.sei.supported``);
-  - **identity_round_trip + opacity** — a real locator Clarion knows is rewritten
+  - **identity_round_trip + opacity** — a real locator Loomweave knows is rewritten
     in place to a real ``clarion:eid:`` SEI by the backfill;
-  - **orphan** (the ambiguous/delete producer shape) — a locator Clarion cannot
+  - **orphan** (the ambiguous/delete producer shape) — a locator Loomweave cannot
     resolve is flagged ORPHAN and kept verbatim, never dropped.
 
-The rename/move/ambiguous *carry* semantics are Clarion-internal (mint vs. carry
-vs. orphan); they are proven on the authority side by Clarion's own run of the
+The rename/move/ambiguous *carry* semantics are Loomweave-internal (mint vs. carry
+vs. orphan); they are proven on the authority side by Loomweave's own run of the
 same shared fixture (``cargo test -p clarion-storage --test
 sei_conformance_oracle``). Filigree's job is to store the SEI opaquely and
 degrade honestly, which is what this test exercises end to end.
@@ -39,7 +39,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from filigree.core import FiligreeDB
-from filigree.registry import ClarionRegistry
+from filigree.registry import LoomweaveRegistry
 from filigree.sei_backfill import run_sei_backfill
 
 pytestmark = [
@@ -70,18 +70,18 @@ def _wait_for_capabilities(base_url: str, *, timeout: float = 15.0) -> dict[str,
         except Exception as exc:  # polling loop swallows everything until deadline
             last_error = exc
             time.sleep(0.2)
-    raise RuntimeError(f"Clarion HTTP read API did not come up at {base_url}: {last_error}")
+    raise RuntimeError(f"Loomweave HTTP read API did not come up at {base_url}: {last_error}")
 
 
 @contextmanager
-def _spawn_clarion_serve(project_root: Path) -> Iterator[tuple[str, dict[str, object]]]:
-    """Install, analyze, and serve a real Clarion over loopback HTTP.
+def _spawn_loomweave_serve(project_root: Path) -> Iterator[tuple[str, dict[str, object]]]:
+    """Install, analyze, and serve a real Loomweave over loopback HTTP.
 
     Yields ``(base_url, capabilities)``. Skips (or fails under
-    ``FILIGREE_REQUIRE_LIVE_CLARION``) when Clarion is absent or too old.
+    ``FILIGREE_REQUIRE_LIVE_CLARION``) when Loomweave is absent or too old.
     """
     if shutil.which("clarion") is None:
-        _live_unavailable("clarion CLI is not on PATH; install Clarion to run this integration test")
+        _live_unavailable("clarion CLI is not on PATH; install Loomweave to run this integration test")
 
     install = subprocess.run(["clarion", "install", "--path", str(project_root)], check=False, capture_output=True, text=True)
     if install.returncode != 0:
@@ -135,12 +135,12 @@ def _spawn_clarion_serve(project_root: Path) -> Iterator[tuple[str, dict[str, ob
 def _require_sei_capable(capabilities: dict[str, object]) -> None:
     sei = capabilities.get("sei")
     if not isinstance(sei, dict) or not sei.get("supported"):
-        _live_unavailable(f"clarion on PATH predates the SEI surface (capabilities.sei={sei!r}); rebuild Clarion to run this test")
+        _live_unavailable(f"clarion on PATH predates the SEI surface (capabilities.sei={sei!r}); rebuild Loomweave to run this test")
 
 
 def _real_file_locator(base_url: str, path: str) -> str | None:
-    """Return the ``core:file:`` locator Clarion minted for ``path`` (or None)."""
-    reg = ClarionRegistry(base_url, timeout_seconds=5)
+    """Return the ``core:file:`` locator Loomweave minted for ``path`` (or None)."""
+    reg = LoomweaveRegistry(base_url, timeout_seconds=5)
     try:
         resolved = reg.resolve_file(path)
     except Exception:
@@ -150,35 +150,35 @@ def _real_file_locator(base_url: str, path: str) -> str | None:
     return resolved["file_id"]
 
 
-def test_backfill_against_live_clarion(tmp_path: Path) -> None:
+def test_backfill_against_live_loomweave(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     (project_root / "src").mkdir(parents=True)
     (project_root / "src" / "sample.py").write_text("def issue_token():\n    return 1\n")
 
-    with _spawn_clarion_serve(project_root) as (base_url, capabilities):
+    with _spawn_loomweave_serve(project_root) as (base_url, capabilities):
         _require_sei_capable(capabilities)
 
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
             registry_backend="clarion",
-            clarion_config={"base_url": base_url, "timeout_seconds": 5},
+            loomweave_config={"base_url": base_url, "timeout_seconds": 5},
             project_root=project_root,
         )
         db.initialize()
-        assert db.clarion_capabilities is not None
-        assert db.clarion_capabilities["sei_supported"] is True
+        assert db.loomweave_capabilities is not None
+        assert db.loomweave_capabilities["sei_supported"] is True
 
-        # A locator Clarion genuinely knows (its minted file entity), bound to an
+        # A locator Loomweave genuinely knows (its minted file entity), bound to an
         # issue, must migrate in place to a real opaque SEI.
         locator = _real_file_locator(base_url, "src/sample.py")
         if locator is None or locator.startswith("clarion:eid:"):
-            _live_unavailable("live Clarion did not surface a resolvable file locator (no language plugin / no entity minted)")
+            _live_unavailable("live Loomweave did not surface a resolvable file locator (no language plugin / no entity minted)")
 
         known_issue = db.create_issue("known", priority=2)
         db.add_entity_association(known_issue.id, locator, content_hash="sha256:body")
 
-        # A locator Clarion cannot resolve → orphan (the producer shape of
+        # A locator Loomweave cannot resolve → orphan (the producer shape of
         # ambiguous/delete), kept verbatim and flagged.
         orphan_locator = "py:func:does.not.exist::nope"
         orphan_issue = db.create_issue("orphan", priority=2)
@@ -192,7 +192,7 @@ def test_backfill_against_live_clarion(tmp_path: Path) -> None:
             (known_issue.id,),
         ).fetchone()
         if not migrated["clarion_entity_id"].startswith("clarion:eid:"):
-            _live_unavailable("live Clarion did not mint a SEI for the file entity; cannot prove round-trip on this build")
+            _live_unavailable("live Loomweave did not mint a SEI for the file entity; cannot prove round-trip on this build")
         assert migrated["migration_orphaned_at"] is None
         assert migrated["clarion_entity_id"] != locator
         assert report.associations_migrated >= 1

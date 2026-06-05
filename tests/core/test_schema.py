@@ -181,7 +181,7 @@ class TestClaimLeaseSchema:
 
 
 class TestEntityAssociationsSchema:
-    """Verify the v15 entity_associations table per ADR-029 (Clarion B.7)."""
+    """Verify the v15 entity_associations table per ADR-029 (Loomweave B.7)."""
 
     def test_fresh_schema_contains_entity_associations_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
@@ -221,7 +221,7 @@ class TestEntityAssociationsSchema:
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Any string must insert successfully — including obviously-malformed
-        # Clarion-shaped IDs. Use raw SQL to bypass any future application-
+        # Loomweave-shaped IDs. Use raw SQL to bypass any future application-
         # layer validation.
         conn.execute(
             "INSERT INTO issues (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",

@@ -50,20 +50,20 @@ def _unused_localhost_url() -> str:
 
 
 @pytest.fixture
-def clarion_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
-    """Dashboard DB configured through the real Clarion fallback constructor path.
+def loomweave_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
+    """Dashboard DB configured through the real Loomweave fallback constructor path.
 
     Uses ``http://clarion.test`` (unresolvable) plus ``allow_local_fallback=True``
     so the startup capability probe fails with ``RegistryUnavailableError`` and
     is downgraded to a WARN — exercising the same fallback wiring an operator
-    would hit with Clarion offline.
+    would hit with Loomweave offline.
     """
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
         check_same_thread=False,
         registry_backend="clarion",
-        clarion_config={
+        loomweave_config={
             "base_url": "http://clarion.test",
             "allow_local_fallback": True,
         },
@@ -74,9 +74,9 @@ def clarion_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None,
 
 
 @pytest.fixture
-async def clarion_fallback_client(clarion_fallback_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
-    """Dashboard client backed by a constructor-validated Clarion fallback DB."""
-    dash_module._db = clarion_fallback_dashboard_db
+async def loomweave_fallback_client(loomweave_fallback_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
+    """Dashboard client backed by a constructor-validated Loomweave fallback DB."""
+    dash_module._db = loomweave_fallback_dashboard_db
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -85,16 +85,16 @@ async def clarion_fallback_client(clarion_fallback_dashboard_db: FiligreeDB) -> 
 
 
 @pytest.fixture
-def unavailable_clarion_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
-    """Dashboard DB configured for Clarion that became unreachable mid-session.
+def unavailable_loomweave_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
+    """Dashboard DB configured for Loomweave that became unreachable mid-session.
 
-    Stands up a Clarion stub long enough for the startup capability probe to
+    Stands up a Loomweave stub long enough for the startup capability probe to
     succeed, then shuts it down so subsequent ``resolve_file`` calls (e.g.
     from a scan-results POST) fail with ``RegistryUnavailableError``. This
-    mirrors the real production failure mode (Filigree starts, Clarion crashes
+    mirrors the real production failure mode (Filigree starts, Loomweave crashes
     later) — the older variant that pointed at an unused port at construction
     time can no longer build a DB because ADR-014 fail-closed startup rejects
-    a Clarion that was never reachable.
+    a Loomweave that was never reachable.
     """
     with clarion_stub() as (base_url, _state):
         db = FiligreeDB(
@@ -102,13 +102,13 @@ def unavailable_clarion_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, No
             prefix="test",
             check_same_thread=False,
             registry_backend="clarion",
-            clarion_config={
+            loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 0.1,
             },
         )
         db.initialize()
-    # Stub has shut down — Clarion is now unreachable for the test's writes.
+    # Stub has shut down — Loomweave is now unreachable for the test's writes.
     try:
         yield db
     finally:
@@ -116,9 +116,9 @@ def unavailable_clarion_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, No
 
 
 @pytest.fixture
-async def unavailable_clarion_client(unavailable_clarion_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
-    """Dashboard client backed by a constructor-validated unreachable Clarion DB."""
-    dash_module._db = unavailable_clarion_dashboard_db
+async def unavailable_loomweave_client(unavailable_loomweave_dashboard_db: FiligreeDB) -> AsyncIterator[AsyncClient]:
+    """Dashboard client backed by a constructor-validated unreachable Loomweave DB."""
+    dash_module._db = unavailable_loomweave_dashboard_db
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
