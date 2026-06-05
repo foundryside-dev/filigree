@@ -184,7 +184,7 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
     """Validate the batch-update request body.
 
     Shared by classic ``POST /api/batch/update`` and loom
-    ``POST /api/loom/batch/update``; both generations accept the same
+    ``POST /api/weft/batch/update``; both generations accept the same
     request shape (``issue_ids``, ``status``, ``priority``, ``assignee``,
     ``fields``, ``actor``). Returns the kwargs dict for
     ``db.batch_update`` on success, or a 400 ``JSONResponse`` on error.
@@ -234,7 +234,7 @@ def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = N
     """Validate the batch-close request body.
 
     Shared by classic ``POST /api/batch/close`` and loom
-    ``POST /api/loom/batch/close``. Returns kwargs for ``db.batch_close``
+    ``POST /api/weft/batch/close``. Returns kwargs for ``db.batch_close``
     on success, or a 400 ``JSONResponse`` on error.
 
     Accepts optional ``force`` (bool) to use the template reverse/escape

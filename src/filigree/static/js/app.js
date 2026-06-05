@@ -209,7 +209,7 @@ async function loadDashboardConfig() {
 
 async function loadRegistryFallbackBanner() {
   const banner = document.getElementById("registryFallbackBanner");
-  const rotationBanner = document.getElementById("clarionRotationBanner");
+  const rotationBanner = document.getElementById("loomweaveRotationBanner");
   if (!banner && !rotationBanner) return;
   try {
     const schema = await fetchFileSchema();
@@ -221,7 +221,7 @@ async function loadRegistryFallbackBanner() {
       }
     }
     if (rotationBanner) {
-      if (schema?.config_flags?.clarion_instance_rotated) {
+      if (schema?.config_flags?.loomweave_instance_rotated) {
         rotationBanner.classList.remove("hidden");
       } else {
         rotationBanner.classList.add("hidden");

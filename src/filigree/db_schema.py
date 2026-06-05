@@ -440,7 +440,7 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 
 -- ---- Deleted-issue tombstones (v20) --------------------------------------
 -- A hard-deleted issue leaves no events/issues row, so federation consumers
--- (Loomweave / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
+-- (Loomweave / Wardline / Shuttle) reconciling off ``GET /api/weft/changes``
 -- would otherwise keep a stale reference forever. ``delete_issue`` writes a
 -- tombstone here in the same transaction it deletes the issue; the changes
 -- feed surfaces it as a synthetic ``issue_deleted`` record cursored on

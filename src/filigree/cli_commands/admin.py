@@ -589,7 +589,7 @@ def migrate(from_beads: bool, beads_db: str | None) -> None:
     is_flag=True,
     help=(
         "Permit ``force=true`` on POST /api/batch/close and "
-        "POST /api/loom/batch/close. Off by default — HTTP callers cannot "
+        "POST /api/weft/batch/close. Off by default — HTTP callers cannot "
         "use the workflow escape lane unless explicitly opted in."
     ),
 )

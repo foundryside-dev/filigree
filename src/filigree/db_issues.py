@@ -1274,7 +1274,7 @@ class IssuesMixin(DBMixinProtocol):
         path. The events row is destroyed along with the issue, so ``undo_last``
         cannot reverse it. A row is written to ``deleted_issues`` in the same
         transaction so federation consumers reconciling off ``GET
-        /api/loom/changes`` learn of the deletion (they would otherwise keep a
+        /api/weft/changes`` learn of the deletion (they would otherwise keep a
         stale reference forever — the changes feed INNER JOINs ``issues``).
 
         Guards (each refuses with a ``ValueError`` unless ``force=True``):

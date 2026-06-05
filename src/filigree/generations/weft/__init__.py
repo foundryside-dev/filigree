@@ -1,6 +1,6 @@
 """Weft API generation — federation-era filigree HTTP surface.
 
-Introduced in 2.0. URL layout is ``/api/loom/*``, using the unified
+Introduced in 2.0. URL layout is ``/api/weft/*``, using the unified
 ``BatchResponse`` / ``ListResponse`` envelopes, the closed ``ErrorCode``
 enum, the ``issue_id`` vocabulary, and composed operations like
 ``start_work``. See ADR-002 for the lifecycle rules and

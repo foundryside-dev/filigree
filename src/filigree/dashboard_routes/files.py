@@ -228,7 +228,7 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     """Validate the scan-results request body.
 
     Shared by the classic ``POST /api/v1/scan-results`` handler and the loom
-    ``POST /api/loom/scan-results`` handler — both generations accept the
+    ``POST /api/weft/scan-results`` handler — both generations accept the
     same request shape; only the response envelope differs (per ADR-002 §6
     and the loom contract fixture). Returns the kwargs dict to splat into
     ``db.process_scan_results`` on success, or an error string on validation
@@ -613,7 +613,7 @@ def create_weft_router() -> APIRouter:
     """Build the loom-generation APIRouter for file tracking and scan
     findings endpoints.
 
-    Phase C1 mounts ``POST /api/loom/scan-results`` per the fixture at
+    Phase C1 mounts ``POST /api/weft/scan-results`` per the fixture at
     ``tests/fixtures/contracts/loom/scan-results.json``. Subsequent
     Phase C tasks add the rest of the loom file/findings surface.
     """
@@ -1082,7 +1082,7 @@ def create_weft_router() -> APIRouter:
         load_errors: list[str] = []
         scanners = list_scanners(scanners_dir, errors=load_errors)
         if load_errors:
-            logger.warning("scanner load errors during /api/loom/scanners: %s", load_errors)
+            logger.warning("scanner load errors during /api/weft/scanners: %s", load_errors)
         items = [scanner_config_to_weft(s) for s in scanners]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
@@ -1116,7 +1116,7 @@ def create_living_surface_router() -> APIRouter:
     async def api_living_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Ingest scan results — living surface (loom envelope).
 
-        Equivalent to /api/loom/scan-results as of 2026-04-26.
+        Equivalent to /api/weft/scan-results as of 2026-04-26.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):

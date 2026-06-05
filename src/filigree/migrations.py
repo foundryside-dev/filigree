@@ -707,7 +707,7 @@ def migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
 
     A hard delete (``FiligreeDB.delete_issue``) removes the issue row and all
     of its child rows, including its ``events``. Because ``GET
-    /api/loom/changes`` (``get_events_since``) INNER JOINs ``issues``, a
+    /api/weft/changes`` (``get_events_since``) INNER JOINs ``issues``, a
     hard-deleted issue is otherwise invisible to federation consumers — they
     keep a stale reference forever. ``delete_issue`` writes a tombstone row
     here in the same transaction, and the changes feed surfaces it as a

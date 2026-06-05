@@ -30,7 +30,7 @@ jobs:
             exit 1
           fi
 
-  live-clarion-release-check:
+  live-loomweave-release-check:
     needs: [ci, validate-tag]
     runs-on: ubuntu-latest
     permissions:
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Check scheduled Live Clarion integration
+      - name: Check scheduled Live Loomweave integration
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -63,7 +63,7 @@ jobs:
             -f status=success \
             -f per_page=20 \
             --jq '.workflow_runs[] | select(.conclusion == "success") | [.head_sha, .html_url] | @tsv'); then
-            echo "::warning title=Live Clarion release checklist::Could not inspect scheduled Live Clarion Integration lane history. Confirm it has passed since Clarion contract changes before publishing federation-sensitive changes."
+            echo "::warning title=Live Loomweave release checklist::Could not inspect scheduled Live Loomweave Integration lane history. Confirm it has passed since Loomweave contract changes before publishing federation-sensitive changes."
             exit 0
           fi
 
@@ -78,13 +78,13 @@ jobs:
           done <<< "$RUNS"
 
           if [ -z "$MATCHED_URL" ]; then
-            echo "::warning title=Live Clarion release checklist::No successful scheduled Live Clarion Integration lane was found at or after Clarion contract changes ($LAST_CONTRACT_SHA). Run CI manually with require_live_clarion=true or wait for the scheduled lane before publishing federation-sensitive changes."
+            echo "::warning title=Live Loomweave release checklist::No successful scheduled Live Loomweave Integration lane was found at or after Loomweave contract changes ($LAST_CONTRACT_SHA). Run CI manually with require_live_loomweave=true or wait for the scheduled lane before publishing federation-sensitive changes."
           else
-            echo "Scheduled Live Clarion Integration proof: $MATCHED_URL"
+            echo "Scheduled Live Loomweave Integration proof: $MATCHED_URL"
           fi
 
   build:
-    needs: [ci, validate-tag, live-clarion-release-check]
+    needs: [ci, validate-tag, live-loomweave-release-check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

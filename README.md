@@ -13,9 +13,9 @@ Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding ag
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
-Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Loom HTTP generation at `/api/loom/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
+Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Weft HTTP generation at `/api/weft/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
 
-Filigree is the work-state member of the **Loom federation** — a family of independently-useful code-governance tools woven together by narrow, additive contracts. Filigree runs fully standalone; the Loom surface is optional enrichment. The authoritative federation roster, axiom, and composition doctrine live at the Loom hub (`~/loom`, see `~/loom/doctrine.md`); Filigree owns its own HTTP/MCP/CLI surface and contracts (see [docs/federation/contracts.md](docs/federation/contracts.md)).
+Filigree is the work-state member of the **Weft federation** — a family of independently-useful code-governance tools woven together by narrow, additive contracts. Filigree runs fully standalone; the Weft surface is optional enrichment. The authoritative federation roster, axiom, and composition doctrine live at the Weft hub (`~/loom`, see `~/loom/doctrine.md`); Filigree owns its own HTTP/MCP/CLI surface and contracts (see [docs/federation/contracts.md](docs/federation/contracts.md)).
 
 **Security boundary:** Filigree does not encrypt, sandbox, harden, or secure stored project data beyond ordinary filesystem permissions and standard HTTPS transport if you put it behind HTTPS yourself. Do not use Filigree for secure, regulated, confidential, or business-sensitive data.
 
@@ -23,7 +23,7 @@ Filigree is the work-state member of the **Loom federation** — a family of ind
 
 - **MCP server** with 115 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
-- **Loom HTTP generation** — stable `/api/loom/*` contracts with classic compatibility for existing integrations
+- **Weft HTTP generation** — stable `/api/weft/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
 - **Workflow templates** — 24 issue types across 9 packs with enforced state machines
 - **Dependency graph** — blockers, ready-queue, critical path analysis
@@ -55,7 +55,7 @@ flowchart TD
 
     DB[("SQLite database<br/>.filigree/filigree.db")]
     Ctx["context.md<br/>(pre-computed orientation)"]
-    Loom["Loom HTTP /api/loom/*<br/>(optional federation)"]
+    Weft["Weft HTTP /api/weft/*<br/>(optional federation)"]
 
     Agent -->|"calls tools over stdio"| MCP
     Human -->|"runs commands"| CLI
@@ -68,7 +68,7 @@ flowchart TD
     DB -->|"regenerates on every mutation"| Ctx
     Ctx -->|"injected at session start"| Agent
 
-    DB -.->|"serves federation peers"| Loom
+    DB -.->|"serves federation peers"| Weft
 ```
 
 **The work loop** is the same whether you drive it from the CLI or an agent
@@ -177,7 +177,7 @@ The dashboard is local-first and assumes loopback/local filesystem trust by defa
 |-------------|----------------|
 | Dashboard UI (`/`) | Open under the local loopback trust boundary |
 | Classic dashboard API (`/api/issues`, `/api/issue/{id}`, `/api/health`) | Open under the local loopback trust boundary |
-| Federation and scanner ingest (`/api/loom/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
+| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
 | MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
 
 ## Why Filigree?
@@ -228,7 +228,7 @@ Nothing in Filigree is encrypted or secured beyond ordinary local filesystem pro
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
 | [MCP Server Reference](docs/mcp.md) | 115 MCP tools for agent-native interaction |
-| [Federation Contracts](docs/federation/contracts.md) | Classic and Loom HTTP generation contracts |
+| [Federation Contracts](docs/federation/contracts.md) | Classic and Weft HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |
 | [Python API Reference](docs/api-reference.md) | FiligreeDB, Issue, TemplateRegistry for programmatic use |

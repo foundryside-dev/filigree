@@ -38,7 +38,7 @@ Filigree is an issue tracker designed for AI coding agents. This roadmap outline
 ## Shipped (v1.6–v2.1)
 
 - **Autodiscovery MCP installs (v1.6)** -- Claude Code and Codex MCP configs use runtime project autodiscovery instead of project-pinned arguments or URL routing
-- **Loom generation and 2.0 surface migration** -- stable `/api/loom/*` HTTP generation, MCP and CLI forward migration, composed `start_work` / `start_next_work`, and schema-mismatch UX across entry points
+- **Weft generation and 2.0 surface migration** -- stable `/api/weft/*` HTTP generation, MCP and CLI forward migration, composed `start_work` / `start_next_work`, and schema-mismatch UX across entry points
 - **2.0.x stability releases** -- linked-worktree discovery, workflow-close semantics, HTTP force-close parity, and agent instruction refreshes
 - **2.1.0 release hardening** -- claim-aware concurrency guardrails, audit-event sequencing, explicit workflow `reverse_transitions`, safer HTTP force-close defaults, entity associations, and registry metadata migrations
 

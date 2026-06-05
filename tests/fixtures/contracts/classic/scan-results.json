@@ -54,7 +54,7 @@
           "findings": [
             {
               "path": "src/example/module.py",
-              "rule_id": "CLA-PY-UNSAFE-EVAL",
+              "rule_id": "LMWV-PY-UNSAFE-EVAL",
               "severity": "high",
               "message": "Use of eval() on untrusted input",
               "line_start": 42,

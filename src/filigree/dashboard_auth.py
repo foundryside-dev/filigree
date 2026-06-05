@@ -3,7 +3,7 @@
 Filigree's HTTP API is loopback-only and historically performs no inbound
 auth (ADR-012: the transport is the trust boundary). When an operator sets
 ``FILIGREE_FEDERATION_API_TOKEN`` (or the legacy ``FILIGREE_API_TOKEN``),
-this module gates the **loom federation surface** (``/api/loom/*`` plus the
+this module gates the **loom federation surface** (``/api/weft/*`` plus the
 living-surface federation aliases), scanner ingest aliases, and dashboard MCP
 HTTP endpoint behind a bearer token, while leaving the classic dashboard API
 and the local dashboard UI open.
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from starlette.middleware.base import BaseHTTPMiddleware
 
 #: Living-surface paths (trailing segment, no ``/api`` prefix) that route to the
-#: loom generation and must be enforced alongside ``/api/loom/*``. Add new
+#: loom generation and must be enforced alongside ``/api/weft/*``. Add new
 #: federation-write aliases here when living-surface routers grow.
 LIVING_FEDERATION_ALIASES: frozenset[str] = frozenset({"scan-results", "observations"})
 CLASSIC_FEDERATION_ALIASES: frozenset[str] = frozenset({"v1/scan-results"})

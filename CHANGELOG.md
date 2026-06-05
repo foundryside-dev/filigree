@@ -17,6 +17,26 @@ release PR and land incrementally on this branch — the entries below are the
 work already merged.** Consumers should not pin to 3.0.0 until the breaking
 checklist is complete and a coordinated consumer-migration window is published.
 
+### Changed (BREAKING)
+
+- **Loomweave / Weft rebrand (schema v26).** The Clarion→Loomweave (sibling/
+  registry/SEI) and Loom→Weft (federation + named API generation) renames land
+  as a hard wire-break: `/api/loom/*`→`/api/weft/*`, the entity-association key
+  `clarion_entity_id`→`loomweave_entity_id`, the SEI prefix
+  `clarion:eid:`→`loomweave:eid:`, finding rule-ids `CLA-`→`LMWV-`, and the token
+  env var `CLARION_LOOM_TOKEN`→`WEFT_TOKEN`. No compatibility aliases. The v26
+  migration rewrites every stored SEI prefix in place — the entity-association
+  column, the `deleted_issues` F5 tombstone `entity_ids` array, and the
+  entity-association audit events — plus finding rule-ids. Deployments must set
+  `WEFT_TOKEN` (the opaque federation bearer token; `CLARION_LOOM_TOKEN` is no
+  longer read). The `registry_backend` value/section is now `loomweave` (a
+  deployed `clarion` config is migrated on load via a one-shot rename-on-load
+  shim). Stored Legis signatures are stale-pending-reissue until Legis re-signs
+  over the renamed `loomweave:eid:` entity_ids (Filigree never verifies them, so
+  reads do not break). The registry error codes (`CLARION_REGISTRY_VERSION_MISMATCH`,
+  `CLARION_OUT_OF_SYNC`) and the `loom://` URI scheme are intentionally NOT
+  renamed in 3.0.0 (the hub has not locked them; tracked as residuals).
+
 ### Added
 
 - **Legis governed-sign-off binding fields (B1, schema v25).** The

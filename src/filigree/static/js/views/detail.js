@@ -195,7 +195,7 @@ export async function openDetail(issueId) {
       const freshness = assoc.freshness_status || "unknown";
       const orphaned = assoc.orphan_status === "orphaned";
       // Only badge a *known* content-axis state. This forward (issue→entity)
-      // lookup never carries Clarion's current hash, so freshness is always
+      // lookup never carries Loomweave's current hash, so freshness is always
       // "unknown" here; rendering that literal is noise, so suppress it.
       const freshnessBadge =
         freshness === "fresh"
@@ -209,7 +209,7 @@ export async function openDetail(issueId) {
       return (
         '<div class="text-xs rounded px-2 py-1 mb-1" style="background:var(--surface-base)">' +
         '<div class="flex items-center gap-2">' +
-        `<span class="truncate flex-1" style="color:var(--text-primary)">${escHtml(assoc.entity_id || assoc.clarion_entity_id || "")}</span>` +
+        `<span class="truncate flex-1" style="color:var(--text-primary)">${escHtml(assoc.entity_id || assoc.loomweave_entity_id || "")}</span>` +
         kind +
         freshnessBadge +
         (orphaned ? '<span class="text-red-300">orphaned</span>' : "") +

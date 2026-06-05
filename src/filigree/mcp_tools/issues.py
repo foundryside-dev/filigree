@@ -167,7 +167,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": (
                             "Include file associations in response (default false; pass true to "
                             "include the files list). Federation consumers typically want a clean "
-                            "issue projection — this aligns with /api/loom/issues/{issue_id} which "
+                            "issue projection — this aligns with /api/weft/issues/{issue_id} which "
                             "has defaulted include_files to false since Phase C3."
                         ),
                     },

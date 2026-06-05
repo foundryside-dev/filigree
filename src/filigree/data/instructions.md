@@ -75,7 +75,7 @@ either catalogue. The verbs you will reach for most:
 - **Cross-product entity bindings (ADR-029):** `entity_association_add`,
   `entity_association_remove`, `entity_association_list`,
   `entity_association_list_by_entity`. Used when a sibling tool (e.g.
-  Clarion) needs to bind a Filigree issue to a function, class, or
+  Loomweave) needs to bind a Filigree issue to a function, class, or
   module identifier it owns. The `entity_id` is an opaque external string
   from Filigree's perspective and may be a `loomweave:eid:...` SEI or a legacy
   locator; callers may also supply `entity_kind` explicitly. The consumer (the sibling tool's read

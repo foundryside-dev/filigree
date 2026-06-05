@@ -59,7 +59,7 @@ class ScanStats(TypedDict):
 
 
 class BatchCloseResponseWeft(TypedDict):
-    """Response shape for ``POST /api/loom/batch/close``.
+    """Response shape for ``POST /api/weft/batch/close``.
 
     ``succeeded`` carries ``SlimIssueWeft`` by default and ``IssueWeft``
     when the request sets ``response_detail=full`` — the union covers
@@ -127,7 +127,7 @@ class IssueWeft(TypedDict):
 
 class IssueLoomWithFiles(IssueWeft):
     """``IssueWeft`` + ``files``: the response shape returned when
-    ``GET /api/loom/issues/{issue_id}?include_files=true``.
+    ``GET /api/weft/issues/{issue_id}?include_files=true``.
 
     The ``files`` payload mirrors what ``db.get_issue_files()`` returns —
     a list of file-association rows. Weft does not yet declare a
@@ -164,7 +164,7 @@ class CommentRecordWeft(TypedDict):
 
 
 class BlockedIssueWeft(SlimIssueWeft):
-    """SlimIssueWeft + ``blocked_by`` for ``GET /api/loom/blocked``.
+    """SlimIssueWeft + ``blocked_by`` for ``GET /api/weft/blocked``.
 
     Mirrors classic ``BlockedIssue`` (which extends ``SlimIssue``) but uses
     the loom ``issue_id`` vocabulary for the entity primary key. Reference
@@ -178,7 +178,7 @@ class BlockedIssueWeft(SlimIssueWeft):
 
 
 class FileRecordWeft(TypedDict):
-    """File record with summary counts — items in ``GET /api/loom/files``.
+    """File record with summary counts — items in ``GET /api/weft/files``.
 
     Mirrors classic ``EnrichedFileItem`` (FileRecordDict + summary +
     associations_count + observation_count) except the file's own primary
@@ -204,7 +204,7 @@ class FileRecordWeft(TypedDict):
 
 
 class FileAssocWeft(TypedDict):
-    """Issue-to-file association row — items in ``GET /api/loom/issues/{issue_id}/files``.
+    """Issue-to-file association row — items in ``GET /api/weft/issues/{issue_id}/files``.
 
     Mirrors classic ``IssueFileAssociation`` except the association row's
     own primary key is renamed ``id`` → ``assoc_id``. The cross-entity
@@ -224,7 +224,7 @@ class FileAssocWeft(TypedDict):
 
 
 class ScanFindingWeft(TypedDict):
-    """Scan finding row — items in ``GET /api/loom/findings`` and the
+    """Scan finding row — items in ``GET /api/weft/findings`` and the
     embedded findings list inside file/finding details.
 
     Mirrors classic ``ScanFindingDict`` except the finding's own primary
@@ -256,7 +256,7 @@ class ScanFindingWeft(TypedDict):
 
 
 class ObservationWeft(TypedDict):
-    """Observation row — items in ``GET /api/loom/observations``.
+    """Observation row — items in ``GET /api/weft/observations``.
 
     Mirrors classic ``ObservationDict`` except the observation's own
     primary key is renamed ``id`` → ``observation_id``. Cross-entity refs
@@ -279,7 +279,7 @@ class ObservationWeft(TypedDict):
 
 
 class ScannerWeft(TypedDict):
-    """Scanner registration entry — items in ``GET /api/loom/scanners``.
+    """Scanner registration entry — items in ``GET /api/weft/scanners``.
 
     Mirrors the dict produced by ``ScannerConfig.to_dict()``. ``name`` is
     the scanner's primary key but is already a string-name (not a uuid),
@@ -294,7 +294,7 @@ class ScannerWeft(TypedDict):
 
 
 class PackWeft(TypedDict):
-    """Workflow pack entry — items in ``GET /api/loom/packs``.
+    """Workflow pack entry — items in ``GET /api/weft/packs``.
 
     Mirrors MCP's ``PackListItem``. ``pack`` is the entity's logical
     primary key; renaming it would harm readability (federation consumers
@@ -314,7 +314,7 @@ class PackWeft(TypedDict):
 
 
 class TypeSummaryWeft(TypedDict):
-    """Issue-type summary entry — items in ``GET /api/loom/types``.
+    """Issue-type summary entry — items in ``GET /api/weft/types``.
 
     Mirrors the classic ``/api/types`` shape. ``type`` is the entity's
     logical primary key (a string name like ``task``); no rename per the
@@ -330,7 +330,7 @@ class TypeSummaryWeft(TypedDict):
 
 
 class IssueEventWeft(TypedDict):
-    """Event row for ``GET /api/loom/issues/{issue_id}/events``.
+    """Event row for ``GET /api/weft/issues/{issue_id}/events``.
 
     Mirrors classic ``EventRecord`` except the event's own primary key
     is renamed ``id`` → ``event_id``. ``issue_id`` is a cross-entity
@@ -350,7 +350,7 @@ class IssueEventWeft(TypedDict):
 
 
 class ChangeRecordWeft(IssueEventWeft):
-    """Cross-issue event row for ``GET /api/loom/changes``.
+    """Cross-issue event row for ``GET /api/weft/changes``.
 
     Extends ``IssueEventWeft`` with the joined ``issue_title`` column —
     matches the structural difference between ``EventRecord`` and
@@ -370,7 +370,7 @@ class ChangeRecordWeft(IssueEventWeft):
 
 
 class ScanIngestResponseWeft(TypedDict):
-    """Response shape for ``POST /api/loom/scan-results``.
+    """Response shape for ``POST /api/weft/scan-results``.
 
     ``succeeded`` contains server-generated finding ids for newly-created
     findings (classic called this ``new_finding_ids``). ``failed`` is

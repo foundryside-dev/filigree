@@ -555,7 +555,7 @@ def create_weft_router() -> APIRouter:
 
     Phase C4 mounts the cross-issue ``GET /changes`` and project-wide
     ``GET /observations`` list endpoints; both are loom-only (no
-    classic dashboard counterpart) and live behind ``/api/loom/`` plus
+    classic dashboard counterpart) and live behind ``/api/weft/`` plus
     living-surface aliases at ``/api/changes`` and ``/api/observations``
     per the C4 aliasing rule (no classic counterpart → alias).
     """
@@ -607,7 +607,7 @@ def create_weft_router() -> APIRouter:
         # discarding it. (filigree-f0f47f5b9d)
         if "offset" in params:
             return _error_response(
-                "offset is not supported on /api/loom/changes; the cursor is the 'since' timestamp.",
+                "offset is not supported on /api/weft/changes; the cursor is the 'since' timestamp.",
                 ErrorCode.VALIDATION,
                 400,
                 {"param": "offset"},
@@ -717,7 +717,7 @@ def create_living_surface_router() -> APIRouter:
     async def api_living_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Ingest observation — living surface (loom envelope).
 
-        Equivalent to /api/loom/observations as of 2026-04-26.
+        Equivalent to /api/weft/observations as of 2026-04-26.
         """
         return await _create_observation_handler(request, db)
 

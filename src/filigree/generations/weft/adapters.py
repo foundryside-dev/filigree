@@ -119,7 +119,7 @@ def comment_record_to_weft(record: CommentRecord, *, created_at: ISOTimestamp | 
 def blocked_issue_to_weft(issue: Issue) -> BlockedIssueWeft:
     """Project a blocked ``Issue`` into the loom shape with ``blocked_by``.
 
-    Used by ``GET /api/loom/blocked``. Mirrors classic ``BlockedIssue``
+    Used by ``GET /api/weft/blocked``. Mirrors classic ``BlockedIssue``
     (which extends ``SlimIssue``) but renames ``id`` → ``issue_id``.
     """
     return BlockedIssueWeft(
@@ -137,7 +137,7 @@ def file_record_to_weft(record: EnrichedFileItem) -> FileRecordWeft:
 
     Renames the file's primary key ``id`` → ``file_id`` and preserves the
     enriched fields (summary, associations_count, observation_count).
-    Used by ``GET /api/loom/files``.
+    Used by ``GET /api/weft/files``.
     """
     return FileRecordWeft(
         file_id=record["id"],
@@ -159,7 +159,7 @@ def file_assoc_to_weft(record: IssueFileAssociation) -> FileAssocWeft:
 
     Renames the association row's primary key ``id`` → ``assoc_id``.
     Cross-entity refs ``file_id`` and ``issue_id`` keep their names.
-    Used by ``GET /api/loom/issues/{issue_id}/files``.
+    Used by ``GET /api/weft/issues/{issue_id}/files``.
     """
     return FileAssocWeft(
         assoc_id=record["id"],
@@ -176,7 +176,7 @@ def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
     """Project a ``ScanFindingDict`` into the loom finding shape.
 
     Renames the finding's primary key ``id`` → ``finding_id``. Used by
-    ``GET /api/loom/findings``.
+    ``GET /api/weft/findings``.
     """
     return ScanFindingWeft(
         finding_id=record["id"],
@@ -205,7 +205,7 @@ def observation_to_weft(record: ObservationDict) -> ObservationWeft:
     """Project an ``ObservationDict`` into the loom observation shape.
 
     Renames the observation's primary key ``id`` → ``observation_id``.
-    Used by ``GET /api/loom/observations``.
+    Used by ``GET /api/weft/observations``.
     """
     return ObservationWeft(
         observation_id=record["id"],
@@ -227,7 +227,7 @@ def scanner_config_to_weft(config: ScannerConfig) -> ScannerWeft:
 
     Mirrors ``ScannerConfig.to_dict()`` exactly. ``name`` is the
     scanner's primary key but is already string-named, so no rename
-    applies. Used by ``GET /api/loom/scanners``.
+    applies. Used by ``GET /api/weft/scanners``.
     """
     return ScannerWeft(
         name=config.name,
@@ -240,7 +240,7 @@ def pack_to_weft(pack: WorkflowPack) -> PackWeft:
     """Project a ``WorkflowPack`` into the loom packs-list shape.
 
     Mirrors MCP's ``PackListItem``. ``pack`` is the entity's logical
-    primary key; not renamed. Used by ``GET /api/loom/packs``.
+    primary key; not renamed. Used by ``GET /api/weft/packs``.
     """
     return PackWeft(
         pack=pack.pack,
@@ -256,7 +256,7 @@ def type_template_to_weft(template: TypeTemplate) -> TypeSummaryWeft:
     """Project a ``TypeTemplate`` into the loom types-list shape.
 
     Matches the classic ``/api/types`` projection (4 keys). Used by
-    ``GET /api/loom/types``.
+    ``GET /api/weft/types``.
     """
     return TypeSummaryWeft(
         type=template.type,
@@ -270,7 +270,7 @@ def issue_event_to_weft(record: EventRecord) -> IssueEventWeft:
     """Project an ``EventRecord`` into the loom event shape.
 
     Renames the event row's primary key ``id`` → ``event_id``. Used by
-    ``GET /api/loom/issues/{issue_id}/events``. The ``issue_id`` field
+    ``GET /api/weft/issues/{issue_id}/events``. The ``issue_id`` field
     is a cross-entity ref and is kept as-is.
     """
     return IssueEventWeft(
@@ -289,7 +289,7 @@ def change_record_to_weft(record: EventRecordWithTitle) -> ChangeRecordWeft:
     """Project an ``EventRecordWithTitle`` into the loom change shape.
 
     Same as ``issue_event_to_weft`` but includes the joined
-    ``issue_title``. Used by ``GET /api/loom/changes``.
+    ``issue_title``. Used by ``GET /api/weft/changes``.
     """
     return ChangeRecordWeft(
         event_id=record["id"],
