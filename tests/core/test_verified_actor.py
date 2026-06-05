@@ -138,3 +138,29 @@ def test_annotation_event_verified_actor_null_when_unset(db: FiligreeDB, tmp_pat
     row = db.conn.execute("SELECT verified_actor FROM annotation_events ORDER BY rowid DESC LIMIT 1").fetchone()
     assert row is not None
     assert row["verified_actor"] is None
+
+
+def test_export_import_round_trips_verified_actor(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src" / ".filigree"
+    src_dir.mkdir(parents=True)
+    src = FiligreeDB.from_filigree_dir(src_dir)
+    src.set_verified_actor("alice")
+    issue = src.create_issue(title="t", actor="agent-x")
+    src.add_comment(issue.id, "hello", author="agent-x")
+    export_path = tmp_path / "dump.jsonl"
+    src.export_jsonl(export_path)
+
+    dst_dir = tmp_path / "dst" / ".filigree"
+    dst_dir.mkdir(parents=True)
+    dst = FiligreeDB.from_filigree_dir(dst_dir)
+    # Import must NOT stamp the importer's identity; it restores the recorded one.
+    dst.set_verified_actor("bob")
+    dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+    ev = dst.conn.execute(
+        "SELECT verified_actor FROM events WHERE issue_id = ? AND event_type = 'created'",
+        (issue.id,),
+    ).fetchone()
+    assert ev["verified_actor"] == "alice"
+    cm = dst.conn.execute("SELECT verified_author FROM comments WHERE issue_id = ?", (issue.id,)).fetchone()
+    assert cm["verified_author"] == "alice"

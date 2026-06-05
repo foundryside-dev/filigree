@@ -1308,14 +1308,15 @@ class MetaMixin(DBMixinProtocol):
                 if merge:
                     created = _normalize_iso_to_utc(record.get("created_at")) or _now_iso()
                     cursor = self.conn.execute(
-                        "INSERT INTO comments (issue_id, author, text, created_at) "
-                        "SELECT ?, ?, ?, ? "
+                        "INSERT INTO comments (issue_id, author, verified_author, text, created_at) "
+                        "SELECT ?, ?, ?, ?, ? "
                         "WHERE NOT EXISTS ("
                         "  SELECT 1 FROM comments WHERE issue_id = ? AND author = ? AND text = ? AND created_at = ?"
                         ")",
                         (
                             record.get("issue_id", ""),
                             record.get("author", ""),
+                            record.get("verified_author"),
                             record.get("text", ""),
                             created,
                             record.get("issue_id", ""),
@@ -1326,10 +1327,11 @@ class MetaMixin(DBMixinProtocol):
                     )
                 else:
                     cursor = self.conn.execute(
-                        "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO comments (issue_id, author, verified_author, text, created_at) VALUES (?, ?, ?, ?, ?)",
                         (
                             record.get("issue_id", ""),
                             record.get("author", ""),
+                            record.get("verified_author"),
                             record.get("text", ""),
                             _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         ),
@@ -1344,12 +1346,13 @@ class MetaMixin(DBMixinProtocol):
                 # (filigree-20911dfe6d)
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO events "
-                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(issue_id, event_type, actor, verified_actor, old_value, new_value, comment, created_at, event_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.get("issue_id", ""),
                         record.get("event_type", ""),
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         record.get("old_value"),
                         record.get("new_value"),
                         record.get("comment", ""),
@@ -1399,8 +1402,8 @@ class MetaMixin(DBMixinProtocol):
                 if merge:
                     created = _normalize_iso_to_utc(record.get("created_at")) or _now_iso()
                     cursor = self.conn.execute(
-                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, created_at) "
-                        "SELECT ?, ?, ?, ?, ?, ? "
+                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, verified_actor, created_at) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ? "
                         "WHERE NOT EXISTS ("
                         "  SELECT 1 FROM file_events "
                         "  WHERE file_id = ? AND event_type = ? AND field = ? AND old_value = ? AND new_value = ? AND created_at = ?"
@@ -1411,6 +1414,7 @@ class MetaMixin(DBMixinProtocol):
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            record.get("verified_actor"),
                             created,
                             file_id,
                             record.get("event_type", "file_metadata_update"),
@@ -1422,13 +1426,16 @@ class MetaMixin(DBMixinProtocol):
                     )
                 else:
                     cursor = self.conn.execute(
-                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO file_events "
+                        "(file_id, event_type, field, old_value, new_value, verified_actor, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             file_id,
                             record.get("event_type", "file_metadata_update"),
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            record.get("verified_actor"),
                             _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         ),
                     )

@@ -52,6 +52,9 @@ def record_reconciliation_debt_comment(
     actor: str = RECONCILIATION_DEBT_ACTOR,
 ) -> None:
     try:
+        # ADR-012: reconciliation-debt is a system-authored cascade write with no
+        # transport proof (bare conn, system actor). verified_author is left NULL
+        # intentionally — this is a NEW record, not a restored one.
         conn.execute(
             "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
             (issue_id, actor, f"{RECONCILIATION_DEBT_PREFIX} {text}", _now_iso()),
