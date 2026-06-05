@@ -22,6 +22,7 @@ from filigree.models import FileRecord
 from filigree.registry import (
     CLARION_BATCH_MAX_QUERIES,
     BatchQuery,
+    BatchResolution,
     ClarionRegistry,
     ClarionResolvedFile,
     LocalRegistry,
@@ -1584,6 +1585,60 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         # CONTRACT-1: scan-results now goes through resolve_files_batch, so
         # the fallback WARN message is the batch-resolve variant.
         assert "using local file registry fallback" in caplog.text
+    finally:
+        db.close()
+
+
+def test_filigree_db_allow_local_fallback_rejects_invalid_clarion_batch_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolution_attempts: list[list[str]] = []
+
+    class MalformedBatchClarionRegistry:
+        def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
+            self.base_url = base_url
+            self.timeout_seconds = timeout_seconds
+            self.auth_token = auth_token
+
+        def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
+            raise AssertionError("scan ingest must use the batch resolver")
+
+        def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
+            resolution_attempts.append([query["path"] for query in queries])
+            raise RegistryUnavailableError(
+                "Clarion batch resolve returned an ambiguous briefing_blocked response",
+                url=f"{self.base_url}/api/v1/files/batch",
+                path="",
+                cause_kind="invalid_response",
+            )
+
+        def is_displaced(self) -> bool:
+            return True
+
+    monkeypatch.setattr("filigree.core.ClarionRegistry", MalformedBatchClarionRegistry)
+    db = FiligreeDB(
+        tmp_path / "filigree.db",
+        prefix="test",
+        registry_backend="clarion",
+        clarion_config={
+            "base_url": "http://clarion.test",
+            "timeout_seconds": 0.1,
+            "allow_local_fallback": True,
+        },
+    )
+    try:
+        db.initialize()
+
+        with pytest.raises(RegistryUnavailableError) as exc_info:
+            db.process_scan_results(
+                scan_source="ruff",
+                findings=[{"path": "src/secrets.py", "rule_id": "S001", "severity": "high", "message": "msg"}],
+            )
+
+        assert exc_info.value.cause_kind == "invalid_response"
+        assert resolution_attempts == [["src/secrets.py"]]
+        assert db.get_file_by_path("src/secrets.py") is None
     finally:
         db.close()
 

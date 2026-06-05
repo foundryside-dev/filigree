@@ -627,6 +627,15 @@ VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[Regi
 class _ClarionLocalFallbackRegistry:
     """Try Clarion first, then fall back to local IDs for availability failures."""
 
+    @staticmethod
+    def _should_fallback(exc: RegistryUnavailableError) -> bool:
+        # ``invalid_response`` means Clarion was reachable but violated the
+        # resolver contract. Treat that as a fail-closed protocol error rather
+        # than an availability failure; falling back locally could mask
+        # security-bearing outcomes such as ``briefing_blocked`` embedded in an
+        # ambiguous malformed batch response.
+        return exc.cause_kind != "invalid_response"
+
     def __init__(self, primary: RegistryProtocol, fallback: LocalRegistry, *, base_url: str) -> None:
         self._primary = primary
         self._fallback = fallback
@@ -642,6 +651,8 @@ class _ClarionLocalFallbackRegistry:
         try:
             return self._primary.resolve_file(path, language=language, actor=actor)
         except RegistryUnavailableError as exc:
+            if not self._should_fallback(exc):
+                raise
             logger.warning(
                 "Clarion registry backend unavailable; using local file registry fallback",
                 extra={
@@ -668,6 +679,9 @@ class _ClarionLocalFallbackRegistry:
         from a *successful* batch call pass through verbatim — those are not
         availability failures and must NOT be silently re-attached locally
         (briefing-blocked in particular is a security-bearing refusal).
+        Likewise, reachable malformed Clarion responses (``cause_kind``
+        ``invalid_response``) fail closed instead of falling back because they
+        may contain ambiguous security-bearing outcomes.
 
         For primaries that only implement ``resolve_file`` (test fakes
         predating CONTRACT-1), the loop helper from ``filigree.registry``
@@ -680,6 +694,8 @@ class _ClarionLocalFallbackRegistry:
                 return result
             return resolve_files_batch_via_loop(self._primary, queries, actor=actor)
         except RegistryUnavailableError as exc:
+            if not self._should_fallback(exc):
+                raise
             logger.warning(
                 "Clarion registry backend unavailable for batch resolve; using local file registry fallback",
                 extra={
