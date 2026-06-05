@@ -2268,7 +2268,7 @@ class TestInstallMcpServerMode:
 
     def test_server_mode_no_warning_with_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """With a token configured, the server-mode install message carries no warning."""
-        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")  # noqa: S105 - test fixture
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
             ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
