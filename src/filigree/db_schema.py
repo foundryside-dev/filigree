@@ -405,8 +405,8 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
 
 -- ---- Cross-product entity associations (ADR-029) --------------------------
 -- Binds Filigree issues to opaque external entities.
--- The historical clarion_entity_id column name is retained for compatibility,
--- but the value is OPAQUE to Filigree: no grammar parsing, no CHECK constraint
+-- The loomweave_entity_id column (renamed from clarion_entity_id in v26) holds
+-- the value OPAQUE to Filigree: no grammar parsing, no CHECK constraint
 -- on its shape, and no inference of kind from the ID string. Callers may supply
 -- entity_kind metadata explicitly when they already know it.
 
@@ -415,11 +415,11 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
 -- whose stored locator no longer resolved to an alive SEI at backfill time
 -- (Loomweave answered ``alive:false``): the locator is kept verbatim — never
 -- silently dropped — and stamped here so an operator can review the orphan.
--- It is metadata about the migration, not part of the opaque ``clarion_entity_id``
+-- It is metadata about the migration, not part of the opaque ``loomweave_entity_id``
 -- value or its wire shape, both of which are unchanged.
 CREATE TABLE IF NOT EXISTS entity_associations (
     issue_id                TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-    clarion_entity_id       TEXT NOT NULL,
+    loomweave_entity_id     TEXT NOT NULL,
     content_hash_at_attach  TEXT NOT NULL,
     attached_at             TEXT NOT NULL,
     attached_by             TEXT NOT NULL,
@@ -432,11 +432,11 @@ CREATE TABLE IF NOT EXISTS entity_associations (
     -- stored verbatim and echoed back, exactly like content_hash_at_attach.
     signature               TEXT,
     signoff_seq             INTEGER,
-    PRIMARY KEY (issue_id, clarion_entity_id)
+    PRIMARY KEY (issue_id, loomweave_entity_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
-  ON entity_associations(clarion_entity_id);
+  ON entity_associations(loomweave_entity_id);
 
 -- ---- Deleted-issue tombstones (v20) --------------------------------------
 -- A hard-deleted issue leaves no events/issues row, so federation consumers
@@ -456,7 +456,7 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 -- re-deletion (``INSERT OR REPLACE`` on the same id) assigns a NEW, strictly
 -- higher ``seq`` and re-notifies consumers as a fresh deletion, monotonically.
 --
--- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``clarion_entity_id``s
+-- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``loomweave_entity_id``s
 -- whose ``entity_associations`` rows the delete cascade removed. ``delete_issue``
 -- captures them BEFORE the cascade so the synthetic ``issue_deleted`` change record
 -- can name them as ``affected_entities`` — a consumer must purge its mirrored
@@ -584,4 +584,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26

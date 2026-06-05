@@ -894,7 +894,7 @@ class MetaMixin(DBMixinProtocol):
         ("comment", "SELECT * FROM comments ORDER BY created_at"),
         ("event", "SELECT * FROM events ORDER BY created_at"),
         ("file_association", "SELECT * FROM file_associations ORDER BY created_at, file_id, issue_id"),
-        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, clarion_entity_id"),
+        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, loomweave_entity_id"),
         ("file_event", "SELECT * FROM file_events ORDER BY created_at, file_id"),
         ("observation", "SELECT * FROM observations ORDER BY created_at"),
         ("dismissed_observation", "SELECT * FROM dismissed_observations ORDER BY dismissed_at"),
@@ -1386,12 +1386,12 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(entity_associations):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO entity_associations "
-                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, "
+                    "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by, "
                     "migration_orphaned_at, signature, signoff_seq) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["issue_id"],
-                        record["clarion_entity_id"],
+                        record["loomweave_entity_id"],
                         record["content_hash_at_attach"],
                         _normalize_iso_to_utc(record.get("attached_at")) or _now_iso(),
                         record.get("attached_by", ""),

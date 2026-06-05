@@ -31,11 +31,11 @@ class _FakeDB:
 
 
 def _governed_rows() -> list[dict[str, object]]:
-    return [{"clarion_entity_id": "sei:a", "signature": "deadbeef", "signoff_seq": 1}]
+    return [{"loomweave_entity_id": "sei:a", "signature": "deadbeef", "signoff_seq": 1}]
 
 
 def _ungoverned_rows() -> list[dict[str, object]]:
-    return [{"clarion_entity_id": "sei:a", "signature": None, "signoff_seq": None}]
+    return [{"loomweave_entity_id": "sei:a", "signature": None, "signoff_seq": None}]
 
 
 def test_governance_off_proceeds_without_reading_db(monkeypatch: pytest.MonkeyPatch) -> None:

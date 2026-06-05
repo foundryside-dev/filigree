@@ -40,7 +40,7 @@ class TestAddEntityAssociationMCP:
         )
         assert result["issue_id"] == issue.id
         assert result["entity_id"] == "py:func:parser.tokenize"
-        assert result["clarion_entity_id"] == "py:func:parser.tokenize"
+        assert result["loomweave_entity_id"] == "py:func:parser.tokenize"
         assert result["content_hash_at_attach"] == "abc123"
         assert result["attached_by"] == "alice"
 
@@ -193,7 +193,7 @@ class TestListEntityAssociationsMCP:
             {"issue_id": issue.id, "entity_id": "py:func:b", "content_hash": "h2"},
         )
         result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
-        ids = {row["clarion_entity_id"] for row in result["associations"]}
+        ids = {row["loomweave_entity_id"] for row in result["associations"]}
         assert ids == {"py:func:a", "py:func:b"}
 
     async def test_list_does_not_compute_drift(self, mcp_db: FiligreeDB) -> None:

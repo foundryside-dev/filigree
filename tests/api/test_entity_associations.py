@@ -38,7 +38,7 @@ class TestListEntityAssociationsHTTP:
         resp = await client.get(f"/api/issue/{issue_id}/entity-associations")
         assert resp.status_code == 200
         body = resp.json()
-        ids = {row["clarion_entity_id"] for row in body["associations"]}
+        ids = {row["loomweave_entity_id"] for row in body["associations"]}
         assert ids == {"py:func:a", "py:func:b"}
 
     async def test_missing_issue_returns_404(self, client: AsyncClient) -> None:
@@ -69,7 +69,7 @@ class TestAddEntityAssociationHTTP:
         assert resp.status_code == 201
         body = resp.json()
         assert body["entity_id"] == "py:func:tokenize"
-        assert body["clarion_entity_id"] == "py:func:tokenize"
+        assert body["loomweave_entity_id"] == "py:func:tokenize"
         assert body["content_hash_at_attach"] == "hash-a"
         assert body["attached_by"] == "alice"
 
@@ -109,7 +109,7 @@ class TestAddEntityAssociationHTTP:
 
         listed = await client.get(f"/api/issue/{issue_id}/entity-associations")
         assert listed.status_code == 200
-        row = next(r for r in listed.json()["associations"] if r["clarion_entity_id"] == "sei:gov")
+        row = next(r for r in listed.json()["associations"] if r["loomweave_entity_id"] == "sei:gov")
         assert row["signature"] == "deadbeef"
         assert row["signoff_seq"] == 7
 
@@ -251,7 +251,7 @@ class TestListAssociationsByEntityHTTP:
         body = resp.json()
         assert {row["issue_id"] for row in body["associations"]} == {a_id, b_id}
         assert all(row["entity_id"] == target for row in body["associations"])
-        assert all(row["clarion_entity_id"] == target for row in body["associations"])
+        assert all(row["loomweave_entity_id"] == target for row in body["associations"])
 
     async def test_current_content_hash_marks_freshness(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         a_id = dashboard_db.ids["a"]

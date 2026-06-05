@@ -193,7 +193,7 @@ class TestEntityAssociationsSchema:
         columns = _get_table_columns(conn, "entity_associations")
         assert set(columns) == {
             "issue_id",
-            "clarion_entity_id",
+            "loomweave_entity_id",
             "content_hash_at_attach",
             "attached_at",
             "attached_by",
@@ -205,14 +205,14 @@ class TestEntityAssociationsSchema:
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
         pk_columns = {row[1] for row in pk_rows if row[5]}
-        assert pk_columns == {"issue_id", "clarion_entity_id"}
+        assert pk_columns == {"issue_id", "loomweave_entity_id"}
 
         # Reverse-lookup index per ADR-029 §"Decision 1".
         assert "ix_entity_assoc_entity" in _get_index_names(conn)
         conn.close()
 
     def test_fresh_schema_no_entity_id_check_constraint(self, tmp_path: Path) -> None:
-        """Federation §5 — clarion_entity_id must be opaque (no grammar parsing).
+        """Federation §5 — loomweave_entity_id must be opaque (no grammar parsing).
 
         Pin the absence of any CHECK constraint on the entity_id column.
         Adding one would couple Filigree to ADR-003's grammar and break
@@ -229,7 +229,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES (?, ?, ?, ?, ?)",
             ("filigree-test", "not-a-clarion-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
@@ -247,7 +247,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES (?, ?, ?, ?, ?)",
             ("filigree-test", "py:func:foo", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
@@ -276,14 +276,14 @@ class TestEntityAssociationsSchema:
         assert "entity_associations" in _get_table_names(conn)
         assert "ix_entity_assoc_entity" in _get_index_names(conn)
         columns = _get_table_columns(conn, "entity_associations")
-        assert "clarion_entity_id" in columns
+        assert "loomweave_entity_id" in columns
         assert "content_hash_at_attach" in columns
         conn.close()
 
     def test_migration_v21_to_v22_adds_migration_orphaned_at_column(self, tmp_path: Path) -> None:
         """Pin the v21->v22 migration in isolation: ALTER adds the nullable
         ``entity_associations.migration_orphaned_at`` ORPHAN marker (ADR-038 §7).
-        Existing rows read NULL; the opaque ``clarion_entity_id`` is untouched."""
+        Existing rows read NULL; the opaque ``loomweave_entity_id`` is untouched."""
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Simulate a true v21 DB: drop the marker column and stamp the prior version.
@@ -295,7 +295,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
             ("2026-05-01T00:00:00+00:00",),
         )
@@ -333,7 +333,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES ('iss-1', 'not-a-clarion-id', 'h', ?, 'x')",
             ("2026-05-01T00:00:00+00:00",),
         )
@@ -410,7 +410,7 @@ class TestEntityAssociationsSchema:
         """Pin the v24->v25 migration: ALTER adds the nullable
         ``entity_associations.signature`` (TEXT) and ``signoff_seq`` (INTEGER)
         Legis governed-signoff binding fields (B1). Existing rows read NULL;
-        the opaque ``clarion_entity_id`` is untouched."""
+        the opaque ``loomweave_entity_id`` is untouched."""
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Simulate a true v24 DB: drop the new columns and stamp the prior version.
@@ -423,7 +423,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
             ("2026-05-01T00:00:00+00:00",),
         )
@@ -460,6 +460,82 @@ class TestEntityAssociationsSchema:
         conn.commit()
         assert "signature" in _get_table_columns(conn, "entity_associations")
         assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v25_to_v26_renames_column_and_rewrites_prefixes(self, tmp_path: Path) -> None:
+        """v25→v26 (Loomweave/Weft rebrand data pass): rename the
+        entity-association column ``clarion_entity_id`` -> ``loomweave_entity_id``
+        (PK rewritten by SQLite RENAME COLUMN), rewrite stored SEI prefixes
+        ``clarion:eid:`` -> ``loomweave:eid:`` and finding rule-id prefixes
+        ``CLA-`` -> ``LMWV-`` in place, suffixes preserved."""
+        from filigree.migrations import migrate_v25_to_v26
+
+        conn = _make_db(tmp_path)
+        # minimal v25 shape for the two affected tables (old clarion_entity_id column)
+        conn.execute(
+            "CREATE TABLE entity_associations ("
+            "issue_id TEXT NOT NULL, clarion_entity_id TEXT NOT NULL, "
+            "content_hash_at_attach TEXT NOT NULL, attached_at TEXT NOT NULL, attached_by TEXT NOT NULL, "
+            "PRIMARY KEY (issue_id, clarion_entity_id))"
+        )
+        conn.execute("CREATE INDEX ix_entity_assoc_entity ON entity_associations(clarion_entity_id)")
+        conn.execute("CREATE TABLE scan_findings (id TEXT PRIMARY KEY, rule_id TEXT DEFAULT '')")
+        # F5 tombstone array + audit events carry the same SEI value (all must be rewritten).
+        conn.execute("CREATE TABLE deleted_issues (issue_id TEXT, entity_ids TEXT NOT NULL DEFAULT '[]')")
+        conn.execute(
+            "CREATE TABLE events (issue_id TEXT, event_type TEXT, actor TEXT, old_value TEXT, new_value TEXT, comment TEXT DEFAULT '')"
+        )
+        conn.execute("INSERT INTO entity_associations VALUES ('filigree-a', 'clarion:eid:deadbeef', 'h', 't', 'me')")
+        conn.execute("INSERT INTO scan_findings (id, rule_id) VALUES ('f1', 'CLA-PY-UNSAFE-EVAL')")
+        conn.execute("INSERT INTO scan_findings (id, rule_id) VALUES ('f2', '')")
+        conn.execute("""INSERT INTO deleted_issues VALUES ('filigree-z', '["clarion:eid:abc", "clarion:eid:def"]')""")
+        conn.execute("INSERT INTO events VALUES ('filigree-a', 'entity_association_added', 'me', NULL, 'clarion:eid:deadbeef', 'h')")
+        conn.execute("INSERT INTO events VALUES ('filigree-a', 'entity_association_removed', 'me', 'clarion:eid:gone', NULL, '')")
+        conn.commit()
+
+        migrate_v25_to_v26(conn)
+
+        cols = _get_table_columns(conn, "entity_associations")
+        assert "loomweave_entity_id" in cols
+        assert "clarion_entity_id" not in cols
+        eid = conn.execute("SELECT loomweave_entity_id FROM entity_associations").fetchone()[0]
+        assert eid == "loomweave:eid:deadbeef"  # prefix rewritten, suffix preserved
+        rid = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f1'").fetchone()[0]
+        assert rid == "LMWV-PY-UNSAFE-EVAL"  # CLA- -> LMWV-, suffix preserved
+        empty = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f2'").fetchone()[0]
+        assert empty == ""  # untouched
+        # F5 tombstone array rewritten (both elements), no clarion:eid: survives.
+        ids = conn.execute("SELECT entity_ids FROM deleted_issues").fetchone()[0]
+        assert ids == '["loomweave:eid:abc", "loomweave:eid:def"]'
+        # audit events rewritten in new_value (added) and old_value (removed)
+        added = conn.execute("SELECT new_value FROM events WHERE event_type = 'entity_association_added'").fetchone()[0]
+        assert added == "loomweave:eid:deadbeef"
+        removed = conn.execute("SELECT old_value FROM events WHERE event_type = 'entity_association_removed'").fetchone()[0]
+        assert removed == "loomweave:eid:gone"
+        # PK rewritten to the new column name
+        pk = [r[1] for r in conn.execute("PRAGMA table_info(entity_associations)") if r[5]]
+        assert pk == ["issue_id", "loomweave_entity_id"]
+        conn.close()
+
+    def test_migration_v25_to_v26_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v25_to_v26
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Fresh schema already has loomweave_entity_id; re-running must be a no-op.
+        migrate_v25_to_v26(conn)
+        assert "loomweave_entity_id" in _get_table_columns(conn, "entity_associations")
+        assert "clarion_entity_id" not in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_loomweave_entity_id_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        cols = _get_table_columns(conn, "entity_associations")
+        assert "loomweave_entity_id" in cols
+        assert "clarion_entity_id" not in cols
         conn.close()
 
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
@@ -2047,8 +2123,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_25(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 25
+    def test_current_schema_version_is_26(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 26
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

@@ -745,7 +745,7 @@ def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
     that mirrors the reverse lookup (``list_associations_by_entity``) would keep
     returning the deleted issue and surface a user-facing phantom (filigree-f3bf56554c).
 
-    This adds a JSON-array column holding the affected ``clarion_entity_id``s,
+    This adds a JSON-array column holding the affected ``loomweave_entity_id``s,
     captured in ``delete_issue`` before the cascade and surfaced as
     ``affected_entities`` on the change record. The column is ``NOT NULL DEFAULT
     '[]'`` to match the fresh ``SCHEMA_SQL`` shape (SQLite permits a NOT NULL ADD
@@ -761,7 +761,7 @@ def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
     """v21 -> v22: Add ``entity_associations.migration_orphaned_at`` (SEI backfill).
 
     The locator→SEI value migration (ADR-038 §7, driven by ``filigree
-    sei-backfill``) rewrites each opaque ``clarion_entity_id`` from its locator to
+    sei-backfill``) rewrites each opaque ``loomweave_entity_id`` from its locator to
     the resolved SEI *in place* — the column name, wire shape, and storage
     mechanism are unchanged. A locator that no longer resolves (Loomweave answers
     ``alive:false``) must be kept verbatim and flagged for human review, never
@@ -826,6 +826,67 @@ def migrate_v24_to_v25(conn: sqlite3.Connection) -> None:
     add_column(conn, "entity_associations", "signoff_seq", "INTEGER", default=None)
 
 
+def migrate_v25_to_v26(conn: sqlite3.Connection) -> None:
+    """v25 -> v26: Loomweave/Weft rebrand data pass.
+
+    Renames the entity-association column ``clarion_entity_id`` ->
+    ``loomweave_entity_id`` (SQLite's RENAME COLUMN rewrites the PRIMARY KEY
+    reference) and rewrites EVERY stored ``clarion:eid:`` SEI prefix ->
+    ``loomweave:eid:`` and finding rule-id prefix ``CLA-`` -> ``LMWV-`` in
+    place. Suffixes are preserved. Idempotent under re-run (guards on the source
+    name/prefix existing).
+
+    The SEI value is stored in more than one place — every site is rewritten so
+    a federation consumer (already on ``loomweave:eid:``) reconciling off any of
+    them matches:
+      - ``entity_associations.loomweave_entity_id`` — the binding itself.
+      - ``deleted_issues.entity_ids`` — the F5 tombstone JSON array surfaced as
+        an ``issue_deleted`` change record's ``affected_entities``; a stale
+        prefix here reproduces the phantom-reverse-lookup bug (filigree-f3bf56554c).
+      - ``events`` audit log — the entity-association add/remove/refresh events
+        carry the SEI in ``new_value`` / ``old_value`` / ``comment``.
+
+    NOTE (rule-id dedup): the ``CLA- -> LMWV-`` rewrite could in principle trip
+    the ``scan_findings`` unique dedup index if a DB straddled the cutover and
+    already held an ``LMWV-`` finding at the same (file, source, line). Filigree
+    is the last federation member to rebrand, so a real Filigree DB holds only
+    ``CLA-`` rows; if it ever collided the transaction rolls back cleanly (no
+    corruption). The v19 fingerprint-partition index makes it lower-probability.
+
+    NOTE (Legis): rewriting the SEI prefix changes the entity_id string the
+    Legis HMAC was cut over, so every stored ``signature`` becomes
+    stale-pending-reissue. Filigree never verifies the signature, so reads do
+    not break; Legis re-signs in lockstep (see the rebrand epic, T0b).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(entity_associations)").fetchall()}
+    if "clarion_entity_id" in cols and "loomweave_entity_id" not in cols:
+        rename_column(conn, "entity_associations", "clarion_entity_id", "loomweave_entity_id")
+    # Re-affirm the entity index under the new column name (drop old, recreate).
+    drop_index(conn, "ix_entity_assoc_entity")
+    add_index(conn, "ix_entity_assoc_entity", "entity_associations", ["loomweave_entity_id"])
+    # Rewrite stored SEI prefixes (clarion:eid: -> loomweave:eid:), suffix preserved.
+    conn.execute(
+        "UPDATE entity_associations SET loomweave_entity_id = "
+        "'loomweave:eid:' || substr(loomweave_entity_id, length('clarion:eid:') + 1) "
+        "WHERE loomweave_entity_id LIKE 'clarion:eid:%'"
+    )
+    # F5 deletion-tombstone affected-entity arrays (JSON text) carry the same SEI.
+    conn.execute(
+        "UPDATE deleted_issues SET entity_ids = replace(entity_ids, 'clarion:eid:', 'loomweave:eid:') "
+        "WHERE entity_ids LIKE '%clarion:eid:%'"
+    )
+    # Entity-association audit events store the SEI verbatim in new_value/old_value/comment.
+    conn.execute(
+        "UPDATE events SET "
+        "new_value = replace(new_value, 'clarion:eid:', 'loomweave:eid:'), "
+        "old_value = replace(old_value, 'clarion:eid:', 'loomweave:eid:'), "
+        "comment = replace(comment, 'clarion:eid:', 'loomweave:eid:') "
+        "WHERE new_value LIKE '%clarion:eid:%' OR old_value LIKE '%clarion:eid:%' OR comment LIKE '%clarion:eid:%'"
+    )
+    # Rewrite stored finding rule-id prefixes (CLA- -> LMWV-), suffix preserved.
+    conn.execute("UPDATE scan_findings SET rule_id = 'LMWV-' || substr(rule_id, length('CLA-') + 1) WHERE rule_id LIKE 'CLA-%'")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -851,6 +912,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     22: migrate_v22_to_v23,
     23: migrate_v23_to_v24,
     24: migrate_v24_to_v25,
+    25: migrate_v25_to_v26,
 }
 
 

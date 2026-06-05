@@ -129,14 +129,14 @@ def test_identity_round_trip_and_opacity(tmp_path: Path) -> None:
         assert report.associations_orphaned == 0
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
-        stored = rows[0]["clarion_entity_id"]
+        stored = rows[0]["loomweave_entity_id"]
         # Opacity + round-trip: the SEI is stored verbatim, carries the reserved
         # prefix, and is not the locator.
         assert stored == sei
         assert stored.startswith("clarion:eid:")
         assert stored != locator
         # Reverse lookup keys on the new SEI.
-        assert [r["clarion_entity_id"] for r in db.list_associations_by_entity(sei)] == [sei]
+        assert [r["loomweave_entity_id"] for r in db.list_associations_by_entity(sei)] == [sei]
         db.close()
 
 
@@ -171,7 +171,7 @@ def test_stable_sei_is_never_repointed(tmp_path: Path, scenario: str) -> None:
         # No locator was sent for resolution (the only stored value was an SEI).
         assert state.identity_resolve_requests == [] or all(req == [] for req in state.identity_resolve_requests)
         row = db.list_entity_associations(issue.id)[0]
-        assert row["clarion_entity_id"] == sei
+        assert row["loomweave_entity_id"] == sei
         assert row["content_hash_at_attach"] == hash_after_first
         db.close()
 
@@ -199,10 +199,10 @@ def test_unresolvable_locator_is_orphaned_not_dropped(tmp_path: Path, scenario: 
         assert [(o.source, o.locator, o.reason) for o in report.orphans] == [("association", locator, "unresolved")]
         # The binding is KEPT verbatim (never dropped) and flagged for review.
         row = db.conn.execute(
-            "SELECT clarion_entity_id, content_hash_at_attach, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
+            "SELECT loomweave_entity_id, content_hash_at_attach, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
             (issue.id,),
         ).fetchone()
-        assert row["clarion_entity_id"] == locator
+        assert row["loomweave_entity_id"] == locator
         assert row["migration_orphaned_at"] is not None
         # The content axis stays inspectable on the orphan.
         assert row["content_hash_at_attach"] == "sha256:body"
@@ -234,12 +234,12 @@ def test_capability_absent_refuses_cleanly(tmp_path: Path, include_sei_capabilit
 
         # Degrades gracefully: the binding is untouched and still readable on its
         # locator (no crash, no partial write, "identity unavailable").
-        assert db.list_entity_associations(issue.id)[0]["clarion_entity_id"] == locator
+        assert db.list_entity_associations(issue.id)[0]["loomweave_entity_id"] == locator
         stored = db.conn.execute(
-            "SELECT clarion_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
+            "SELECT loomweave_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
             (issue.id,),
         ).fetchone()
-        assert stored["clarion_entity_id"] == locator
+        assert stored["loomweave_entity_id"] == locator
         assert stored["migration_orphaned_at"] is None
         db.close()
 
@@ -281,7 +281,7 @@ def test_pk_collision_merges_to_single_row(tmp_path: Path) -> None:
 
         assert report.associations_merged == 1
         rows = db.list_entity_associations(issue.id)
-        assert [r["clarion_entity_id"] for r in rows] == [sei]
+        assert [r["loomweave_entity_id"] for r in rows] == [sei]
         db.close()
 
 
@@ -303,7 +303,7 @@ def _set_attach_metadata(
     deterministically)."""
     db.conn.execute(
         "UPDATE entity_associations SET attached_at = ?, content_hash_at_attach = ?, attached_by = ? "
-        "WHERE issue_id = ? AND clarion_entity_id = ?",
+        "WHERE issue_id = ? AND loomweave_entity_id = ?",
         (attached_at, content_hash, attached_by, issue_id, locator),
     )
     db.conn.commit()
@@ -349,12 +349,12 @@ def test_merge_keeps_newest_attach_axis_and_preserves_attached_by(tmp_path: Path
 
         assert report.associations_merged == 1
         row = db.conn.execute(
-            "SELECT clarion_entity_id, content_hash_at_attach, attached_at, attached_by FROM entity_associations WHERE issue_id = ?",
+            "SELECT loomweave_entity_id, content_hash_at_attach, attached_at, attached_by FROM entity_associations WHERE issue_id = ?",
             (issue.id,),
         ).fetchall()
         assert len(row) == 1
         survivor = row[0]
-        assert survivor["clarion_entity_id"] == sei
+        assert survivor["loomweave_entity_id"] == sei
         # The freshness invariant: newest attach wins, in BOTH directions.
         assert survivor["attached_at"] == _LATER
         assert survivor["content_hash_at_attach"] == "sha256:fresh"
@@ -402,8 +402,8 @@ def test_applied_run_rolls_back_all_writes_on_mid_apply_fault(tmp_path: Path, mo
         # No partial write survived: BOTH bindings are still their original
         # locators (the first row's migration was rolled back).
         stored = {
-            r["issue_id"]: r["clarion_entity_id"]
-            for r in db.conn.execute("SELECT issue_id, clarion_entity_id FROM entity_associations").fetchall()
+            r["issue_id"]: r["loomweave_entity_id"]
+            for r in db.conn.execute("SELECT issue_id, loomweave_entity_id FROM entity_associations").fetchall()
         }
         assert stored == {issue_a.id: loc_a, issue_b.id: loc_b}
         # The transaction is closed, not leaked open on the live connection.
@@ -430,7 +430,7 @@ def test_dry_run_merge_count_matches_apply_for_already_sei_survivor(tmp_path: Pa
         assert applied.associations_merged == 1
         assert preview.associations_merged == applied.associations_merged
         rows = db.list_entity_associations(issue.id)
-        assert [r["clarion_entity_id"] for r in rows] == [sei]
+        assert [r["loomweave_entity_id"] for r in rows] == [sei]
         db.close()
 
 
@@ -536,7 +536,7 @@ def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
         assert report.dry_run is True
         assert report.associations_migrated == 1
         # Nothing was written — the value is still the locator.
-        assert db.list_entity_associations(issue.id)[0]["clarion_entity_id"] == locator
+        assert db.list_entity_associations(issue.id)[0]["loomweave_entity_id"] == locator
         db.close()
 
 

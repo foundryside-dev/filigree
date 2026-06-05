@@ -188,21 +188,21 @@ def test_backfill_against_live_loomweave(tmp_path: Path) -> None:
 
         # identity_round_trip + opacity, proven against the real authority.
         migrated = db.conn.execute(
-            "SELECT clarion_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
+            "SELECT loomweave_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
             (known_issue.id,),
         ).fetchone()
-        if not migrated["clarion_entity_id"].startswith("clarion:eid:"):
+        if not migrated["loomweave_entity_id"].startswith("clarion:eid:"):
             _live_unavailable("live Loomweave did not mint a SEI for the file entity; cannot prove round-trip on this build")
         assert migrated["migration_orphaned_at"] is None
-        assert migrated["clarion_entity_id"] != locator
+        assert migrated["loomweave_entity_id"] != locator
         assert report.associations_migrated >= 1
 
         # orphan, kept verbatim and flagged for review.
         orphaned = db.conn.execute(
-            "SELECT clarion_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
+            "SELECT loomweave_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
             (orphan_issue.id,),
         ).fetchone()
-        assert orphaned["clarion_entity_id"] == orphan_locator
+        assert orphaned["loomweave_entity_id"] == orphan_locator
         assert orphaned["migration_orphaned_at"] is not None
         assert any(o.locator == orphan_locator for o in report.orphans)
         db.close()

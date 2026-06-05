@@ -1,7 +1,7 @@
 """Entity-association CRUD (ADR-029, Loomweave B.7 / WP9-A).
 
 Binds Filigree issues to opaque external entity IDs. The historical
-SQLite column is named ``clarion_entity_id`` for compatibility, but the
+SQLite column is named ``loomweave_entity_id`` for compatibility, but the
 public projection exposes canonical ``entity_id`` and treats the value
 as an opaque string. The value may be a Loomweave SEI, a legacy locator, or
 another caller-owned ID; Filigree never parses or validates its grammar.
@@ -42,7 +42,7 @@ class EntityAssociationRow(TypedDict):
 
     issue_id: IssueId
     entity_id: LoomweaveEntityId
-    clarion_entity_id: LoomweaveEntityId
+    loomweave_entity_id: LoomweaveEntityId
     entity_kind: str
     content_hash_at_attach: ContentHash
     attached_at: ISOTimestamp
@@ -82,13 +82,13 @@ def _freshness_status(content_hash_at_attach: str, current_content_hash: str | N
 
 
 def _row_to_entity_association(r: Mapping[str, Any], *, current_content_hash: str | None = None) -> EntityAssociationRow:
-    entity_id = LoomweaveEntityId(r["clarion_entity_id"])
+    entity_id = LoomweaveEntityId(r["loomweave_entity_id"])
     migration_orphaned_at = r["migration_orphaned_at"]
     content_hash_at_attach = ContentHash(r["content_hash_at_attach"])
     return EntityAssociationRow(
         issue_id=IssueId(r["issue_id"]),
         entity_id=entity_id,
-        clarion_entity_id=entity_id,
+        loomweave_entity_id=entity_id,
         entity_kind=r["entity_kind"],
         content_hash_at_attach=content_hash_at_attach,
         attached_at=ISOTimestamp(r["attached_at"]),
@@ -168,7 +168,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
             """
             SELECT content_hash_at_attach
             FROM entity_associations
-            WHERE issue_id = ? AND clarion_entity_id = ?
+            WHERE issue_id = ? AND loomweave_entity_id = ?
             """,
             (issue_id, entity_id),
         ).fetchone()
@@ -185,10 +185,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         self.conn.execute(
             """
             INSERT INTO entity_associations
-                (issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by,
+                (issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by,
                  entity_kind, signature, signoff_seq)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(issue_id, clarion_entity_id) DO UPDATE SET
+            ON CONFLICT(issue_id, loomweave_entity_id) DO UPDATE SET
                 content_hash_at_attach = excluded.content_hash_at_attach,
                 attached_at = excluded.attached_at,
                 entity_kind = CASE
@@ -206,10 +206,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         # passed in for an existing row.
         stored = self.conn.execute(
             """
-            SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
+            SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
                    attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
-            WHERE issue_id = ? AND clarion_entity_id = ?
+            WHERE issue_id = ? AND loomweave_entity_id = ?
             """,
             (issue_id, entity_id),
         ).fetchone()
@@ -258,7 +258,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
         entity_id = make_loomweave_entity_id(entity_id)
         self._check_id_prefix(issue_id)
         cursor = self.conn.execute(
-            "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
+            "DELETE FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
             (issue_id, entity_id),
         )
         if cursor.rowcount > 0:
@@ -283,11 +283,11 @@ class EntityAssociationsMixin(DBMixinProtocol):
         self._check_id_prefix(issue_id)
         rows = self.conn.execute(
             """
-            SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
+            SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
                    attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
             WHERE issue_id = ?
-            ORDER BY attached_at ASC, clarion_entity_id ASC
+            ORDER BY attached_at ASC, loomweave_entity_id ASC
             """,
             (issue_id,),
         ).fetchall()
@@ -319,10 +319,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
             current_content_hash = make_content_hash(current_content_hash)
         rows = self.conn.execute(
             """
-            SELECT issue_id, clarion_entity_id, entity_kind, content_hash_at_attach,
+            SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
                    attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
             FROM entity_associations
-            WHERE clarion_entity_id = ?
+            WHERE loomweave_entity_id = ?
             ORDER BY attached_at ASC, issue_id ASC
             """,
             (entity_id,),

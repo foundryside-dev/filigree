@@ -26,7 +26,7 @@ class TestAddEntityAssociation:
             actor="alice",
         )
         assert row["issue_id"] == issue.id
-        assert row["clarion_entity_id"] == "py:func:parser.tokenize"
+        assert row["loomweave_entity_id"] == "py:func:parser.tokenize"
         assert row["content_hash_at_attach"] == "hash-a"
         assert row["attached_by"] == "alice"
         assert row["attached_at"]  # non-empty timestamp
@@ -153,7 +153,7 @@ class TestAddEntityAssociation:
             assert not thread.is_alive()
             assert errors == []
             assert rows[0]["issue_id"] == issue.id
-            assert rows[0]["clarion_entity_id"] == "py:func:locked"
+            assert rows[0]["loomweave_entity_id"] == "py:func:locked"
         finally:
             if holder.conn.in_transaction:
                 holder.conn.rollback()
@@ -181,7 +181,7 @@ class TestRemoveEntityAssociation:
         db.remove_entity_association(issue.id, "py:func:a")
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
-        assert rows[0]["clarion_entity_id"] == "py:func:b"
+        assert rows[0]["loomweave_entity_id"] == "py:func:b"
 
     def test_remove_records_audit_event(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
@@ -259,7 +259,7 @@ class TestListEntityAssociations:
         db.add_entity_association(issue.id, "py:class:C", content_hash="h3")
 
         rows = db.list_entity_associations(issue.id)
-        ids = {row["clarion_entity_id"] for row in rows}
+        ids = {row["loomweave_entity_id"] for row in rows}
         assert ids == {"py:func:a", "py:func:b", "py:class:C"}
 
     def test_does_not_leak_other_issues_associations(self, db: FiligreeDB) -> None:
@@ -269,7 +269,7 @@ class TestListEntityAssociations:
         db.add_entity_association(b.id, "py:func:y", content_hash="h2")
 
         rows_a = db.list_entity_associations(a.id)
-        assert {r["clarion_entity_id"] for r in rows_a} == {"py:func:x"}
+        assert {r["loomweave_entity_id"] for r in rows_a} == {"py:func:x"}
 
     def test_list_does_not_compute_drift(self, db: FiligreeDB) -> None:
         """ADR-029 §"Decision 3" — drift comparison is the consumer's job
@@ -303,7 +303,7 @@ class TestListAssociationsByEntity:
         issue_ids = {row["issue_id"] for row in rows}
         assert issue_ids == {a.id, b.id}
         # The unrelated entity's binding does not appear in the result.
-        assert all(row["clarion_entity_id"] == target for row in rows)
+        assert all(row["loomweave_entity_id"] == target for row in rows)
 
     def test_returns_raw_hash_for_drift_comparison(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
@@ -326,7 +326,7 @@ class TestListAssociationsByEntity:
         db.add_entity_association(issue.id, weird, content_hash="h")
         rows = db.list_associations_by_entity(weird)
         assert len(rows) == 1
-        assert rows[0]["clarion_entity_id"] == weird
+        assert rows[0]["loomweave_entity_id"] == weird
 
 
 # Cascade behaviour (ON DELETE CASCADE on issue_id) is pinned at the schema
@@ -405,6 +405,11 @@ class TestSignatureAndSignoffSeq:
         src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
         export_path = Path(str(tmp_path)) / "dump.jsonl"
         src.export_jsonl(export_path)
+
+        # v26: the exported JSONL carries the renamed key, never the old one.
+        blob = export_path.read_text()
+        assert "loomweave_entity_id" in blob
+        assert "clarion_entity_id" not in blob
 
         dst_dir = Path(str(tmp_path)) / "dst" / ".filigree"
         dst_dir.mkdir(parents=True)

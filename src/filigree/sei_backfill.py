@@ -3,7 +3,7 @@
 The Weft suite moves every cross-tool binding off the mutable **locator**
 (``{plugin}:{kind}:{qualname}``) onto the durable, opaque **SEI**
 (``clarion:eid:<hex>``). Filigree stores the binding id opaquely in
-``entity_associations.clarion_entity_id`` (and, for hard-deleted issues, in the
+``entity_associations.loomweave_entity_id`` (and, for hard-deleted issues, in the
 ``deleted_issues.entity_ids`` tombstone JSON array). This module rewrites those
 stored values *in place* — the column name, wire shape, and storage mechanism
 are unchanged; only the value format changes.
@@ -131,7 +131,7 @@ def run_sei_backfill(db: FiligreeDB, *, dry_run: bool = True, actor: str = "") -
     registry = _build_loomweave_registry(db)
     try:
         assoc_rows = db.conn.execute(
-            "SELECT issue_id, clarion_entity_id FROM entity_associations WHERE migration_orphaned_at IS NULL"
+            "SELECT issue_id, loomweave_entity_id FROM entity_associations WHERE migration_orphaned_at IS NULL"
         ).fetchall()
         tomb_rows = db.conn.execute("SELECT seq, issue_id, entity_ids FROM deleted_issues").fetchall()
 
@@ -237,7 +237,7 @@ def _collect_locators(assoc_rows: list[Any], tomb_rows: list[Any]) -> set[str]:
     """Gather the distinct, not-already-SEI locators across both surfaces."""
     locators: set[str] = set()
     for row in assoc_rows:
-        eid = row["clarion_entity_id"]
+        eid = row["loomweave_entity_id"]
         if not eid.startswith(SEI_PREFIX):
             locators.add(eid)
     for row in tomb_rows:
@@ -303,7 +303,7 @@ def _plan(
     targets_per_issue: dict[str, dict[str, int]] = {}
     already_sei_per_issue: dict[str, set[str]] = {}
     for row in assoc_rows:
-        eid = row["clarion_entity_id"]
+        eid = row["loomweave_entity_id"]
         if eid.startswith(SEI_PREFIX):
             report.associations_already_sei += 1
             already_sei_per_issue.setdefault(row["issue_id"], set()).add(eid)
@@ -382,7 +382,7 @@ def _apply_association(
     now: str,
 ) -> None:
     issue_id = row["issue_id"]
-    eid = row["clarion_entity_id"]
+    eid = row["loomweave_entity_id"]
     if eid.startswith(SEI_PREFIX):
         report.associations_already_sei += 1
         return
@@ -390,7 +390,7 @@ def _apply_association(
     sei = sei_by_locator.get(eid)
     if sei is None:
         conn.execute(
-            "UPDATE entity_associations SET migration_orphaned_at = ? WHERE issue_id = ? AND clarion_entity_id = ?",
+            "UPDATE entity_associations SET migration_orphaned_at = ? WHERE issue_id = ? AND loomweave_entity_id = ?",
             (now, issue_id, eid),
         )
         report.associations_orphaned += 1
@@ -398,7 +398,7 @@ def _apply_association(
         return
     try:
         conn.execute(
-            "UPDATE entity_associations SET clarion_entity_id = ? WHERE issue_id = ? AND clarion_entity_id = ?",
+            "UPDATE entity_associations SET loomweave_entity_id = ? WHERE issue_id = ? AND loomweave_entity_id = ?",
             (sei, issue_id, eid),
         )
         report.associations_migrated += 1
@@ -425,22 +425,22 @@ def _merge_into_survivor(
     so freshness reflects the most recent attach across the merged pair.
     """
     survivor = conn.execute(
-        "SELECT content_hash_at_attach, attached_at, attached_by FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
+        "SELECT content_hash_at_attach, attached_at, attached_by FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, sei),
     ).fetchone()
-    # ``incoming`` from the outer scan carries only (issue_id, clarion_entity_id);
+    # ``incoming`` from the outer scan carries only (issue_id, loomweave_entity_id);
     # fetch its full attach metadata before we delete the duplicate row.
     incoming_full = conn.execute(
-        "SELECT content_hash_at_attach, attached_at FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
+        "SELECT content_hash_at_attach, attached_at FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, old_locator),
     ).fetchone()
     conn.execute(
-        "DELETE FROM entity_associations WHERE issue_id = ? AND clarion_entity_id = ?",
+        "DELETE FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, old_locator),
     )
     if survivor is not None and incoming_full is not None and incoming_full["attached_at"] > survivor["attached_at"]:
         conn.execute(
-            "UPDATE entity_associations SET content_hash_at_attach = ?, attached_at = ? WHERE issue_id = ? AND clarion_entity_id = ?",
+            "UPDATE entity_associations SET content_hash_at_attach = ?, attached_at = ? WHERE issue_id = ? AND loomweave_entity_id = ?",
             (incoming_full["content_hash_at_attach"], incoming_full["attached_at"], issue_id, sei),
         )
 

@@ -231,7 +231,7 @@ class TestDeletionCarriesAffectedEntities:
     without the dropped bindings it cannot purge its mirrored reverse lookup
     (``list_associations_by_entity``) and surfaces a user-facing phantom issue.
     The synthetic record therefore carries ``affected_entities`` — the sorted
-    ``clarion_entity_id``s the cascade removed — captured in the tombstone before
+    ``loomweave_entity_id``s the cascade removed — captured in the tombstone before
     the rows vanish.
     """
 

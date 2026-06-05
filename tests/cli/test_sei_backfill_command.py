@@ -90,9 +90,9 @@ def test_sei_backfill_execute_human_reports_applied_and_lists_orphans(cli_in_pro
         # the orphan is kept verbatim and stamped.
         with get_db() as db:
             rows = {
-                r["clarion_entity_id"]: r["migration_orphaned_at"]
+                r["loomweave_entity_id"]: r["migration_orphaned_at"]
                 for r in db.conn.execute(
-                    "SELECT clarion_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
+                    "SELECT loomweave_entity_id, migration_orphaned_at FROM entity_associations WHERE issue_id = ?",
                     (issue_id,),
                 ).fetchall()
             }

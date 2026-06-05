@@ -42,7 +42,7 @@ class TestFederationSemanticCoupling:
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
         assert rows[0]["entity_id"] == "not-a-valid-clarion-id"
-        assert rows[0]["clarion_entity_id"] == "not-a-valid-clarion-id"
+        assert rows[0]["loomweave_entity_id"] == "not-a-valid-clarion-id"
 
     def test_caller_supplied_entity_kind_round_trips_without_inference(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Kind metadata", priority=2)
@@ -84,7 +84,7 @@ class TestFederationSemanticCoupling:
         for entity_id in odd_ids:
             db.add_entity_association(issue.id, entity_id, content_hash="h")
         rows = db.list_entity_associations(issue.id)
-        stored = {row["clarion_entity_id"] for row in rows}
+        stored = {row["loomweave_entity_id"] for row in rows}
         assert stored == set(odd_ids)
 
     def test_content_hash_is_opaque_too(self, db: FiligreeDB) -> None:
@@ -192,7 +192,7 @@ class TestFederationPipelineCoupling:
         # Associations untouched throughout.
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 3
-        ids = {row["clarion_entity_id"] for row in rows}
+        ids = {row["loomweave_entity_id"] for row in rows}
         assert ids == {"py:func:a", "py:func:b", "py:class:C"}
 
     def test_associations_table_with_orphaned_entity_ids_does_not_break_reads(self, db: FiligreeDB) -> None:
@@ -215,7 +215,7 @@ class TestFederationPipelineCoupling:
         assert len(rows) == 1
         assert rows[0]["orphan_status"] == "unknown"
         assert rows[0]["freshness_status"] == "unknown"
-        assert rows[0]["clarion_entity_id"] == "py:func:long-since-deleted::very-much-removed"
+        assert rows[0]["loomweave_entity_id"] == "py:func:long-since-deleted::very-much-removed"
         assert rows[0]["content_hash_at_attach"] == "abandoned-hash"
 
     def test_current_hash_comparison_is_caller_supplied(self, db: FiligreeDB) -> None:
@@ -234,7 +234,7 @@ class TestFederationPipelineCoupling:
         entity_id = "py:func:removed"
         db.add_entity_association(issue.id, entity_id, content_hash="h")
         db.conn.execute(
-            "UPDATE entity_associations SET migration_orphaned_at = ? WHERE issue_id = ? AND clarion_entity_id = ?",
+            "UPDATE entity_associations SET migration_orphaned_at = ? WHERE issue_id = ? AND loomweave_entity_id = ?",
             ("2026-06-04T00:00:00+00:00", issue.id, entity_id),
         )
         db.conn.commit()

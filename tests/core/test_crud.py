@@ -1415,7 +1415,7 @@ class TestImportJsonl:
             {
                 "_type": "entity_association",
                 "issue_id": issue.id,
-                "clarion_entity_id": "py:func:parser.tokenize",
+                "loomweave_entity_id": "py:func:parser.tokenize",
                 "content_hash_at_attach": "hash-a",
                 "attached_at": attached["attached_at"],
                 "attached_by": "alice",
@@ -1442,7 +1442,7 @@ class TestImportJsonl:
                 {
                     "_type": "entity_association",
                     "issue_id": "other-1234567890",
-                    "clarion_entity_id": "py:func:parser.tokenize",
+                    "loomweave_entity_id": "py:func:parser.tokenize",
                     "content_hash_at_attach": "hash-a",
                     "attached_at": "2026-01-01T00:00:00+00:00",
                     "attached_by": "alice",

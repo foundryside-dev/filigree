@@ -1356,7 +1356,7 @@ class IssuesMixin(DBMixinProtocol):
         affected_entity_ids = [
             row[0]
             for row in self.conn.execute(
-                "SELECT clarion_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY clarion_entity_id",
+                "SELECT loomweave_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY loomweave_entity_id",
                 (issue_id,),
             ).fetchall()
         ]

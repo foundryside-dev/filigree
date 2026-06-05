@@ -128,7 +128,7 @@ class EventRecordWithTitle(EventRecord):
 
     issue_title: str
     # Only populated on synthetic ``issue_deleted`` tombstone records: the sorted
-    # ``clarion_entity_id``s whose entity_associations the delete cascade removed
+    # ``loomweave_entity_id``s whose entity_associations the delete cascade removed
     # (schema v21, F5 amplifier). Absent on real event rows; consumers of the wire
     # shape see it normalized to ``[]`` via ``change_record_to_weft``.
     affected_entities: NotRequired[list[str]]

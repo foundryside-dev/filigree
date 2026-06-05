@@ -28,7 +28,7 @@ from filigree.types.api import ErrorCode
 def sei_backfill_cmd(ctx: click.Context, execute: bool, as_json: bool) -> None:
     """Rewrite stored Loomweave entity ids from locators to SEIs (ADR-038 §7).
 
-    Resolves every opaque ``clarion_entity_id`` — and every historical
+    Resolves every opaque ``loomweave_entity_id`` — and every historical
     deleted-issue tombstone id — through Loomweave's identity/resolve endpoint and
     rewrites it in place. The column name and wire shape are unchanged; only the
     value format changes (locator → ``clarion:eid:<hex>``).
