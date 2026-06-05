@@ -549,7 +549,7 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
+def create_weft_router() -> APIRouter:
     """Build the loom-generation APIRouter for analytics, graph, and
     metrics endpoints.
 
@@ -564,19 +564,19 @@ def create_loom_router() -> APIRouter:
 
     from filigree.dashboard import _get_db
     from filigree.dashboard_routes.common import _MAX_PAGINATION_LIMIT, _parse_pagination
-    from filigree.generations.loom.adapters import (
-        change_record_to_loom,
+    from filigree.generations.weft.adapters import (
+        change_record_to_weft,
         list_response,
-        observation_to_loom,
+        observation_to_weft,
     )
 
     router = APIRouter()
 
     @router.get("/changes")
     async def api_loom_changes(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Cross-issue events since a timestamp — ``ListResponse[ChangeRecordLoom]``.
+        """Cross-issue events since a timestamp — ``ListResponse[ChangeRecordWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Mirrors MCP's
+        Weft-only (no classic dashboard counterpart). Mirrors MCP's
         ``get_changes`` semantics: pass ``?since=<ISO timestamp>`` and
         optional ``?limit=`` (default 100). Heartbeat events are excluded
         by default; pass ``?include_heartbeats=true`` or ``?type=heartbeat``
@@ -656,7 +656,7 @@ def create_loom_router() -> APIRouter:
         has_more = len(events) > limit
         if has_more:
             events = events[:limit]
-        items = [change_record_to_loom(e) for e in events]
+        items = [change_record_to_weft(e) for e in events]
         body: dict[str, Any] = {"items": items, "has_more": has_more}
         body["next_since"] = items[-1]["created_at"] if items else since_normalized
         body["next_event_id"] = items[-1]["event_id"] if items else after_event_id
@@ -664,9 +664,9 @@ def create_loom_router() -> APIRouter:
 
     @router.get("/observations")
     async def api_loom_list_observations(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List pending observations — ``ListResponse[ObservationLoom]``.
+        """List pending observations — ``ListResponse[ObservationWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Drops MCP's
+        Weft-only (no classic dashboard counterpart). Drops MCP's
         ``stats`` sibling per the strict ``ListResponse[T]`` envelope —
         consumers needing aggregate counts hit ``/api/observations/stats``.
         ``?file_path=`` and ``?file_id=`` filters mirror the MCP tool;
@@ -687,7 +687,7 @@ def create_loom_router() -> APIRouter:
         has_more = len(observations) > limit
         if has_more:
             observations = observations[:limit]
-        items = [observation_to_loom(o) for o in observations]
+        items = [observation_to_weft(o) for o in observations]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.post("/observations")
@@ -732,7 +732,7 @@ async def _create_observation_handler(request: Request, db: FiligreeDB) -> JSONR
 
     from filigree.dashboard_routes.common import _error_response, _parse_json_body, _validate_actor
     from filigree.db_files import _is_project_relative_scan_path, _normalize_scan_path
-    from filigree.generations.loom.adapters import observation_to_loom
+    from filigree.generations.weft.adapters import observation_to_weft
 
     body = await _parse_json_body(request)
     if isinstance(body, JSONResponse):
@@ -830,6 +830,6 @@ async def _create_observation_handler(request: Request, db: FiligreeDB) -> JSONR
         return _error_response(f"Database error: {e}", ErrorCode.IO, 500)
 
     # 11. Map and return
-    mapped = observation_to_loom(obs)
+    mapped = observation_to_weft(obs)
     status_code = 200 if is_duplicate else 201
     return JSONResponse(mapped, status_code=status_code)

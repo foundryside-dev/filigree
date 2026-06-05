@@ -6,7 +6,7 @@ has its own subpackage here:
 
 - ``filigree.generations.classic`` — pre-federation HTTP API, frozen at
   its existing URLs (mostly ``/api/*``, with one ``/api/v1/`` outlier).
-- ``filigree.generations.loom`` — new in 2.0, at ``/api/loom/*``, using
+- ``filigree.generations.weft`` — new in 2.0, at ``/api/loom/*``, using
   the unified ``BatchResponse`` / ``ListResponse`` envelopes, the closed
   ``ErrorCode`` enum, and the ``issue_id`` vocabulary.
 

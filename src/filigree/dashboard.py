@@ -590,11 +590,11 @@ def _create_project_router() -> APIRouter:
     router.include_router(releases.create_classic_router())
     router.include_router(entities.create_classic_router())
 
-    # Loom generation — new in 2.0 under /loom. Empty in Phase B.
-    router.include_router(analytics.create_loom_router(), prefix="/loom")
-    router.include_router(issues.create_loom_router(), prefix="/loom")
-    router.include_router(files.create_loom_router(), prefix="/loom")
-    router.include_router(releases.create_loom_router(), prefix="/loom")
+    # Weft generation — new in 2.0 under /loom. Empty in Phase B.
+    router.include_router(analytics.create_weft_router(), prefix="/loom")
+    router.include_router(issues.create_weft_router(), prefix="/loom")
+    router.include_router(files.create_weft_router(), prefix="/loom")
+    router.include_router(releases.create_weft_router(), prefix="/loom")
 
     # Living surface — un-prefixed loom aliases; per-endpoint adoption.
     router.include_router(files.create_living_surface_router())

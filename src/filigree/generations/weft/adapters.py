@@ -1,4 +1,4 @@
-"""Loom-generation shape adapters.
+"""Weft-generation shape adapters.
 
 Adapters take internal domain results (from the ``filigree.db_*`` core
 layer) and produce the loom-generation wire shape. Per ADR-002 §6,
@@ -15,22 +15,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from filigree.generations.loom.types import (
-    BlockedIssueLoom,
-    ChangeRecordLoom,
-    CommentRecordLoom,
-    FileAssocLoom,
-    FileRecordLoom,
-    IssueEventLoom,
-    IssueLoom,
-    ObservationLoom,
-    PackLoom,
-    ScanFindingLoom,
-    ScanIngestResponseLoom,
-    ScannerLoom,
+from filigree.generations.weft.types import (
+    BlockedIssueWeft,
+    ChangeRecordWeft,
+    CommentRecordWeft,
+    FileAssocWeft,
+    FileRecordWeft,
+    IssueEventWeft,
+    IssueWeft,
+    ObservationWeft,
+    PackWeft,
+    ScanFindingWeft,
+    ScanIngestResponseWeft,
+    ScannerWeft,
     ScanStats,
-    SlimIssueLoom,
-    TypeSummaryLoom,
+    SlimIssueWeft,
+    TypeSummaryWeft,
 )
 from filigree.models import Issue
 from filigree.scanners import ScannerConfig
@@ -41,7 +41,7 @@ from filigree.types.files import EnrichedFileItem, IssueFileAssociation, ScanIng
 from filigree.types.planning import CommentRecord
 
 
-def slim_issue_to_loom(issue: Issue) -> SlimIssueLoom:
+def slim_issue_to_weft(issue: Issue) -> SlimIssueWeft:
     """Project an ``Issue`` into the loom slim shape.
 
     Renames ``id`` to ``issue_id`` per the Phase D vocabulary shift and
@@ -49,7 +49,7 @@ def slim_issue_to_loom(issue: Issue) -> SlimIssueLoom:
     status, priority, type). Used by every loom batch handler whose
     ``succeeded`` and ``newly_unblocked`` lists return slim issues.
     """
-    return SlimIssueLoom(
+    return SlimIssueWeft(
         issue_id=issue.id,
         title=issue.title,
         status=issue.status,
@@ -58,7 +58,7 @@ def slim_issue_to_loom(issue: Issue) -> SlimIssueLoom:
     )
 
 
-def issue_to_loom(issue: Issue) -> IssueLoom:
+def issue_to_weft(issue: Issue) -> IssueWeft:
     """Project an ``Issue`` into the full loom-vocab issue shape.
 
     Mirrors ``Issue.to_dict()`` (returning ``IssueDict``) except the
@@ -72,7 +72,7 @@ def issue_to_loom(issue: Issue) -> IssueLoom:
     create).
     """
     classic = issue.to_dict()
-    return IssueLoom(
+    return IssueWeft(
         issue_id=classic["id"],
         title=classic["title"],
         status=classic["status"],
@@ -99,7 +99,7 @@ def issue_to_loom(issue: Issue) -> IssueLoom:
     )
 
 
-def comment_record_to_loom(record: CommentRecord, *, created_at: ISOTimestamp | None = None) -> CommentRecordLoom:
+def comment_record_to_weft(record: CommentRecord, *, created_at: ISOTimestamp | None = None) -> CommentRecordWeft:
     """Project a classic ``CommentRecord`` (``id``) into the loom shape
     (``comment_id``).
 
@@ -108,7 +108,7 @@ def comment_record_to_loom(record: CommentRecord, *, created_at: ISOTimestamp | 
     insert (rather than reading it from a CommentRecord); callers can
     pass the freshly-fetched timestamp through this argument.
     """
-    return CommentRecordLoom(
+    return CommentRecordWeft(
         comment_id=record["id"],
         author=record["author"],
         text=record["text"],
@@ -116,13 +116,13 @@ def comment_record_to_loom(record: CommentRecord, *, created_at: ISOTimestamp | 
     )
 
 
-def blocked_issue_to_loom(issue: Issue) -> BlockedIssueLoom:
+def blocked_issue_to_weft(issue: Issue) -> BlockedIssueWeft:
     """Project a blocked ``Issue`` into the loom shape with ``blocked_by``.
 
     Used by ``GET /api/loom/blocked``. Mirrors classic ``BlockedIssue``
     (which extends ``SlimIssue``) but renames ``id`` → ``issue_id``.
     """
-    return BlockedIssueLoom(
+    return BlockedIssueWeft(
         issue_id=issue.id,
         title=issue.title,
         status=issue.status,
@@ -132,14 +132,14 @@ def blocked_issue_to_loom(issue: Issue) -> BlockedIssueLoom:
     )
 
 
-def file_record_to_loom(record: EnrichedFileItem) -> FileRecordLoom:
+def file_record_to_weft(record: EnrichedFileItem) -> FileRecordWeft:
     """Project an ``EnrichedFileItem`` into the loom file shape.
 
     Renames the file's primary key ``id`` → ``file_id`` and preserves the
     enriched fields (summary, associations_count, observation_count).
     Used by ``GET /api/loom/files``.
     """
-    return FileRecordLoom(
+    return FileRecordWeft(
         file_id=record["id"],
         path=record["path"],
         language=record["language"],
@@ -154,14 +154,14 @@ def file_record_to_loom(record: EnrichedFileItem) -> FileRecordLoom:
     )
 
 
-def file_assoc_to_loom(record: IssueFileAssociation) -> FileAssocLoom:
+def file_assoc_to_weft(record: IssueFileAssociation) -> FileAssocWeft:
     """Project an ``IssueFileAssociation`` into the loom assoc shape.
 
     Renames the association row's primary key ``id`` → ``assoc_id``.
     Cross-entity refs ``file_id`` and ``issue_id`` keep their names.
     Used by ``GET /api/loom/issues/{issue_id}/files``.
     """
-    return FileAssocLoom(
+    return FileAssocWeft(
         assoc_id=record["id"],
         file_id=record["file_id"],
         issue_id=record["issue_id"],
@@ -172,13 +172,13 @@ def file_assoc_to_loom(record: IssueFileAssociation) -> FileAssocLoom:
     )
 
 
-def scan_finding_to_loom(record: ScanFindingDict) -> ScanFindingLoom:
+def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
     """Project a ``ScanFindingDict`` into the loom finding shape.
 
     Renames the finding's primary key ``id`` → ``finding_id``. Used by
     ``GET /api/loom/findings``.
     """
-    return ScanFindingLoom(
+    return ScanFindingWeft(
         finding_id=record["id"],
         file_id=record["file_id"],
         severity=record["severity"],
@@ -201,13 +201,13 @@ def scan_finding_to_loom(record: ScanFindingDict) -> ScanFindingLoom:
     )
 
 
-def observation_to_loom(record: ObservationDict) -> ObservationLoom:
+def observation_to_weft(record: ObservationDict) -> ObservationWeft:
     """Project an ``ObservationDict`` into the loom observation shape.
 
     Renames the observation's primary key ``id`` → ``observation_id``.
     Used by ``GET /api/loom/observations``.
     """
-    return ObservationLoom(
+    return ObservationWeft(
         observation_id=record["id"],
         summary=record["summary"],
         detail=record["detail"],
@@ -222,27 +222,27 @@ def observation_to_loom(record: ObservationDict) -> ObservationLoom:
     )
 
 
-def scanner_config_to_loom(config: ScannerConfig) -> ScannerLoom:
+def scanner_config_to_weft(config: ScannerConfig) -> ScannerWeft:
     """Project a ``ScannerConfig`` into the loom scanner shape.
 
     Mirrors ``ScannerConfig.to_dict()`` exactly. ``name`` is the
     scanner's primary key but is already string-named, so no rename
     applies. Used by ``GET /api/loom/scanners``.
     """
-    return ScannerLoom(
+    return ScannerWeft(
         name=config.name,
         description=config.description,
         file_types=list(config.file_types),
     )
 
 
-def pack_to_loom(pack: WorkflowPack) -> PackLoom:
+def pack_to_weft(pack: WorkflowPack) -> PackWeft:
     """Project a ``WorkflowPack`` into the loom packs-list shape.
 
     Mirrors MCP's ``PackListItem``. ``pack`` is the entity's logical
     primary key; not renamed. Used by ``GET /api/loom/packs``.
     """
-    return PackLoom(
+    return PackWeft(
         pack=pack.pack,
         version=pack.version,
         display_name=pack.display_name,
@@ -252,13 +252,13 @@ def pack_to_loom(pack: WorkflowPack) -> PackLoom:
     )
 
 
-def type_template_to_loom(template: TypeTemplate) -> TypeSummaryLoom:
+def type_template_to_weft(template: TypeTemplate) -> TypeSummaryWeft:
     """Project a ``TypeTemplate`` into the loom types-list shape.
 
     Matches the classic ``/api/types`` projection (4 keys). Used by
     ``GET /api/loom/types``.
     """
-    return TypeSummaryLoom(
+    return TypeSummaryWeft(
         type=template.type,
         display_name=template.display_name,
         pack=template.pack,
@@ -266,14 +266,14 @@ def type_template_to_loom(template: TypeTemplate) -> TypeSummaryLoom:
     )
 
 
-def issue_event_to_loom(record: EventRecord) -> IssueEventLoom:
+def issue_event_to_weft(record: EventRecord) -> IssueEventWeft:
     """Project an ``EventRecord`` into the loom event shape.
 
     Renames the event row's primary key ``id`` → ``event_id``. Used by
     ``GET /api/loom/issues/{issue_id}/events``. The ``issue_id`` field
     is a cross-entity ref and is kept as-is.
     """
-    return IssueEventLoom(
+    return IssueEventWeft(
         event_id=record["id"],
         issue_id=record["issue_id"],
         event_type=record["event_type"],
@@ -285,13 +285,13 @@ def issue_event_to_loom(record: EventRecord) -> IssueEventLoom:
     )
 
 
-def change_record_to_loom(record: EventRecordWithTitle) -> ChangeRecordLoom:
+def change_record_to_weft(record: EventRecordWithTitle) -> ChangeRecordWeft:
     """Project an ``EventRecordWithTitle`` into the loom change shape.
 
-    Same as ``issue_event_to_loom`` but includes the joined
+    Same as ``issue_event_to_weft`` but includes the joined
     ``issue_title``. Used by ``GET /api/loom/changes``.
     """
-    return ChangeRecordLoom(
+    return ChangeRecordWeft(
         event_id=record["id"],
         issue_id=record["issue_id"],
         event_type=record["event_type"],
@@ -334,7 +334,7 @@ def list_response(items: list[Any], *, limit: int, offset: int, total: int | Non
     return body
 
 
-def scan_ingest_result_to_loom(result: ScanIngestResult) -> ScanIngestResponseLoom:
+def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWeft:
     """Transform an internal ``ScanIngestResult`` into the loom response shape.
 
     - ``new_finding_ids`` → ``succeeded`` (the generic batch wrapper's
@@ -347,7 +347,7 @@ def scan_ingest_result_to_loom(result: ScanIngestResult) -> ScanIngestResponseLo
     - ``failed`` is ``[]`` until per-finding ingest failure tracking
       lands (non-breaking addition per ADR-002 §3).
     """
-    return ScanIngestResponseLoom(
+    return ScanIngestResponseWeft(
         succeeded=list(result["new_finding_ids"]),
         failed=[],
         stats=ScanStats(

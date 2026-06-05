@@ -949,7 +949,7 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
+def create_weft_router() -> APIRouter:
     """Build the loom-generation APIRouter for issue, workflow, and
     dependency endpoints.
 
@@ -973,26 +973,26 @@ def create_loom_router() -> APIRouter:
 
     from filigree.dashboard import _get_db
     from filigree.dashboard_routes.common import _get_bool_param, _parse_pagination, _parse_response_detail
-    from filigree.generations.loom.adapters import (
-        blocked_issue_to_loom,
-        comment_record_to_loom,
-        file_assoc_to_loom,
-        issue_event_to_loom,
-        issue_to_loom,
+    from filigree.generations.weft.adapters import (
+        blocked_issue_to_weft,
+        comment_record_to_weft,
+        file_assoc_to_weft,
+        issue_event_to_weft,
+        issue_to_weft,
         list_response,
-        pack_to_loom,
-        slim_issue_to_loom,
-        type_template_to_loom,
+        pack_to_weft,
+        slim_issue_to_weft,
+        type_template_to_weft,
     )
-    from filigree.generations.loom.types import CommentRecordLoom
+    from filigree.generations.weft.types import CommentRecordWeft
 
     router = APIRouter()
 
     @router.get("/issues")
     async def api_loom_list_issues(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List issues — ``ListResponse[IssueLoom]`` with real pagination.
+        """List issues — ``ListResponse[IssueWeft]`` with real pagination.
 
-        Loom adds ``?limit=&offset=`` (default limit=100). Classic
+        Weft adds ``?limit=&offset=`` (default limit=100). Classic
         ``GET /api/issues`` returns every row in one shot and stays
         unchanged. The loom variant overfetches by 1 to detect
         ``has_more`` without a separate COUNT query.
@@ -1009,30 +1009,30 @@ def create_loom_router() -> APIRouter:
         has_more = len(page) > limit
         if has_more:
             page = page[:limit]
-        items = [issue_to_loom(i) for i in page]
+        items = [issue_to_weft(i) for i in page]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/ready")
     async def api_loom_ready(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Issues ready to work (no open blockers) — ``ListResponse[IssueLoom]``.
+        """Issues ready to work (no open blockers) — ``ListResponse[IssueWeft]``.
 
         Returns the full result set — ``get_ready()`` is unbounded today
         and ``has_more`` is always ``false``.
         """
         issues = db.get_ready()
-        items = [issue_to_loom(i) for i in issues]
+        items = [issue_to_weft(i) for i in issues]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/blocked")
     async def api_loom_blocked(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Issues with at least one open blocker — ``ListResponse[BlockedIssueLoom]``.
+        """Issues with at least one open blocker — ``ListResponse[BlockedIssueWeft]``.
 
-        Loom-only (no classic counterpart). Returns the full result set
+        Weft-only (no classic counterpart). Returns the full result set
         — ``get_blocked()`` is unbounded today and ``has_more`` is
         always ``false``.
         """
         issues = db.get_blocked()
-        items = [blocked_issue_to_loom(i) for i in issues]
+        items = [blocked_issue_to_weft(i) for i in issues]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/search")
@@ -1040,9 +1040,9 @@ def create_loom_router() -> APIRouter:
         request: Request,
         db: FiligreeDB = Depends(_get_db),
     ) -> JSONResponse:
-        """Full-text search — ``ListResponse[IssueLoom]``.
+        """Full-text search — ``ListResponse[IssueWeft]``.
 
-        Classic ``GET /api/search`` returns ``{results, total}``. Loom
+        Classic ``GET /api/search`` returns ``{results, total}``. Weft
         drops the running total to keep the unified envelope (consumers
         needing total can hit ``/api/stats``).
         """
@@ -1070,30 +1070,30 @@ def create_loom_router() -> APIRouter:
             return JSONResponse(list_response([], limit=limit, offset=offset, has_more=False))
         total = db.count_search_results(q)
         page = db.search_issues(q, limit=limit, offset=offset)
-        items = [issue_to_loom(i) for i in page]
+        items = [issue_to_weft(i) for i in page]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=total))
 
     @router.get("/types")
     async def api_loom_list_types(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List registered issue types — ``ListResponse[TypeSummaryLoom]``."""
+        """List registered issue types — ``ListResponse[TypeSummaryWeft]``."""
         types = db.templates.list_types()
-        items = [type_template_to_loom(t) for t in types]
+        items = [type_template_to_weft(t) for t in types]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/packs")
     async def api_loom_list_packs(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List enabled workflow packs — ``ListResponse[PackLoom]``.
+        """List enabled workflow packs — ``ListResponse[PackWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Mirrors MCP's
+        Weft-only (no classic dashboard counterpart). Mirrors MCP's
         ``list_packs`` projection.
         """
         packs = sorted(db.templates.list_packs(), key=lambda p: p.pack)
-        items = [pack_to_loom(p) for p in packs]
+        items = [pack_to_weft(p) for p in packs]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/comments")
     async def api_loom_get_comments(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Comments for an issue — ``ListResponse[CommentRecordLoom]``.
+        """Comments for an issue — ``ListResponse[CommentRecordWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) so missing
         issues do not silently return an empty list. ``db.get_comments``
@@ -1109,12 +1109,12 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         comments = db.get_comments(issue_id)
-        items = [comment_record_to_loom(c) for c in comments]
+        items = [comment_record_to_weft(c) for c in comments]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/events")
     async def api_loom_get_issue_events(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Event history for an issue — ``ListResponse[IssueEventLoom]``.
+        """Event history for an issue — ``ListResponse[IssueEventWeft]``.
 
         ``db.get_issue_events`` validates the issue exists (raises
         ``KeyError``) and accepts a ``limit``. Default 50 to match MCP
@@ -1135,12 +1135,12 @@ def create_loom_router() -> APIRouter:
         has_more = len(events) > limit
         if has_more:
             events = events[:limit]
-        items = [issue_event_to_loom(e) for e in events]
+        items = [issue_event_to_weft(e) for e in events]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/issues/{issue_id}/files")
     async def api_loom_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """File associations for an issue — ``ListResponse[FileAssocLoom]``.
+        """File associations for an issue — ``ListResponse[FileAssocWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) — the
         underlying ``db.get_issue_files`` does not. Matches the classic
@@ -1154,7 +1154,7 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         assocs = db.get_issue_files(issue_id)
-        items = [file_assoc_to_loom(a) for a in assocs]
+        items = [file_assoc_to_weft(a) for a in assocs]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.post("/batch/update")
@@ -1162,8 +1162,8 @@ def create_loom_router() -> APIRouter:
         """Batch update issues — loom envelope.
 
         ``response_detail=slim`` (default) keeps the historical C2 shape
-        (``BatchResponse[SlimIssueLoom]``); ``response_detail=full``
-        upgrades ``succeeded[]`` items to full ``IssueLoom``. Validation
+        (``BatchResponse[SlimIssueWeft]``); ``response_detail=full``
+        upgrades ``succeeded[]`` items to full ``IssueWeft``. Validation
         of the query param runs before body parsing so a malformed
         ``response_detail`` returns 400 even on a malformed body.
         """
@@ -1184,7 +1184,7 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        project = issue_to_loom if detail == "full" else slim_issue_to_loom
+        project = issue_to_weft if detail == "full" else slim_issue_to_weft
         return JSONResponse(
             {
                 "succeeded": [project(i) for i in updated],
@@ -1196,9 +1196,9 @@ def create_loom_router() -> APIRouter:
     async def api_loom_batch_close(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Batch close issues — loom envelope.
 
-        ``response_detail=slim`` (default) returns ``SlimIssueLoom`` in
-        ``succeeded[]``; ``response_detail=full`` returns ``IssueLoom``.
-        ``newly_unblocked[]`` stays ``SlimIssueLoom`` regardless — it
+        ``response_detail=slim`` (default) returns ``SlimIssueWeft`` in
+        ``succeeded[]``; ``response_detail=full`` returns ``IssueWeft``.
+        ``newly_unblocked[]`` stays ``SlimIssueWeft`` regardless — it
         represents *secondary* state (consumers branch on its presence
         to decide whether to refetch); upgrading would inflate the
         response without buying federation consumers anything new. See
@@ -1230,21 +1230,21 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
-        project = issue_to_loom if detail == "full" else slim_issue_to_loom
+        project = issue_to_weft if detail == "full" else slim_issue_to_weft
         response: dict[str, Any] = {
             "succeeded": [project(i) for i in closed],
             "failed": [*gate_errors, *errors],
         }
         if newly_unblocked:
-            response["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
+            response["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(response)
 
     @router.get("/issues/{issue_id}")
     async def api_loom_get_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Get a single issue — IssueLoom (or IssueLoomWithFiles when
+        """Get a single issue — IssueWeft (or IssueLoomWithFiles when
         ``include_files=true``).
 
-        Loom defaults ``include_files`` to ``False`` (federation
+        Weft defaults ``include_files`` to ``False`` (federation
         consumers usually want a clean issue projection without the
         file-association payload). Classic ``GET /api/issue/{id}`` does
         not expose ``include_files`` and continues to return its
@@ -1260,14 +1260,14 @@ def create_loom_router() -> APIRouter:
             issue = db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
-        body: dict[str, Any] = dict(issue_to_loom(issue))
+        body: dict[str, Any] = dict(issue_to_weft(issue))
         if include_files:
-            body["files"] = [file_assoc_to_loom(a) for a in db.get_issue_files(issue_id)]
+            body["files"] = [file_assoc_to_weft(a) for a in db.get_issue_files(issue_id)]
         return JSONResponse(body)
 
     @router.post("/issues", status_code=201)
     async def api_loom_create_issue(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Create an issue — returns ``IssueLoom``."""
+        """Create an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1313,11 +1313,11 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except (TypeError, ValueError) as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        return JSONResponse(issue_to_loom(issue), status_code=201)
+        return JSONResponse(issue_to_weft(issue), status_code=201)
 
     @router.patch("/issues/{issue_id}")
     async def api_loom_update_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Update issue fields — returns ``IssueLoom``."""
+        """Update issue fields — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1373,11 +1373,11 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             code = _classify_issue_write_error(e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/close")
     async def api_loom_close_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Close an issue — returns ``IssueLoom`` (or
+        """Close an issue — returns ``IssueWeft`` (or
         ``IssueLoomWithUnblocked`` when at least one issue became ready
         as a result, mirroring MCP ``close_issue``).
         """
@@ -1424,16 +1424,16 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
-        result: dict[str, Any] = dict(issue_to_loom(issue))
+        result: dict[str, Any] = dict(issue_to_weft(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
         if newly_unblocked:
-            result["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
+            result["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(result)
 
     @router.post("/issues/{issue_id}/reopen")
     async def api_loom_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Reopen a closed issue — returns ``IssueLoom``."""
+        """Reopen a closed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1449,11 +1449,11 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             code = classify_value_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/claim")
     async def api_loom_claim_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Claim an issue — returns ``IssueLoom``."""
+        """Claim an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1476,11 +1476,11 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             code = classify_value_error(str(e))
             return _error_response(str(e), code, errorcode_to_http_status(code))
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/release")
     async def api_loom_release_claim(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Release a claimed issue — returns ``IssueLoom``."""
+        """Release a claimed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1508,11 +1508,11 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
             return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/claim-next")
     async def api_loom_claim_next(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Claim the highest-priority ready issue — returns ``IssueLoom``,
+        """Claim the highest-priority ready issue — returns ``IssueWeft``,
         or 404 ``ErrorCode.NOT_FOUND`` when nothing is ready (matching
         classic).
         """
@@ -1536,11 +1536,11 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), code, errorcode_to_http_status(code))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/comments", status_code=201)
     async def api_loom_add_comment(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Add a comment — returns ``CommentRecordLoom`` (``comment_id``
+        """Add a comment — returns ``CommentRecordWeft`` (``comment_id``
         replaces classic's ``id``).
         """
         # See classic add-comment: prefix check first so foreign-project IDs
@@ -1575,7 +1575,7 @@ def create_loom_router() -> APIRouter:
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)
             return _error_response("Internal error: comment created but not retrievable", ErrorCode.INTERNAL, 500)
         return JSONResponse(
-            CommentRecordLoom(
+            CommentRecordWeft(
                 comment_id=comment_id,
                 author=author,
                 text=text,
@@ -1658,7 +1658,7 @@ def create_loom_router() -> APIRouter:
             # exactly the typo-masking path: flag it via issue_found=false, log
             # it, then honour the frozen idempotent contract.
             logger.warning(
-                "Loom dependency DELETE absorbed missing-issue KeyError (issue_id=%s dep_issue_id=%s); returning idempotent removed=false",
+                "Weft dependency DELETE absorbed missing-issue KeyError (issue_id=%s dep_issue_id=%s); returning idempotent removed=false",
                 issue_id,
                 dep_issue_id,
             )

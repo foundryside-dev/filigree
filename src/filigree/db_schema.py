@@ -183,7 +183,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_dedup
   ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1))
   WHERE fingerprint = '';
 -- Fingerprint-bearing findings use the scanner-supplied fingerprint as their
--- cross-run identity (Loom §3.B). Scoped by scan_source so two scanners may
+-- cross-run identity (Weft §3.B). Scoped by scan_source so two scanners may
 -- mint colliding fingerprints without interfering.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint
   ON scan_findings(scan_source, fingerprint)

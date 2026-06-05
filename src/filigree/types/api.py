@@ -56,7 +56,7 @@ class SlimIssue(TypedDict):
 
     Per Phase D3 of the 2.0 federation work package, the entity's own
     primary key is named ``issue_id`` (matching the loom vocabulary used
-    by ``SlimIssueLoom`` since Phase C). Cross-entity references inside
+    by ``SlimIssueWeft`` since Phase C). Cross-entity references inside
     response payloads (``parent_id``, ``blocks``, ``blocked_by``,
     ``children``) keep their existing names — only the entity's own
     primary key is renamed.

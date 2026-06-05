@@ -1168,7 +1168,7 @@ class FilesMixin(DBMixinProtocol):
             suggestion = suggestion[:10_000] + "\n[truncated]"
 
         if fingerprint:
-            # Scanner-supplied fingerprint is the cross-run identity (Loom §3.B):
+            # Scanner-supplied fingerprint is the cross-run identity (Weft §3.B):
             # it follows the finding across line moves, so identity is keyed on
             # (scan_source, fingerprint) alone, not file/rule/line.
             existing_finding = self.conn.execute(

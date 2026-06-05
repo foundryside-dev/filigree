@@ -1,4 +1,4 @@
-"""Unit tests for filigree.generations.loom.adapters.
+"""Unit tests for filigree.generations.weft.adapters.
 
 Covers the shape transformations that feed the loom generation's HTTP
 responses. The tests here pin the adapter's key-set and field routing
@@ -10,11 +10,11 @@ the loom-generation contract.
 
 from __future__ import annotations
 
-from filigree.generations.loom.adapters import scan_ingest_result_to_loom
+from filigree.generations.weft.adapters import scan_ingest_result_to_weft
 from filigree.types.files import ScanIngestResult
 
 
-class TestScanIngestResultToLoom:
+class TestScanIngestResultToWeft:
     def test_empty_findings_clean_scan(self) -> None:
         result = ScanIngestResult(
             files_created=0,
@@ -26,7 +26,7 @@ class TestScanIngestResultToLoom:
             observations_failed=0,
             warnings=[],
         )
-        loom = scan_ingest_result_to_loom(result)
+        loom = scan_ingest_result_to_weft(result)
 
         # Top-level envelope keys.
         assert set(loom.keys()) == {"succeeded", "failed", "stats", "warnings"}
@@ -56,7 +56,7 @@ class TestScanIngestResultToLoom:
             observations_failed=0,
             warnings=["unknown severity 'xxx' coerced to 'info'"],
         )
-        loom = scan_ingest_result_to_loom(result)
+        loom = scan_ingest_result_to_weft(result)
 
         # new_finding_ids routes to succeeded.
         assert loom["succeeded"] == ["sf_abc123"]
@@ -83,7 +83,7 @@ class TestScanIngestResultToLoom:
             observations_failed=0,
             warnings=warnings,
         )
-        loom = scan_ingest_result_to_loom(result)
+        loom = scan_ingest_result_to_weft(result)
         loom["succeeded"].append("sf_two")
         loom["warnings"].append("w2")
         assert ids == ["sf_one"]

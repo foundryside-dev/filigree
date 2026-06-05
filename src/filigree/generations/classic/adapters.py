@@ -8,7 +8,7 @@ introduces internal-vocabulary renames that have to be reversed on the
 classic wire (e.g. internal ``issue_id`` renamed from ``SlimIssue.id``
 would require ``slim_issue_to_classic`` to map ``issue_id → id``).
 
-See ``filigree.generations.loom.adapters`` for the exemplar pattern and
+See ``filigree.generations.weft.adapters`` for the exemplar pattern and
 ``docs/plans/2026-04-24-2.0-federation-work-package.md`` §D for the
 Phase D rename work that will cause classic adapters to become non-empty.
 """

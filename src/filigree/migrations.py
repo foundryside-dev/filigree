@@ -673,7 +673,7 @@ def migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
 
 
 def migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
-    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Loom §3.B).
+    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Weft §3.B).
 
     A scanner may supply a stable per-finding ``fingerprint`` as the finding's
     cross-run identity. When present it keys lifecycle/``seen_count`` instead of

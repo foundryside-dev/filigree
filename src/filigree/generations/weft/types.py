@@ -1,4 +1,4 @@
-"""Loom-generation response types.
+"""Weft-generation response types.
 
 Per ADR-002 §6, loom wraps internal results in the unified envelopes
 defined in ``filigree.types.api``. Endpoint-specific response types that
@@ -27,7 +27,7 @@ from filigree.types.events import EventType
 from filigree.types.files import FindingsSummary
 
 
-class SlimIssueLoom(TypedDict):
+class SlimIssueWeft(TypedDict):
     """Slim issue projection for the loom generation.
 
     Key difference from ``filigree.types.api.SlimIssue``: ``issue_id``
@@ -46,8 +46,8 @@ class ScanStats(TypedDict):
     """Per-ingest counts surfaced alongside succeeded / failed.
 
     Mirrors the integer counters in ``filigree.types.files.ScanIngestResult``
-    except ``new_finding_ids`` (moved up to ``ScanIngestResponseLoom.succeeded``)
-    and ``warnings`` (moved up to ``ScanIngestResponseLoom.warnings``).
+    except ``new_finding_ids`` (moved up to ``ScanIngestResponseWeft.succeeded``)
+    and ``warnings`` (moved up to ``ScanIngestResponseWeft.warnings``).
     """
 
     files_created: int
@@ -58,14 +58,14 @@ class ScanStats(TypedDict):
     observations_failed: int
 
 
-class BatchCloseResponseLoom(TypedDict):
+class BatchCloseResponseWeft(TypedDict):
     """Response shape for ``POST /api/loom/batch/close``.
 
-    ``succeeded`` carries ``SlimIssueLoom`` by default and ``IssueLoom``
+    ``succeeded`` carries ``SlimIssueWeft`` by default and ``IssueWeft``
     when the request sets ``response_detail=full`` — the union covers
     both projections the handler may emit (see C5 in
     ``docs/federation/contracts.md``). ``newly_unblocked`` stays
-    ``SlimIssueLoom`` regardless of ``response_detail`` per the locked
+    ``SlimIssueWeft`` regardless of ``response_detail`` per the locked
     C5 rule, and uses the loom vocabulary (``issue_id``) like every
     other loom-shaped issue.
 
@@ -73,13 +73,13 @@ class BatchCloseResponseLoom(TypedDict):
     the contract test in ``tests/api/test_envelope_types.py``.
     """
 
-    succeeded: list[SlimIssueLoom | IssueLoom]
+    succeeded: list[SlimIssueWeft | IssueWeft]
     failed: list[BatchFailure]
-    newly_unblocked: NotRequired[list[SlimIssueLoom]]
+    newly_unblocked: NotRequired[list[SlimIssueWeft]]
 
 
-class IssueLoom(TypedDict):
-    """Loom-vocab issue projection.
+class IssueWeft(TypedDict):
+    """Weft-vocab issue projection.
 
     Same field shape as ``IssueDict`` (``filigree.types.core``) except
     the issue's own primary key is named ``issue_id`` rather than
@@ -125,35 +125,35 @@ class IssueLoom(TypedDict):
     data_warnings: list[str]
 
 
-class IssueLoomWithFiles(IssueLoom):
-    """``IssueLoom`` + ``files``: the response shape returned when
+class IssueLoomWithFiles(IssueWeft):
+    """``IssueWeft`` + ``files``: the response shape returned when
     ``GET /api/loom/issues/{issue_id}?include_files=true``.
 
     The ``files`` payload mirrors what ``db.get_issue_files()`` returns —
-    a list of file-association rows. Loom does not yet declare a
-    dedicated ``FileAssocLoom`` TypedDict; phase D may tighten this
+    a list of file-association rows. Weft does not yet declare a
+    dedicated ``FileAssocWeft`` TypedDict; phase D may tighten this
     when the file surface is loom-ified.
     """
 
     files: list[dict[str, Any]]
 
 
-class IssueLoomWithUnblocked(IssueLoom):
-    """``IssueLoom`` + ``newly_unblocked``: returned by close-issue
+class IssueLoomWithUnblocked(IssueWeft):
+    """``IssueWeft`` + ``newly_unblocked``: returned by close-issue
     when at least one issue became ready as a result. Mirrors MCP's
-    ``IssueWithUnblocked`` semantics but uses ``SlimIssueLoom``
+    ``IssueWithUnblocked`` semantics but uses ``SlimIssueWeft``
     rather than the classic ``SlimIssue``.
     """
 
-    newly_unblocked: list[SlimIssueLoom]
+    newly_unblocked: list[SlimIssueWeft]
 
 
-class CommentRecordLoom(TypedDict):
+class CommentRecordWeft(TypedDict):
     """Comment row in the loom vocabulary.
 
     Classic ``CommentRecord`` uses ``id`` for the comment's own primary
     key; loom renames it to ``comment_id`` for the same reason
-    ``SlimIssue.id`` becomes ``SlimIssueLoom.issue_id`` — entity
+    ``SlimIssue.id`` becomes ``SlimIssueWeft.issue_id`` — entity
     primary keys are typed by entity name.
     """
 
@@ -163,8 +163,8 @@ class CommentRecordLoom(TypedDict):
     created_at: ISOTimestamp
 
 
-class BlockedIssueLoom(SlimIssueLoom):
-    """SlimIssueLoom + ``blocked_by`` for ``GET /api/loom/blocked``.
+class BlockedIssueWeft(SlimIssueWeft):
+    """SlimIssueWeft + ``blocked_by`` for ``GET /api/loom/blocked``.
 
     Mirrors classic ``BlockedIssue`` (which extends ``SlimIssue``) but uses
     the loom ``issue_id`` vocabulary for the entity primary key. Reference
@@ -177,7 +177,7 @@ class BlockedIssueLoom(SlimIssueLoom):
     blocked_by: list[str]
 
 
-class FileRecordLoom(TypedDict):
+class FileRecordWeft(TypedDict):
     """File record with summary counts — items in ``GET /api/loom/files``.
 
     Mirrors classic ``EnrichedFileItem`` (FileRecordDict + summary +
@@ -203,7 +203,7 @@ class FileRecordLoom(TypedDict):
     observation_count: int
 
 
-class FileAssocLoom(TypedDict):
+class FileAssocWeft(TypedDict):
     """Issue-to-file association row — items in ``GET /api/loom/issues/{issue_id}/files``.
 
     Mirrors classic ``IssueFileAssociation`` except the association row's
@@ -223,7 +223,7 @@ class FileAssocLoom(TypedDict):
     file_language: str | None
 
 
-class ScanFindingLoom(TypedDict):
+class ScanFindingWeft(TypedDict):
     """Scan finding row — items in ``GET /api/loom/findings`` and the
     embedded findings list inside file/finding details.
 
@@ -255,7 +255,7 @@ class ScanFindingLoom(TypedDict):
     data_warnings: list[str]
 
 
-class ObservationLoom(TypedDict):
+class ObservationWeft(TypedDict):
     """Observation row — items in ``GET /api/loom/observations``.
 
     Mirrors classic ``ObservationDict`` except the observation's own
@@ -278,7 +278,7 @@ class ObservationLoom(TypedDict):
     expires_at: ISOTimestamp
 
 
-class ScannerLoom(TypedDict):
+class ScannerWeft(TypedDict):
     """Scanner registration entry — items in ``GET /api/loom/scanners``.
 
     Mirrors the dict produced by ``ScannerConfig.to_dict()``. ``name`` is
@@ -293,7 +293,7 @@ class ScannerLoom(TypedDict):
     file_types: list[str]
 
 
-class PackLoom(TypedDict):
+class PackWeft(TypedDict):
     """Workflow pack entry — items in ``GET /api/loom/packs``.
 
     Mirrors MCP's ``PackListItem``. ``pack`` is the entity's logical
@@ -313,7 +313,7 @@ class PackLoom(TypedDict):
     requires_packs: list[str]
 
 
-class TypeSummaryLoom(TypedDict):
+class TypeSummaryWeft(TypedDict):
     """Issue-type summary entry — items in ``GET /api/loom/types``.
 
     Mirrors the classic ``/api/types`` shape. ``type`` is the entity's
@@ -329,7 +329,7 @@ class TypeSummaryLoom(TypedDict):
     initial_state: str
 
 
-class IssueEventLoom(TypedDict):
+class IssueEventWeft(TypedDict):
     """Event row for ``GET /api/loom/issues/{issue_id}/events``.
 
     Mirrors classic ``EventRecord`` except the event's own primary key
@@ -349,10 +349,10 @@ class IssueEventLoom(TypedDict):
     created_at: ISOTimestamp
 
 
-class ChangeRecordLoom(IssueEventLoom):
+class ChangeRecordWeft(IssueEventWeft):
     """Cross-issue event row for ``GET /api/loom/changes``.
 
-    Extends ``IssueEventLoom`` with the joined ``issue_title`` column —
+    Extends ``IssueEventWeft`` with the joined ``issue_title`` column —
     matches the structural difference between ``EventRecord`` and
     ``EventRecordWithTitle`` in ``filigree.types.events``.
 
@@ -369,7 +369,7 @@ class ChangeRecordLoom(IssueEventLoom):
     affected_entities: list[str]
 
 
-class ScanIngestResponseLoom(TypedDict):
+class ScanIngestResponseWeft(TypedDict):
     """Response shape for ``POST /api/loom/scan-results``.
 
     ``succeeded`` contains server-generated finding ids for newly-created

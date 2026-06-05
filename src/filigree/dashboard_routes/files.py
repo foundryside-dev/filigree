@@ -609,7 +609,7 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
+def create_weft_router() -> APIRouter:
     """Build the loom-generation APIRouter for file tracking and scan
     findings endpoints.
 
@@ -621,12 +621,12 @@ def create_loom_router() -> APIRouter:
     from fastapi.responses import JSONResponse
 
     from filigree.dashboard import _get_db
-    from filigree.generations.loom.adapters import (
-        file_record_to_loom,
+    from filigree.generations.weft.adapters import (
+        file_record_to_weft,
         list_response,
-        scan_finding_to_loom,
-        scan_ingest_result_to_loom,
-        scanner_config_to_loom,
+        scan_finding_to_weft,
+        scan_ingest_result_to_weft,
+        scanner_config_to_weft,
     )
     from filigree.scanners import list_scanners
 
@@ -661,14 +661,14 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
-        return JSONResponse(scan_ingest_result_to_loom(result))
+        return JSONResponse(scan_ingest_result_to_weft(result))
 
     @router.get("/files")
     async def api_loom_list_files(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List tracked files — ``ListResponse[FileRecordLoom]``.
+        """List tracked files — ``ListResponse[FileRecordWeft]``.
 
         Classic ``GET /api/files`` returns ``PaginatedResult`` with
-        ``{results, total, limit, offset, has_more}``. Loom drops
+        ``{results, total, limit, offset, has_more}``. Weft drops
         ``total``, ``limit``, ``offset`` from the envelope per the
         unified ``ListResponse`` contract — consumers paginate via
         ``next_offset``. Filter query params (``language``,
@@ -697,14 +697,14 @@ def create_loom_router() -> APIRouter:
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        items = [file_record_to_loom(r) for r in result["results"]]
+        items = [file_record_to_weft(r) for r in result["results"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
     @router.get("/findings")
     async def api_loom_list_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Project-wide findings list — ``ListResponse[ScanFindingLoom]``.
+        """Project-wide findings list — ``ListResponse[ScanFindingWeft]``.
 
-        Loom-only (no classic dashboard counterpart at this path).
+        Weft-only (no classic dashboard counterpart at this path).
         Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
         ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``, plus
         ``fingerprint`` (lets a scanner confirm a finding's issue link without
@@ -724,7 +724,7 @@ def create_loom_router() -> APIRouter:
             result = db.list_findings_global(limit=limit, offset=offset, **filters)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        items = [scan_finding_to_loom(f) for f in result["findings"]]
+        items = [scan_finding_to_weft(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
     @router.get("/findings/{finding_id}/dossier")
@@ -760,7 +760,7 @@ def create_loom_router() -> APIRouter:
 
         return JSONResponse(
             {
-                "finding": scan_finding_to_loom(finding),
+                "finding": scan_finding_to_weft(finding),
                 "file": file_payload,
                 "linked_issue": linked_issue,
                 "file_associations": issue_file_associations or file_associations,
@@ -821,7 +821,7 @@ def create_loom_router() -> APIRouter:
         # private ``_build_scan_finding`` row-builder. This costs one extra
         # SELECT per finding (N+1), which is acceptable on this diagnostic
         # session-evidence surface and keeps the route off the DB internals.
-        findings = [scan_finding_to_loom(db.get_finding(row["id"])) for row in finding_rows]
+        findings = [scan_finding_to_weft(db.get_finding(row["id"])) for row in finding_rows]
 
         assoc_rows = db.conn.execute(
             """
@@ -1065,9 +1065,9 @@ def create_loom_router() -> APIRouter:
 
     @router.get("/scanners")
     async def api_loom_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List registered scanner configs — ``ListResponse[ScannerLoom]``.
+        """List registered scanner configs — ``ListResponse[ScannerWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Drops MCP's
+        Weft-only (no classic dashboard counterpart). Drops MCP's
         ``errors`` and ``hint`` siblings per the strict envelope —
         scanner load errors are logged at the boundary; consumers that
         need the diagnostic UI remain on the MCP surface. Resolves
@@ -1083,7 +1083,7 @@ def create_loom_router() -> APIRouter:
         scanners = list_scanners(scanners_dir, errors=load_errors)
         if load_errors:
             logger.warning("scanner load errors during /api/loom/scanners: %s", load_errors)
-        items = [scanner_config_to_loom(s) for s in scanners]
+        items = [scanner_config_to_weft(s) for s in scanners]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     return router
@@ -1108,7 +1108,7 @@ def create_living_surface_router() -> APIRouter:
     from fastapi.responses import JSONResponse
 
     from filigree.dashboard import _get_db
-    from filigree.generations.loom.adapters import scan_ingest_result_to_loom
+    from filigree.generations.weft.adapters import scan_ingest_result_to_weft
 
     router = APIRouter()
 
@@ -1141,6 +1141,6 @@ def create_living_surface_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
-        return JSONResponse(scan_ingest_result_to_loom(result))
+        return JSONResponse(scan_ingest_result_to_weft(result))
 
     return router

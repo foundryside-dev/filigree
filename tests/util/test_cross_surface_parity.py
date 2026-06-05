@@ -653,7 +653,7 @@ class TestBatchMixedValidityParity:
     ) -> None:
         """Loom-side positive-shape pin: ``/api/loom/batch/update`` and
         MCP ``batch_update`` both expose ``{succeeded, failed}``
-        (``BatchResponse[SlimIssueLoom]`` on the dashboard side,
+        (``BatchResponse[SlimIssueWeft]`` on the dashboard side,
         ``BatchResponse[SlimIssue]`` on the MCP side after Phase D1).
         What matters is that BOTH publish ``succeeded`` and ``failed``
         and that NEITHER publishes the classic-only

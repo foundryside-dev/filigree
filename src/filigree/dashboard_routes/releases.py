@@ -175,7 +175,7 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
+def create_weft_router() -> APIRouter:
     """Build the loom-generation APIRouter for release endpoints.
 
     Empty in Phase B of the 2.0 federation work package; Phase C fills

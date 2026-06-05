@@ -1,6 +1,6 @@
 """Locator→SEI value migration for entity associations (ADR-038 §7).
 
-The Loom suite moves every cross-tool binding off the mutable **locator**
+The Weft suite moves every cross-tool binding off the mutable **locator**
 (``{plugin}:{kind}:{qualname}``) onto the durable, opaque **SEI**
 (``clarion:eid:<hex>``). Filigree stores the binding id opaquely in
 ``entity_associations.clarion_entity_id`` (and, for hard-deleted issues, in the

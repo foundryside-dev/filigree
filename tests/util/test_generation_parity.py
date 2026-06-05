@@ -358,10 +358,10 @@ _SLIM_ISSUE_LOOM_KEYS = frozenset({"issue_id", "title", "status", "priority", "t
 
 
 def _assert_slim_issue_loom(item: Any, path: str = "$") -> None:
-    """Assert ``item`` is a SlimIssueLoom (5 keys, all the expected types)."""
+    """Assert ``item`` is a SlimIssueWeft (5 keys, all the expected types)."""
     assert isinstance(item, dict), f"{path}: expected dict, got {type(item).__name__}"
     assert set(item.keys()) == _SLIM_ISSUE_LOOM_KEYS, (
-        f"{path}: SlimIssueLoom key-set mismatch; "
+        f"{path}: SlimIssueWeft key-set mismatch; "
         f"missing={_SLIM_ISSUE_LOOM_KEYS - set(item.keys())} "
         f"extra={set(item.keys()) - _SLIM_ISSUE_LOOM_KEYS}"
     )
@@ -376,7 +376,7 @@ def _assert_slim_issue_loom(item: Any, path: str = "$") -> None:
 @pytest.mark.asyncio
 class TestLoomGenerationParityBatchUpdate:
     """Loom batch/update parity. Phase C2 mounts
-    ``POST /api/loom/batch/update`` returning ``BatchResponse[SlimIssueLoom]``.
+    ``POST /api/loom/batch/update`` returning ``BatchResponse[SlimIssueWeft]``.
 
     Fixture replay covers error envelopes and the all-missing 200 case
     (which pins ``BatchFailure`` shape on ``failed[0]``). The populated-
@@ -412,7 +412,7 @@ class TestLoomGenerationParityBatchUpdate:
             _assert_shape_matches(body, expected_resp["body"], path=example["name"])
 
     async def test_succeeded_populated_shape(self, dashboard_surface: AsyncClient) -> None:
-        """Pin ``succeeded[0]`` as a SlimIssueLoom against a real update.
+        """Pin ``succeeded[0]`` as a SlimIssueWeft against a real update.
 
         Fixture replay can't populate ``succeeded`` (the fixture body uses
         non-existent ids), so this test seeds a real issue and asserts
@@ -438,7 +438,7 @@ class TestLoomGenerationParityBatchUpdate:
 
     async def test_response_detail_full_succeeded_shape(self, dashboard_surface: AsyncClient) -> None:
         """``?response_detail=full`` upgrades ``succeeded[0]`` from a slim
-        5-key projection to a full ``IssueLoom`` (23 keys). Pins the C5
+        5-key projection to a full ``IssueWeft`` (23 keys). Pins the C5
         shape contract for federation consumers that opt in.
         """
         create = await dashboard_surface.post("/api/issues", json={"title": "C5 batch update full seed"})
@@ -459,7 +459,7 @@ class TestLoomGenerationParityBatchUpdate:
 
     async def test_response_detail_default_is_slim(self, dashboard_surface: AsyncClient) -> None:
         """No ``?response_detail`` param → succeeded[] items are
-        ``SlimIssueLoom`` (default). Pins the backwards-compat guarantee.
+        ``SlimIssueWeft`` (default). Pins the backwards-compat guarantee.
         """
         create = await dashboard_surface.post("/api/issues", json={"title": "C5 default slim"})
         assert create.status_code in (200, 201), create.text
@@ -485,8 +485,8 @@ _LOOM_BATCH_CLOSE_EXAMPLES = _examples_for("loom", "batch-close")
 @pytest.mark.asyncio
 class TestLoomGenerationParityBatchClose:
     """Loom batch/close parity. Phase C2 mounts
-    ``POST /api/loom/batch/close`` returning ``BatchCloseResponseLoom``
-    (BatchResponse[SlimIssueLoom] plus optional ``newly_unblocked``).
+    ``POST /api/loom/batch/close`` returning ``BatchCloseResponseWeft``
+    (BatchResponse[SlimIssueWeft] plus optional ``newly_unblocked``).
 
     Fixture replay covers errors + all-missing. The seeded test methods
     pin the populated-success shape and the ``newly_unblocked``
@@ -522,7 +522,7 @@ class TestLoomGenerationParityBatchClose:
 
     async def test_succeeded_populated_shape(self, dashboard_surface: AsyncClient) -> None:
         """Close one isolated (no dependents) issue. ``succeeded[0]`` is a
-        ``SlimIssueLoom``; ``newly_unblocked`` MUST be omitted because no
+        ``SlimIssueWeft``; ``newly_unblocked`` MUST be omitted because no
         issue was waiting on this one (per the BatchResponse §C2 rule).
         """
         create = await dashboard_surface.post("/api/issues", json={"title": "C2 batch close seed"})
@@ -543,7 +543,7 @@ class TestLoomGenerationParityBatchClose:
 
     async def test_newly_unblocked_populated_shape(self, dashboard_surface: AsyncClient) -> None:
         """Wire up a dependency (B blocked by A), close A, assert
-        ``newly_unblocked`` is present and contains B as a SlimIssueLoom.
+        ``newly_unblocked`` is present and contains B as a SlimIssueWeft.
         """
         a_resp = await dashboard_surface.post("/api/issues", json={"title": "blocker"})
         b_resp = await dashboard_surface.post("/api/issues", json={"title": "blocked"})
@@ -616,7 +616,7 @@ class TestLoomGenerationParityBatchClose:
 
     async def test_response_detail_full_succeeded_shape(self, dashboard_surface: AsyncClient) -> None:
         """``?response_detail=full`` on batch/close upgrades succeeded[0]
-        to a full ``IssueLoom``. Single isolated close, no
+        to a full ``IssueWeft``. Single isolated close, no
         newly_unblocked path exercised here.
         """
         create = await dashboard_surface.post("/api/issues", json={"title": "C5 batch close full seed"})
@@ -639,10 +639,10 @@ class TestLoomGenerationParityBatchClose:
         dashboard_surface: AsyncClient,
     ) -> None:
         """Even with ``?response_detail=full``, ``newly_unblocked[]``
-        items stay ``SlimIssueLoom`` per the locked C5 decision (see
+        items stay ``SlimIssueWeft`` per the locked C5 decision (see
         docs/federation/contracts.md). Set up B blocked by A, close A
         with ``?response_detail=full``, and assert succeeded[0] is full
-        IssueLoom while newly_unblocked[0] is slim.
+        IssueWeft while newly_unblocked[0] is slim.
         """
         a_resp = await dashboard_surface.post("/api/issues", json={"title": "blocker C5"})
         b_resp = await dashboard_surface.post("/api/issues", json={"title": "blocked C5"})
@@ -727,14 +727,14 @@ _ISSUE_LOOM_KEYS: frozenset[str] = frozenset(
 
 
 def _assert_issue_loom_shape(body: Any, *, path: str = "$") -> None:
-    """Assert ``body`` is an ``IssueLoom`` (23 keys, types match the TypedDict).
+    """Assert ``body`` is an ``IssueWeft`` (23 keys, types match the TypedDict).
 
     Allows extra keys to support the ``WithFiles`` / ``WithUnblocked`` subtypes
     (the test bodies that hit those paths assert the extra keys themselves).
     """
     assert isinstance(body, dict), f"{path}: expected dict, got {type(body).__name__}"
     missing = _ISSUE_LOOM_KEYS - set(body.keys())
-    assert not missing, f"{path}: IssueLoom missing keys {missing}; got {sorted(body.keys())}"
+    assert not missing, f"{path}: IssueWeft missing keys {missing}; got {sorted(body.keys())}"
     assert isinstance(body["issue_id"], str), f"{path}: issue_id must be str"
     assert "id" not in body, f"{path}: classic 'id' leaked into loom shape"
     assert isinstance(body["title"], str), f"{path}: title must be str"
@@ -763,7 +763,7 @@ class TestLoomGenerationParityIssues:
 
     Fixture coverage is intentionally narrow — most are 404/400 cases
     that exercise the path/validation surface without seeded state.
-    The populated-success ``IssueLoom`` shape and the
+    The populated-success ``IssueWeft`` shape and the
     ``newly_unblocked`` cascade are pinned by
     ``test_full_lifecycle_pins_issue_loom_shape`` below, which seeds
     real issues and exercises the entire surface in one test.
@@ -805,7 +805,7 @@ class TestLoomGenerationParityIssues:
         dashboard_surface: AsyncClient,
     ) -> None:
         """Seed two issues + a dependency, then exercise every loom CRUD
-        endpoint that returns an ``IssueLoom`` and assert the shape pin
+        endpoint that returns an ``IssueWeft`` and assert the shape pin
         on each response. Covers what fixture replay can't seed.
         """
         # Create
@@ -850,7 +850,7 @@ class TestLoomGenerationParityIssues:
         assert rl.status_code == 200, rl.text
         _assert_issue_loom_shape(rl.json(), path="release")
 
-        # COMMENT (CommentRecordLoom shape)
+        # COMMENT (CommentRecordWeft shape)
         cm = await dashboard_surface.post(
             f"/api/loom/issues/{a_id}/comments",
             json={"text": "lifecycle test"},
@@ -859,7 +859,7 @@ class TestLoomGenerationParityIssues:
         cm_body = cm.json()
         assert set(cm_body.keys()) == {"comment_id", "author", "text", "created_at"}, cm_body
         assert isinstance(cm_body["comment_id"], int)
-        assert "id" not in cm_body, "classic 'id' leaked into CommentRecordLoom"
+        assert "id" not in cm_body, "classic 'id' leaked into CommentRecordWeft"
 
         # DEPENDENCY ADD (b depends on a)
         da = await dashboard_surface.post(
@@ -887,7 +887,7 @@ class TestLoomGenerationParityIssues:
         _assert_issue_loom_shape(ro.json(), path="reopen")
         assert ro.json()["status"] == "open"
 
-        # CLAIM-NEXT (a is now ready again after reopen+release; expect IssueLoom)
+        # CLAIM-NEXT (a is now ready again after reopen+release; expect IssueWeft)
         cn = await dashboard_surface.post("/api/loom/claim-next", json={"assignee": "tester2"})
         assert cn.status_code == 200, cn.text
         _assert_issue_loom_shape(cn.json(), path="claim_next")
@@ -955,15 +955,15 @@ _BLOCKED_ISSUE_LOOM_KEYS: frozenset[str] = frozenset({"issue_id", "title", "stat
 
 
 def _assert_blocked_issue_loom(item: Any, *, path: str = "$") -> None:
-    """Assert ``item`` is a BlockedIssueLoom (SlimIssueLoom + blocked_by)."""
+    """Assert ``item`` is a BlockedIssueWeft (SlimIssueWeft + blocked_by)."""
     assert isinstance(item, dict), f"{path}: expected dict, got {type(item).__name__}"
     assert set(item.keys()) == _BLOCKED_ISSUE_LOOM_KEYS, (
-        f"{path}: BlockedIssueLoom key-set mismatch; "
+        f"{path}: BlockedIssueWeft key-set mismatch; "
         f"missing={_BLOCKED_ISSUE_LOOM_KEYS - set(item.keys())} "
         f"extra={set(item.keys()) - _BLOCKED_ISSUE_LOOM_KEYS}"
     )
     assert isinstance(item["issue_id"], str), f"{path}: issue_id must be str"
-    assert "id" not in item, f"{path}: classic 'id' leaked into BlockedIssueLoom"
+    assert "id" not in item, f"{path}: classic 'id' leaked into BlockedIssueWeft"
     assert isinstance(item["blocked_by"], list), f"{path}: blocked_by must be list"
     for blocker in item["blocked_by"]:
         assert isinstance(blocker, str), f"{path}: blocked_by entries must be str"
@@ -1015,7 +1015,7 @@ class TestLoomGenerationParityLists:
 
     async def test_blocked_populated_shape(self, dashboard_surface: AsyncClient) -> None:
         """Seed A blocking B, then assert ``GET /api/loom/blocked`` returns
-        B as a ``BlockedIssueLoom`` with ``blocked_by=[A]``.
+        B as a ``BlockedIssueWeft`` with ``blocked_by=[A]``.
         """
         a_resp = await dashboard_surface.post("/api/issues", json={"title": "blocker"})
         b_resp = await dashboard_surface.post("/api/issues", json={"title": "blocked"})
@@ -1040,7 +1040,7 @@ class TestLoomGenerationParityLists:
     async def test_issues_pagination_and_shape(self, dashboard_surface: AsyncClient) -> None:
         """Seed three issues, then exercise ``GET /api/loom/issues`` with
         a ``limit=1`` page boundary so the overfetch-by-1 has_more
-        detection actually triggers. Asserts ``IssueLoom`` shape on the
+        detection actually triggers. Asserts ``IssueWeft`` shape on the
         item plus ``next_offset`` semantics on subsequent pages.
         """
         for n in range(3):
@@ -1103,8 +1103,8 @@ class TestLoomGenerationParityLists:
         _assert_list_response_shape(files_body, path="files")
         assert len(files_body["items"]) >= 1
         f0 = files_body["items"][0]
-        assert "file_id" in f0, f"FileRecordLoom must use file_id, got keys: {sorted(f0.keys())}"
-        assert "id" not in f0, "classic 'id' leaked into FileRecordLoom"
+        assert "file_id" in f0, f"FileRecordWeft must use file_id, got keys: {sorted(f0.keys())}"
+        assert "id" not in f0, "classic 'id' leaked into FileRecordWeft"
         assert isinstance(f0["file_id"], str)
         assert isinstance(f0["path"], str)
         assert isinstance(f0["summary"], dict)
@@ -1118,8 +1118,8 @@ class TestLoomGenerationParityLists:
         _assert_list_response_shape(findings_body, path="findings")
         assert len(findings_body["items"]) >= 1
         sf0 = findings_body["items"][0]
-        assert "finding_id" in sf0, f"ScanFindingLoom must use finding_id, got keys: {sorted(sf0.keys())}"
-        assert "id" not in sf0, "classic 'id' leaked into ScanFindingLoom"
+        assert "finding_id" in sf0, f"ScanFindingWeft must use finding_id, got keys: {sorted(sf0.keys())}"
+        assert "id" not in sf0, "classic 'id' leaked into ScanFindingWeft"
         assert isinstance(sf0["finding_id"], str)
         assert sf0["severity"] == "high"
         assert sf0["rule_id"] == "C4-rule"
@@ -1131,8 +1131,8 @@ class TestLoomGenerationParityLists:
         _assert_list_response_shape(obs_body, path="observations")
         assert len(obs_body["items"]) >= 1
         ob0 = obs_body["items"][0]
-        assert "observation_id" in ob0, f"ObservationLoom must use observation_id, got keys: {sorted(ob0.keys())}"
-        assert "id" not in ob0, "classic 'id' leaked into ObservationLoom"
+        assert "observation_id" in ob0, f"ObservationWeft must use observation_id, got keys: {sorted(ob0.keys())}"
+        assert "id" not in ob0, "classic 'id' leaked into ObservationWeft"
         assert isinstance(ob0["observation_id"], str)
         # Pin that loom drops MCP's 'stats' sibling.
         assert "stats" not in obs_body, "loom observations must drop MCP's 'stats' field"
@@ -1149,7 +1149,7 @@ class TestLoomGenerationParityLists:
         )
         assert cm_resp.status_code == 201, cm_resp.text
 
-        # Comments — CommentRecordLoom item.
+        # Comments — CommentRecordWeft item.
         comments_resp = await dashboard_surface.get(f"/api/loom/issues/{issue_id}/comments")
         assert comments_resp.status_code == 200, comments_resp.text
         cb = comments_resp.json()
@@ -1158,17 +1158,17 @@ class TestLoomGenerationParityLists:
         c0 = cb["items"][0]
         assert set(c0.keys()) == {"comment_id", "author", "text", "created_at"}, c0
         assert isinstance(c0["comment_id"], int)
-        assert "id" not in c0, "classic 'id' leaked into CommentRecordLoom"
+        assert "id" not in c0, "classic 'id' leaked into CommentRecordWeft"
 
-        # Events — IssueEventLoom item. Issue creation generated at least one event.
+        # Events — IssueEventWeft item. Issue creation generated at least one event.
         events_resp = await dashboard_surface.get(f"/api/loom/issues/{issue_id}/events")
         assert events_resp.status_code == 200, events_resp.text
         eb = events_resp.json()
         _assert_list_response_shape(eb, path="issue-events")
         assert len(eb["items"]) >= 1
         e0 = eb["items"][0]
-        assert "event_id" in e0, f"IssueEventLoom must use event_id, got keys: {sorted(e0.keys())}"
-        assert "id" not in e0, "classic 'id' leaked into IssueEventLoom"
+        assert "event_id" in e0, f"IssueEventWeft must use event_id, got keys: {sorted(e0.keys())}"
+        assert "id" not in e0, "classic 'id' leaked into IssueEventWeft"
         assert isinstance(e0["event_id"], int)
         assert e0["issue_id"] == issue_id
 

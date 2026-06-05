@@ -648,7 +648,7 @@ class TestDashboardRoutesStructure:
 
         for mod in (analytics, files, issues, releases):
             assert callable(getattr(mod, "create_classic_router", None)), f"{mod.__name__} missing create_classic_router()"
-            assert callable(getattr(mod, "create_loom_router", None)), f"{mod.__name__} missing create_loom_router()"
+            assert callable(getattr(mod, "create_weft_router", None)), f"{mod.__name__} missing create_weft_router()"
 
 
 class TestCliCommandsStructure:
