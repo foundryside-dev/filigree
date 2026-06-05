@@ -140,7 +140,7 @@ class TestBorrowForWorkerThread:
                 tmp_path / "filigree.db",
                 prefix="test",
                 check_same_thread=False,
-                registry_backend="clarion",
+                registry_backend="loomweave",
                 loomweave_config={"base_url": base_url, "timeout_seconds": 0.5},
             )
             db.initialize()

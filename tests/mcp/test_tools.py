@@ -2879,7 +2879,7 @@ class TestFileTools:
         # This deliberately constructs an invalid hybrid state that FiligreeDB.__init__
         # rejects. The point is to pin the handler to registry.is_displaced(), not the
         # cached backend label, if future tests monkeypatch the registry protocol.
-        mcp_db.registry_backend = "clarion"
+        mcp_db.registry_backend = "loomweave"
         mcp_db.loomweave_config = {"base_url": "http://localhost:9111"}
 
         data = _parse(await call_tool("register_file", {"path": "src/protocol.py", "language": "python"}))
@@ -3841,7 +3841,7 @@ class TestHttpMcpRequestContext:
         def _resolver() -> FiligreeDB:
             raise RegistryVersionMismatchError(
                 "Loomweave advertised an incompatible registry API",
-                url="http://clarion.test/api/v1/_capabilities",
+                url="http://loomweave.test/api/v1/_capabilities",
                 expected=EXPECTED_LOOMWEAVE_API_VERSION,
                 advertised=EXPECTED_LOOMWEAVE_API_VERSION + 1,
             )
@@ -3864,7 +3864,7 @@ class TestHttpMcpRequestContext:
         assert data["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
         assert data["details"] == {
             "cause": "clarion_registry_version_mismatch",
-            "url": "http://clarion.test/api/v1/_capabilities",
+            "url": "http://loomweave.test/api/v1/_capabilities",
             "expected": EXPECTED_LOOMWEAVE_API_VERSION,
             "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
         }

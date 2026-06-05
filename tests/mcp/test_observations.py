@@ -21,7 +21,7 @@ class TestObserveTool:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
+                    url="http://loomweave.test/api/v1/files?path=src%2Fobserved.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -29,7 +29,7 @@ class TestObserveTool:
             def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files",
+                    url="http://loomweave.test/api/v1/files",
                     cause_kind="network",
                 )
 
@@ -45,7 +45,7 @@ class TestObserveTool:
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/observed.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fobserved.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fobserved.py"
 
     async def test_observe_creates_observation(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("observe", {"summary": "Something looks wrong"})

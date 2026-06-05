@@ -150,7 +150,7 @@ class FileRecord:
         # The (registry_backend, content_hash) pair is a correlated invariant,
         # not two independent fields: ``local`` files carry the empty-hash
         # sentinel (the local backend cannot compute a drift hash) and
-        # ``clarion`` files must carry a non-empty hash. Reject the two illegal
+        # ``loomweave`` files must carry a non-empty hash. Reject the two illegal
         # cross combinations at construction — mirrors ScanFinding's enum guard
         # and closes the type-level hole the flat dataclass otherwise allows.
         if self.registry_backend not in _VALID_REGISTRY_BACKENDS:

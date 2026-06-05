@@ -385,8 +385,8 @@ class TestMainGlobalReset:
             {
                 "prefix": "dash",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
         write_conf(
@@ -396,8 +396,8 @@ class TestMainGlobalReset:
                 "project_name": "dash",
                 "prefix": "dash",
                 "db": ".filigree/filigree.db",
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="dash")
@@ -417,19 +417,19 @@ class TestMainGlobalReset:
         with caplog.at_level(logging.WARNING, logger="filigree.dashboard"):
             dash_module.main(port=9999, no_browser=True, server_mode=False, allow_local_fallback=True)
 
-        assert "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
+        assert "dashboard started with --allow-local-fallback; loomweave registry is bypassed for auto-creates" in caplog.text
         # The post-startup *write-path* WARN (``_LoomweaveLocalFallbackRegistry``
         # logs this on every resolve_file fall-through) is still absent —
         # only the startup-time probe-failure WARN is in caplog.
         assert "Loomweave registry backend unavailable; using local file registry fallback" not in caplog.text
         assert captured["allow_local_fallback"] is True
         assert captured["registry_displaced"] is True
-        assert captured["config"]["clarion"] == {"base_url": "http://clarion.test"}
+        assert captured["config"]["loomweave"] == {"base_url": "http://loomweave.test"}
         # ADR-014: ``--allow-local-fallback`` overrides whatever the project
         # config says about fallback *before* the capability probe runs, so
         # the resulting in-memory ``loomweave_config`` carries
         # ``allow_local_fallback: True``.
-        assert captured["loomweave_config"] == {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        assert captured["loomweave_config"] == {"base_url": "http://loomweave.test", "allow_local_fallback": True}
 
     def test_dashboard_structured_log_does_not_leak_paths(
         self,
@@ -533,8 +533,8 @@ class TestGetDbErrorPaths:
             {
                 "prefix": "bad",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "file:///not-http"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "file:///not-http"},
             },
         )
         bad_db = FiligreeDB(bad_dir / DB_FILENAME, prefix="bad", check_same_thread=False)
@@ -556,7 +556,7 @@ class TestGetDbErrorPaths:
             assert bad_resp.status_code == 400
             bad_body = bad_resp.json()
             assert bad_body["code"] == "VALIDATION"
-            assert "clarion.base_url" in bad_body["error"]
+            assert "loomweave.base_url" in bad_body["error"]
         finally:
             store.close_all()
             dash_module._project_store = None

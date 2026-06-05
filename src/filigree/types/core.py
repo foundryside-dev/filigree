@@ -85,7 +85,7 @@ AnnotationTargetType = Literal["issue", "file", "finding", "observation"]
 AnnotationRelationship = Literal["relevant_to", "must_consider", "evidence_for", "explains", "created_from", "promoted_to"]
 AnnotationAnchorState = Literal["current", "line_drifted", "content_changed_anchor_found", "stale", "file_missing"]
 AnnotationProvenanceTrustLevel = Literal["complete", "partial", "minimal"]
-RegistryBackend = Literal["local", "clarion"]
+RegistryBackend = Literal["local", "loomweave"]
 
 
 class _ProjectConfigRequired(TypedDict):
@@ -122,7 +122,7 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     enabled_packs: list[str]
     mode: str
     registry_backend: RegistryBackend
-    clarion: LoomweaveConfig
+    loomweave: LoomweaveConfig
 
 
 _T = TypeVar("_T")

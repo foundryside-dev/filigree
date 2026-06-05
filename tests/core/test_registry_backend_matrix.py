@@ -24,11 +24,11 @@ class _DisplacedRegistry:
         return cast(
             ResolvedFile,
             {
-                "file_id": f"clarion:file:{path.replace('/', ':')}",
+                "file_id": f"loomweave:file:{path.replace('/', ':')}",
                 "content_hash": f"hash:{path}",
                 "canonical_path": path,
                 "language": language,
-                "registry_backend": "clarion",
+                "registry_backend": "loomweave",
             },
         )
 
@@ -38,12 +38,12 @@ class _DisplacedRegistry:
 
 @contextmanager
 def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tuple[FiligreeDB, ClarionStubState | None]]:
-    if registry_backend == "clarion":
+    if registry_backend == "loomweave":
         with clarion_stub() as (base_url, state):
             db = FiligreeDB(
                 tmp_path / "filigree.db",
                 prefix="test",
-                registry_backend="clarion",
+                registry_backend="loomweave",
                 loomweave_config={"base_url": base_url, "timeout_seconds": 1},
                 project_root=tmp_path,
             )
@@ -63,14 +63,14 @@ def _matrix_db(tmp_path: Path, registry_backend: RegistryBackend) -> Iterator[tu
 
 
 def _expected_file_id(registry_backend: RegistryBackend, path: str) -> str:
-    return f"core:file:stub@{path}" if registry_backend == "clarion" else ""
+    return f"core:file:stub@{path}" if registry_backend == "loomweave" else ""
 
 
 def _assert_registry_file_record(db: FiligreeDB, registry_backend: RegistryBackend, path: str) -> None:
     file_record = db.get_file_by_path(path)
     assert file_record is not None
     assert file_record.registry_backend == registry_backend
-    if registry_backend == "clarion":
+    if registry_backend == "loomweave":
         assert file_record.id == _expected_file_id(registry_backend, path)
         assert file_record.content_hash == f"sha256:{path}"
     else:
@@ -79,7 +79,7 @@ def _assert_registry_file_record(db: FiligreeDB, registry_backend: RegistryBacke
 
 
 def test_default_registry_backend_matrix_covers_local_and_loomweave() -> None:
-    assert DEFAULT_TEST_REGISTRY_BACKENDS == ("local", "clarion")
+    assert DEFAULT_TEST_REGISTRY_BACKENDS == ("local", "loomweave")
     assert not hasattr(registry_module, "SUPPORTED_REGISTRY_BACKENDS")
 
 
@@ -90,7 +90,7 @@ def test_register_file_round_trips_default_registry_backend(tmp_path: Path, regi
 
         _assert_registry_file_record(db, registry_backend, "src/default_backend.py")
         assert file_record.id == db.get_file_by_path("src/default_backend.py").id  # type: ignore[union-attr]
-        if registry_backend == "clarion":
+        if registry_backend == "loomweave":
             assert state is not None
             assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
@@ -116,7 +116,7 @@ def test_scan_ingest_round_trips_default_registry_backend(tmp_path: Path, regist
         file_record = db.get_file_by_path("src/default_backend.py")
         assert file_record is not None
         assert finding["file_id"] == file_record.id
-        if registry_backend == "clarion":
+        if registry_backend == "loomweave":
             assert state is not None
             # CONTRACT-1: scan-results batches via POST /api/v1/files/batch.
             assert state.file_requests == []
@@ -129,7 +129,7 @@ def test_observation_file_path_round_trips_default_registry_backend(tmp_path: Pa
         db.create_observation(summary="Observed", file_path="src/default_backend.py")
 
         _assert_registry_file_record(db, registry_backend, "src/default_backend.py")
-        if registry_backend == "clarion":
+        if registry_backend == "loomweave":
             assert state is not None
             assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
@@ -147,7 +147,7 @@ def test_annotation_file_path_round_trips_default_registry_backend(tmp_path: Pat
         file_record = db.get_file_by_path("src/default_backend.py")
         assert file_record is not None
         assert annotation["file_id"] == file_record.id
-        if registry_backend == "clarion":
+        if registry_backend == "loomweave":
             assert state is not None
             assert state.file_requests == [{"path": ["src/default_backend.py"], "language": ["python"]}]
 
@@ -158,7 +158,7 @@ def test_implicit_auto_create_paths_thread_displaced_registry_ids(tmp_path: Path
         tmp_path / "filigree.db",
         prefix="test",
         registry=registry,
-        registry_backend="clarion",
+        registry_backend="loomweave",
         project_root=tmp_path,
     )
     try:
@@ -184,16 +184,16 @@ def test_implicit_auto_create_paths_thread_displaced_registry_ids(tmp_path: Path
             observation_actor="scanner",
         )
 
-        assert registered.id == "clarion:file:src:registered.py"
-        assert observation["file_id"] == "clarion:file:src:observed.py"
-        assert annotation["file_id"] == "clarion:file:src:annotated.py"
+        assert registered.id == "loomweave:file:src:registered.py"
+        assert observation["file_id"] == "loomweave:file:src:observed.py"
+        assert annotation["file_id"] == "loomweave:file:src:annotated.py"
         finding = db.get_finding(scan["new_finding_ids"][0])
-        assert finding["file_id"] == "clarion:file:src:scanned.py"
+        assert finding["file_id"] == "loomweave:file:src:scanned.py"
 
         for path in ("src/registered.py", "src/observed.py", "src/annotated.py", "src/scanned.py"):
             file_record = db.get_file_by_path(path)
             assert file_record is not None
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             assert file_record.content_hash == f"hash:{path}"
     finally:
         db.close()

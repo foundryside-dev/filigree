@@ -270,7 +270,7 @@ class TestFileRecordBackendInvariant:
     """FileRecord enforces the correlated (registry_backend, content_hash) invariant.
 
     ``local`` files carry the empty-hash sentinel (the local backend cannot
-    compute a drift hash); ``clarion`` files must carry a non-empty hash. The
+    compute a drift hash); ``loomweave`` files must carry a non-empty hash. The
     illegal cross combinations are rejected at construction so a corrupt row
     or a future mis-wired caller cannot hydrate an inconsistent record.
     """
@@ -281,8 +281,8 @@ class TestFileRecordBackendInvariant:
         assert record.content_hash == ""
 
     def test_loomweave_with_nonempty_hash_is_valid(self) -> None:
-        record = FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="sha256:abc")
-        assert record.registry_backend == "clarion"
+        record = FileRecord(id="f1", path="src/a.py", registry_backend="loomweave", content_hash="sha256:abc")
+        assert record.registry_backend == "loomweave"
         assert record.content_hash == "sha256:abc"
 
     def test_local_with_nonempty_hash_is_rejected(self) -> None:
@@ -291,7 +291,7 @@ class TestFileRecordBackendInvariant:
 
     def test_loomweave_with_empty_hash_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="content_hash"):
-            FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="")
+            FileRecord(id="f1", path="src/a.py", registry_backend="loomweave", content_hash="")
 
     def test_invalid_registry_backend_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="registry_backend"):

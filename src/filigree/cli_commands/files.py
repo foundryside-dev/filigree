@@ -794,7 +794,7 @@ def _apply_registry_migration(db: Any, entries: list[dict[str, Any]], *, reverse
 
 
 @click.command("migrate-registry")
-@click.option("--to", "target_backend", type=click.Choice(["clarion"]), default=None, help="Target registry backend")
+@click.option("--to", "target_backend", type=click.Choice(["loomweave"]), default=None, help="Target registry backend")
 @click.option("--dry-run", "dry_run", is_flag=True, help="Plan the migration without changing the database")
 @click.option("--execute", "execute", is_flag=True, help="Apply the migration and write a rollback manifest")
 @click.option("--rollback", "rollback_manifest", type=click.Path(path_type=Path), default=None, help="Rollback using a manifest")

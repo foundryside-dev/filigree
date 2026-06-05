@@ -36,8 +36,8 @@ def _switch_to_loomweave_mode(project: Path, base_url: str) -> None:
     """Repoint a local-mode project's conf at a (live-stub) Loomweave authority."""
     conf_path = project / ".filigree.conf"
     conf = json.loads(conf_path.read_text())
-    conf["registry_backend"] = "clarion"
-    conf["clarion"] = {"base_url": base_url, "timeout_seconds": 2}
+    conf["registry_backend"] = "loomweave"
+    conf["loomweave"] = {"base_url": base_url, "timeout_seconds": 2}
     conf_path.write_text(json.dumps(conf))
 
 
@@ -142,7 +142,7 @@ def test_sei_backfill_maps_registry_unavailable_to_error_envelope(
     runner, _project = cli_in_project
 
     def _boom(*_args: object, **_kwargs: object) -> None:
-        raise RegistryUnavailableError("clarion down", url="http://x", path="", cause_kind="network")
+        raise RegistryUnavailableError("loomweave down", url="http://x", path="", cause_kind="network")
 
     monkeypatch.setattr("filigree.cli_commands.sei.run_sei_backfill", _boom)
     result = runner.invoke(cli, ["sei-backfill", "--json"])
@@ -150,7 +150,7 @@ def test_sei_backfill_maps_registry_unavailable_to_error_envelope(
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["code"] == "REGISTRY_UNAVAILABLE"
-    assert "clarion down" in payload["error"]
+    assert "loomweave down" in payload["error"]
 
 
 def test_sei_backfill_maps_sqlite_error_to_io_envelope(
@@ -190,7 +190,7 @@ def test_sei_backfill_maps_out_of_sync_error_to_code_3_and_envelope(
     payload = json.loads(result.output)
     assert payload["code"] == "CLARION_OUT_OF_SYNC"
     assert "Loomweave DB is out of sync" in payload["error"]
-    assert payload["remediation_command"] == "clarion analyze"
+    assert payload["remediation_command"] == "loomweave analyze"
 
 
 def test_sei_backfill_sync_check_missing_db(

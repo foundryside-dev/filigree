@@ -1,6 +1,6 @@
 """Federation §5 audit for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
-The Loom federation doctrine (``clarion/docs/suite/loom.md`` §5) names
+The Loom federation doctrine (``loomweave/docs/suite/loom.md`` §5) names
 three failure modes that the enrich-only rule must rule out:
 
   1. **Semantic coupling** — does Filigree depend on Loomweave to function?
@@ -38,24 +38,24 @@ class TestFederationSemanticCoupling:
         issue = db.create_issue("Federation §5 test", priority=2)
         # No colons, no plugin_id, no kind — the opposite of ADR-003's
         # three-segment composite. Filigree must not care.
-        db.add_entity_association(issue.id, "not-a-valid-clarion-id", content_hash="h")
+        db.add_entity_association(issue.id, "not-a-valid-loomweave-id", content_hash="h")
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
-        assert rows[0]["entity_id"] == "not-a-valid-clarion-id"
-        assert rows[0]["loomweave_entity_id"] == "not-a-valid-clarion-id"
+        assert rows[0]["entity_id"] == "not-a-valid-loomweave-id"
+        assert rows[0]["loomweave_entity_id"] == "not-a-valid-loomweave-id"
 
     def test_caller_supplied_entity_kind_round_trips_without_inference(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Kind metadata", priority=2)
 
         db.add_entity_association(
             issue.id,
-            "not-a-valid-clarion-id",
+            "not-a-valid-loomweave-id",
             content_hash="h",
             entity_kind="function",
         )
 
         rows = db.list_entity_associations(issue.id)
-        assert rows[0]["entity_id"] == "not-a-valid-clarion-id"
+        assert rows[0]["entity_id"] == "not-a-valid-loomweave-id"
         assert rows[0]["entity_kind"] == "function"
 
     def test_absent_entity_kind_stays_empty_for_locator_like_ids(self, db: FiligreeDB) -> None:
@@ -145,7 +145,7 @@ class TestFederationInitialisationCoupling:
 
     def test_no_loomweave_module_import(self) -> None:
         """The entity_associations module must not import anything named
-        'clarion' or attempt to dispatch onto a Loomweave client. Smoke test
+        'loomweave' or attempt to dispatch onto a Loomweave client. Smoke test
         the source for the obvious anti-pattern.
         """
         import filigree.db_entity_associations as mod
@@ -155,9 +155,9 @@ class TestFederationInitialisationCoupling:
         with open(source) as f:
             text = f.read()
         # Comments mentioning Loomweave are fine and expected; imports/calls
-        # of a literal "clarion" Python module are not.
-        assert "import clarion" not in text
-        assert "from clarion" not in text
+        # of a literal "loomweave" Python module are not.
+        assert "import loomweave" not in text
+        assert "from loomweave" not in text
 
 
 class TestFederationPipelineCoupling:
@@ -183,7 +183,7 @@ class TestFederationPipelineCoupling:
         # Comment
         db.add_comment(issue.id, "still running without Loomweave", author="t")
         # Label
-        db.add_label(issue.id, "no-clarion-needed")
+        db.add_label(issue.id, "no-loomweave-needed")
         # Close
         db.close_issue(issue.id, reason="federation test complete")
         # Reopen

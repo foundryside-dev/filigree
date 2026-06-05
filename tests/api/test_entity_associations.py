@@ -78,14 +78,14 @@ class TestAddEntityAssociationHTTP:
         resp = await client.post(
             f"/api/issue/{issue_id}/entity-associations",
             json={
-                "entity_id": "not-a-clarion-locator",
+                "entity_id": "not-a-loomweave-locator",
                 "content_hash": "hash-a",
                 "entity_kind": "function",
             },
         )
         assert resp.status_code == 201
         body = resp.json()
-        assert body["entity_id"] == "not-a-clarion-locator"
+        assert body["entity_id"] == "not-a-loomweave-locator"
         assert body["entity_kind"] == "function"
 
     async def test_attach_persists_and_echoes_signature(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:

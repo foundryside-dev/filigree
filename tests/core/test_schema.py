@@ -231,7 +231,7 @@ class TestEntityAssociationsSchema:
             "INSERT INTO entity_associations "
             "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("filigree-test", "not-a-clarion-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
+            ("filigree-test", "not-a-loomweave-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
         conn.commit()
         conn.close()
@@ -334,7 +334,7 @@ class TestEntityAssociationsSchema:
         conn.execute(
             "INSERT INTO entity_associations "
             "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
-            "VALUES ('iss-1', 'not-a-clarion-id', 'h', ?, 'x')",
+            "VALUES ('iss-1', 'not-a-loomweave-id', 'h', ?, 'x')",
             ("2026-05-01T00:00:00+00:00",),
         )
         conn.commit()
@@ -464,7 +464,7 @@ class TestEntityAssociationsSchema:
 
     def test_migration_v25_to_v26_renames_column_and_rewrites_prefixes(self, tmp_path: Path) -> None:
         """v25→v26 (Loomweave/Weft rebrand data pass): rename the
-        entity-association column ``clarion_entity_id`` -> ``loomweave_entity_id``
+        entity-association column ``loomweave_entity_id`` -> ``loomweave_entity_id``
         (PK rewritten by SQLite RENAME COLUMN), rewrite stored SEI prefixes
         ``loomweave:eid:`` -> ``loomweave:eid:`` and finding rule-id prefixes
         ``CLA-`` -> ``LMWV-`` in place, suffixes preserved."""
@@ -504,7 +504,7 @@ class TestEntityAssociationsSchema:
         assert rid == "LMWV-PY-UNSAFE-EVAL"  # CLA- -> LMWV-, suffix preserved
         empty = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f2'").fetchone()[0]
         assert empty == ""  # untouched
-        # F5 tombstone array rewritten (both elements), no loomweave:eid: survives.
+        # F5 tombstone array rewritten (both elements), no clarion:eid: survives.
         ids = conn.execute("SELECT entity_ids FROM deleted_issues").fetchone()[0]
         assert ids == '["loomweave:eid:abc", "loomweave:eid:def"]'
         # audit events rewritten in new_value (added) and old_value (removed)

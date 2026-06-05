@@ -114,7 +114,7 @@ class TestReportFindingTool:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=src%2Freport_target.py",
+                    url="http://loomweave.test/api/v1/files?path=src%2Freport_target.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -143,7 +143,7 @@ class TestReportFindingTool:
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/report_target.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Freport_target.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Freport_target.py"
         assert "Registry unavailable" in data["error"]
         assert data["details"]["cause"] == "registry_unavailable"
 
@@ -151,9 +151,9 @@ class TestReportFindingTool:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Loomweave registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
+                    "Loomweave registry could not resolve file at http://loomweave.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
-                    url="http://clarion.test/api/v1/files?path=missing.py",
+                    url="http://loomweave.test/api/v1/files?path=missing.py",
                 )
 
             def is_displaced(self) -> bool:
@@ -185,7 +185,7 @@ class TestReportFindingTool:
                 raise RegistryBriefingBlockedError(
                     "Loomweave registry refuses briefing-blocked file",
                     status_code=403,
-                    url="http://clarion.test/api/v1/files?path=secret.py",
+                    url="http://loomweave.test/api/v1/files?path=secret.py",
                 )
 
             def is_displaced(self) -> bool:
@@ -225,7 +225,7 @@ class TestReportFindingTool:
                         "content_hash": f"hash:{canonical_path}",
                         "canonical_path": canonical_path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 

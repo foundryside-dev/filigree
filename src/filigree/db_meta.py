@@ -20,7 +20,7 @@ from filigree.types.planning import CommentRecord, StatsResult
 
 logger = logging.getLogger(__name__)
 
-_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "clarion"})
+_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "loomweave"})
 
 
 class MetaMixin(DBMixinProtocol):

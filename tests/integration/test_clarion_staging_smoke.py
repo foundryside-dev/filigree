@@ -1,6 +1,6 @@
 """Smoke-test the pinned staging Loomweave HTTP deployment.
 
-The local live-Loomweave tests spawn a ``clarion`` binary from PATH. This check
+The local live-Loomweave tests spawn a ``loomweave`` binary from PATH. This check
 covers the release-governance gap where the deployed wire surface drifts even
 when the local binary lane still passes. It is optional for contributor runs,
 but required in the scheduled/manual live lane via

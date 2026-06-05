@@ -23,7 +23,7 @@ resume, the ``invalid`` (REQ-F-02) channel, PK-collision merge, and the
 historical ``deleted_issues.entity_ids`` rewrite (REQ-F-01).
 
 The faithful "no grandfathering" gate — the same scenarios against a live
-``clarion serve`` — lives in ``test_sei_oracle_live_loomweave.py``.
+``loomweave serve`` — lives in ``test_sei_oracle_live_loomweave.py``.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _loomweave_db(tmp_path: Path, base_url: str) -> FiligreeDB:
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={"base_url": base_url, "timeout_seconds": 2},
     )
     db.initialize()
@@ -88,8 +88,10 @@ def _loomweave_oracle_source() -> Path | None:
     env = os.environ.get("CLARION_REPO")
     if env:
         candidates.append(Path(env) / "docs" / "federation" / "fixtures" / "sei-conformance-oracle.json")
-    # Sibling checkout: <home>/clarion next to <home>/filigree.
-    candidates.append(Path(__file__).resolve().parents[3] / "clarion" / "docs" / "federation" / "fixtures" / "sei-conformance-oracle.json")
+    # Sibling checkout: <home>/loomweave next to <home>/filigree.
+    candidates.append(
+        Path(__file__).resolve().parents[3] / "loomweave" / "docs" / "federation" / "fixtures" / "sei-conformance-oracle.json"
+    )
     return next((c for c in candidates if c.exists()), None)
 
 

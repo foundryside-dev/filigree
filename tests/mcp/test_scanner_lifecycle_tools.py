@@ -404,7 +404,7 @@ class TestTriggerScanBatchTool:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=batch_registry_a.py",
+                    url="http://loomweave.test/api/v1/files?path=batch_registry_a.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -427,7 +427,7 @@ class TestTriggerScanBatchTool:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "batch_registry_a.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=batch_registry_a.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=batch_registry_a.py"
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -1090,7 +1090,7 @@ class TestTriggerScanCooldownReservation:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=trigger_registry.py",
+                    url="http://loomweave.test/api/v1/files?path=trigger_registry.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -1110,7 +1110,7 @@ class TestTriggerScanCooldownReservation:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "trigger_registry.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=trigger_registry.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=trigger_registry.py"
         finally:
             _cleanup_files(mcp_db, files)
 

@@ -66,7 +66,7 @@ class TestFilesSchemaAPI:
 
         assert data["config_flags"] == {
             "registry_backend": "local",
-            "registry_backend_features": ["local", "clarion"],
+            "registry_backend_features": ["local", "loomweave"],
             "allow_local_fallback": False,
             # F-1: probe identity is unset under local-mode; the keys are still
             # emitted so the dashboard JS does not need a separate code path.
@@ -79,8 +79,8 @@ class TestFilesSchemaAPI:
         resp = await loomweave_fallback_client.get("/api/files/_schema")
         data = resp.json()
 
-        assert data["config_flags"]["registry_backend"] == "clarion"
-        assert data["config_flags"]["registry_backend_features"] == ["local", "clarion"]
+        assert data["config_flags"]["registry_backend"] == "loomweave"
+        assert data["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
         assert data["config_flags"]["allow_local_fallback"] is True
 
 
@@ -93,9 +93,9 @@ class TestScanResultsRegistryErrors:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Loomweave registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
+                    "Loomweave registry could not resolve file at http://loomweave.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
-                    url="http://clarion.test/api/v1/files?path=missing.py",
+                    url="http://loomweave.test/api/v1/files?path=missing.py",
                 )
 
             def is_displaced(self) -> bool:
@@ -234,7 +234,7 @@ class TestUnknownScanRunIdContract:
     """POST scan-results with a client-supplied scan_run_id Filigree has never
     seen — the permanent "tolerate-unknown" intake contract (F6, contracts.md).
 
-    Federation producers (Loomweave `clarion analyze`) mint their own run_id and
+    Federation producers (Loomweave `loomweave analyze`) mint their own run_id and
     POST findings carrying it with NO prior create handshake. Filigree ingests
     the findings and reconstructs the run in GET /api/scan-runs from
     scan_findings.scan_run_id. This is a supported, permanent contract — not a
@@ -250,8 +250,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-never-seen-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-never-seen-001",
                 "findings": [{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
             },
         )
@@ -260,7 +260,7 @@ class TestUnknownScanRunIdContract:
         assert body["findings_created"] == 1
         # The orphan run is reconstructed from scan_findings in history.
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
-        assert any(r["scan_run_id"] == "clarion-run-never-seen-001" for r in runs)
+        assert any(r["scan_run_id"] == "loomweave-run-never-seen-001" for r in runs)
 
     async def test_unknown_run_completion_is_silently_skipped(self, client: AsyncClient) -> None:
         """With complete_scan_run=True (default) an unknown run does NOT emit a
@@ -273,8 +273,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-warn-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-warn-001",
                 "findings": [{"path": "b.py", "rule_id": "C2", "severity": "high", "message": "m"}],
             },
         )
@@ -284,7 +284,7 @@ class TestUnknownScanRunIdContract:
         assert not any("not updated to 'completed'" in w for w in body["warnings"])
         # The unknown run is still reconstructed from scan_findings in history.
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
-        assert any(r["scan_run_id"] == "clarion-run-warn-001" for r in runs)
+        assert any(r["scan_run_id"] == "loomweave-run-warn-001" for r in runs)
 
     async def test_complete_scan_run_false_suppresses_completion_warning(self, client: AsyncClient) -> None:
         """complete_scan_run=False suppresses the completion attempt entirely,
@@ -292,8 +292,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-noverify-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-noverify-001",
                 "findings": [{"path": "c.py", "rule_id": "C3", "severity": "high", "message": "m"}],
                 "complete_scan_run": False,
             },
@@ -555,16 +555,16 @@ class TestLoomCleanStaleFindingsAPI:
     async def test_clean_stale_matrix(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """One seeded matrix proving scoping + enrich-only in a single sweep.
 
-        | finding                              | after clarion/30d sweep |
+        | finding                              | after loomweave/30d sweep |
         | ------------------------------------ | ----------------------- |
-        | clarion + unseen + old               | fixed (cleaned)         |
-        | clarion + unseen + recent            | kept unseen_in_latest   |
-        | clarion + open (still in latest)     | kept open (enrich-only) |
+        | loomweave + unseen + old               | fixed (cleaned)         |
+        | loomweave + unseen + recent            | kept unseen_in_latest   |
+        | loomweave + open (still in latest)     | kept open (enrich-only) |
         | wardline + unseen + old              | kept (scan_source iso)  |
         """
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[
                 {"path": "clar_old.py", "rule_id": "C-OLD", "severity": "high", "message": "m"},
                 {"path": "clar_recent.py", "rule_id": "C-RECENT", "severity": "high", "message": "m"},
@@ -586,20 +586,20 @@ class TestLoomCleanStaleFindingsAPI:
 
         resp = await client.post(
             "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+            json={"scan_source": "loomweave", "older_than_days": 30, "actor": "loomweave"},
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
+        assert body == {"findings_fixed": 1, "scan_source": "loomweave", "older_than_days": 30, "warnings": []}
 
-        # Only the old clarion unseen finding was swept.
+        # Only the old loomweave unseen finding was swept.
         assert self._status_by_rule(dashboard_db, "clar_old.py")["C-OLD"] == "fixed"
-        # Recent clarion unseen finding untouched.
+        # Recent loomweave unseen finding untouched.
         assert self._status_by_rule(dashboard_db, "clar_recent.py")["C-RECENT"] == "unseen_in_latest"
-        # Live (open) clarion finding untouched — enrich-only: still-present
+        # Live (open) loomweave finding untouched — enrich-only: still-present
         # findings keep their seen state.
         assert self._status_by_rule(dashboard_db, "clar_open.py")["C-OPEN"] == "open"
-        # Wardline finding untouched — scan_source isolation: a clarion-scoped
+        # Wardline finding untouched — scan_source isolation: a loomweave-scoped
         # sweep can never affect another tool's findings.
         assert self._status_by_rule(dashboard_db, "ward_old.py")["W-OLD"] == "unseen_in_latest"
 
@@ -607,7 +607,7 @@ class TestLoomCleanStaleFindingsAPI:
         """``older_than_days`` is optional; omitting it defaults to 30 (REQ-FINDING-06)."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
         )
         db.conn.execute(
@@ -615,16 +615,16 @@ class TestLoomCleanStaleFindingsAPI:
             (_OLD_TS,),
         )
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 200
-        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
+        assert resp.json() == {"findings_fixed": 1, "scan_source": "loomweave", "older_than_days": 30, "warnings": []}
 
     async def test_coalesce_fallback_null_last_seen_at(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Age gate is coalesce(last_seen_at, updated_at): a NULL last_seen_at
         with an old updated_at is still swept (inherited from the core method)."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
         )
         db.conn.execute(
@@ -632,7 +632,7 @@ class TestLoomCleanStaleFindingsAPI:
             (_OLD_TS,),
         )
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 30})
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "loomweave", "older_than_days": 30})
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
         assert self._status_by_rule(dashboard_db, "a.py")["C1"] == "fixed"
@@ -643,7 +643,7 @@ class TestLoomCleanStaleFindingsAPI:
         already-unseen rows, and open (live) findings are still untouched."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[
                 {"path": "u.py", "rule_id": "C-UNSEEN", "severity": "low", "message": "m"},
                 {"path": "o.py", "rule_id": "C-OPEN", "severity": "low", "message": "m"},
@@ -652,7 +652,7 @@ class TestLoomCleanStaleFindingsAPI:
         # Mark one unseen with a *recent* last_seen_at (would survive a 30-day window).
         db.conn.execute("UPDATE scan_findings SET status = 'unseen_in_latest' WHERE rule_id = 'C-UNSEEN'")
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 0})
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "loomweave", "older_than_days": 0})
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
         assert self._status_by_rule(dashboard_db, "u.py")["C-UNSEEN"] == "fixed"
@@ -664,7 +664,7 @@ class TestLoomCleanStaleFindingsAPI:
         sweeping a finding dismisses the observation linked to it."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
             create_observations=True,
         )
@@ -681,7 +681,7 @@ class TestLoomCleanStaleFindingsAPI:
 
         resp = await client.post(
             "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+            json={"scan_source": "loomweave", "older_than_days": 30, "actor": "loomweave"},
         )
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
@@ -704,7 +704,7 @@ class TestLoomCleanStaleFindingsAPI:
     async def test_invalid_older_than_days_rejected(self, client: AsyncClient, bad_days: object) -> None:
         resp = await client.post(
             "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": bad_days},
+            json={"scan_source": "loomweave", "older_than_days": bad_days},
         )
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
@@ -733,7 +733,7 @@ class TestLoomCleanStaleFindingsAPI:
             raise sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 500
         assert resp.json()["code"] == "IO"
 
@@ -744,7 +744,7 @@ class TestLoomCleanStaleFindingsAPI:
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 500
         body = resp.json()
         assert body["code"] == "INTERNAL"

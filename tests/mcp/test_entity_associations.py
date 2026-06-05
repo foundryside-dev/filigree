@@ -61,13 +61,13 @@ class TestAddEntityAssociationMCP:
                 "add_entity_association",
                 {
                     "issue_id": issue.id,
-                    "entity_id": "not-a-clarion-locator",
+                    "entity_id": "not-a-loomweave-locator",
                     "content_hash": "abc123",
                     "entity_kind": "function",
                 },
             )
         )
-        assert result["entity_id"] == "not-a-clarion-locator"
+        assert result["entity_id"] == "not-a-loomweave-locator"
         assert result["entity_kind"] == "function"
 
     async def test_attach_idempotent_preserves_attached_by(self, mcp_db: FiligreeDB) -> None:

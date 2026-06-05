@@ -53,7 +53,7 @@ def _unused_localhost_url() -> str:
 def loomweave_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, None, None]:
     """Dashboard DB configured through the real Loomweave fallback constructor path.
 
-    Uses ``http://clarion.test`` (unresolvable) plus ``allow_local_fallback=True``
+    Uses ``http://loomweave.test`` (unresolvable) plus ``allow_local_fallback=True``
     so the startup capability probe fails with ``RegistryUnavailableError`` and
     is downgraded to a WARN — exercising the same fallback wiring an operator
     would hit with Loomweave offline.
@@ -62,9 +62,9 @@ def loomweave_fallback_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, Non
         tmp_path / "filigree.db",
         prefix="test",
         check_same_thread=False,
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={
-            "base_url": "http://clarion.test",
+            "base_url": "http://loomweave.test",
             "allow_local_fallback": True,
         },
     )
@@ -101,7 +101,7 @@ def unavailable_loomweave_dashboard_db(tmp_path: Path) -> Generator[FiligreeDB, 
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 0.1,

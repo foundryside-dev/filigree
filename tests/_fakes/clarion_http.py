@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-DEFAULT_INSTANCE_ID = "test-clarion-instance"
+DEFAULT_INSTANCE_ID = "test-loomweave-instance"
 DEFAULT_API_VERSION = 1
 
 
@@ -45,7 +45,7 @@ class ClarionStubState:
     # after that many probes (so e.g. ``=1`` flips the answer on the *second*
     # probe — the typical mid-session-rotation test pattern).
     rotate_after_capability_probes: int | None = None
-    rotated_instance_id: str = "test-clarion-instance-rotated"
+    rotated_instance_id: str = "test-loomweave-instance-rotated"
     # When a Clarion-side file is briefing-blocked, Clarion 1.0 returns
     # HTTP 403 with body ``{"code": "BRIEFING_BLOCKED", ...}``. The set holds
     # paths to simulate that state. Filigree must raise

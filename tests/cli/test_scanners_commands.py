@@ -875,7 +875,7 @@ class TestReportFindingCommand:
         def unavailable_registry(self: FiligreeDB, **kwargs: object) -> object:
             raise RegistryUnavailableError(
                 "Loomweave registry unavailable for test",
-                url="http://clarion.test/api/v1/files?path=src%2Ffoo.py",
+                url="http://loomweave.test/api/v1/files?path=src%2Ffoo.py",
                 path="src/foo.py",
                 cause_kind="network",
             )
@@ -892,7 +892,7 @@ class TestReportFindingCommand:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "src/foo.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Ffoo.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Ffoo.py"
         finally:
             os.chdir(original)
 
@@ -905,7 +905,7 @@ class TestReportFindingCommand:
             raise RegistryBriefingBlockedError(
                 "Loomweave registry refuses briefing-blocked file",
                 status_code=403,
-                url="http://clarion.test/api/v1/files?path=secret.py",
+                url="http://loomweave.test/api/v1/files?path=secret.py",
             )
 
         runner = CliRunner()
@@ -1168,7 +1168,7 @@ class TestTriggerScanCommand:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
                 "Loomweave registry unavailable for test",
-                url="http://clarion.test/api/v1/files?path=target.py",
+                url="http://loomweave.test/api/v1/files?path=target.py",
                 path=path,
                 cause_kind="network",
             )
@@ -1185,7 +1185,7 @@ class TestTriggerScanCommand:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "target.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=target.py"
         finally:
             os.chdir(original)
 
@@ -1197,7 +1197,7 @@ class TestTriggerScanCommand:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
                 "Loomweave registry unavailable for test",
-                url="http://clarion.test/api/v1/files?path=target.py",
+                url="http://loomweave.test/api/v1/files?path=target.py",
                 path=path,
                 cause_kind="network",
             )
@@ -1214,7 +1214,7 @@ class TestTriggerScanCommand:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "target.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=target.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=target.py"
         finally:
             os.chdir(original)
 

@@ -48,7 +48,7 @@ class _CasefoldingRegistry:
                 "content_hash": f"hash:{canonical_path}",
                 "canonical_path": canonical_path,
                 "language": language,
-                "registry_backend": "clarion",
+                "registry_backend": "loomweave",
             },
         )
 
@@ -91,7 +91,7 @@ class TestRegisterFile:
             registry=FixedRegistry(
                 file_id="core:file:def456@src/direct.py",
                 content_hash="hash-direct",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -103,7 +103,7 @@ class TestRegisterFile:
             assert file_record.path == "src/direct.py"
             assert file_record.language == "python"
             assert file_record.content_hash == "hash-direct"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
         finally:
             db.close()
 
@@ -129,7 +129,7 @@ class TestRegisterFile:
             registry=FixedRegistry(
                 file_id="core:file:escape",
                 canonical_path="../outside.py",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -359,7 +359,7 @@ class TestRegisterFile:
                         "content_hash": f"sha256:refresh-{self.calls}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -367,7 +367,7 @@ class TestRegisterFile:
                 return True
 
         registry = RefreshingRegistry()
-        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="clarion")
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="loomweave")
         try:
             db.initialize()
 
@@ -381,7 +381,7 @@ class TestRegisterFile:
 
             assert created.id == updated.id
             assert updated.content_hash == "sha256:refresh-2"
-            assert updated.registry_backend == "clarion"
+            assert updated.registry_backend == "loomweave"
             assert registry.calls == 2
             events = db.get_file_timeline(updated.id, event_type="file_metadata_update")
             assert {event["data"]["field"] for event in events["results"]} >= {"content_hash", "registry_backend"}
@@ -679,7 +679,7 @@ class TestProcessScanResults:
             registry=FixedRegistry(
                 file_id="core:file:abc123@src/main.py",
                 content_hash="hash-ingest",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -702,7 +702,7 @@ class TestProcessScanResults:
             assert file_record is not None
             assert file_record.id == "core:file:abc123@src/main.py"
             assert file_record.content_hash == "hash-ingest"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             finding = db.get_finding(result["new_finding_ids"][0])
             assert finding["file_id"] == "core:file:abc123@src/main.py"
         finally:
@@ -721,7 +721,7 @@ class TestProcessScanResults:
                         "content_hash": f"sha256:scan-{self.calls}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -732,7 +732,7 @@ class TestProcessScanResults:
                 return True
 
         registry = RefreshingRegistry()
-        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="clarion")
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="loomweave")
         try:
             db.initialize()
             first = db.process_scan_results(
@@ -767,7 +767,7 @@ class TestProcessScanResults:
             assert second["files_updated"] == 1
             assert registry.calls == 2
             assert file_record.content_hash == "sha256:scan-2"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
         finally:
             db.close()
 
@@ -787,7 +787,7 @@ class TestProcessScanResults:
                         "content_hash": f"hash:{path}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -799,8 +799,8 @@ class TestProcessScanResults:
             tmp_path / "filigree.db",
             prefix="test",
             registry=registry,
-            registry_backend="clarion",
-            loomweave_config={"base_url": "http://clarion.test"},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": "http://loomweave.test"},
         )
         registry.db = db
         try:
@@ -1000,7 +1000,7 @@ class TestProcessScanResults:
             registry=FixedRegistry(
                 file_id="core:file:escape",
                 canonical_path="/etc/passwd",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -1675,7 +1675,7 @@ class TestScanRunId:
         skips the completion attempt silently — no "status not updated" warning
         (there is nothing to complete). Findings still ingest."""
         result = db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             scan_run_id="never-created-run",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
         )

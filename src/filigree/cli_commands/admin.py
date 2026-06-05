@@ -596,7 +596,7 @@ def migrate(from_beads: bool, beads_db: str | None) -> None:
 @click.option(
     "--allow-local-fallback",
     is_flag=True,
-    help="When registry_backend=clarion, route file auto-creates through the local registry for recovery.",
+    help="When registry_backend=loomweave, route file auto-creates through the local registry for recovery.",
 )
 def dashboard(
     port: int | None,

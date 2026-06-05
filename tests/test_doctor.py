@@ -356,8 +356,8 @@ class TestDoctorDatabase:
                 "project_name": "tst",
                 "prefix": "tst",
                 "db": ".filigree/filigree.db",
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
 
@@ -367,7 +367,7 @@ class TestDoctorDatabase:
         assert registry_result.passed is False
         assert "configured for Loomweave" in registry_result.message
         assert "1 file_records row(s)" in registry_result.message
-        assert "migrate-registry --to clarion" in registry_result.fix_hint
+        assert "migrate-registry --to loomweave" in registry_result.fix_hint
 
 
 class TestDoctorHonorsConfDbPath:

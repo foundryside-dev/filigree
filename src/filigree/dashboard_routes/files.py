@@ -575,7 +575,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent
@@ -646,7 +646,7 @@ def create_weft_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent
@@ -1126,7 +1126,7 @@ def create_living_surface_router() -> APIRouter:
             return _error_response(parsed, ErrorCode.VALIDATION, 400)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent

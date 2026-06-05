@@ -27,7 +27,7 @@ class FixedRegistry:
         self.displaced = displaced
 
     def _resolved_file_id(self) -> FileId | EntityId:
-        if self.displaced or self.registry_backend == "clarion":
+        if self.displaced or self.registry_backend == "loomweave":
             return make_entity_id(self.file_id)
         return make_file_id(self.file_id)
 

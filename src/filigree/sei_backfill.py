@@ -60,7 +60,7 @@ class SeiBackfillError(RuntimeError):
     """The backfill cannot run because its precondition is unmet.
 
     Raised for a clean, actionable refusal — not a partial write. The two
-    cases: the project is not in ``clarion`` registry mode (no authority to
+    cases: the project is not in ``loomweave`` registry mode (no authority to
     resolve against), or the reachable Loomweave has not shipped SEI
     (``_capabilities.sei.supported`` false/absent). In the latter case the
     honest answer is "identity unavailable; nothing to migrate", per the
@@ -155,7 +155,7 @@ def run_sei_backfill(db: FiligreeDB, *, dry_run: bool = True, actor: str = "") -
 
 
 def _require_sei_capable(db: FiligreeDB) -> None:
-    if db.registry_backend != "clarion":
+    if db.registry_backend != "loomweave":
         msg = (
             f"SEI backfill requires Loomweave as the registry backend (project is {db.registry_backend!r}). "
             "There is no authority to resolve locators against; nothing to migrate."
@@ -224,7 +224,7 @@ def _build_loomweave_registry(db: FiligreeDB) -> LoomweaveRegistry:
     """
     base_url = db._loomweave_base_url()
     if base_url is None:  # pragma: no cover — guarded by _require_sei_capable
-        msg = "clarion.base_url is not configured"
+        msg = "loomweave.base_url is not configured"
         raise SeiBackfillError(msg)
     return LoomweaveRegistry(
         base_url,

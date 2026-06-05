@@ -67,15 +67,15 @@
       }
     },
     {
-      "name": "success_one_finding_with_clarion_metadata",
+      "name": "success_one_finding_with_loomweave_metadata",
       "note": "Representative federation-emitter case. succeeded contains the server-generated finding id (was: new_finding_ids in classic); stats mirrors ScanIngestResult counts minus new_finding_ids (now surfaced as succeeded) and warnings (now top-level).",
       "request": {
         "method": "POST",
         "path": "/api/loom/scan-results",
         "headers": {"Content-Type": "application/json"},
         "body": {
-          "scan_source": "clarion",
-          "scan_run_id": "clarion-20260424-a1b2c3",
+          "scan_source": "loomweave",
+          "scan_run_id": "loomweave-20260424-a1b2c3",
           "mark_unseen": true,
           "findings": [
             {
@@ -87,9 +87,9 @@
               "line_end": 42,
               "suggestion": "Replace eval() with ast.literal_eval() or a parser for the expected grammar.",
               "metadata": {
-                "clarion": {
+                "loomweave": {
                   "internal_severity": "ERROR",
-                  "entity_id": "clarion:py:example.module.parse_config"
+                  "entity_id": "loomweave:py:example.module.parse_config"
                 }
               }
             }

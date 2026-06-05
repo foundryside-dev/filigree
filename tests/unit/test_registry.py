@@ -61,7 +61,7 @@ def test_local_registry_resolves_file_with_local_identity() -> None:
 def test_project_config_uses_typed_loomweave_config() -> None:
     hints = get_type_hints(ProjectConfig)
 
-    assert hints["clarion"] is LoomweaveConfig
+    assert hints["loomweave"] is LoomweaveConfig
     assert set(get_type_hints(LoomweaveConfig)) == {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
 
 
@@ -98,7 +98,7 @@ def test_filigree_db_reads_loomweave_token_from_named_env_var(tmp_path: Path, mo
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,
@@ -132,7 +132,7 @@ def test_filigree_db_warns_when_loomweave_token_env_unset(
                 tmp_path / "filigree.db",
                 prefix="test",
                 check_same_thread=False,
-                registry_backend="clarion",
+                registry_backend="loomweave",
                 loomweave_config={
                     "base_url": base_url,
                     "timeout_seconds": 1,
@@ -173,11 +173,11 @@ def test_filigree_db_exceptional_context_exit_closes_registry(tmp_path: Path) ->
 
 
 def test_filigree_db_validates_programmatic_loomweave_config(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="unknown clarion setting"):
+    with pytest.raises(ValueError, match="unknown loomweave setting"):
         FiligreeDB(
             tmp_path / "unknown.db",
             prefix="test",
-            loomweave_config={"base-url": "http://clarion.test"},  # type: ignore[typeddict-unknown-key]
+            loomweave_config={"base-url": "http://loomweave.test"},  # type: ignore[typeddict-unknown-key]
         )
 
     with pytest.raises(ValueError, match="allow_local_fallback"):
@@ -200,7 +200,7 @@ def test_registry_resolved_file_uses_branded_file_identity_types() -> None:
 
     assert loomweave_hints["file_id"] is EntityId
     assert loomweave_hints["content_hash"] is ContentHash
-    assert loomweave_hints["registry_backend"] == Literal["clarion"]
+    assert loomweave_hints["registry_backend"] == Literal["loomweave"]
 
 
 def test_filigree_db_composes_local_registry_by_default(tmp_path: Path) -> None:
@@ -256,7 +256,7 @@ def test_loomweave_registry_resolves_file_via_http() -> None:
             "content_hash": "sha256:abc123",
             "canonical_path": "src/main.py",
             "language": "python",
-            "registry_backend": "clarion",
+            "registry_backend": "loomweave",
         }
         assert registry.is_displaced() is True
     finally:
@@ -541,7 +541,7 @@ def test_loomweave_registry_batch_retries_transient_5xx_before_success(caplog: p
         thread.join(timeout=1)
 
 
-@pytest.mark.parametrize("base_url", ["ftp://clarion.test", "http://", "localhost:9111", "http:///api"])
+@pytest.mark.parametrize("base_url", ["ftp://loomweave.test", "http://", "localhost:9111", "http:///api"])
 def test_loomweave_registry_rejects_invalid_base_url(base_url: str) -> None:
     with pytest.raises(ValueError, match="base_url"):
         LoomweaveRegistry(base_url)
@@ -550,13 +550,13 @@ def test_loomweave_registry_rejects_invalid_base_url(base_url: str) -> None:
 @pytest.mark.parametrize("timeout_seconds", [0, -1, False, "slow"])
 def test_loomweave_registry_rejects_invalid_timeout_seconds(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
-        LoomweaveRegistry("http://clarion.test", timeout_seconds=timeout_seconds)  # type: ignore[arg-type]
+        LoomweaveRegistry("http://loomweave.test", timeout_seconds=timeout_seconds)  # type: ignore[arg-type]
 
 
 def test_loomweave_registry_is_immutable() -> None:
-    registry = LoomweaveRegistry("http://clarion.test/")
+    registry = LoomweaveRegistry("http://loomweave.test/")
 
-    assert registry.base_url == "http://clarion.test"
+    assert registry.base_url == "http://loomweave.test"
     with pytest.raises(FrozenInstanceError):
         registry.base_url = "http://other.test"  # type: ignore[misc]
 
@@ -564,13 +564,13 @@ def test_loomweave_registry_is_immutable() -> None:
 def test_registry_unavailable_error_carries_structured_fields() -> None:
     error = RegistryUnavailableError(
         "registry unavailable",
-        url="http://clarion.test/api/v1/files?path=src/main.py",
+        url="http://loomweave.test/api/v1/files?path=src/main.py",
         path="src/main.py",
         cause_kind="network",
     )
 
     assert str(error) == "registry unavailable"
-    assert error.url == "http://clarion.test/api/v1/files?path=src/main.py"
+    assert error.url == "http://loomweave.test/api/v1/files?path=src/main.py"
     assert error.path == "src/main.py"
     assert error.cause_kind == "network"
 
@@ -879,7 +879,7 @@ def test_loomweave_registry_rejects_sei_resolution_missing_requested_locator() -
         ),
         (
             {
-                "resolved": {"core:file:dup@src/dup.py": {"sei": "clarion:sei:9"}},
+                "resolved": {"core:file:dup@src/dup.py": {"sei": "loomweave:sei:9"}},
                 "not_found": ["core:file:dup@src/dup.py"],
                 "invalid": [],
             },
@@ -977,7 +977,7 @@ def test_loomweave_registry_sends_no_authorization_header_when_no_token_configur
 
         resolved = registry.resolve_file("src/x.py", language="python")
 
-    assert resolved["registry_backend"] == "clarion"
+    assert resolved["registry_backend"] == "loomweave"
     # capability probe is not invoked by LoomweaveRegistry itself; the only
     # request issued here was /api/v1/files, so exactly one header tracked.
     assert state.auth_headers_seen == [None]
@@ -995,7 +995,7 @@ def test_loomweave_registry_sends_bearer_authorization_when_token_provided() -> 
         resolved = registry.resolve_file("src/x.py", language="python")
         registry.resolve_file("src/y.py", language="python")
 
-    assert resolved["registry_backend"] == "clarion"
+    assert resolved["registry_backend"] == "loomweave"
     assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
 
 
@@ -1037,7 +1037,7 @@ def test_filigree_db_skip_probe_still_rejects_loomweave_token_for_untrusted_orig
         FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": "https://example.invalid",
                 "timeout_seconds": 1,
@@ -1135,7 +1135,7 @@ def test_loomweave_capability_probe_uses_runtime_http_policy(monkeypatch: pytest
                     "registry_backend": True,
                     "file_registry": True,
                     "api_version": 1,
-                    "instance_id": "clarion-test",
+                    "instance_id": "loomweave-test",
                 },
             )
 
@@ -1449,7 +1449,7 @@ def test_filigree_db_composes_loomweave_registry_when_configured(tmp_path: Path)
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
         try:
@@ -1459,7 +1459,7 @@ def test_filigree_db_composes_loomweave_registry_when_configured(tmp_path: Path)
 
             assert file_record.id == "core:file:stub@src/main.py"
             assert file_record.content_hash == "sha256:src/main.py"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             assert db.registry.is_displaced() is True
         finally:
             db.close()
@@ -1479,11 +1479,11 @@ def test_filigree_db_allow_local_fallback_tries_loomweave_first(tmp_path: Path, 
             return cast(
                 ResolvedFile,
                 {
-                    "file_id": "core:file:clarion-first@src/fallback.py",
-                    "content_hash": "sha256:clarion-first",
+                    "file_id": "core:file:loomweave-first@src/fallback.py",
+                    "content_hash": "sha256:loomweave-first",
                     "canonical_path": path,
                     "language": language,
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                 },
             )
 
@@ -1494,9 +1494,9 @@ def test_filigree_db_allow_local_fallback_tries_loomweave_first(tmp_path: Path, 
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={
-            "base_url": "http://clarion.test",
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 1,
             "allow_local_fallback": True,
         },
@@ -1507,17 +1507,17 @@ def test_filigree_db_allow_local_fallback_tries_loomweave_first(tmp_path: Path, 
         file_record = db.register_file("src/fallback.py", language="python")
 
         assert resolutions == ["src/fallback.py"]
-        assert file_record.id == "core:file:clarion-first@src/fallback.py"
-        assert file_record.content_hash == "sha256:clarion-first"
-        assert file_record.registry_backend == "clarion"
+        assert file_record.id == "core:file:loomweave-first@src/fallback.py"
+        assert file_record.content_hash == "sha256:loomweave-first"
+        assert file_record.registry_backend == "loomweave"
         assert db.registry.is_displaced() is True
     finally:
         db.close()
 
 
 def test_filigree_db_requires_explicit_loomweave_base_url(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match=r"clarion\.base_url"):
-        FiligreeDB(tmp_path / "filigree.db", prefix="test", registry_backend="clarion")
+    with pytest.raises(ValueError, match=r"loomweave\.base_url"):
+        FiligreeDB(tmp_path / "filigree.db", prefix="test", registry_backend="loomweave")
 
 
 def test_filigree_db_allow_local_fallback_uses_local_registry(
@@ -1549,9 +1549,9 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={
-            "base_url": "http://clarion.test",
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 0.1,
             "allow_local_fallback": True,
         },
@@ -1579,7 +1579,7 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         assert event is not None
         assert event["event_type"] == "registry_local_fallback"
         assert event["field"] == "registry_backend"
-        assert event["old_value"] == "clarion"
+        assert event["old_value"] == "loomweave"
         assert event["new_value"] == "local"
         assert result["files_created"] == 1
         # CONTRACT-1: scan-results now goes through resolve_files_batch, so
@@ -1620,9 +1620,9 @@ def test_filigree_db_allow_local_fallback_rejects_invalid_loomweave_batch_respon
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={
-            "base_url": "http://clarion.test",
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 0.1,
             "allow_local_fallback": True,
         },
@@ -1656,8 +1656,8 @@ def test_filigree_db_logs_hybrid_registry_state_on_startup(tmp_path: Path, caplo
         db = FiligreeDB(
             db_path,
             prefix="test",
-            registry_backend="clarion",
-            loomweave_config={"base_url": "http://clarion.test"},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": "http://loomweave.test"},
             # Test exercises hybrid-state detection logic on initialize(),
             # not the capability handshake — skip the probe so the
             # unreachable URL doesn't abort __init__.
@@ -1670,7 +1670,7 @@ def test_filigree_db_logs_hybrid_registry_state_on_startup(tmp_path: Path, caplo
 
     records = [record for record in caplog.records if record.message == "file_registry_hybrid_state_detected"]
     assert records
-    assert records[0].registry_backend == "clarion"
+    assert records[0].registry_backend == "loomweave"
     assert records[0].local_file_records == 1
 
 
@@ -1682,7 +1682,7 @@ def test_filigree_db_rejects_injected_local_registry_for_loomweave_backend(tmp_p
             tmp_path / "filigree.db",
             prefix="test",
             registry=registry,
-            registry_backend="clarion",
+            registry_backend="loomweave",
         )
 
 

@@ -28,7 +28,7 @@ def test_annotate_file_registry_unavailable_returns_structured_code(
     def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
         raise RegistryUnavailableError(
             "Loomweave registry unavailable for test",
-            url="http://clarion.test/api/v1/files?path=src%2Fcli_ann.py",
+            url="http://loomweave.test/api/v1/files?path=src%2Fcli_ann.py",
             path=path,
             cause_kind="network",
         )
@@ -48,7 +48,7 @@ def test_annotate_file_registry_unavailable_returns_structured_code(
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/cli_ann.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fcli_ann.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fcli_ann.py"
     finally:
         os.chdir(original)
 

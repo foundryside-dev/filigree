@@ -19,7 +19,7 @@ def test_dashboard_api_tests_do_not_assign_loomweave_backend_directly() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
                 continue
-            assigns_loomweave = isinstance(node.value, ast.Constant) and node.value.value == "clarion"
+            assigns_loomweave = isinstance(node.value, ast.Constant) and node.value.value == "loomweave"
             if not assigns_loomweave:
                 continue
             if any(isinstance(target, ast.Attribute) and target.attr == "registry_backend" for target in node.targets):

@@ -182,8 +182,8 @@ class TestStdioStartupHonoursConf:
                 {
                     "prefix": "mcp",
                     "version": 1,
-                    "registry_backend": "clarion",
-                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                    "registry_backend": "loomweave",
+                    "loomweave": {"base_url": base_url, "timeout_seconds": 1},
                 },
             )
 

@@ -44,7 +44,7 @@ def sei_backfill_cmd(ctx: click.Context, execute: bool, as_json: bool) -> None:
             report = run_sei_backfill(db, dry_run=dry_run, actor=ctx.obj["actor"])
         except LoomweaveOutOfSyncError as e:
             # Loomweave database is out of sync or offline. Output JSON and exit 3.
-            click.echo(json_mod.dumps({"error": str(e), "code": "CLARION_OUT_OF_SYNC", "remediation_command": "clarion analyze"}))
+            click.echo(json_mod.dumps({"error": str(e), "code": "CLARION_OUT_OF_SYNC", "remediation_command": "loomweave analyze"}))
             sys.exit(3)
         except SeiBackfillError as e:
             # Clean precondition refusal (not Loomweave-backed / SEI unsupported).

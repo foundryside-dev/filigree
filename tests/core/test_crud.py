@@ -1455,7 +1455,7 @@ class TestImportJsonl:
             db.import_jsonl(jsonl, merge=True)
 
     def test_import_preserves_file_registry_metadata(self, tmp_path: Path) -> None:
-        jsonl = tmp_path / "clarion-file.jsonl"
+        jsonl = tmp_path / "loomweave-file.jsonl"
         jsonl.write_text(
             json.dumps(
                 {
@@ -1465,16 +1465,16 @@ class TestImportJsonl:
                     "language": "python",
                     "file_type": "source",
                     "content_hash": "sha256:imported",
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                     "first_seen": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
-                    "metadata": {"owner": "clarion"},
+                    "metadata": {"owner": "loomweave"},
                 }
             )
             + "\n"
         )
 
-        fresh = FiligreeDB(tmp_path / "fresh-clarion-file.db", prefix="test")
+        fresh = FiligreeDB(tmp_path / "fresh-loomweave-file.db", prefix="test")
         fresh.initialize()
         fresh.import_jsonl(jsonl)
 
@@ -1485,8 +1485,8 @@ class TestImportJsonl:
         assert dict(row) == {
             "id": "core:file:src/imported.py",
             "content_hash": "sha256:imported",
-            "registry_backend": "clarion",
-            "metadata": '{"owner": "clarion"}',
+            "registry_backend": "loomweave",
+            "metadata": '{"owner": "loomweave"}',
         }
         fresh.close()
 

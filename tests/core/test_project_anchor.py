@@ -121,8 +121,8 @@ class TestConfIO:
             "project_name": "demo",
             "prefix": "demo",
             "db": ".filigree/filigree.db",
-            "registry_backend": "clarion",
-            "clarion": {
+            "registry_backend": "loomweave",
+            "loomweave": {
                 "base_url": "http://localhost:9111",
                 "timeout_seconds": 3,
                 "allow_local_fallback": True,
@@ -154,14 +154,14 @@ class TestConfIO:
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": [1, 2]}, r"enabled_packs"),
             ({"prefix": "x", "db": "filigree.db", "registry_backend": "sqlite"}, r"registry_backend"),
             ({"prefix": "x", "db": "filigree.db", "registry_backend": 1}, r"registry_backend"),
-            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion"}, r"clarion\.base_url"),
-            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion", "clarion": {}}, r"clarion\.base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": []}, r"clarion"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": 1}}, r"base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": "file:///tmp/clarion"}}, r"base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base-url": "http://localhost:9111"}}, r"base-url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "loomweave"}, r"loomweave\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "loomweave", "loomweave": {}}, r"loomweave\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": []}, r"loomweave"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base_url": 1}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base_url": "file:///tmp/loomweave"}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base-url": "http://localhost:9111"}}, r"base-url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
         ],
         ids=[
             "db-list",
@@ -172,14 +172,14 @@ class TestConfIO:
             "packs-non-string-items",
             "registry-backend-unknown",
             "registry-backend-non-string",
-            "clarion-backend-missing-config",
-            "clarion-backend-missing-base-url",
-            "clarion-non-dict",
-            "clarion-base-url-non-string",
-            "clarion-base-url-invalid-scheme",
-            "clarion-unknown-key",
-            "clarion-timeout-non-numeric",
-            "clarion-fallback-non-bool",
+            "loomweave-backend-missing-config",
+            "loomweave-backend-missing-base-url",
+            "loomweave-non-dict",
+            "loomweave-base-url-non-string",
+            "loomweave-base-url-invalid-scheme",
+            "loomweave-unknown-key",
+            "loomweave-timeout-non-numeric",
+            "loomweave-fallback-non-bool",
         ],
     )
     def test_read_rejects_malformed_field_types(self, tmp_path: Path, payload: dict[str, object], match: str) -> None:
@@ -230,14 +230,14 @@ class TestConfIO:
                     "project_name": "demo",
                     "prefix": "demo",
                     "db": ".filigree/filigree.db",
-                    "registry_backend": "clarion",
-                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                    "registry_backend": "loomweave",
+                    "loomweave": {"base_url": base_url, "timeout_seconds": 1},
                 },
             )
 
             db = FiligreeDB.from_conf(conf)
             try:
-                assert db.registry_backend == "clarion"
+                assert db.registry_backend == "loomweave"
             finally:
                 db.close()
 

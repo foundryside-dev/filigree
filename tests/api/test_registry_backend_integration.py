@@ -24,7 +24,7 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
         assert schema_response.status_code == 200
         schema = schema_response.json()
         assert schema["config_flags"]["registry_backend"] == db.registry_backend
-        assert schema["config_flags"]["registry_backend_features"] == ["local", "clarion"]
+        assert schema["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
 
         ingest_response = await client.post(
             "/api/loom/scan-results",
@@ -39,15 +39,15 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
         return ingest_response.json()
 
 
-@pytest.mark.parametrize("registry_backend", ["local", "clarion"])
+@pytest.mark.parametrize("registry_backend", ["local", "loomweave"])
 async def test_loom_scan_results_resolves_file_identity_over_registry_backends(tmp_path: Path, registry_backend: str) -> None:
-    if registry_backend == "clarion":
+    if registry_backend == "loomweave":
         with clarion_stub() as (base_url, state):
             db = FiligreeDB(
                 tmp_path / "filigree.db",
                 prefix="test",
                 check_same_thread=False,
-                registry_backend="clarion",
+                registry_backend="loomweave",
                 loomweave_config={"base_url": base_url, "timeout_seconds": 1},
             )
             db.initialize()
@@ -64,7 +64,7 @@ async def test_loom_scan_results_resolves_file_identity_over_registry_backends(t
                 assert file_record is not None
                 assert file_record.id == "core:file:stub@src/phase_d.py"
                 assert file_record.content_hash == "sha256:src/phase_d.py"
-                assert file_record.registry_backend == "clarion"
+                assert file_record.registry_backend == "loomweave"
             finally:
                 dash_module._db = None
                 db.close()
@@ -91,7 +91,7 @@ async def test_loom_scan_results_falls_back_to_local_when_loomweave_goes_down(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """ADR-014 §7: clarion-mode + allow_local_fallback=true + Loomweave-down at write time.
+    """ADR-014 §7: loomweave-mode + allow_local_fallback=true + Loomweave-down at write time.
 
     Exercise the recovery path end-to-end through ``FiligreeDB``:
     - Stub Loomweave is up at startup so the capability probe succeeds.
@@ -109,7 +109,7 @@ async def test_loom_scan_results_falls_back_to_local_when_loomweave_goes_down(
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 0.5,
@@ -136,7 +136,7 @@ async def test_loom_scan_results_falls_back_to_local_when_loomweave_goes_down(
         ).fetchone()
         assert event is not None
         assert event["field"] == "registry_backend"
-        assert event["old_value"] == "clarion"
+        assert event["old_value"] == "loomweave"
         assert event["new_value"] == "local"
 
         # WARN log carries the network cause_kind and the failing URL.
@@ -219,7 +219,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
@@ -349,7 +349,7 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
@@ -546,7 +546,7 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
@@ -589,7 +589,7 @@ async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,

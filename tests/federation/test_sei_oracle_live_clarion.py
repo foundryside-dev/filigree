@@ -1,4 +1,4 @@
-"""SEI conformance oracle — faithful lane against a live ``clarion serve``.
+"""SEI conformance oracle — faithful lane against a live ``loomweave serve``.
 
 The fast lane (``test_sei_conformance_oracle.py``) proves every producer branch
 against the Loomweave stub. This module re-proves the producer's obligations
@@ -14,12 +14,12 @@ What it asserts against live Loomweave:
 
 The rename/move/ambiguous *carry* semantics are Loomweave-internal (mint vs. carry
 vs. orphan); they are proven on the authority side by Loomweave's own run of the
-same shared fixture (``cargo test -p clarion-storage --test
+same shared fixture (``cargo test -p loomweave-storage --test
 sei_conformance_oracle``). Filigree's job is to store the SEI opaquely and
 degrade honestly, which is what this test exercises end to end.
 
 Opt-in / skip rules mirror ``tests/integration/test_clarion_phase_d_e2e.py``:
-the ``clarion`` CLI must be on PATH and new enough to ship the SEI surface;
+the ``loomweave`` CLI must be on PATH and new enough to ship the SEI surface;
 otherwise the test skips (or fails when ``FILIGREE_REQUIRE_LIVE_CLARION=1``).
 """
 
@@ -80,23 +80,23 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[tuple[str, dict[str, 
     Yields ``(base_url, capabilities)``. Skips (or fails under
     ``FILIGREE_REQUIRE_LIVE_CLARION``) when Loomweave is absent or too old.
     """
-    if shutil.which("clarion") is None:
-        _live_unavailable("clarion CLI is not on PATH; install Loomweave to run this integration test")
+    if shutil.which("loomweave") is None:
+        _live_unavailable("loomweave CLI is not on PATH; install Loomweave to run this integration test")
 
-    install = subprocess.run(["clarion", "install", "--path", str(project_root)], check=False, capture_output=True, text=True)
+    install = subprocess.run(["loomweave", "install", "--path", str(project_root)], check=False, capture_output=True, text=True)
     if install.returncode != 0:
-        _live_unavailable(f"clarion install failed (stderr: {install.stderr.strip()!r})")
+        _live_unavailable(f"loomweave install failed (stderr: {install.stderr.strip()!r})")
 
-    analyze = subprocess.run(["clarion", "analyze", str(project_root)], check=False, capture_output=True, text=True)
+    analyze = subprocess.run(["loomweave", "analyze", str(project_root)], check=False, capture_output=True, text=True)
     if analyze.returncode != 0:
-        _live_unavailable(f"clarion analyze failed (stderr: {analyze.stderr.strip()!r})")
+        _live_unavailable(f"loomweave analyze failed (stderr: {analyze.stderr.strip()!r})")
 
     port = _free_loopback_port()
     bind = f"127.0.0.1:{port}"
-    (project_root / "clarion.yaml").write_text(f'version: 1\nserve:\n  http:\n    enabled: true\n    bind: "{bind}"\n')
+    (project_root / "loomweave.yaml").write_text(f'version: 1\nserve:\n  http:\n    enabled: true\n    bind: "{bind}"\n')
 
     proc = subprocess.Popen(
-        ["clarion", "serve", "--path", str(project_root)],
+        ["loomweave", "serve", "--path", str(project_root)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -112,7 +112,7 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[tuple[str, dict[str, 
             except subprocess.TimeoutExpired:
                 proc.kill()
                 _stdout, stderr = proc.communicate()
-            _live_unavailable(f"clarion serve did not come up on {base_url}: {exc}; stderr={stderr.decode('utf-8', 'replace')[:500]!r}")
+            _live_unavailable(f"loomweave serve did not come up on {base_url}: {exc}; stderr={stderr.decode('utf-8', 'replace')[:500]!r}")
         yield base_url, capabilities
     finally:
         if proc.stdin is not None:
@@ -135,7 +135,7 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[tuple[str, dict[str, 
 def _require_sei_capable(capabilities: dict[str, object]) -> None:
     sei = capabilities.get("sei")
     if not isinstance(sei, dict) or not sei.get("supported"):
-        _live_unavailable(f"clarion on PATH predates the SEI surface (capabilities.sei={sei!r}); rebuild Loomweave to run this test")
+        _live_unavailable(f"loomweave on PATH predates the SEI surface (capabilities.sei={sei!r}); rebuild Loomweave to run this test")
 
 
 def _real_file_locator(base_url: str, path: str) -> str | None:
@@ -161,7 +161,7 @@ def test_backfill_against_live_loomweave(tmp_path: Path) -> None:
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 5},
             project_root=project_root,
         )

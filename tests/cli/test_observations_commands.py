@@ -79,7 +79,7 @@ class TestObserveCommand:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
                 "Loomweave registry unavailable for test",
-                url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
+                url="http://loomweave.test/api/v1/files?path=src%2Fobserved.py",
                 path=path,
                 cause_kind="network",
             )
@@ -93,7 +93,7 @@ class TestObserveCommand:
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/observed.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fobserved.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fobserved.py"
 
     def test_observe_happy_path_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

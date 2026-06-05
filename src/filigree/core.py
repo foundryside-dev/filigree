@@ -687,7 +687,7 @@ class _LoomweaveLocalFallbackRegistry:
             logger.warning(
                 "Loomweave registry backend unavailable; using local file registry fallback",
                 extra={
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                     "loomweave_base_url": self._base_url,
                     "path": path,
                     "url": exc.url,
@@ -730,7 +730,7 @@ class _LoomweaveLocalFallbackRegistry:
             logger.warning(
                 "Loomweave registry backend unavailable for batch resolve; using local file registry fallback",
                 extra={
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                     "loomweave_base_url": self._base_url,
                     "batch_size": len(queries),
                     "url": exc.url,
@@ -755,7 +755,7 @@ def _apply_allow_local_fallback_override(
     loomweave_config: LoomweaveConfig | None,
     override: bool | None,
 ) -> LoomweaveConfig | None:
-    """Apply a ``--allow-local-fallback`` startup override to a clarion config.
+    """Apply a ``--allow-local-fallback`` startup override to a loomweave config.
 
     Returns the input untouched when ``override is None`` (no flag passed).
     Otherwise produces a new dict with ``allow_local_fallback`` set to the
@@ -770,49 +770,66 @@ def _apply_allow_local_fallback_override(
     return merged
 
 
+def _migrate_legacy_registry_config(raw: dict[str, Any]) -> None:
+    """Rename-on-load shim (3.0 Loomweave/Weft rebrand).
+
+    A deployed ``.filigree.conf`` still carrying the pre-3.0 ``clarion`` names
+    loads as ``loomweave`` without a manual edit: ``registry_backend: "clarion"``
+    becomes ``"loomweave"`` and a ``[clarion]`` section moves to ``[loomweave]``.
+    One-shot and in place. There is no reverse shim — once the config is
+    re-saved it carries the new names, and a bare ``"clarion"`` value is no
+    longer a valid backend.
+    """
+    if raw.get("registry_backend") == "clarion":
+        raw["registry_backend"] = "loomweave"
+    if "clarion" in raw and "loomweave" not in raw:
+        raw["loomweave"] = raw.pop("clarion")
+
+
 def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_loomweave_base_url: bool = True) -> None:
     """Validate ADR-014 registry backend settings in project config."""
+    _migrate_legacy_registry_config(raw)
     if "registry_backend" in raw:
         backend = raw["registry_backend"]
         if not isinstance(backend, str) or backend not in VALID_REGISTRY_BACKENDS:
             msg = f"{source}: 'registry_backend' must be one of {sorted(VALID_REGISTRY_BACKENDS)}, got {backend!r}"
             raise ValueError(msg)
 
-    if "clarion" not in raw:
-        if raw.get("registry_backend") == "clarion":
-            msg = f"{source}: 'clarion.base_url' is required when registry_backend is 'clarion'"
+    if "loomweave" not in raw:
+        if raw.get("registry_backend") == "loomweave":
+            msg = f"{source}: 'loomweave.base_url' is required when registry_backend is 'loomweave'"
             raise ValueError(msg)
         return
-    clarion = raw["clarion"]
-    if not isinstance(clarion, dict):
-        msg = f"{source}: 'clarion' must be a JSON object, got {type(clarion).__name__}: {clarion!r}"
+    loomweave = raw["loomweave"]
+    if not isinstance(loomweave, dict):
+        msg = f"{source}: 'loomweave' must be a JSON object, got {type(loomweave).__name__}: {loomweave!r}"
         raise ValueError(msg)
     allowed_loomweave_keys = {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
-    unknown_loomweave_keys = sorted(set(clarion) - allowed_loomweave_keys)
+    unknown_loomweave_keys = sorted(set(loomweave) - allowed_loomweave_keys)
     if unknown_loomweave_keys:
-        msg = f"{source}: unknown clarion setting(s): {', '.join(unknown_loomweave_keys)}"
+        msg = f"{source}: unknown loomweave setting(s): {', '.join(unknown_loomweave_keys)}"
         raise ValueError(msg)
-    if require_loomweave_base_url and raw.get("registry_backend") == "clarion" and "base_url" not in clarion:
-        msg = f"{source}: 'clarion.base_url' is required when registry_backend is 'clarion'"
+    if require_loomweave_base_url and raw.get("registry_backend") == "loomweave" and "base_url" not in loomweave:
+        msg = f"{source}: 'loomweave.base_url' is required when registry_backend is 'loomweave'"
         raise ValueError(msg)
-    if "base_url" in clarion:
+    if "base_url" in loomweave:
         try:
-            normalize_loomweave_base_url(cast("str", clarion["base_url"]))
+            normalize_loomweave_base_url(cast("str", loomweave["base_url"]))
         except ValueError as exc:
             msg = f"{source}: {exc}"
             raise ValueError(msg) from exc
-    if "timeout_seconds" in clarion:
-        timeout = clarion["timeout_seconds"]
+    if "timeout_seconds" in loomweave:
+        timeout = loomweave["timeout_seconds"]
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-            msg = f"{source}: 'clarion.timeout_seconds' must be a positive number, got {timeout!r}"
+            msg = f"{source}: 'loomweave.timeout_seconds' must be a positive number, got {timeout!r}"
             raise ValueError(msg)
-    if "allow_local_fallback" in clarion and not isinstance(clarion["allow_local_fallback"], bool):
-        msg = f"{source}: 'clarion.allow_local_fallback' must be a boolean, got {clarion['allow_local_fallback']!r}"
+    if "allow_local_fallback" in loomweave and not isinstance(loomweave["allow_local_fallback"], bool):
+        msg = f"{source}: 'loomweave.allow_local_fallback' must be a boolean, got {loomweave['allow_local_fallback']!r}"
         raise ValueError(msg)
-    if "token_env" in clarion:
-        token_env = clarion["token_env"]
+    if "token_env" in loomweave:
+        token_env = loomweave["token_env"]
         if not isinstance(token_env, str) or not token_env.strip():
-            msg = f"{source}: 'clarion.token_env' must be a non-empty string naming an env var, got {token_env!r}"
+            msg = f"{source}: 'loomweave.token_env' must be a non-empty string naming an env var, got {token_env!r}"
             raise ValueError(msg)
 
 
@@ -1052,7 +1069,7 @@ class FiligreeDB(
         _validate_registry_settings(
             {
                 "registry_backend": registry_backend,
-                "clarion": dict(loomweave_config or {}),
+                "loomweave": dict(loomweave_config or {}),
             },
             source=self.db_path,
             require_loomweave_base_url=registry is None,
@@ -1071,7 +1088,7 @@ class FiligreeDB(
         self.loomweave_api_version: int | None = None
         self.loomweave_instance_rotated: bool = False
         if registry is not None:
-            backend_displaced = registry_backend == "clarion"
+            backend_displaced = registry_backend == "loomweave"
             registry_displaced = registry.is_displaced()
             if registry_displaced != backend_displaced:
                 msg = (
@@ -1080,12 +1097,12 @@ class FiligreeDB(
                 )
                 raise ValueError(msg)
             self.registry = registry
-            if self.allow_local_fallback and registry_backend == "clarion":
+            if self.allow_local_fallback and registry_backend == "loomweave":
                 self.enable_local_registry_fallback()
-        elif registry_backend == "clarion":
+        elif registry_backend == "loomweave":
             base_url_value = self.loomweave_config.get("base_url")
             if not isinstance(base_url_value, str) or not base_url_value:
-                msg = "clarion.base_url is required when registry_backend is 'clarion'"
+                msg = "loomweave.base_url is required when registry_backend is 'loomweave'"
                 raise ValueError(msg)
             base_url = normalize_loomweave_base_url(base_url_value)
             self.loomweave_config["base_url"] = base_url
@@ -1200,7 +1217,7 @@ class FiligreeDB(
                     extra={
                         "url": exc.url,
                         "cause_kind": exc.cause_kind,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
                 return
@@ -1220,7 +1237,7 @@ class FiligreeDB(
     def reprobe_loomweave_capabilities(self) -> LoomweaveCapabilities | None:
         """Re-issue the capability probe and flag a banner on instance_id rotation.
 
-        Returns ``None`` if this DB is not running in ``clarion`` mode, or if
+        Returns ``None`` if this DB is not running in ``loomweave`` mode, or if
         Loomweave is unreachable (the unavailability is logged at WARN; callers
         that need fail-closed behaviour should call ``resolve_file`` instead,
         which already has the strict policy). Returns the probe payload
@@ -1231,7 +1248,7 @@ class FiligreeDB(
         ``loomweave_instance_rotated=True`` and logs at WARN. The dashboard
         surfaces this through ``GET /api/files/_schema``.
         """
-        if self.registry_backend != "clarion":
+        if self.registry_backend != "loomweave":
             return None
         base_url_value = self._loomweave_base_url()
         if base_url_value is None:
@@ -1247,7 +1264,7 @@ class FiligreeDB(
                 extra={
                     "url": exc.url,
                     "cause_kind": exc.cause_kind,
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                 },
             )
             return None
@@ -1269,7 +1286,7 @@ class FiligreeDB(
 
     def enable_local_registry_fallback(self) -> None:
         """Allow Loomweave projects to use local IDs only after Loomweave is unavailable."""
-        if self.registry_backend != "clarion":
+        if self.registry_backend != "loomweave":
             return
         self.allow_local_fallback = True
         if isinstance(self.registry, _LoomweaveLocalFallbackRegistry):
@@ -1310,7 +1327,7 @@ class FiligreeDB(
         config = read_config(filigree_dir)
         configured_prefix = _raw_config_prefix(filigree_dir / CONFIG_FILENAME)
         prefix = configured_prefix if configured_prefix is not None else (filigree_dir.parent.name or "filigree")
-        loomweave_config = _apply_allow_local_fallback_override(config.get("clarion"), allow_local_fallback_override)
+        loomweave_config = _apply_allow_local_fallback_override(config.get("loomweave"), allow_local_fallback_override)
         db = cls(
             filigree_dir / DB_FILENAME,
             prefix=prefix,
@@ -1358,7 +1375,7 @@ class FiligreeDB(
             config = read_config(conf_path.parent / FILIGREE_DIR_NAME)
             enabled_packs = config.get("enabled_packs")
             enabled_packs_from_project_config = enabled_packs is not None
-        loomweave_config = _apply_allow_local_fallback_override(data.get("clarion"), allow_local_fallback_override)
+        loomweave_config = _apply_allow_local_fallback_override(data.get("loomweave"), allow_local_fallback_override)
         db = cls(
             db_path,
             prefix=prefix,
@@ -1497,13 +1514,13 @@ class FiligreeDB(
         implicit paths resolve through Loomweave. Startup should make that hybrid
         state visible without preventing read-only recovery commands.
         """
-        if self.registry_backend != "clarion" or self.allow_local_fallback:
+        if self.registry_backend != "loomweave" or self.allow_local_fallback:
             return
         try:
             local_count = int(
                 self.conn.execute(
                     "SELECT COUNT(*) FROM file_records WHERE registry_backend != ?",
-                    ("clarion",),
+                    ("loomweave",),
                 ).fetchone()[0]
             )
         except sqlite3.Error:

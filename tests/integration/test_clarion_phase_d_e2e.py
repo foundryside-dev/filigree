@@ -2,18 +2,18 @@
 
 Closes review item F-2: the existing
 ``tests/api/test_registry_backend_integration.py`` exercises only the
-ThreadingHTTPServer stub. This file boots an actual ``clarion`` binary
+ThreadingHTTPServer stub. This file boots an actual ``loomweave`` binary
 on the loopback interface and verifies that ``POST /api/loom/scan-results``
 threads Loomweave's entity ID (``core:file:...``) into the stored
 ``file_records.id``.
 
 The test is opt-in by environment because:
-    1. The ``clarion`` CLI may not be on PATH in every contributor's
+    1. The ``loomweave`` CLI may not be on PATH in every contributor's
        workstation or CI lane.
     2. The Loomweave build on PATH may predate the HTTP read API.
 
 Skipping rules:
-    - ``shutil.which("clarion") is None``: skip.
+    - ``shutil.which("loomweave") is None``: skip.
     - The installed binary does not accept ``serve --path`` or the spawned
       process fails to bind the configured HTTP port: skip with a clear
       reason.
@@ -89,24 +89,24 @@ def _wait_for_capabilities(base_url: str, *, timeout: float = 15.0) -> dict[str,
 
 @contextmanager
 def _spawn_loomweave_serve(project_root: Path) -> Iterator[str]:
-    """Run ``clarion install`` then spawn ``clarion serve`` with HTTP enabled.
+    """Run ``loomweave install`` then spawn ``loomweave serve`` with HTTP enabled.
 
     Yields the loopback base URL Filigree should point at. The subprocess
     is terminated on context exit; closing its stdin shuts down the MCP
     stdio half cleanly, which in turn shuts the HTTP half.
     """
-    if shutil.which("clarion") is None:
-        _loomweave_unavailable("clarion CLI is not on PATH; install Loomweave to run this integration test")
+    if shutil.which("loomweave") is None:
+        _loomweave_unavailable("loomweave CLI is not on PATH; install Loomweave to run this integration test")
 
     install = subprocess.run(
-        ["clarion", "install", "--path", str(project_root)],
+        ["loomweave", "install", "--path", str(project_root)],
         check=False,
         capture_output=True,
         text=True,
     )
     if install.returncode != 0:
         _loomweave_unavailable(
-            f"clarion install failed — installed binary may be too old for this test (stderr: {install.stderr.strip()!r})"
+            f"loomweave install failed — installed binary may be too old for this test (stderr: {install.stderr.strip()!r})"
         )
 
     # Index the tree so Loomweave's read API has entities to resolve. Without an
@@ -116,20 +116,20 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[str]:
     # language plugin is on PATH; the per-file precondition probe in the test
     # body turns that into an honest skip rather than a spurious failure.)
     analyze = subprocess.run(
-        ["clarion", "analyze", str(project_root)],
+        ["loomweave", "analyze", str(project_root)],
         check=False,
         capture_output=True,
         text=True,
     )
     if analyze.returncode != 0:
-        _loomweave_unavailable(f"clarion analyze failed (stderr: {analyze.stderr.strip()!r})")
+        _loomweave_unavailable(f"loomweave analyze failed (stderr: {analyze.stderr.strip()!r})")
 
     port = _free_loopback_port()
     bind = f"127.0.0.1:{port}"
-    (project_root / "clarion.yaml").write_text(f'version: 1\nserve:\n  http:\n    enabled: true\n    bind: "{bind}"\n')
+    (project_root / "loomweave.yaml").write_text(f'version: 1\nserve:\n  http:\n    enabled: true\n    bind: "{bind}"\n')
 
     proc = subprocess.Popen(
-        ["clarion", "serve", "--path", str(project_root)],
+        ["loomweave", "serve", "--path", str(project_root)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -147,7 +147,7 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[str]:
                 proc.kill()
                 _stdout, stderr = proc.communicate()
             _loomweave_unavailable(
-                f"clarion serve did not start an HTTP listener on {base_url}: {exc}; "
+                f"loomweave serve did not start an HTTP listener on {base_url}: {exc}; "
                 f"stderr={stderr.decode('utf-8', errors='replace')[:500]!r}"
             )
         # ADR-014 F-1 shape: ``api_version: int`` and ``instance_id: str``
@@ -157,7 +157,7 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[str]:
         # build that ships the F-1 handshake."
         if not isinstance(capabilities.get("api_version"), int) or not isinstance(capabilities.get("instance_id"), str):
             _loomweave_unavailable(
-                "clarion CLI on PATH predates ADR-014 F-1 (no api_version / instance_id "
+                "loomweave CLI on PATH predates ADR-014 F-1 (no api_version / instance_id "
                 f"in /api/v1/_capabilities response: {capabilities!r}). Rebuild Loomweave "
                 "from a tip that includes the F-1 handshake to run this test."
             )
@@ -185,7 +185,7 @@ def _probe_loomweave_file(base_url: str, *, path: str, language: str) -> dict[st
     """Return Loomweave's resolved file entity for *path*, or None if unindexed.
 
     A 404 means Loomweave's catalog has no entity for the path — the fail-closed
-    behaviour when ``clarion analyze`` indexed nothing (no language plugin on
+    behaviour when ``loomweave analyze`` indexed nothing (no language plugin on
     PATH). Any other HTTP error is a real fault and propagates.
     """
     url = f"{base_url}/api/v1/files?path={path}&language={language}"
@@ -217,7 +217,7 @@ async def _post_scan_results(db: FiligreeDB, *, path: str) -> dict[str, object]:
 
 
 async def test_filigree_resolves_file_identity_via_live_loomweave_serve(tmp_path: Path) -> None:
-    """End-to-end: real `clarion serve` HTTP read API resolves Filigree file IDs."""
+    """End-to-end: real `loomweave serve` HTTP read API resolves Filigree file IDs."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     source = project_root / "src" / "phase_d.py"
@@ -229,7 +229,7 @@ async def test_filigree_resolves_file_identity_via_live_loomweave_serve(tmp_path
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 5},
             project_root=project_root,
         )
@@ -240,11 +240,11 @@ async def test_filigree_resolves_file_identity_via_live_loomweave_serve(tmp_path
 
             # Precondition: Loomweave must have indexed the fixture, or the
             # registry resolve (and thus the scan-results POST) fail-closes with
-            # 404. With no Loomweave language plugin on PATH, `clarion analyze`
+            # 404. With no Loomweave language plugin on PATH, `loomweave analyze`
             # indexes nothing — skip with an accurate reason rather than fail.
             if _probe_loomweave_file(base_url, path="src/phase_d.py", language="python") is None:
                 _loomweave_unavailable(
-                    "clarion analyze indexed no entity for src/phase_d.py — a Loomweave "
+                    "loomweave analyze indexed no entity for src/phase_d.py — a Loomweave "
                     "language plugin (e.g. the Python plugin) must be on PATH for the "
                     "read API to mint a core:file: identity. Install one to run this e2e."
                 )
@@ -254,7 +254,7 @@ async def test_filigree_resolves_file_identity_via_live_loomweave_serve(tmp_path
             file_record = db.get_file_by_path("src/phase_d.py")
             assert file_record is not None
             assert file_record.id.startswith("core:file:"), f"Expected Loomweave entity ID prefix, got {file_record.id!r}"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             assert file_record.content_hash, "Loomweave should have supplied a non-empty content_hash"
         finally:
             dash_module._db = None

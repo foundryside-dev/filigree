@@ -2,7 +2,7 @@
 
 Covers the four exit criteria the post-implementation review named:
 
-1. Probe runs at ``FiligreeDB.__init__`` when ``registry_backend='clarion'``.
+1. Probe runs at ``FiligreeDB.__init__`` when ``registry_backend='loomweave'``.
 2. ``api_version`` mismatch raises (no fallback can rescue a wire-break).
 3. ``instance_id`` rotation between probes flips the dashboard banner state.
 4. Probe failure interacts correctly with ``allow_local_fallback``.
@@ -58,7 +58,7 @@ def test_validate_raises_on_api_version_mismatch() -> None:
 def test_registry_error_response_maps_api_version_mismatch() -> None:
     exc = RegistryVersionMismatchError(
         "Loomweave advertised an incompatible registry API",
-        url="http://clarion.test/api/v1/_capabilities",
+        url="http://loomweave.test/api/v1/_capabilities",
         expected=EXPECTED_LOOMWEAVE_API_VERSION,
         advertised=EXPECTED_LOOMWEAVE_API_VERSION + 1,
     )
@@ -68,7 +68,7 @@ def test_registry_error_response_maps_api_version_mismatch() -> None:
     assert response["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
     assert response["details"] == {
         "cause": "clarion_registry_version_mismatch",
-        "url": "http://clarion.test/api/v1/_capabilities",
+        "url": "http://loomweave.test/api/v1/_capabilities",
         "expected": EXPECTED_LOOMWEAVE_API_VERSION,
         "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
     }
@@ -88,7 +88,7 @@ def test_filigree_db_startup_probe_captures_instance_id_and_api_version(tmp_path
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
         try:
@@ -107,7 +107,7 @@ def test_filigree_db_startup_raises_on_api_version_mismatch(tmp_path: Path) -> N
         FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
 
@@ -118,7 +118,7 @@ def test_filigree_db_startup_raises_on_version_mismatch_even_with_fallback(tmp_p
         FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,
@@ -132,7 +132,7 @@ def test_filigree_db_startup_probe_failure_without_fallback_aborts_init(tmp_path
         FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": "http://127.0.0.1:1", "timeout_seconds": 0.1},
         )
 
@@ -145,7 +145,7 @@ def test_filigree_db_startup_probe_failure_with_fallback_downgrades_to_warn(
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={
                 "base_url": "http://127.0.0.1:1",
                 "timeout_seconds": 0.1,
@@ -171,7 +171,7 @@ def test_reprobe_detects_instance_id_rotation_and_flips_banner(
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
         try:
@@ -183,8 +183,8 @@ def test_reprobe_detects_instance_id_rotation_and_flips_banner(
                 result = db.reprobe_loomweave_capabilities()
 
             assert result is not None
-            assert result["instance_id"] == "test-clarion-instance-rotated"
-            assert db.loomweave_instance_id == "test-clarion-instance-rotated"
+            assert result["instance_id"] == "test-loomweave-instance-rotated"
+            assert db.loomweave_instance_id == "test-loomweave-instance-rotated"
             assert db.loomweave_instance_rotated is True
             assert "Loomweave instance_id rotated mid-session" in caplog.text
         finally:
@@ -196,7 +196,7 @@ def test_reprobe_with_matching_instance_id_does_not_set_rotation_flag(tmp_path: 
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
+            registry_backend="loomweave",
             loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
         try:
@@ -223,8 +223,8 @@ def test_skip_capability_probe_leaves_state_unset(tmp_path: Path) -> None:
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
-        loomweave_config={"base_url": "http://clarion.test", "timeout_seconds": 0.1},
+        registry_backend="loomweave",
+        loomweave_config={"base_url": "http://loomweave.test", "timeout_seconds": 0.1},
         skip_loomweave_capability_probe=True,
     )
     try:

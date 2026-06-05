@@ -7,7 +7,7 @@
     "authority": [
       "docs/architecture/decisions/ADR-015-findings-retention-policy.md",
       "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md",
-      "/home/john/clarion/docs/suite/loom.md"
+      "/home/john/loomweave/docs/suite/loom.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "verification": "tests/api/test_files_api.py::TestLoomCleanStaleFindingsAPI::test_fixture_examples_match_live_shape",
@@ -34,16 +34,16 @@
   },
   "examples": [
     {
-      "name": "success_clarion_scoped_sweep",
+      "name": "success_loomweave_scoped_sweep",
       "note": "Clarion sweeps its own stale findings with the default 30-day window. findings_fixed counts what moved to 'fixed' (0 when nothing is stale; the shape is identical either way).",
       "request": {
         "method": "POST",
         "path": "/api/loom/findings/clean-stale",
         "headers": {"Content-Type": "application/json"},
         "body": {
-          "scan_source": "clarion",
+          "scan_source": "loomweave",
           "older_than_days": 30,
-          "actor": "clarion"
+          "actor": "loomweave"
         }
       },
       "response": {
@@ -51,7 +51,7 @@
         "headers": {"Content-Type": "application/json"},
         "body": {
           "findings_fixed": 0,
-          "scan_source": "clarion",
+          "scan_source": "loomweave",
           "older_than_days": 30,
           "warnings": []
         }

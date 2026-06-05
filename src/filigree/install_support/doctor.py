@@ -227,10 +227,10 @@ def _doctor_file_registry_backend_state(
     if schema_version is None or schema_version < 17:
         return None
     settings = registry_settings or {}
-    if settings.get("registry_backend", "local") != "clarion":
+    if settings.get("registry_backend", "local") != "loomweave":
         return None
-    clarion = settings.get("clarion")
-    allow_local_fallback = bool(clarion.get("allow_local_fallback", False)) if isinstance(clarion, dict) else False
+    loomweave = settings.get("loomweave")
+    allow_local_fallback = bool(loomweave.get("allow_local_fallback", False)) if isinstance(loomweave, dict) else False
     if allow_local_fallback:
         return CheckResult(
             "File registry backend state",
@@ -241,7 +241,7 @@ def _doctor_file_registry_backend_state(
         local_count = int(
             conn.execute(
                 "SELECT COUNT(*) FROM file_records WHERE registry_backend != ?",
-                ("clarion",),
+                ("loomweave",),
             ).fetchone()[0]
         )
     except sqlite3.Error as exc:
@@ -256,7 +256,7 @@ def _doctor_file_registry_backend_state(
             "File registry backend state",
             False,
             f"Project is configured for Loomweave but {local_count} file_records row(s) still use local registry identity.",
-            fix_hint="Run: filigree migrate-registry --to clarion --dry-run, then --execute after reviewing unresolved rows.",
+            fix_hint="Run: filigree migrate-registry --to loomweave --dry-run, then --execute after reviewing unresolved rows.",
             code="registry_backend_hybrid_state",
         )
     return CheckResult("File registry backend state", True, "All file_records rows use Loomweave registry identity.")

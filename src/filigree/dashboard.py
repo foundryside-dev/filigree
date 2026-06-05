@@ -980,8 +980,8 @@ def main(
                 check_same_thread=False,
                 allow_local_fallback_override=True if allow_local_fallback else None,
             )
-            if allow_local_fallback and db.registry_backend == "clarion":
-                logger.warning("dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates")
+            if allow_local_fallback and db.registry_backend == "loomweave":
+                logger.warning("dashboard started with --allow-local-fallback; loomweave registry is bypassed for auto-creates")
                 db.enable_local_registry_fallback()
             _db = db
         except SchemaVersionMismatchError as exc:

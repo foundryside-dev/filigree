@@ -55,13 +55,13 @@ logger = logging.getLogger(__name__)
 # because this string is an env-var name, not a credential.
 DEFAULT_LOOMWEAVE_TOKEN_ENV = "CLARION_LOOM_TOKEN"  # noqa: S105
 
-DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "clarion")
-REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "clarion")
+DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "loomweave")
+REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "loomweave")
 LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS = 3
 LOOMWEAVE_RESOLVE_FILE_RETRY_BACKOFF_SECONDS = 0.05
 
 # Loomweave's `_capabilities` response declares an `api_version: u8`. Filigree
-# rejects startup under `clarion` mode if Loomweave advertises a version this
+# rejects startup under `loomweave` mode if Loomweave advertises a version this
 # build was not written against — a mismatch means the wire contract changed
 # in a way no in-process fallback can mask. Bumped when ADR-014 makes a
 # breaking change to the resolver protocol (see ADR-014 §4 and the
@@ -89,19 +89,19 @@ class LoomweaveResolvedFile(TypedDict):
 
     Loomweave returns an opaque ``EntityId`` and a non-empty drift hash; the hash
     is branded ``ContentHash`` (minted via ``make_content_hash``, which rejects
-    blank tokens), so a clarion record cannot carry the empty sentinel.
+    blank tokens), so a loomweave record cannot carry the empty sentinel.
     """
 
     file_id: EntityId
     content_hash: ContentHash
     canonical_path: str
     language: str
-    registry_backend: Literal["clarion"]
+    registry_backend: Literal["loomweave"]
 
 
 # Discriminated on ``registry_backend``. The former flat shape let mismatched
 # backend/identity combinations type-check (a ``local`` file with a drift hash,
-# a ``clarion`` file with the empty sentinel). The union pins ``file_id`` and
+# a ``loomweave`` file with the empty sentinel). The union pins ``file_id`` and
 # ``content_hash`` to the backend so those illegal combinations are
 # unconstructible at the mint sites. All five keys are shared across both
 # members, so consumers reading common fields (db_files.py) narrow without
@@ -314,7 +314,7 @@ class LoomweaveCapabilities(TypedDict):
     Field names mirror Loomweave's wire surface verbatim. ``registry_backend``
     is Loomweave's boolean "I am willing to serve registry-backend traffic" flag
     and is NOT the same field as Filigree's
-    ``config_flags.registry_backend: 'local'|'clarion'`` (project-mode string).
+    ``config_flags.registry_backend: 'local'|'loomweave'`` (project-mode string).
     The collision is in name only, not in meaning; see ADR-014's
     "Briefing-block masking" section and the cross-project C-6 review item.
     """
@@ -359,7 +359,7 @@ def _is_loopback_origin(url: str) -> bool:
 def _validate_loomweave_token_origin(url: str, *, auth_token: str | None) -> None:
     if auth_token and not _is_loopback_origin(url):
         msg = (
-            "clarion.auth_token may only be sent to loopback Loomweave origins by default; "
+            "loomweave.auth_token may only be sent to loopback Loomweave origins by default; "
             f"refusing token-bearing request to {urlparse(url).netloc!r}"
         )
         raise ValueError(msg)
@@ -520,12 +520,12 @@ def loomweave_file_read_url(base_url: str, path: str, *, language: str = "") -> 
 def normalize_loomweave_base_url(base_url: str) -> str:
     """Validate and canonicalize a Loomweave registry base URL."""
     if not isinstance(base_url, str) or not base_url.strip():
-        msg = f"clarion.base_url must be a non-empty http(s) URL with a host, got {base_url!r}"
+        msg = f"loomweave.base_url must be a non-empty http(s) URL with a host, got {base_url!r}"
         raise ValueError(msg)
     normalized = base_url.strip().rstrip("/")
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.hostname is None:
-        msg = f"clarion.base_url must be a non-empty http(s) URL with a host, got {base_url!r}"
+        msg = f"loomweave.base_url must be a non-empty http(s) URL with a host, got {base_url!r}"
         raise ValueError(msg)
     return normalized
 
@@ -590,11 +590,11 @@ class LoomweaveRegistry:
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_loomweave_base_url(self.base_url))
         if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, int | float) or self.timeout_seconds <= 0:
-            msg = f"clarion.timeout_seconds must be a positive number, got {self.timeout_seconds!r}"
+            msg = f"loomweave.timeout_seconds must be a positive number, got {self.timeout_seconds!r}"
             raise ValueError(msg)
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
         if self.auth_token is not None and not isinstance(self.auth_token, str):
-            msg = f"clarion.auth_token must be a string or None, got {type(self.auth_token).__name__}"
+            msg = f"loomweave.auth_token must be a string or None, got {type(self.auth_token).__name__}"
             raise ValueError(msg)
         _validate_loomweave_token_origin(self.base_url, auth_token=self.auth_token)
         object.__setattr__(
@@ -676,7 +676,7 @@ class LoomweaveRegistry:
             content_hash=content_hash,
             canonical_path=payload["canonical_path"],
             language=payload["language"],
-            registry_backend="clarion",
+            registry_backend="loomweave",
         )
 
     def _raise_file_http_error(self, response: httpx.Response, *, url: str, path: str) -> None:
@@ -857,7 +857,7 @@ class LoomweaveRegistry:
                 content_hash=content_hash,
                 canonical_path=item["canonical_path"],
                 language=item["language"],
-                registry_backend="clarion",
+                registry_backend="loomweave",
             )
 
         not_found: list[str] = []

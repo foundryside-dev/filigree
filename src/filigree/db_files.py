@@ -279,13 +279,13 @@ class FilesMixin(DBMixinProtocol):
         # ``registry_backend`` and ``allow_local_fallback`` are always set on
         # ``FiligreeDB.__init__`` before any DB call reaches a mixin method;
         # attribute access is safe without a default.
-        return self.registry_backend == "clarion" and bool(self.allow_local_fallback) and registry_backend == "local"
+        return self.registry_backend == "loomweave" and bool(self.allow_local_fallback) and registry_backend == "local"
 
     def _record_registry_fallback_event(self, file_id: str, *, actor: str, now: str) -> None:
         self.conn.execute(
             "INSERT INTO file_events "
             "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
-            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'clarion', 'local', ?, ?, ?)",
+            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'loomweave', 'local', ?, ?, ?)",
             (file_id, actor, self._verified_actor, now),
         )
 
@@ -1547,7 +1547,7 @@ class FilesMixin(DBMixinProtocol):
 
         if scan_run_id and complete_scan_run:
             # §F6 tolerate-unknown: an enrich-only producer (e.g. Loomweave
-            # `clarion analyze`) POSTs findings under a scan_run_id Filigree
+            # `loomweave analyze`) POSTs findings under a scan_run_id Filigree
             # never created, so there is no scan_runs row to mark completed.
             # That is the normal path, not an error — skip the completion
             # attempt silently rather than emit a benign "status not updated"

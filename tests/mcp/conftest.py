@@ -30,7 +30,7 @@ def _make_mcp_db(
     config: dict[str, Any] = {"prefix": "mcp", "version": 1}
     if registry_backend != "local":
         config["registry_backend"] = registry_backend
-        config["clarion"] = dict(loomweave_config or {})
+        config["loomweave"] = dict(loomweave_config or {})
     write_config(filigree_dir, config)
     (filigree_dir / SUMMARY_FILENAME).write_text("# test\n")
 
@@ -77,7 +77,7 @@ def loomweave_mcp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generat
     d = _make_mcp_db(
         tmp_path,
         monkeypatch,
-        registry_backend="clarion",
+        registry_backend="loomweave",
         loomweave_config={"base_url": "http://localhost:9111"},
     )
 

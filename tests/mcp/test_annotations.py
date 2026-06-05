@@ -22,7 +22,7 @@ class TestAnnotationMcpTools:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
                     "Loomweave registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=src%2Fmcp_ann.py",
+                    url="http://loomweave.test/api/v1/files?path=src%2Fmcp_ann.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -43,7 +43,7 @@ class TestAnnotationMcpTools:
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/mcp_ann.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fmcp_ann.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fmcp_ann.py"
 
     async def test_annotate_file_returns_public_full_payload(self, mcp_db: FiligreeDB) -> None:
         root = _project_root(mcp_db)

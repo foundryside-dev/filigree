@@ -1114,8 +1114,8 @@ class TestAdminProjectConfigValidation:
                     "prefix": "test",
                     "name": "test",
                     "version": 1,
-                    "registry_backend": "clarion",
-                    "clarion": {},
+                    "registry_backend": "loomweave",
+                    "loomweave": {},
                 }
             )
             + "\n"
@@ -1134,7 +1134,7 @@ class TestAdminProjectConfigValidation:
         assert result.exit_code == 1
         assert not isinstance(result.exception, ValueError)
         assert "Invalid project config" in (result.output or "")
-        assert "clarion.base_url" in (result.output or "")
+        assert "loomweave.base_url" in (result.output or "")
 
     def test_install_mode_reports_project_config_validation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
@@ -1149,7 +1149,7 @@ class TestAdminProjectConfigValidation:
         assert result.exit_code == 1
         assert not isinstance(result.exception, ValueError)
         assert "Invalid project config" in (result.output or "")
-        assert "clarion.base_url" in (result.output or "")
+        assert "loomweave.base_url" in (result.output or "")
 
 
 @pytest.mark.slow
