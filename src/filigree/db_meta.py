@@ -581,6 +581,12 @@ class MetaMixin(DBMixinProtocol):
         backfill of pre-v16 rows). ``INSERT OR IGNORE`` is retained on
         purpose for this path — imports re-applied against the same DB
         should be idempotent on the full composite key, not raise.
+
+        ADR-012: this path intentionally omits ``verified_actor`` and is the
+        Beads→Filigree one-time migration writer only (``migrate.py``), whose
+        source has no transport proof — NULL is correct there. The JSONL import
+        path uses a separate INSERT (``import_jsonl``) that *does* preserve
+        ``verified_actor``; do not reuse ``bulk_insert_event`` for JSONL ingest.
         """
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
