@@ -60,6 +60,12 @@ from filigree.install_support.integrations import (
     install_claude_code_mcp,
     install_codex_mcp,
 )
+from filigree.install_support.safe_paths import (
+    UnsafeInstallPathError,
+    ensure_project_dir,
+    project_path,
+    reject_symlink,
+)
 
 __all__ = [
     # Constants
@@ -149,6 +155,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     user-visible files (CLAUDE.md, .gitignore, etc.) owner-only.
     """
     existing_mode: int | None
+    reject_symlink(path)
     try:
         existing_mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
@@ -183,6 +190,11 @@ def inject_instructions(file_path: Path) -> tuple[bool, str]:
     If it exists and already has the marker, replaces the block.
     If it exists without the marker, appends the block.
     """
+    try:
+        reject_symlink(file_path)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
+
     if file_path.exists():
         content = file_path.read_text()
         if FILIGREE_INSTRUCTIONS_MARKER in content:
@@ -222,7 +234,10 @@ def inject_instructions(file_path: Path) -> tuple[bool, str]:
 
 def ensure_gitignore(project_root: Path) -> tuple[bool, str]:
     """Ensure .filigree/ is in .gitignore."""
-    gitignore = project_root / ".gitignore"
+    try:
+        gitignore = project_path(project_root, ".gitignore")
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
     filigree_pattern = ".filigree/"
 
     if gitignore.exists():
@@ -263,8 +278,15 @@ def _install_skill_to(project_root: Path, target_subpath: Path) -> tuple[bool, s
     if not skill_source.is_dir():
         return False, f"Skill source not found at {skill_source}"
 
-    target_dir = project_root / target_subpath / SKILL_NAME
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target_parent = ensure_project_dir(project_root, *target_subpath.parts)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
+    target_dir = target_parent / SKILL_NAME
+    try:
+        reject_symlink(target_dir)
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
 
     # Stage into a unique per-call directory. mkdtemp's name is collision-free
     # even when multiple installers race (e.g. concurrent Claude Code sessions
