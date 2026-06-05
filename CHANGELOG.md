@@ -19,6 +19,17 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Added
 
+- **Transport-bound actor identity (ADR-012, schema v24).** Every runtime write
+  now records a `verified_*` column alongside the claimed `actor`/`author`,
+  holding the OS-user identity the process verifiably ran as (or `NULL` when no
+  transport proof exists — all historical rows, unverified surfaces, and
+  system-authored writes). Resolved at the CLI and MCP-stdio entry points. A
+  non-blocking `ACTOR_MISMATCH` warning surfaces when the claimed and verified
+  identities disagree (CLI: stderr; MCP: response-envelope `warnings` array);
+  framework default actors (`cli`/`mcp`) are suppressed. No backfill; the
+  `events` dedup index is unchanged; `export`/`import` round-trips the new
+  columns. MCP-HTTP peer identity and dashboard auth remain deferred.
+
 - **`scanned_paths` on `POST /api/loom/scan-results` (and the classic/living
   aliases) — close-on-fixed now fires from scan ingest.** A scanner can now send
   `scanned_paths`: the authoritative set of files it visited this run, including

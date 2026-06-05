@@ -31,6 +31,7 @@ without grepping source. The source of truth remains
 
 | Release | Ships `user_version` | Notes |
 |---------|----------------------|-------|
+| 3.0.0 | 24 | Migration 23 to 24 (ADR-012, transport-bound actor identity): nullable `verified_*` column on the 5 runtime event-bearing tables (`events.verified_actor`, `file_events.verified_actor`, `annotation_events.verified_actor`, `comments.verified_author`, `observations.verified_actor`). Additive + idempotent; no backfill (`NULL` = no transport proof); the `events` dedup unique index is **not** extended |
 | 2.3.0 | 23 | Migration 22 to 23: `entity_associations.entity_kind` caller-supplied metadata; public projections expose canonical `entity_id` with `clarion_entity_id` compatibility alias |
 | 2.1.1 | 21 | Migration 20 to 21: `deleted_issues.entity_ids`, surfaced as `affected_entities` on the `issue_deleted` deletion-signal record (F5 amplifier) |
 | 2.1.0 | 20 | Migrations 14 to 20: entity associations (v15), event sequencing (v16), file registry metadata (v17), `application_id` stamp (v18), scan-finding fingerprints (v19), and the `deleted_issues` tombstone (v20) |
