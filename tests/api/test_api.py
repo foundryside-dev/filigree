@@ -1608,12 +1608,14 @@ class TestEtherealDashboard:
 
 
 class TestMcpEndpoint:
-    async def test_mcp_endpoint_exists(self, client: AsyncClient) -> None:
-        """The /mcp/ endpoint should be mounted (even if empty in ethereal mode)."""
-        # In ethereal mode this may return a protocol error (not a 404),
-        # which confirms the route exists
+    async def test_mcp_endpoint_gated_off_without_token(self, client: AsyncClient) -> None:
+        """The high-privilege /mcp transport is not mounted unless a federation
+        bearer token is configured. The default ``client`` fixture sets no token,
+        so the endpoint must be absent (404). Mount-when-configured and bearer
+        enforcement are covered in tests/api/test_loom_auth.py.
+        """
         resp = await client.get("/mcp/")
-        assert resp.status_code != 404
+        assert resp.status_code == 404
 
 
 class TestHealthAPI:
