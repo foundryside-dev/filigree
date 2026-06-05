@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Dashboard `/mcp` HTTP transport now requires a federation bearer token.**
+  The streamable-HTTP MCP endpoint exposes high-privilege agent tools. It was
+  previously mounted unconditionally on the loopback interface even with no auth
+  configured. It is now mounted only when `FILIGREE_FEDERATION_API_TOKEN` (or
+  legacy `FILIGREE_API_TOKEN`) is set; otherwise `/mcp` returns `404`. Bearer
+  enforcement on the mounted endpoint is unchanged (ADR-018; the loopback
+  boundary remains ADR-012).
+
+  **Migration:** if you use **server-mode** MCP (`.mcp.json` with `type:
+  streamable-http` pointing at the daemon), set `FILIGREE_FEDERATION_API_TOKEN`
+  before starting the dashboard, or the MCP client will receive `404`. The
+  installer (`filigree doctor`/`init`) now warns when it writes a server-mode
+  config while no token is configured. Ethereal (stdio) MCP is unaffected.
+
 ## [2.3.0] - 2026-06-02
 
 ### Added
