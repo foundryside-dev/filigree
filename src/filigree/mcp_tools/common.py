@@ -84,6 +84,30 @@ def _text(content: object) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(content, indent=2, default=str))]
 
 
+def _inject_warnings(result: list[TextContent], warnings: list[dict[str, Any]]) -> list[TextContent]:
+    """Add a top-level ``warnings`` array to a tool's JSON envelope.
+
+    Post-processing hook so warning producers (e.g. ADR-012 actor mismatch) need
+    not touch every handler. Parses the first text element; if it is a JSON
+    object, appends to (or creates) its ``warnings`` list. Bare-string and
+    non-object responses are returned untouched. Never raises.
+    """
+    if not warnings or not result:
+        return result
+    first = result[0]
+    if first.type != "text":
+        return result
+    try:
+        payload = json.loads(first.text)
+    except (json.JSONDecodeError, ValueError):
+        return result  # bare-string response — leave untouched
+    if not isinstance(payload, dict):
+        return result
+    existing = payload.get("warnings")
+    payload["warnings"] = (existing if isinstance(existing, list) else []) + warnings
+    return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str)), *result[1:]]
+
+
 def _registry_error_text(exc: RegistryPublicError, *, action: str) -> list[TextContent]:
     return _text(registry_error_response(exc, action=action))
 

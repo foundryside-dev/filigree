@@ -96,6 +96,20 @@ def cli(ctx: click.Context, actor: str) -> None:
         raise click.BadParameter(err, param_hint="'--actor'")
     ctx.obj["actor"] = cleaned
 
+    # ADR-012: surface a non-blocking warning when the claimed --actor disagrees
+    # with the transport-verified OS identity. Resolution + warning never raise
+    # and never block the command. Placeholder defaults ("cli") are suppressed
+    # by actor_mismatch_warning.
+    from filigree import actor_identity
+
+    _verified = actor_identity.resolve_os_actor()
+    _warning = actor_identity.actor_mismatch_warning(cleaned, _verified)
+    if _warning is not None:
+        click.echo(
+            f"warning: {_warning['code']} claimed={_warning['claimed']!r} verified={_warning['verified']!r}",
+            err=True,
+        )
+
 
 # Register domain command modules
 for _mod in (issues, planning, meta, workflow, admin, server, observations, files, annotations_cmds, scanners, sei):

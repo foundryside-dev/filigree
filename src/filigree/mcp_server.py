@@ -944,6 +944,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     async def _run() -> list[TextContent]:
         try:
             out: list[TextContent] = await handler(arguments)
+            # ADR-012: surface a non-blocking actor mismatch in the response
+            # envelope's ``warnings`` list. Best-effort — never break a tool call.
+            try:
+                from filigree import actor_identity
+                from filigree.mcp_tools.common import _inject_warnings
+
+                run_db = _request_db.get() or db
+                if run_db is not None:
+                    mismatch = actor_identity.actor_mismatch_warning(arguments.get("actor"), run_db._verified_actor)
+                    if mismatch is not None:
+                        out = _inject_warnings(out, [dict(mismatch)])
+            except Exception:
+                pass
             return out
         except Exception:
             if _logger:
@@ -1143,6 +1156,12 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
     _filigree_dir = filigree_dir
     try:
         db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
+        # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
+        # session so every runtime insert records verified_actor. Resolution
+        # never raises and never blocks; None leaves verified_actor NULL.
+        from filigree import actor_identity
+
+        db.set_verified_actor(actor_identity.resolve_os_actor())
         _schema_mismatch = None
         _registry_startup_error = None
         _db_open_error = None
