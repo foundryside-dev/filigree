@@ -727,11 +727,13 @@ class ClarionRegistry:
 
         Chunks ``queries`` into runs of ``CLARION_BATCH_MAX_QUERIES`` (256)
         and merges the per-chunk results into a single ``BatchResolution``.
-        Whole-batch failures (network, timeout, HTTP 5xx, malformed body,
+        Whole-batch availability failures (network, timeout, HTTP 5xx,
         HTTP 401 auth) raise ``RegistryUnavailableError`` — fallback policy
-        applies. Per-item failures (not_found, briefing_blocked, structured
-        errors) populate the corresponding channel and the call still
-        returns; callers decide whether to raise per item.
+        applies. Malformed reachable responses use
+        ``cause_kind="invalid_response"`` so fallback wrappers can fail closed.
+        Per-item failures (not_found, briefing_blocked, structured errors)
+        populate the corresponding channel and the call still returns; callers
+        decide whether to raise per item.
         """
         aggregate = BatchResolution(resolved={}, not_found=[], briefing_blocked=[], errors=[], messages={})
         if not queries:
