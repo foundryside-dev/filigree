@@ -631,27 +631,34 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         allow_http_force_close=_allow_http_force_close,
     )
 
-    # --- MCP streamable-HTTP setup (optional) ---
+    # Resolve federation auth before MCP setup so the high-privilege
+    # streamable-HTTP transport is only mounted when it can be protected.
+    _api_token, _api_token_env = _resolve_federation_api_token()
+
+    # --- MCP streamable-HTTP setup (optional, token-protected only) ---
     _mcp_handler: ASGIApp | None = None
     _mcp_lifespan_factory: Callable[..., Any] | None = None
-    try:
-        from filigree.mcp_server import create_mcp_app
+    if _api_token:
+        try:
+            from filigree.mcp_server import create_mcp_app
 
-        if server_mode:
-            # Closure reads ContextVar — no changes to mcp_server.py needed
-            def _server_db_resolver() -> FiligreeDB | None:
-                if dashboard_state.project_store is None:
-                    return None
-                key = dashboard_state.current_project_key.get() or dashboard_state.project_store.default_key
-                if not key:
-                    return None
-                return dashboard_state.project_store.get_db(key)
+            if server_mode:
+                # Closure reads ContextVar — no changes to mcp_server.py needed
+                def _server_db_resolver() -> FiligreeDB | None:
+                    if dashboard_state.project_store is None:
+                        return None
+                    key = dashboard_state.current_project_key.get() or dashboard_state.project_store.default_key
+                    if not key:
+                        return None
+                    return dashboard_state.project_store.get_db(key)
 
-            _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=_server_db_resolver)
-        else:
-            _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=lambda: dashboard_state.db)
-    except ImportError:
-        logger.debug("MCP streamable-HTTP not available (SDK not installed or import error)", exc_info=True)
+                _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=_server_db_resolver)
+            else:
+                _mcp_handler, _mcp_lifespan_factory = create_mcp_app(db_resolver=lambda: dashboard_state.db)
+        except ImportError:
+            logger.debug("MCP streamable-HTTP not available (SDK not installed or import error)", exc_info=True)
+    else:
+        logger.debug("MCP streamable-HTTP endpoint disabled because federation bearer auth is not configured")
 
     @contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -730,11 +737,10 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     # Opt-in bearer-token auth for the loom federation surface (ADR-018).
     # Active only when FILIGREE_FEDERATION_API_TOKEN (or legacy
-    # FILIGREE_API_TOKEN) is set; otherwise the middleware is
-    # not installed at all and behaviour is identical to the loopback default
-    # (ADR-012). Added after CORS so CORS remains inner and still decorates
+    # FILIGREE_API_TOKEN) is set; otherwise the middleware is not installed for
+    # loom routes. The MCP HTTP transport is never mounted without this token.
+    # Added after CORS so CORS remains inner and still decorates
     # classic/dashboard responses; loom OPTIONS preflight passes through.
-    _api_token, _api_token_env = _resolve_federation_api_token()
     app.state.auth_scope = _dashboard_auth_scope(federation_enabled=bool(_api_token), token_env=_api_token_env)
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
@@ -851,7 +857,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    # Mount MCP streamable-HTTP endpoint.
+    # Mount MCP streamable-HTTP endpoint only when bearer auth is configured.
     if _mcp_handler is not None:
         from starlette.routing import Mount
 
