@@ -101,6 +101,21 @@ def test_500_maps_to_integrity_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.status is LegisGateStatus.INTEGRITY_FAILURE
 
 
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_transient_5xx_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """A 502/503/504 is a transport/gateway failure (restarting Legis or an
+    interposed proxy), NOT a ledger-tamper claim. It must degrade to UNREACHABLE
+    — only an exact 500 is the integrity signal. Mislabelling these as
+    INTEGRITY_FAILURE defeats the cascade's one-timeout-per-batch short-circuit,
+    since INTEGRITY_FAILURE is a per-issue verdict that never short-circuits."""
+    with legis_stub() as (url, state):
+        state.status = status
+        state.body = {"reason": "gateway error"}
+        _set_url(monkeypatch, url)
+        result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.UNREACHABLE
+
+
 def test_connection_refused_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     # Nothing listening on this port → fast connection error → UNREACHABLE.
     _set_url(monkeypatch, "http://127.0.0.1:1")

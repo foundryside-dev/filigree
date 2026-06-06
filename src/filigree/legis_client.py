@@ -25,6 +25,11 @@ Wire contract consumed (Legis side — do not change here):
       409 → blocked            {"allowed": false, "reason", "evidence": null}
       404 → ledger not enabled (Legis configured without an HMAC key)
       500 → integrity failure  (tampered ledger — fail closed, surface)
+
+Only an exact ``500`` is read as Legis's integrity signal. Any other 5xx
+(``502``/``503``/``504`` — a restarting Legis or an interposed proxy / load
+balancer) is a transport failure, not a ledger-tamper claim, and degrades to
+``UNREACHABLE`` so the caller's fail-closed policy and batch short-circuit apply.
 """
 
 from __future__ import annotations
@@ -150,11 +155,22 @@ def _classify_http_error(exc: urllib.error.HTTPError) -> LegisGateResult:
         )
     if exc.code == 404:
         return LegisGateResult(LegisGateStatus.NOT_ENABLED, reason=reason or "Legis binding ledger not enabled")
-    if exc.code >= 500:
+    if exc.code == 500:
+        # Per the wire contract (module docstring), Legis emits **exactly** 500
+        # for a tampered/integrity-failed ledger — fail closed and surface it.
         return LegisGateResult(
             LegisGateStatus.INTEGRITY_FAILURE,
-            reason=reason or f"Legis binding integrity failure (HTTP {exc.code})",
+            reason=reason or "Legis binding integrity failure (HTTP 500)",
         )
+    if exc.code > 500:
+        # 502/503/504 etc. are transport/gateway failures (Legis restarting, or a
+        # proxy / load balancer in front of it) — NOT a ledger-integrity signal.
+        # Degrade to UNREACHABLE so a governed-close batch cascade short-circuits
+        # after one timeout, rather than mislabelling each issue as INTEGRITY_FAILURE
+        # (a per-issue verdict that deliberately never short-circuits — see
+        # finding_issue_cascade and governance.GateOutcome.STALE notes).
+        logger.warning("Legis closure-gate gateway/transport error: HTTP %s", exc.code)
+        return LegisGateResult(LegisGateStatus.UNREACHABLE, reason=reason or f"Legis gateway/transport error (HTTP {exc.code})")
     # Any other unexpected status: fail closed conservatively as unreachable.
     logger.warning("Legis closure-gate unexpected status %s", exc.code)
     return LegisGateResult(LegisGateStatus.UNREACHABLE, reason=f"Unexpected Legis status {exc.code}")
