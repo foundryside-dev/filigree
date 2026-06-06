@@ -86,7 +86,7 @@ _schema_mismatch: SchemaVersionMismatchError | None = None
 
 # Set when Loomweave advertises an incompatible registry API version at startup.
 # Mirrors schema-mismatch degraded mode: list_tools stays available, while
-# call_tool surfaces a structured CLARION_REGISTRY_VERSION_MISMATCH envelope.
+# call_tool surfaces a structured LOOMWEAVE_REGISTRY_VERSION_MISMATCH envelope.
 _registry_startup_error: RegistryVersionMismatchError | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing

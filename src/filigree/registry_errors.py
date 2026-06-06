@@ -21,9 +21,9 @@ def registry_error_response(exc: RegistryPublicError, *, action: str) -> ErrorRe
     if isinstance(exc, RegistryVersionMismatchError):
         return ErrorResponse(
             error=f"Loomweave registry API version mismatch while {action}: {exc}",
-            code=ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH,
+            code=ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH,
             details={
-                "cause": "clarion_registry_version_mismatch",
+                "cause": "loomweave_registry_version_mismatch",
                 "url": exc.url,
                 "expected": exc.expected,
                 "advertised": exc.advertised,

@@ -176,7 +176,7 @@ def test_sei_backfill_maps_out_of_sync_error_to_code_3_and_envelope(
     cli_in_project: tuple[CliRunner, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A LoomweaveOutOfSyncError maps to exit code 3 and the CLARION_OUT_OF_SYNC envelope."""
+    """A LoomweaveOutOfSyncError maps to exit code 3 and the LOOMWEAVE_OUT_OF_SYNC envelope."""
     runner, _project = cli_in_project
     from filigree.sei_backfill import LoomweaveOutOfSyncError
 
@@ -188,7 +188,7 @@ def test_sei_backfill_maps_out_of_sync_error_to_code_3_and_envelope(
 
     assert result.exit_code == 3
     payload = json.loads(result.output)
-    assert payload["code"] == "CLARION_OUT_OF_SYNC"
+    assert payload["code"] == "LOOMWEAVE_OUT_OF_SYNC"
     assert "Loomweave DB is out of sync" in payload["error"]
     assert payload["remediation_command"] == "loomweave analyze"
 
@@ -205,7 +205,7 @@ def test_sei_backfill_sync_check_missing_db(
         result = runner.invoke(cli, ["sei-backfill", "--json"])
         assert result.exit_code == 3
         payload = json.loads(result.output)
-        assert payload["code"] == "CLARION_OUT_OF_SYNC"
+        assert payload["code"] == "LOOMWEAVE_OUT_OF_SYNC"
         assert "Loomweave database not found" in payload["error"]
 
 
@@ -251,7 +251,7 @@ def test_sei_backfill_sync_check_hash_mismatch(
         result = runner.invoke(cli, ["sei-backfill", "--json"])
         assert result.exit_code == 3
         payload = json.loads(result.output)
-        assert payload["code"] == "CLARION_OUT_OF_SYNC"
+        assert payload["code"] == "LOOMWEAVE_OUT_OF_SYNC"
         assert "out of sync with git HEAD" in payload["error"]
         assert "mismatched_commit_hash" in payload["error"]
         assert "expected_git_head_commit_hash" in payload["error"]

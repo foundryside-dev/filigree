@@ -65,9 +65,9 @@ def test_registry_error_response_maps_api_version_mismatch() -> None:
 
     response = registry_error_response(exc, action="resolving file identity")
 
-    assert response["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+    assert response["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
     assert response["details"] == {
-        "cause": "clarion_registry_version_mismatch",
+        "cause": "loomweave_registry_version_mismatch",
         "url": "http://loomweave.test/api/v1/_capabilities",
         "expected": EXPECTED_LOOMWEAVE_API_VERSION,
         "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,

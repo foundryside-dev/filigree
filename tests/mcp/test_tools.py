@@ -3861,9 +3861,9 @@ class TestHttpMcpRequestContext:
         body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
         data = json.loads(body)
         assert start["status"] == 503
-        assert data["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert data["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
         assert data["details"] == {
-            "cause": "clarion_registry_version_mismatch",
+            "cause": "loomweave_registry_version_mismatch",
             "url": "http://loomweave.test/api/v1/_capabilities",
             "expected": EXPECTED_LOOMWEAVE_API_VERSION,
             "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,

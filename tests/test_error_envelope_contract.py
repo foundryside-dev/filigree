@@ -340,9 +340,9 @@ class TestCLIStartupEnvelope:
         assert result.exit_code == 1, result.output
         payload = json.loads(result.output)
         _assert_flat_envelope(payload, surface="cli")
-        assert payload["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
         assert payload["details"] == {
-            "cause": "clarion_registry_version_mismatch",
+            "cause": "loomweave_registry_version_mismatch",
             "url": f"{base_url}/api/v1/_capabilities",
             "expected": EXPECTED_LOOMWEAVE_API_VERSION,
             "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,

@@ -44,7 +44,7 @@ def test_error_code_enum_members() -> None:
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
     # FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
     # conflict code for projects whose file registry is owned by Loomweave.
-    # CLARION_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
+    # LOOMWEAVE_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
     # Loomweave advertises an api_version this Filigree was not built for.
     # BRIEFING_BLOCKED is the Loomweave 1.0 cross-product code (CONTRACT-3):
     # Loomweave returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
@@ -61,8 +61,8 @@ def test_error_code_enum_members() -> None:
         "INVALID_API_URL",
         "FILE_REGISTRY_DISPLACED",
         "REGISTRY_UNAVAILABLE",
-        "CLARION_REGISTRY_VERSION_MISMATCH",
-        "CLARION_OUT_OF_SYNC",
+        "LOOMWEAVE_REGISTRY_VERSION_MISMATCH",
+        "LOOMWEAVE_OUT_OF_SYNC",
         "BRIEFING_BLOCKED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",

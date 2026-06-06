@@ -461,7 +461,7 @@ class ErrorCode(StrEnum):
     INVALID_API_URL = "INVALID_API_URL"
     FILE_REGISTRY_DISPLACED = "FILE_REGISTRY_DISPLACED"
     REGISTRY_UNAVAILABLE = "REGISTRY_UNAVAILABLE"
-    CLARION_REGISTRY_VERSION_MISMATCH = "CLARION_REGISTRY_VERSION_MISMATCH"
+    LOOMWEAVE_REGISTRY_VERSION_MISMATCH = "LOOMWEAVE_REGISTRY_VERSION_MISMATCH"
     # Surfaces a Loomweave 403 + code="BRIEFING_BLOCKED" response. Distinct from
     # NOT_FOUND (the file exists, Loomweave is intentionally withholding it) and
     # distinct from PERMISSION (the caller's auth is fine; the *file* is
@@ -470,7 +470,7 @@ class ErrorCode(StrEnum):
     BRIEFING_BLOCKED = "BRIEFING_BLOCKED"
     STOP_FAILED = "STOP_FAILED"
     SCHEMA_MISMATCH = "SCHEMA_MISMATCH"
-    CLARION_OUT_OF_SYNC = "CLARION_OUT_OF_SYNC"
+    LOOMWEAVE_OUT_OF_SYNC = "LOOMWEAVE_OUT_OF_SYNC"
     INTERNAL = "INTERNAL"
 
 
@@ -757,8 +757,8 @@ def errorcode_to_http_status(code: ErrorCode) -> int:
             ErrorCode.NOT_INITIALIZED
             | ErrorCode.SCHEMA_MISMATCH
             | ErrorCode.REGISTRY_UNAVAILABLE
-            | ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
-            | ErrorCode.CLARION_OUT_OF_SYNC
+            | ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
+            | ErrorCode.LOOMWEAVE_OUT_OF_SYNC
         ):
             # Service exists but is not in a state where it can answer —
             # 503 lets clients retry once the project is initialized or

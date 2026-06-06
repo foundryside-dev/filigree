@@ -202,9 +202,9 @@ class TestStdioStartupHonoursConf:
 
             result = asyncio.run(mcp_mod.call_tool("list_issues", {}))
             payload = json.loads(result[0].text)
-            assert payload["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+            assert payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
             assert payload["details"] == {
-                "cause": "clarion_registry_version_mismatch",
+                "cause": "loomweave_registry_version_mismatch",
                 "url": f"{base_url}/api/v1/_capabilities",
                 "expected": EXPECTED_LOOMWEAVE_API_VERSION,
                 "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
@@ -213,7 +213,7 @@ class TestStdioStartupHonoursConf:
             status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))
             status_payload = json.loads(status_result[0].text)
             assert status_payload["status"] == "registry_version_mismatch"
-            assert status_payload["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+            assert status_payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
 
 
 class TestRequestFiligreeDirSandbox:

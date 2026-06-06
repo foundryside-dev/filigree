@@ -116,15 +116,15 @@ class TestDegradedModeReachability:
 
         # mcp_status_get -> get_mcp_status stays exempt from the registry guard,
         # so the diagnostic status payload is served (status field +
-        # full diagnostics), NOT the bare CLARION_REGISTRY_VERSION_MISMATCH envelope.
+        # full diagnostics), NOT the bare LOOMWEAVE_REGISTRY_VERSION_MISMATCH envelope.
         status = _parse(await call_tool("mcp_status_get", {}))
         assert status["status"] == "registry_version_mismatch"
-        assert status["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert status["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
         assert "runtime" in status
 
         # A normal tool IS blocked with the registry-mismatch envelope, via the new name.
         blocked = _parse(await call_tool("issue_get", {"issue_id": "anything"}))
-        assert blocked["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert blocked["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
 
 
 class TestServedTaggingIntegrity:

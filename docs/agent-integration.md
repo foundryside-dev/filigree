@@ -43,7 +43,7 @@ All MCP tools and CLI `--json` output use the unified 2.0 envelopes:
 
 - **Batch ops** return `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`. `failed` is always present (empty list if none); `newly_unblocked` is present only when non-empty (omitted when the op unblocked nothing). Pass `response_detail="full"` (MCP) or `--detail=full` (CLI) to get full records back instead of slim summaries.
 - **List ops** return `{items: [...], has_more: bool, next_offset?: int}`. `has_more` is always present; `next_offset` appears only when there is a next page.
-- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`, `CLARION_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
+- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`, `LOOMWEAVE_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
 
 The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, and CLI JSON). Status is always `status`; "state" was retired as a user-facing word in 2.0.
 
