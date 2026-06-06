@@ -495,6 +495,8 @@ class DBMixinProtocol(Protocol):
         _skip_begin: bool = False,
     ) -> EntityAssociationRow: ...
 
+    def list_entity_associations(self, issue_id: IssueId) -> list[EntityAssociationRow]: ...
+
     # -- ObservationsMixin ---------------------------------------------------
 
     def create_observation(

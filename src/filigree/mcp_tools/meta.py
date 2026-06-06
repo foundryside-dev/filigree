@@ -472,6 +472,21 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description="Stop and restart the ephemeral dashboard. Returns the new URL.",
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="list_reconciliation_debt",
+            description=(
+                "List issues carrying reconciliation debt — governed finding→issue auto-closes that the "
+                "Legis closure gate deferred (blocked, or could not confirm). Each row is one issue with "
+                "its debt_count and latest debt timestamp. Use to find and action deferred cascade closes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 50, "minimum": 1, "description": "Max results (default 50)"},
+                    "offset": {"type": "integer", "default": 0, "minimum": 0, "description": "Skip first N results"},
+                },
+            },
+        ),
     ]
 
     handlers: dict[str, Callable[..., Any]] = {
@@ -496,9 +511,29 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "list_labels": _handle_list_labels,
         "get_label_taxonomy": _handle_get_label_taxonomy,
         "restart_dashboard": _handle_restart_dashboard,
+        "list_reconciliation_debt": _handle_list_reconciliation_debt,
     }
 
     return tools, handlers
+
+
+async def _handle_list_reconciliation_debt(arguments: dict[str, Any]) -> list[TextContent]:
+    limit = arguments.get("limit", 50)
+    offset = arguments.get("offset", 0)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return _text(ErrorResponse(error="limit must be a positive integer", code=ErrorCode.VALIDATION))
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return _text(ErrorResponse(error="offset must be a non-negative integer", code=ErrorCode.VALIDATION))
+    tracker = get_db()
+    try:
+        rows = tracker.list_reconciliation_debt(limit=limit + 1, offset=offset)
+    except sqlite3.Error as e:
+        return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+    next_offset = offset + len(rows) if has_more else None
+    return _text(_list_response(rows, has_more=has_more, next_offset=next_offset))
 
 
 # ---------------------------------------------------------------------------

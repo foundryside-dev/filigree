@@ -62,6 +62,10 @@ class CheckResult:
     fix_hint: str = ""
     code: str | None = None  # machine-readable check identifier; e.g. "schema_mismatch_forward"
     check_id: str | None = None
+    # Opaque payload an auto-fixer needs to act on this specific result when the
+    # check name is dynamic (e.g. the exact server-registry key for a vanished
+    # project, whose ``name`` is the non-unique ``Project "<prefix>"``).
+    fix_target: str | None = None
 
     @property
     def icon(self) -> str:
@@ -530,6 +534,10 @@ def _doctor_server_checks(filigree_dir: Path) -> list[CheckResult]:
                     False,
                     f"Directory gone: {path_str}",
                     fix_hint=f"Run: filigree server unregister {p.parent}",
+                    code="server_registry_orphan",
+                    # The exact stored config key, so --fix can unregister it
+                    # without re-resolving a path that no longer exists.
+                    fix_target=path_str,
                 )
             )
 

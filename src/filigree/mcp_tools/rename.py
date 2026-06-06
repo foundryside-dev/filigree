@@ -86,6 +86,8 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "add_comment": "comment_add",
     "get_comments": "comment_list",
     "batch_add_comment": "comment_batch_add",
+    # reconciliation debt — deferred governed cascade closes (1)
+    "list_reconciliation_debt": "reconciliation_debt_list",
     # file (7)
     "list_files": "file_list",
     "get_file": "file_get",

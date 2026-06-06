@@ -127,6 +127,7 @@ _NICHE: frozenset[str] = frozenset(
         "undo_last",
         "restart_dashboard",
         "reload_templates",
+        "list_reconciliation_debt",
         # planning internals
         "create_plan_from_file",
         "move_plan_step",

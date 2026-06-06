@@ -1530,11 +1530,8 @@ class FilesMixin(DBMixinProtocol):
         # lock); this exclusion just avoids a doomed close attempt and the
         # reconciliation-debt churn it would log.
         warnings_before_close = len(stats["warnings"])
-        closed_issue_ids = [
-            issue_id
-            for finding_id, issue_id in sorted(resolved)
-            if issue_id not in regressed_issue_ids and self._close_issue_for_fixed_finding(finding_id, issue_id, warnings=stats["warnings"])
-        ]
+        close_candidates = [(finding_id, issue_id) for finding_id, issue_id in sorted(resolved) if issue_id not in regressed_issue_ids]
+        closed_issue_ids = self._finding_issue_cascade_service().close_resolved_findings(close_candidates, warnings=stats["warnings"])
         for warning in stats["warnings"][warnings_before_close:]:
             logger.warning("finding→issue close cascade: %s", warning)
         if closed_issue_ids:
@@ -2069,10 +2066,8 @@ class FilesMixin(DBMixinProtocol):
         fixed = self._sweep_stale_findings_to_fixed(days=days, scan_source=scan_source, actor=actor)
 
         warnings: list[str] = []
-        closed_issue_ids: list[str] = []
-        for finding_id, issue_id in fixed:
-            if issue_id and self._close_issue_for_fixed_finding(finding_id, str(issue_id), warnings=warnings):
-                closed_issue_ids.append(str(issue_id))
+        valid = [(finding_id, str(issue_id)) for finding_id, issue_id in fixed if issue_id]
+        closed_issue_ids = self._finding_issue_cascade_service().close_resolved_findings(valid, warnings=warnings)
         for warning in warnings:
             logger.warning("clean_stale_findings cascade: %s", warning)
 

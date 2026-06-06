@@ -14,6 +14,7 @@ import signal
 import sqlite3
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -223,6 +224,40 @@ def unregister_project(filigree_dir: Path) -> None:
         config = read_server_config()
         config.projects.pop(str(filigree_dir), None)
         write_server_config(config)
+
+
+def unregister_projects(project_keys: Iterable[str]) -> set[str]:
+    """Remove several projects from server.json in a single locked pass.
+
+    Unlike :func:`unregister_project`, the keys are matched *exactly* against
+    the stored ``projects`` map — they are deliberately **not** re-``resolve()``d.
+    Callers (notably ``doctor --fix`` cleaning up vanished-directory entries)
+    already hold the exact config keys, and re-resolving a now-missing path can
+    diverge from the string that was recorded at registration time, leaving the
+    stale entry stranded.
+
+    Returns the set of keys that were actually present and removed (so callers
+    can report precisely what changed and tell a real removal from a no-op).
+    """
+    wanted = set(project_keys)
+    if not wanted:
+        return set()
+    SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = SERVER_CONFIG_DIR / "server.lock"
+    try:
+        lock_fd = open(lock_path, "w")  # noqa: SIM115
+    except OSError as e:
+        raise RuntimeError(f"Cannot create lock file at {lock_path}: {e}. Check permissions on {SERVER_CONFIG_DIR}.") from e
+    removed: set[str] = set()
+    with lock_fd:
+        portalocker.lock(lock_fd, portalocker.LOCK_EX)
+        config = read_server_config()
+        for key in wanted:
+            if config.projects.pop(key, None) is not None:
+                removed.add(key)
+        if removed:
+            write_server_config(config)
+    return removed
 
 
 # ---------------------------------------------------------------------------

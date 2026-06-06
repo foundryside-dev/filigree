@@ -64,3 +64,53 @@ def test_cli_close_ungoverned_does_not_call_gate(cli_in_project: tuple[CliRunner
     result = runner.invoke(cli, ["close", issue_id])
     assert result.exit_code == 0
     assert calls == []
+
+
+# --- C1: the `update` command can also close (open→closed) and must gate -----
+
+
+def _status_of(project: Path, issue_id: str) -> str:
+    db = FiligreeDB.from_filigree_dir(project / FILIGREE_DIR_NAME)
+    status = db.get_issue(issue_id).status
+    db.close()
+    return status
+
+
+def test_cli_update_to_done_governed_blocked(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    runner, project = cli_in_project
+    issue_id = _extract_id(runner.invoke(cli, ["create", "Governed"]).output)
+    _make_governed(project, issue_id)
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
+    result = runner.invoke(cli, ["update", issue_id, "--status", "closed"])
+    assert result.exit_code == 1
+    assert "no verified binding" in result.output
+    assert _status_of(project, issue_id) != "closed"
+
+
+def test_cli_update_to_done_governed_allowed(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    runner, project = cli_in_project
+    issue_id = _extract_id(runner.invoke(cli, ["create", "Governed"]).output)
+    _make_governed(project, issue_id)
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    result = runner.invoke(cli, ["update", issue_id, "--status", "closed"])
+    assert result.exit_code == 0, result.output
+    assert _status_of(project, issue_id) == "closed"
+
+
+def test_cli_update_to_non_done_does_not_call_gate(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    runner, project = cli_in_project
+    issue_id = _extract_id(runner.invoke(cli, ["create", "Governed"]).output)
+    _make_governed(project, issue_id)
+    calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+    result = runner.invoke(cli, ["update", issue_id, "--status", "in_progress"])
+    assert result.exit_code == 0, result.output
+    assert calls == []  # non-closing status change is never gated
+
+
+def test_cli_update_to_done_ungoverned_does_not_call_gate(cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    runner, _ = cli_in_project
+    issue_id = _extract_id(runner.invoke(cli, ["create", "Ungoverned"]).output)
+    calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+    result = runner.invoke(cli, ["update", issue_id, "--status", "closed"])
+    assert result.exit_code == 0, result.output
+    assert calls == []

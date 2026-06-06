@@ -34,8 +34,8 @@ class TestServedSurface:
     async def test_list_tools_serves_exactly_the_new_names(self) -> None:
         names = [tool.name for tool in await list_tools()]
 
-        assert len(names) == 115
-        assert len(set(names)) == 115, "served names must be unique"
+        assert len(names) == 116
+        assert len(set(names)) == 116, "served names must be unique"
         # Every served name is a NEW name; no OLD name leaks onto the surface.
         assert set(names) == set(RENAME_MAP.values())
         assert set(names) & set(RENAME_MAP.keys()) == set()

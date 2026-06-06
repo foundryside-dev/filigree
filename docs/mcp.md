@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 115 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 116 tools, 1 resource, and 1 prompt.
 
 ## Contents
 
@@ -628,6 +628,14 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 | `admin_import_jsonl` | Import from JSONL |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
+| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the Legis gate deferred) |
+
+#### `reconciliation_debt_list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | no | Max results (default 50) |
+| `offset` | integer | no | Skip first N results |
 
 #### End-of-session cleanup
 

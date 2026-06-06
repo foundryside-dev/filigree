@@ -123,6 +123,31 @@ def _gate_batch_failures(tracker: Any, issue_ids: list[str]) -> tuple[list[str],
     return allowed, failures
 
 
+def _gate_status_change_failures(tracker: Any, issue_ids: list[str], requested_status: str | None) -> tuple[list[str], list[BatchFailure]]:
+    """Partition for ``batch_update`` (C1): gate only issues whose status write
+    would close a governed issue.
+
+    Mirrors :func:`_gate_batch_failures` but uses the status-change gate, which
+    PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
+    changes priority/assignee, or moves issues to a non-done status, gates
+    nothing.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_status_change_gate(tracker, issue_id, requested_status)
+        except (ValueError, KeyError):
+            allowed.append(issue_id)  # let batch_update classify it
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            err = _closure_gate_error(decision)
+            failures.append(BatchFailure(id=issue_id, error=err["error"], code=err["code"]))
+    return allowed, failures
+
+
 def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) -> list[TextContent]:
     if isinstance(exc, ClaimConflictError):
         return _claim_conflict_response(exc)
@@ -1011,6 +1036,12 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         before = tracker.get_issue(args["issue_id"])
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
+    # C1: update_issue can drive a governed issue into a done-category status
+    # (close_issue delegates here) — gate it like close_issue. PROCEED unless
+    # this is a real close of a governed issue.
+    gate = governance.evaluate_status_change_gate(tracker, args["issue_id"], args.get("status"))
+    if not gate.allowed:
+        return _text(_closure_gate_error(gate))
     try:
         issue = tracker.update_issue(
             args["issue_id"],
@@ -1526,9 +1557,13 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     u_fields = args.get("fields")
     if u_fields is not None and not isinstance(u_fields, dict):
         return _text(ErrorResponse(error="fields must be a JSON object", code=ErrorCode.VALIDATION))
+    # C1: gate each issue whose status write would close a governed issue,
+    # per-item like batch_close (B5 DECISION 3) — a blocked issue is reported
+    # in `failed`, not closed.
+    allowed_ids, gate_failures = _gate_status_change_failures(tracker, issue_ids, args.get("status"))
     try:
         updated, update_failed = tracker.batch_update(
-            issue_ids,
+            allowed_ids,
             status=args.get("status"),
             priority=priority,
             assignee=args.get("assignee"),
@@ -1539,16 +1574,17 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
+    all_failed = [*gate_failures, *update_failed]
     refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(i) for i in updated],
-            failed=update_failed,
+            failed=all_failed,
         )
         return _text(full_result)
     result: BatchResponse[SlimIssue] = BatchResponse(
         succeeded=[_slim_issue(i) for i in updated],
-        failed=update_failed,
+        failed=all_failed,
     )
     return _text(result)
 

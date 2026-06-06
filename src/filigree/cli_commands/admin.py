@@ -478,6 +478,36 @@ def _apply_doctor_fixes(
             if emit is not None:
                 click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
 
+    # Stale server-registry entries (vanished project directories) carry a
+    # dynamic, non-unique check name (``Project "<prefix>"``), so they can't be
+    # routed by the name-keyed table above. Route them by their stable ``code``
+    # and unregister by the exact stored key in one locked pass. Safe to clean
+    # because the project re-registers itself on its next use; only gone-dir
+    # entries reach here (see _doctor_server_checks).
+    orphans: list[CheckResult] = []
+    orphan_keys: list[str] = []
+    for r in results:
+        target = r.fix_target
+        if not r.passed and r.code == "server_registry_orphan" and target is not None:
+            orphans.append(r)
+            orphan_keys.append(target)
+    if orphan_keys:
+        from filigree.server import unregister_projects
+
+        try:
+            removed = unregister_projects(orphan_keys)
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot clean stale server registry: {e}", err=True)
+            removed = set()
+        for r in orphans:
+            if r.fix_target in removed:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
+                if emit is not None:
+                    emit(f"  OK {r.name}: Unregistered stale project {r.fix_target}")
+
     return fixed, fixed_check_ids, fixed_check_names
 
 

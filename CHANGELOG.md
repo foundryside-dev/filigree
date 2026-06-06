@@ -39,6 +39,15 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Added
 
+- **Reconciliation-debt list surface (B2).** When the Legis closure gate defers
+  a governed finding→issue auto-close (blocked or unconfirmable), the deferral is
+  recorded as reconciliation debt. A new read surface lists the issues that carry
+  it: `db.list_reconciliation_debt()`, the CLI verb `filigree reconciliation-debt`
+  (`--limit`/`--offset`/`--json`), and the MCP tool `reconciliation_debt_list`
+  (brings the served MCP surface to 116 tools). The debt write is idempotent, so
+  re-evaluating the same blocked issue on every ingest/sweep does not duplicate
+  comments.
+
 - **Legis governed-sign-off binding fields (B1, schema v25).** The
   entity-association attach surface (`POST /api/issue/{id}/entity-associations`)
   now accepts and persists two optional opaque fields Legis sends when it binds
@@ -97,6 +106,18 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Fixed
 
+- **Legis closure gate was bypassable through every non-`close` write path.** The
+  gate (B5) was enforced per transport verb — only `close_issue`/`batch_close` —
+  but `close_issue` routes through `update_issue`, so a governed issue could be
+  driven into a done-category status, ungated, via `update_issue`/`batch_update`
+  on MCP, HTTP (classic + weft), and CLI, and via the scan-ingest/age-out
+  finding→issue cascade. All of these now consult the same gate through a single
+  shared decision (`governance.evaluate_status_change_gate`); a status write that
+  is not a real close of a governed issue makes no network call. The cascade
+  (Design A, B2) fails closed for governed issues Legis blocks/cannot confirm and
+  records reconciliation debt instead of auto-closing; the reopen-on-regress
+  cascade is intentionally not gated.
+
 - **Finding→issue close cascade was unreachable from scan ingest.** Re-ingest
   wired reopen-on-regress but never close-on-fixed: fixing code and re-scanning
   flipped the finding to `unseen_in_latest` while leaving the linked issue open
@@ -124,6 +145,18 @@ checklist is complete and a coordinated consumer-migration window is published.
   `_skip_begin` on both the protocol stub and its `@_in_immediate_tx`
   implementation so the stub-signature contract test and the mypy override check
   agree.
+
+- **`doctor --fix` now clears the stale server-registry entries it already
+  flags.** In server mode, `doctor` reports every registered project whose
+  directory has vanished (`Directory gone: …`) with a `filigree server
+  unregister` hint, but `--fix` skipped them: those checks carry a dynamic,
+  non-unique name (`Project "<prefix>"`) that the name-keyed fixer table never
+  matched, so each reported "manual intervention" despite a deterministic
+  remediation. `--fix` now routes them by a stable `code`
+  (`server_registry_orphan`) and removes them by their exact stored config key
+  in one locked pass (new `server.unregister_projects`), reporting each entry it
+  unregistered. Gone-directory only — a live project re-registers on next use —
+  and the data plane (issues/findings) is never mutated.
 
 ### Changed
 

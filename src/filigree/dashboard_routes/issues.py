@@ -112,6 +112,33 @@ def _gate_batch_failures(db: FiligreeDB, issue_ids: list[str]) -> tuple[list[str
     return allowed, failures
 
 
+def _gate_status_change_failures(
+    db: FiligreeDB, issue_ids: list[str], requested_status: str | None
+) -> tuple[list[str], list[BatchFailure]]:
+    """Partition for ``batch_update`` (C1): gate only issues whose status write
+    would close a governed issue.
+
+    Mirrors :func:`_gate_batch_failures` but uses the status-change gate, which
+    PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
+    only changes priority/assignee, or moves issues to a non-done status, gates
+    nothing.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_status_change_gate(db, issue_id, requested_status)
+        except (ValueError, KeyError):
+            allowed.append(issue_id)  # let batch_update classify it
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            failures.append(BatchFailure(id=issue_id, error=decision.reason, code=code))
+    return allowed, failures
+
+
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
     """Return every issue in the DB by paginating list_issues.
 
@@ -515,6 +542,11 @@ def create_classic_router() -> APIRouter:
         status = _validate_body_string_field(body, "status", default=None)
         if isinstance(status, JSONResponse):
             return status
+        # C1: update can drive a governed issue into a done-category status
+        # (close routes through update) — gate it like close.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            return _closure_gate_block(gate)
         try:
             issue = db.update_issue(
                 issue_id,
@@ -717,8 +749,10 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # C1: gate per-item any status write that would close a governed issue.
+        allowed_ids, gate_failures = _gate_status_change_failures(db, issue_ids, parsed.get("status"))
         try:
-            updated, errors = db.batch_update(issue_ids, **parsed)
+            updated, errors = db.batch_update(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: a foreign-prefix id in a batch aborts envelope-
             # level rather than producing N misleading per-item errors.
@@ -728,7 +762,7 @@ def create_classic_router() -> APIRouter:
         return JSONResponse(
             {
                 "updated": [i.to_dict() for i in updated],
-                "errors": errors,
+                "errors": [*gate_failures, *errors],
             }
         )
 
@@ -1177,8 +1211,10 @@ def create_weft_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # C1: gate per-item any status write that would close a governed issue.
+        allowed_ids, gate_failures = _gate_status_change_failures(db, issue_ids, parsed.get("status"))
         try:
-            updated, errors = db.batch_update(issue_ids, **parsed)
+            updated, errors = db.batch_update(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
@@ -1188,7 +1224,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(
             {
                 "succeeded": [project(i) for i in updated],
-                "failed": errors,
+                "failed": [*gate_failures, *errors],
             }
         )
 
@@ -1349,6 +1385,11 @@ def create_weft_router() -> APIRouter:
         status = _validate_body_string_field(body, "status", default=None)
         if isinstance(status, JSONResponse):
             return status
+        # C1: update can drive a governed issue into a done-category status
+        # (close routes through update) — gate it like close.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            return _closure_gate_block(gate)
         try:
             issue = db.update_issue(
                 issue_id,

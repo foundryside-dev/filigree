@@ -64,6 +64,14 @@ class _AssocReader(Protocol):
     def list_entity_associations(self, issue_id: Any) -> list[Any]: ...
 
 
+class _StatusGateReader(_AssocReader, Protocol):
+    # Adds the issue/template reads the status-change gate needs to tell a
+    # *closing* status write (target done-category) from an ordinary one.
+    # Both methods exist on FiligreeDB.
+    def get_issue(self, issue_id: Any) -> Any: ...
+    def _resolve_status_category(self, issue_type: str, status: str) -> Any: ...
+
+
 def check_closure_gate(issue_id: str) -> LegisGateResult:
     """Indirection point over the Legis client (monkeypatched in tests)."""
     return legis_client.check_closure_gate(issue_id)
@@ -81,6 +89,44 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str) -> GateDecision:
     if not any(row.get("signature") for row in rows):
         return _PROCEED  # ungoverned — no network call (DECISION 1A)
     return _map_result(check_closure_gate(str(issue_id)))
+
+
+def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_status: str | None) -> GateDecision:
+    """Decide whether a status *write* that would close *issue_id* may proceed.
+
+    ``close_issue`` delegates to ``update_issue`` (same template validator,
+    same data-layer write), so ``update_issue``/``batch_update`` can drive a
+    governed issue into a done-category status. Those surfaces historically
+    skipped the gate — an ungated close-equivalent. This mirrors
+    :func:`evaluate_closure_gate` for them, and is the single decision every
+    status-write surface (MCP/HTTP/loom/CLI, single and batch) routes through
+    so the policy cannot drift per verb.
+
+    Returns ``PROCEED`` — making no network call and (beyond governance-off)
+    no governed-ness read — when the write is not a real close:
+
+    - ``requested_status`` is ``None`` (no status change),
+    - governance is off,
+    - the target status is not a done-category state (not a close),
+    - the issue is already in a done-category state (done→done shuffle), or
+    - the issue or target status cannot be resolved (the write's own
+      transition validator will reject it with INVALID_TRANSITION / NOT_FOUND
+      — the gate must not mask or pre-empt that error).
+
+    Otherwise it delegates to :func:`evaluate_closure_gate`, which applies the
+    governed-ness short-circuit and the fail-closed Legis policy.
+    """
+    if requested_status is None or not legis_client.is_configured():
+        return _PROCEED
+    try:
+        issue = db.get_issue(issue_id)
+        if db._resolve_status_category(issue.type, issue.status) == "done":
+            return _PROCEED  # already closed — not a close transition
+        if db._resolve_status_category(issue.type, requested_status) != "done":
+            return _PROCEED  # target is not a done-category state
+    except (KeyError, ValueError):
+        return _PROCEED  # unknown issue/status — let the write validator reject it
+    return evaluate_closure_gate(db, issue_id)
 
 
 def _map_result(result: LegisGateResult) -> GateDecision:

@@ -676,6 +676,125 @@ class TestDoctorCli:
         assert result.exit_code == 0, f"expected exit 0 when all fixed, got {result.exit_code}\n{result.output}"
 
 
+class TestDoctorFixServerRegistry:
+    """doctor --fix cleans stale server-registry entries (vanished directories)."""
+
+    def _patch_server_config(self, project: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        config_dir = project / ".server-config"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", config_dir / "server.pid")
+        return config_dir
+
+    def test_unregisters_vanished_project_and_reports_it(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, project = cli_in_project
+        from filigree.install_support.doctor import CheckResult
+        from filigree.server import ServerConfig, read_server_config, write_server_config
+
+        self._patch_server_config(project, monkeypatch)
+        gone = str(project / "ghost" / ".filigree")
+        alive = str(project / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}, alive: {"prefix": "test"}}))
+
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult(
+                    'Project "ghost"',
+                    False,
+                    f"Directory gone: {gone}",
+                    fix_hint=f"Run: filigree server unregister {Path(gone).parent}",
+                    code="server_registry_orphan",
+                    fix_target=gone,
+                ),
+            ],
+        )
+
+        result = runner.invoke(cli, ["doctor", "--fix"])
+
+        assert result.exit_code == 0, result.output
+        assert gone in result.output  # "report exactly what it changed"
+        # Stale entry removed; the still-present project is left alone.
+        assert set(read_server_config().projects) == {alive}
+
+    def test_json_summary_reports_orphan_check_fixed(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, project = cli_in_project
+        from filigree.install_support.doctor import CheckResult, doctor_check_id
+        from filigree.server import ServerConfig, write_server_config
+
+        self._patch_server_config(project, monkeypatch)
+        gone = str(project / "ghost" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}}))
+
+        orphan = CheckResult('Project "ghost"', False, f"Directory gone: {gone}", code="server_registry_orphan", fix_target=gone)
+        monkeypatch.setattr("filigree.install.run_doctor", lambda **_kw: [orphan])
+
+        result = runner.invoke(cli, ["doctor", "--fix", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks[doctor_check_id(orphan)]["status"] == "fixed"
+
+    def test_does_not_mutate_issue_data(self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        runner, project = cli_in_project
+        from filigree.install_support.doctor import CheckResult
+        from filigree.server import ServerConfig, write_server_config
+
+        created = runner.invoke(cli, ["create", "survivor issue"])
+        assert created.exit_code == 0
+        issue_id = _extract_id(created.output)
+
+        self._patch_server_config(project, monkeypatch)
+        gone = str(project / "ghost" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}}))
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult('Project "ghost"', False, f"Directory gone: {gone}", code="server_registry_orphan", fix_target=gone),
+            ],
+        )
+
+        result = runner.invoke(cli, ["doctor", "--fix"])
+        assert result.exit_code == 0, result.output
+
+        # The data plane is untouched: the issue still resolves.
+        shown = runner.invoke(cli, ["show", issue_id])
+        assert shown.exit_code == 0
+        assert "survivor issue" in shown.output
+
+    def test_real_scan_cleans_orphan_and_is_idempotent(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, project = cli_in_project
+        from filigree.core import read_config
+        from filigree.server import ServerConfig, read_server_config, write_server_config
+
+        # Put the project into server mode so the real run_doctor exercises
+        # _doctor_server_checks.
+        config_path = project / ".filigree" / "config.json"
+        config = read_config(project / ".filigree")
+        config["mode"] = "server"
+        config_path.write_text(json.dumps(config))
+
+        self._patch_server_config(project, monkeypatch)
+        gone = str(project / "ghost" / ".filigree")
+        alive = str(project / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}, alive: {"prefix": "test"}}))
+
+        first = runner.invoke(cli, ["doctor", "--fix"])
+        assert gone in first.output, first.output
+        assert set(read_server_config().projects) == {alive}
+
+        # Second run: the orphan is already gone — the real scan does not
+        # re-surface it, so cleanup is idempotent.
+        second = runner.invoke(cli, ["doctor", "--fix"])
+        assert f"Directory gone: {gone}" not in second.output
+        assert set(read_server_config().projects) == {alive}
+
+
 class TestShowDetailedOutput:
     """Cover the human-readable show output branches."""
 

@@ -787,6 +787,11 @@ class ObserveArgs(TypedDict):
     actor: NotRequired[str]
 
 
+class ListReconciliationDebtArgs(TypedDict):
+    limit: NotRequired[int]
+    offset: NotRequired[int]
+
+
 class ListObservationsArgs(TypedDict):
     limit: NotRequired[int]
     offset: NotRequired[int]
@@ -967,6 +972,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     # observations.py
     "observe": ObserveArgs,
     "list_observations": ListObservationsArgs,
+    "list_reconciliation_debt": ListReconciliationDebtArgs,
     "dismiss_observation": DismissObservationArgs,
     "batch_dismiss_observations": BatchDismissObservationsArgs,
     "batch_promote_observations": BatchPromoteObservationsArgs,

@@ -1649,6 +1649,10 @@ class TestDoctorServerChecks:
         r = project_failures[0]
         assert "Directory gone" in r.message
         assert r.fix_hint
+        # Machine-routable repair: doctor --fix keys off the stable code and
+        # acts on the exact stored config key carried in fix_target.
+        assert r.code == "server_registry_orphan"
+        assert r.fix_target == str(missing_dir)
 
 
 # ---------------------------------------------------------------------------

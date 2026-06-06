@@ -855,6 +855,46 @@ def get_label_taxonomy_cmd(as_json: bool) -> None:
     _taxonomy_impl(as_json)
 
 
+@click.command("reconciliation-debt")
+@click.option("--limit", default=50, type=int, help="Max results (default 50)")
+@click.option("--offset", default=0, type=int, help="Skip first N results")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def reconciliation_debt_cmd(limit: int, offset: int, as_json: bool) -> None:
+    """List issues carrying reconciliation debt (deferred governed cascade closes).
+
+    Design A defers a governed finding→issue auto-close that Legis blocks or
+    cannot confirm, recording the deferral as reconciliation debt. This lists
+    the issues that carry it so the deferral can be actioned.
+    """
+    with get_db() as db:
+        try:
+            rows = db.list_reconciliation_debt(limit=limit + 1, offset=offset)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        next_offset = offset + len(rows) if has_more else None
+
+        if as_json:
+            payload: dict[str, Any] = {"items": rows, "has_more": has_more}
+            if has_more and next_offset is not None:
+                payload["next_offset"] = next_offset
+            click.echo(json_mod.dumps(payload, indent=2, default=str))
+            return
+
+        if not rows:
+            click.echo("No reconciliation debt.")
+            return
+        for row in rows:
+            click.echo(f"{row['issue_id']}  {row['debt_count']} debt  (latest {row['latest']})")
+        click.echo(f"\n{len(rows)} issue(s) with reconciliation debt")
+
+
 def register(cli: click.Group) -> None:
     """Register metadata commands with the CLI group."""
     cli.add_command(add_comment)
@@ -875,3 +915,4 @@ def register(cli: click.Group) -> None:
     cli.add_command(batch_add_label)
     cli.add_command(batch_remove_label)
     cli.add_command(batch_add_comment)
+    cli.add_command(reconciliation_debt_cmd)

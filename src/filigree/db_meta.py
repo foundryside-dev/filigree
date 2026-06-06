@@ -97,6 +97,39 @@ class MetaMixin(DBMixinProtocol):
             created_at=row["created_at"],
         )
 
+    def list_reconciliation_debt(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List issues carrying reconciliation debt, newest debt first.
+
+        Design A defers a governed finding→issue auto-close that Legis blocks (or
+        cannot confirm) and records the deferral as a ``filigree:reconciliation``
+        comment. This is the actionable read surface over that debt.
+
+        Discriminates on ``author = RECONCILIATION_DEBT_ACTOR``, NOT a
+        ``LIKE '[reconciliation-debt]%'`` scan of the unindexed ``comments.text``
+        — so it does not depend on the human-readable prefix string and does not
+        table-scan comment bodies. One row per issue: ``issue_id``,
+        ``debt_count``, ``latest`` (newest debt timestamp). The debt comment
+        bodies are read per-issue via ``get_comments`` — this surface is the
+        index, not the full text (``MAX(text)`` would be the lexicographically
+        largest body, unrelated to the latest, so it is deliberately not exposed).
+        """
+        from filigree.finding_issue_cascade import RECONCILIATION_DEBT_ACTOR
+
+        rows = self.conn.execute(
+            """
+            SELECT issue_id,
+                   COUNT(*) AS debt_count,
+                   MAX(created_at) AS latest
+            FROM comments
+            WHERE author = ?
+            GROUP BY issue_id
+            ORDER BY latest DESC
+            LIMIT ? OFFSET ?
+            """,
+            (RECONCILIATION_DEBT_ACTOR, limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # -- Labels --------------------------------------------------------------
 
     @_retry_busy()

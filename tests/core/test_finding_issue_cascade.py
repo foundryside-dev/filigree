@@ -18,7 +18,9 @@ import logging
 
 import pytest
 
+from filigree import governance
 from filigree.core import FiligreeDB
+from filigree.legis_client import LegisGateResult, LegisGateStatus
 
 
 def _wln(path: str, fingerprint: str, **extra: object) -> dict[str, object]:
@@ -43,6 +45,234 @@ def _ingest(db: FiligreeDB, fingerprint: str = "fp-abc") -> str:
 def _is_done(db: FiligreeDB, issue_id: str) -> bool:
     issue = db.get_issue(issue_id)
     return db._resolve_status_category(issue.type, issue.status) == "done"
+
+
+def _resolved_finding_linked_to_issue(db: FiligreeDB, fingerprint: str = "fp-gov") -> tuple[str, str]:
+    """Ingest a finding, promote it to an issue, mark the finding fixed → return
+    ``(finding_id, issue_id)`` ready for the close-on-fixed cascade."""
+    finding_id = _ingest(db, fingerprint)
+    issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+    db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE id = ?", (finding_id,))
+    db.conn.commit()
+    return finding_id, issue.id
+
+
+def _govern(db: FiligreeDB, issue_id: str, entity: str = "ent-1") -> None:
+    """Attach a signed Legis binding so the issue is governed (DECISION 1A)."""
+    db.add_entity_association(issue_id, entity, content_hash="h", actor="legis", signature="sig", signoff_seq=1)
+
+
+class TestReconciliationDebtIdempotent:
+    """Task 1: Design A re-evaluates a blocked governed issue every ingest/sweep,
+    so the debt write must not append a duplicate comment each run."""
+
+    def test_reconciliation_debt_comment_is_idempotent(self, db: FiligreeDB) -> None:
+        from filigree.finding_issue_cascade import RECONCILIATION_DEBT_ACTOR, record_reconciliation_debt_comment
+
+        issue_id = db.create_issue("governed", type="task").id
+        text = "Finding f1 fixed but issue blocked by Legis"
+        record_reconciliation_debt_comment(db.conn, issue_id, text)
+        record_reconciliation_debt_comment(db.conn, issue_id, text)
+
+        n = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM comments WHERE issue_id = ? AND author = ?",
+            (issue_id, RECONCILIATION_DEBT_ACTOR),
+        ).fetchone()["n"]
+        assert n == 1
+
+    def test_different_debt_reason_still_records(self, db: FiligreeDB) -> None:
+        from filigree.finding_issue_cascade import RECONCILIATION_DEBT_ACTOR, record_reconciliation_debt_comment
+
+        issue_id = db.create_issue("governed", type="task").id
+        record_reconciliation_debt_comment(db.conn, issue_id, "blocked by Legis")
+        record_reconciliation_debt_comment(db.conn, issue_id, "unreachable Legis")
+
+        n = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM comments WHERE issue_id = ? AND author = ?",
+            (issue_id, RECONCILIATION_DEBT_ACTOR),
+        ).fetchone()["n"]
+        assert n == 2  # distinct reasons are distinct debt
+
+
+def _debt_count(db: FiligreeDB, issue_id: str) -> int:
+    from filigree.finding_issue_cascade import RECONCILIATION_DEBT_ACTOR
+
+    return db.conn.execute(
+        "SELECT COUNT(*) AS n FROM comments WHERE issue_id = ? AND author = ?",
+        (issue_id, RECONCILIATION_DEBT_ACTOR),
+    ).fetchone()["n"]
+
+
+class TestGatedCascadeClose:
+    """Task 2 (Design A): the finding→issue auto-close consults the Legis gate
+    for governed issues. Blocked/unavailable/integrity fail closed and record
+    reconciliation debt; ungoverned/unconfigured close with no network call."""
+
+    def test_governed_issue_not_closed_when_legis_blocks(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.BLOCKED, reason="not signed off"))
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-block")
+        _govern(db, issue_id)
+
+        warnings: list[str] = []
+        closed = db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=warnings)
+
+        assert closed is False
+        assert not _is_done(db, issue_id)  # stays open
+        assert any("not auto-closed" in w for w in warnings)  # surfaced
+        assert _debt_count(db, issue_id) == 1  # debt recorded
+
+    def test_governed_issue_closed_when_legis_allows(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.ALLOWED))
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-allow")
+        _govern(db, issue_id)
+
+        assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
+        assert _is_done(db, issue_id)
+
+    def test_governed_issue_fails_closed_when_legis_unreachable(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _id: LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout"))
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-unreach")
+        _govern(db, issue_id)
+
+        warnings: list[str] = []
+        assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=warnings) is False
+        assert not _is_done(db, issue_id)
+        assert _debt_count(db, issue_id) == 1  # fail-closed still records debt
+
+    def test_ungoverned_issue_still_auto_closes(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        # no signature attached → evaluate_closure_gate short-circuits PROCEED, no network
+        called: list[str] = []
+        monkeypatch.setattr(governance, "check_closure_gate", lambda iid: called.append(iid) or LegisGateResult(LegisGateStatus.BLOCKED))
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-ungov")
+
+        assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
+        assert _is_done(db, issue_id)
+        assert called == []  # ungoverned → no network call
+
+    def test_governed_issue_closes_when_legis_unconfigured(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LEGIS_URL", raising=False)  # governance OFF → PROCEED, no network
+        called: list[str] = []
+        monkeypatch.setattr(governance, "check_closure_gate", lambda iid: called.append(iid) or LegisGateResult(LegisGateStatus.BLOCKED))
+        finding_id, issue_id = _resolved_finding_linked_to_issue(db, "fp-unconf")
+        _govern(db, issue_id)
+
+        assert db._close_issue_for_fixed_finding(finding_id, issue_id, warnings=[]) is True
+        assert _is_done(db, issue_id)
+        assert called == []
+
+
+class TestBatchShortCircuit:
+    """Task 3: once Legis is seen UNAVAILABLE in a batch, the rest of the batch
+    defers to reconciliation debt without re-calling Legis — bounding a down /
+    slow Legis to one timeout per batch (legis_client's default is 5 s)."""
+
+    def test_batch_short_circuits_after_legis_unreachable(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        calls = {"n": 0}
+
+        def _gate(_issue_id: str) -> LegisGateResult:
+            calls["n"] += 1
+            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
+
+        monkeypatch.setattr(governance, "check_closure_gate", _gate)
+
+        candidates: list[tuple[str, str]] = []
+        for i in range(3):
+            finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-sc-{i}")
+            _govern(db, issue_id, entity=f"ent-sc-{i}")
+            candidates.append((finding_id, issue_id))
+
+        warnings: list[str] = []
+        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=warnings)
+
+        assert calls["n"] == 1  # only the first governed issue actually called Legis
+        assert closed == []  # none closed (all deferred)
+        n = db.conn.execute("SELECT COUNT(*) AS n FROM comments WHERE author = 'filigree:reconciliation'").fetchone()["n"]
+        assert n == 3  # all three recorded debt
+        for _finding_id, issue_id in candidates:
+            assert not _is_done(db, issue_id)
+
+    def test_batch_integrity_failure_not_short_circuited(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """INTEGRITY_FAILURE is a per-issue ledger-tamper verdict, not a
+        connectivity problem — every governed issue is still evaluated."""
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        calls = {"n": 0}
+
+        def _gate(_issue_id: str) -> LegisGateResult:
+            calls["n"] += 1
+            return LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered")
+
+        monkeypatch.setattr(governance, "check_closure_gate", _gate)
+
+        candidates: list[tuple[str, str]] = []
+        for i in range(3):
+            finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-int-{i}")
+            _govern(db, issue_id, entity=f"ent-int-{i}")
+            candidates.append((finding_id, issue_id))
+
+        db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
+        assert calls["n"] == 3  # each issue evaluated; integrity is not short-circuited
+
+    def test_batch_closes_allowed_and_defers_blocked(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An allowed issue closes; a blocked one in the same batch defers."""
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+
+        f_a, issue_a = _resolved_finding_linked_to_issue(db, "fp-mix-a")
+        f_b, blocked_id = _resolved_finding_linked_to_issue(db, "fp-mix-b")
+        _govern(db, issue_a)
+        _govern(db, blocked_id, entity="ent-b")
+
+        def _gate(issue_id: str) -> LegisGateResult:
+            return (
+                LegisGateResult(LegisGateStatus.BLOCKED, reason="no")
+                if issue_id == blocked_id
+                else LegisGateResult(LegisGateStatus.ALLOWED)
+            )
+
+        monkeypatch.setattr(governance, "check_closure_gate", _gate)
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings([(f_a, issue_a), (f_b, blocked_id)], warnings=[])
+        assert closed == [issue_a]
+        assert _is_done(db, issue_a)
+        assert not _is_done(db, blocked_id)
+
+
+class TestListReconciliationDebt:
+    """Task 4: deferred-close debt is actionable — a cross-issue read surface
+    listing issues that carry reconciliation debt, discriminating on author."""
+
+    def test_returns_issues_with_debt_only(self, db: FiligreeDB) -> None:
+        from filigree.finding_issue_cascade import record_reconciliation_debt_comment
+
+        with_debt = db.create_issue("blocked", type="task").id
+        without = db.create_issue("clean", type="task").id
+        record_reconciliation_debt_comment(db.conn, with_debt, "blocked by Legis")
+
+        rows = db.list_reconciliation_debt(limit=50, offset=0)
+        ids = {r["issue_id"] for r in rows}
+        assert with_debt in ids
+        assert without not in ids
+
+    def test_groups_and_counts_debt_per_issue(self, db: FiligreeDB) -> None:
+        from filigree.finding_issue_cascade import record_reconciliation_debt_comment
+
+        issue_id = db.create_issue("blocked", type="task").id
+        record_reconciliation_debt_comment(db.conn, issue_id, "blocked by Legis")
+        record_reconciliation_debt_comment(db.conn, issue_id, "unreachable Legis")  # distinct reason
+
+        rows = db.list_reconciliation_debt(limit=50, offset=0)
+        row = next(r for r in rows if r["issue_id"] == issue_id)
+        assert row["debt_count"] == 2  # one row per issue, counting its debt
+
+    def test_does_not_match_ordinary_comments(self, db: FiligreeDB) -> None:
+        issue_id = db.create_issue("normal", type="task").id
+        db.add_comment(issue_id, "just a normal human comment", author="human")
+        rows = db.list_reconciliation_debt(limit=50, offset=0)
+        assert all(r["issue_id"] != issue_id for r in rows)
 
 
 class TestFindFindingByFingerprint:

@@ -133,3 +133,99 @@ class TestClosureGateBatchClose:
         resp = await client.post("/api/batch/close", json={"issue_ids": ["other-1234567890", valid], "actor": "x"})
         assert resp.status_code == 400, resp.text
         assert resp.json()["code"] == ErrorCode.VALIDATION
+
+
+class TestStatusChangeGate:
+    """C1: ``update_issue``/``batch_update`` reach the same data-layer close as
+    ``close_issue`` (open→closed is a valid task transition), so the update
+    surfaces must consult the same gate. Covers classic + loom, single + batch."""
+
+    async def test_classic_update_to_done_governed_blocked_returns_409(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
+        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["code"] == ErrorCode.CONFLICT
+        assert dashboard_db.db.get_issue(issue_id).status != "closed"
+
+    async def test_classic_update_to_done_governed_allowed_closes(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        assert dashboard_db.db.get_issue(issue_id).status == "closed"
+
+    async def test_classic_update_to_non_done_does_not_call_gate(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "in_progress", "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        assert calls == []  # non-closing status change is never gated
+
+    async def test_classic_update_to_done_ungoverned_does_not_call_gate(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]  # no signature → ungoverned
+        calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        assert calls == []
+
+    async def test_classic_update_integrity_failure_returns_502(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
+        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
+        assert resp.status_code == 502, resp.text
+        assert resp.json()["code"] == ErrorCode.INTERNAL
+
+    async def test_loom_update_to_done_governed_blocked_returns_409(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue_id = dashboard_db.ids["a"]
+        _make_governed(dashboard_db, issue_id)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        resp = await client.patch(f"/api/weft/issues/{issue_id}", json={"status": "closed", "actor": "x"})
+        assert resp.status_code == 409, resp.text
+        assert dashboard_db.db.get_issue(issue_id).status != "closed"
+
+    async def test_classic_batch_update_to_done_reports_blocked_in_errors(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gov = dashboard_db.ids["a"]
+        ungov = dashboard_db.ids["b"]
+        _make_governed(dashboard_db, gov)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        resp = await client.post("/api/batch/update", json={"issue_ids": [gov, ungov], "status": "closed", "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        updated_ids = {i["id"] for i in body["updated"]}
+        error_ids = {e["id"] for e in body["errors"]}
+        assert ungov in updated_ids
+        assert gov in error_ids
+        assert dashboard_db.db.get_issue(gov).status != "closed"
+
+    async def test_loom_batch_update_to_done_reports_blocked_in_failed(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gov = dashboard_db.ids["a"]
+        ungov = dashboard_db.ids["b"]
+        _make_governed(dashboard_db, gov)
+        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        resp = await client.post("/api/weft/batch/update", json={"issue_ids": [gov, ungov], "status": "closed", "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        failed_ids = {e["id"] for e in body["failed"]}
+        assert gov in failed_ids
+        assert dashboard_db.db.get_issue(gov).status != "closed"

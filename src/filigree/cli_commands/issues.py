@@ -483,6 +483,16 @@ def _update_impl(
             fields["design"] = design
 
     with get_db() as db:
+        # C1: `update --status <done>` reaches the same close as the `close`
+        # command (close routes through update_issue) — gate it the same way.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            code = ErrorCode.INTERNAL if gate.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            if as_json:
+                click.echo(json_mod.dumps({"error": gate.reason, "code": code}))
+            else:
+                click.echo(gate.reason, err=True)
+            sys.exit(1)
         try:
             issue = db.update_issue(
                 issue_id,
