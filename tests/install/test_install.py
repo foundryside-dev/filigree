@@ -24,6 +24,8 @@ from filigree.core import (
     find_filigree_command,
 )
 from filigree.install import (
+    _INSTR_FENCE_RE,
+    FILIGREE_INSTRUCTIONS,
     FILIGREE_INSTRUCTIONS_MARKER,
     SKILL_NAME,
     CheckResult,
@@ -208,6 +210,117 @@ class TestInstructionWriteLock:
         assert "User heading" in content
         assert "User body." in content
         assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+
+_WARDLINE_BLOCK = "<!-- wardline:instructions:v1:abcd1234 -->\nwardline body line\n<!-- /wardline:instructions -->"
+_END = "<!-- /filigree:instructions -->"
+
+
+class TestForeignBlockSafety:
+    """filigree-bcbd4d66fd: inject_instructions must never delete a co-resident
+    sibling tool's block (wardline/legis) in a shared CLAUDE.md/AGENTS.md."""
+
+    def test_malformed_filigree_preserves_following_foreign_block(self, tmp_path: Path) -> None:
+        """The named repro: an UNCLOSED filigree block followed by a well-formed
+        wardline block. The old truncate-to-EOF deleted the wardline block."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "Before user preamble.\n"
+            "<!-- filigree:instructions:v2.9.0:deadbeef -->\n"
+            "filigree workflow body\n"  # NO filigree end marker
+            f"{_WARDLINE_BLOCK}\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        # Wardline block survives intact.
+        assert "wardline body line" in content
+        assert content.count("<!-- wardline:instructions:v1:abcd1234 -->") == 1
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        # User preamble survives; filigree block is now well-formed and singular.
+        assert "Before user preamble." in content
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+        assert content.count(_END) == 1
+
+    def test_shape2_sandwiched_foreign_block_preserved(self, tmp_path: Path) -> None:
+        """Unclosed-first filigree / wardline / closed-later filigree: the
+        well-formed `find` would jump the wardline block; bounded scan must not."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "<!-- filigree:instructions:v1:aaaaaaaa -->\n"
+            "stale filigree body 1\n"  # first block unclosed
+            f"{_WARDLINE_BLOCK}\n"
+            "<!-- filigree:instructions:v1:aaaaaaaa -->\n"
+            "stale filigree body 2\n"
+            f"{_END}\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        # The sandwiched wardline block is NOT swallowed.
+        assert "wardline body line" in content
+        assert content.count("<!-- wardline:instructions:v1:abcd1234 -->") == 1
+
+    def test_uppercase_namespace_sibling_preserved(self, tmp_path: Path) -> None:
+        """Refinement: an uppercase-namespaced sibling fence must still be seen as
+        a boundary (case-insensitive), else it is truncated to EOF as before."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "<!-- filigree:instructions:v1:deadbeef -->\n"
+            "filigree body\n"  # unclosed
+            "<!-- Wardline:instructions:v1:abcd1234 -->\n"
+            "uppercase sibling body\n"
+            "<!-- /Wardline:instructions -->\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        assert "uppercase sibling body" in content
+        assert "Wardline:instructions" in content
+
+    def test_well_formed_filigree_with_trailing_foreign_preserved(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        inject_instructions(target)  # well-formed filigree block
+        target.write_text(target.read_text().rstrip("\n") + f"\n\n{_WARDLINE_BLOCK}\n")
+        ok, _msg = inject_instructions(target)  # replace filigree in place
+        assert ok
+        content = target.read_text()
+        assert "wardline body line" in content
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+    def test_foreign_block_before_filigree_preserved(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(f"{_WARDLINE_BLOCK}\n\n")
+        inject_instructions(target)  # appends filigree after wardline
+        ok, _msg = inject_instructions(target)  # replace filigree in place
+        assert ok
+        content = target.read_text()
+        assert "wardline body line" in content
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+    def test_bounded_recovery_is_idempotent(self, tmp_path: Path) -> None:
+        """Repeated runs over the malformed+foreign repro must converge and not
+        accumulate separators or duplicate filigree blocks."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(f"<!-- filigree:instructions:v9:deadbeef -->\nstale body\n{_WARDLINE_BLOCK}\n")
+        inject_instructions(target)
+        after_first = target.read_text()
+        inject_instructions(target)
+        after_second = target.read_text()
+        assert after_first == after_second  # fixpoint reached
+        assert after_second.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+        assert after_second.count(_END) == 1
+        assert "wardline body line" in after_second
+
+    def test_instructions_body_contains_no_foreign_fence(self) -> None:
+        """Refinement guard: the shipped filigree block must contain ONLY
+        filigree-namespace instruction fences. A foreign-looking ':instructions'
+        token in the body would create a spurious boundary and corrupt the common
+        well-formed replace path on the next inject."""
+        namespaces = {m.group(1).lower() for m in _INSTR_FENCE_RE.finditer(FILIGREE_INSTRUCTIONS)}
+        assert namespaces <= {"filigree"}, f"instructions.md body has non-filigree fence(s): {namespaces}"
 
 
 class TestInstructionsVersionFallback:

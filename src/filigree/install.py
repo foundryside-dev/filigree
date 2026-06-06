@@ -17,6 +17,7 @@ import importlib.metadata
 import importlib.resources
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -117,6 +118,29 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _END_MARKER = "<!-- /filigree:instructions -->"
+
+# Recognises ANY tool's instruction-block fence (open or close) by its vendor
+# namespace, so filigree can bound its own rewrite at a *foreign* fence and never
+# delete a co-resident sibling block (wardline/legis) in a shared
+# CLAUDE.md/AGENTS.md (filigree-bcbd4d66fd). The namespace match is
+# case-insensitive: an uppercase-namespaced sibling must still register as a
+# boundary. The cross-tool multi-owner block contract lives in weft
+# conventions.md (C-4).
+_INSTR_FENCE_RE = re.compile(r"<!--\s*/?([A-Za-z0-9_-]+):instructions")
+
+
+def _first_foreign_fence_pos(content: str, search_from: int) -> int:
+    """Index of the first non-filigree instruction fence at/after *search_from*.
+
+    Own-namespace (``filigree``) fences are absorbed — never treated as a
+    boundary — so duplicate or unclosed filigree blocks still collapse to one
+    clean block (the orphan-tail idempotency invariant). When no foreign fence
+    follows, returns ``len(content)`` (i.e. bound at EOF).
+    """
+    for m in _INSTR_FENCE_RE.finditer(content, search_from):
+        if m.group(1).lower() != "filigree":
+            return m.start()
+    return len(content)
 
 
 def _instructions_text() -> str:
@@ -268,21 +292,49 @@ def _inject_instructions_locked(file_path: Path) -> tuple[bool, str]:
     if file_path.exists():
         content = file_path.read_text()
         if FILIGREE_INSTRUCTIONS_MARKER in content:
-            # Replace existing block
+            # Replace our managed block, bounding the rewrite so we NEVER delete a
+            # sibling tool's block (wardline/legis) co-resident in the same file
+            # (filigree-bcbd4d66fd). The writable region runs from our start
+            # marker to the first of:
+            #   (a) our own end marker, IF it precedes any foreign fence — the
+            #       normal in-place replace;
+            #   (b) the next foreign-namespace fence — bounded recovery for a
+            #       malformed/unclosed block, and for the unclosed-first /
+            #       closed-later "Shape 2" where a bare ``find`` would otherwise
+            #       jump over a foreign block to a later filigree close;
+            #   (c) EOF.
+            # Own-namespace fences are absorbed (see _first_foreign_fence_pos),
+            # so duplicate/unclosed filigree blocks still collapse to one clean
+            # block — preserving the orphan-tail idempotency invariant.
             start = content.index(FILIGREE_INSTRUCTIONS_MARKER)
-            end_pos = content.find(_END_MARKER, start)
-            if end_pos != -1:
-                end = end_pos + len(_END_MARKER)
-                content = content[:start] + FILIGREE_INSTRUCTIONS + content[end:]
+            own_end = content.find(_END_MARKER, start)
+            foreign = _first_foreign_fence_pos(content, start + len(FILIGREE_INSTRUCTIONS_MARKER))
+            if own_end != -1 and own_end < foreign:
+                bound = own_end + len(_END_MARKER)
+                tail = content[bound:]
+                sep = ""
             else:
-                # Malformed — end marker missing. The block is unclosed, so
-                # anything from the start marker onward belongs to the broken
-                # block and cannot be safely preserved.  Replace from the
-                # start marker through EOF.  (The previous behaviour of
-                # preserving the tail left orphan content behind that the
-                # next run could no longer distinguish from genuine user
-                # text, so the corruption persisted indefinitely.)
-                content = content[:start] + FILIGREE_INSTRUCTIONS
+                # Bounded recovery: stop at the foreign fence (or EOF). Re-insert
+                # the separating newline we may have eaten, so our close marker is
+                # never glued mid-line against a following foreign fence — that
+                # keeps us independent of whether a sibling's own block detector
+                # is line-anchored.
+                bound = foreign
+                tail = content[bound:]
+                sep = "\n" if (bound < len(content) and not tail.startswith("\n")) else ""
+            if FILIGREE_INSTRUCTIONS_MARKER in tail:
+                # A second filigree block survives beyond the boundary because
+                # canonicalising it would mean reaching across a block we don't
+                # own. It is STALE, conflicting guidance — not a harmless
+                # duplicate — so surface it instead of silently shipping a split
+                # brain (foreign-safety wins over own-dedup).
+                logger.warning(
+                    "filigree instruction block in %s has a duplicate that could not be "
+                    "canonicalised without crossing another tool's block; the stale copy was "
+                    "left in place. Resolve it by hand.",
+                    file_path,
+                )
+            content = content[:start] + FILIGREE_INSTRUCTIONS + sep + tail
             _atomic_write_text(file_path, content)
             return True, f"Updated instructions in {file_path}"
         else:
