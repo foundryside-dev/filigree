@@ -52,3 +52,7 @@ CLAUDE.md
 loomweave.yaml
 wardline.yaml
 .loomweave/loomweave.lock
+.loomweave/ephemeral.port
+
+# Filigree issue tracker
+.filigree/
