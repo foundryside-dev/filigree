@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from filigree.core import (
     CONF_FILENAME,
@@ -29,10 +32,12 @@ from filigree.install_support.doctor import (
     CheckResult,
     _doctor_ethereal_checks,
     _doctor_install_method,
+    _doctor_mcp_token_result,
     _doctor_server_checks,
     _find_all_filigree_binaries,
     _is_absolute_command_path,
     _is_venv_binary,
+    _unresolved_env_refs,
     doctor_check_id,
     run_doctor,
 )
@@ -470,7 +475,6 @@ class TestDoctorContextMd:
         summary_path = tmp_path / FILIGREE_DIR_NAME / SUMMARY_FILENAME
         # Set mtime 90 minutes ago
         old_mtime = time.time() - 90 * 60
-        import os
 
         os.utime(str(summary_path), (old_mtime, old_mtime))
         results = run_doctor(tmp_path)
@@ -1910,3 +1914,67 @@ class TestDoctorCodexMcp:
         # uv_tool_bin does not exist → warning branch skipped → passes
         assert result.passed is True
         assert "Configured in ~/.codex/config.toml" in result.message
+
+
+# ---------------------------------------------------------------------------
+# WEFT_FEDERATION_TOKEN: .mcp.json header token-reference connectivity check
+# (filigree-0e4bc3d81a)
+# ---------------------------------------------------------------------------
+
+
+class TestMcpTokenReference:
+    """The streamable-http header token must resolve, or /mcp silently 401s."""
+
+    def test_unresolved_env_refs_bare_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN}") == ["WEFT_FEDERATION_TOKEN"]
+
+    def test_unresolved_env_refs_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "secret")
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN}") == []
+
+    def test_unresolved_env_refs_literal_default_counts_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        # ${VAR:-default} expands to the literal default even when VAR is unset.
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN:-fallback}") == []
+
+    def test_token_result_unset_canonical_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${WEFT_FEDERATION_TOKEN}"},
+        }
+        result = _doctor_mcp_token_result(entry)
+        assert result is not None
+        assert result.passed is False
+        assert result.code == "mcp_token_unresolved"
+        assert "WEFT_FEDERATION_TOKEN" in result.fix_hint
+
+    def test_token_result_deprecated_name_hints_fix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${FILIGREE_API_TOKEN}"},
+        }
+        result = _doctor_mcp_token_result(entry)
+        assert result is not None
+        assert "doctor --fix" in result.fix_hint
+
+    def test_token_result_resolved_is_healthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "secret")
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${WEFT_FEDERATION_TOKEN}"},
+        }
+        assert _doctor_mcp_token_result(entry) is None
+
+    def test_token_result_no_header_not_applicable(self) -> None:
+        entry = {"type": "streamable-http", "url": "http://localhost:8749/mcp"}
+        assert _doctor_mcp_token_result(entry) is None
+
+    def test_token_result_stdio_not_applicable(self) -> None:
+        entry = {"type": "stdio", "command": "/usr/bin/filigree-mcp", "args": []}
+        assert _doctor_mcp_token_result(entry) is None

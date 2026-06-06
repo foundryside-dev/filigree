@@ -2600,24 +2600,42 @@ class TestInstallMcpServerMode:
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
 
-    def test_server_mode_warns_without_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Server-mode points at the daemon's /mcp transport, which mounts only
-        when a federation bearer token is set; warn loudly if none is configured."""
+    def test_server_mode_mints_and_instructs_without_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Greenfield: with no federation token set anywhere, server-mode install
+        mints one and prints the export the operator must run. The committed header
+        references the canonical ${WEFT_FEDERATION_TOKEN}."""
+        (tmp_path / ".filigree").mkdir()
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
         monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
         monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
             ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
-        assert "FILIGREE_FEDERATION_API_TOKEN" in msg
-        assert "404" in msg
+        assert "export WEFT_FEDERATION_TOKEN=" in msg
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert mcp["mcpServers"]["filigree"]["headers"]["Authorization"] == "Bearer ${WEFT_FEDERATION_TOKEN}"
+        # Idempotent: the minted token is recorded under the gitignored .filigree dir.
+        assert (tmp_path / ".filigree" / "federation_token").read_text().strip()
 
-    def test_server_mode_no_warning_with_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With a token configured, the server-mode install message carries no warning."""
+    def test_server_mode_clean_with_canonical_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With WEFT_FEDERATION_TOKEN exported, the header resolves and the install
+        message carries no migration note or mint instruction."""
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "tok")
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        assert "export" not in msg
+        assert "NOTE" not in msg
+
+    def test_server_mode_migrates_deprecated_alias(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A token set only under a deprecated alias yields a one-line migration hint
+        onto the canonical name (the header references the canonical name)."""
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
         monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
             ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
-        assert "WARNING" not in msg
+        assert 'export WEFT_FEDERATION_TOKEN="$FILIGREE_FEDERATION_API_TOKEN"' in msg
 
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path

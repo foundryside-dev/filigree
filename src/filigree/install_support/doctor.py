@@ -221,6 +221,72 @@ def _validate_filigree_mcp_entry(entry: object) -> dict[str, object]:
     return entry
 
 
+# Canonical inbound federation bearer env var (mirrors dashboard.FEDERATION_TOKEN_ENV_VARS[0]).
+# Duplicated as a plain string to keep doctor's import surface light.
+_WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
+_DEPRECATED_FEDERATION_ENV_VARS = (
+    "FILIGREE_FEDERATION_API_TOKEN",
+    "FILIGREE_API_TOKEN",
+)
+_ENV_REF_RE = re.compile(r"\$\{(?P<var>[A-Za-z_][A-Za-z0-9_]*)(:-(?P<default>[^}]*))?\}")
+
+
+def _unresolved_env_refs(value: str) -> list[str]:
+    """Return env-var names referenced via ``${VAR}`` in *value* that don't resolve.
+
+    A ``${VAR:-default}`` form with a non-empty literal default counts as resolved
+    (Claude Code expands to the default). Only a bare ``${VAR}`` whose variable is
+    unset/blank in the environment is unresolved. Claude Code cannot fall back
+    across two names (no nested ``${A:-${B}}``), so each bare ref is independent.
+    """
+    unresolved: list[str] = []
+    for match in _ENV_REF_RE.finditer(value):
+        var = match.group("var")
+        if os.environ.get(var, "").strip():
+            continue
+        if match.group("default"):
+            continue
+        unresolved.append(var)
+    return unresolved
+
+
+def _doctor_mcp_token_result(entry: dict[str, object]) -> CheckResult | None:
+    """Connectivity check for a streamable-http filigree entry.
+
+    If the ``Authorization`` header references an env var that doesn't resolve, the
+    transport silently 401s and the agent loses its tracker (coordinates blind).
+    Returns a failing :class:`CheckResult`, or ``None`` when not applicable/healthy.
+    This is a federation/deconfliction availability check, **not** a security check.
+    """
+    if entry.get("type") != "streamable-http":
+        return None
+    headers = entry.get("headers")
+    if not isinstance(headers, dict):
+        return None
+    auth = headers.get("Authorization")
+    if not isinstance(auth, str):
+        return None
+    unresolved = _unresolved_env_refs(auth)
+    if not unresolved:
+        return None
+    deprecated = [v for v in unresolved if v in _DEPRECATED_FEDERATION_ENV_VARS]
+    if deprecated:
+        hint = (
+            f"Header references deprecated {', '.join(deprecated)}. Run `filigree doctor --fix` "
+            f"to migrate it to ${{{_WEFT_FEDERATION_ENV_VAR}}}, then export {_WEFT_FEDERATION_ENV_VAR}=<token> "
+            "and restart the daemon."
+        )
+    else:
+        hint = f"Export the token: {_WEFT_FEDERATION_ENV_VAR}=<token>, then restart the daemon."
+    return CheckResult(
+        "Claude Code MCP",
+        False,
+        f".mcp.json Authorization header references unset env var(s): {', '.join(unresolved)} — /mcp will 401",
+        fix_hint=hint,
+        code="mcp_token_unresolved",
+    )
+
+
 def _doctor_file_registry_backend_state(
     conn: sqlite3.Connection,
     *,
@@ -350,7 +416,7 @@ def _route_supports(route_table: dict[str, set[str]], path: str, method: str) ->
 def _doctor_dashboard_contract_checks() -> list[CheckResult]:
     """Validate dashboard/API route registration without issuing mutating calls."""
     try:
-        from filigree.dashboard import FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR, create_app
+        from filigree.dashboard import FEDERATION_TOKEN_ENV_VARS, create_app
 
         app = create_app(server_mode=False)
         route_table: dict[str, set[str]] = {}
@@ -422,10 +488,7 @@ def _doctor_dashboard_contract_checks() -> list[CheckResult]:
     else:
         results.append(CheckResult("Entity association routes", True, "entity-association routes registered"))
 
-    auth_envs = {
-        FEDERATION_API_ENV_VAR: os.environ.get(FEDERATION_API_ENV_VAR),
-        LEGACY_API_ENV_VAR: os.environ.get(LEGACY_API_ENV_VAR),
-    }
+    auth_envs = {name: os.environ.get(name) for name in FEDERATION_TOKEN_ENV_VARS}
     empty_envs = sorted(name for name, value in auth_envs.items() if value is not None and not value.strip())
     configured_envs = sorted(name for name, value in auth_envs.items() if value is not None and value.strip())
     if empty_envs:
@@ -973,7 +1036,12 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     else:
                         results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json (venv path)"))
                 else:
-                    results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json"))
+                    # streamable-http (or other non-absolute-command) entry: the
+                    # binary checks above don't apply. Verify the Authorization
+                    # header's token reference actually resolves — an unset var
+                    # silently 401s the /mcp transport (the lacuna failure).
+                    token_result = _doctor_mcp_token_result(filigree_mcp_entry)
+                    results.append(token_result or CheckResult("Claude Code MCP", True, "Configured in .mcp.json"))
         except (json.JSONDecodeError, ValueError, OSError):
             results.append(
                 CheckResult(

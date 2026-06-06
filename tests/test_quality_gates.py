@@ -192,7 +192,7 @@ def test_xss_guardrails_execute_rendered_output_instead_of_source_string_checks(
 def test_readme_documents_auth_route_classes() -> None:
     readme = _read("README.md")
 
-    assert "FILIGREE_FEDERATION_API_TOKEN" in readme
+    assert "WEFT_FEDERATION_TOKEN" in readme
     assert "| Route class | Authentication |" in readme
     assert "Classic dashboard API" in readme
     assert "Federation and scanner ingest" in readme

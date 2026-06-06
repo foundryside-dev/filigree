@@ -7,6 +7,13 @@
 Filigree↔Clarion — token sent, ignored). Implements **option (b)** from that
 issue, chosen by the project lead during the 2026-06-03 API review.
 
+> **Amendment (3.0.0, 2026-06-07):** the env var was renamed to
+> **`WEFT_FEDERATION_TOKEN`** (federation plumbing takes the Weft prefix). The
+> original `FILIGREE_API_TOKEN` and the interim `FILIGREE_FEDERATION_API_TOKEN`
+> are still read as deprecated, backward-compatible fallbacks (removal post-1.0).
+> Read order: `WEFT_FEDERATION_TOKEN` → `FILIGREE_FEDERATION_API_TOKEN` →
+> `FILIGREE_API_TOKEN`. References to `FILIGREE_API_TOKEN` below are historical.
+
 ## Summary
 
 Filigree's HTTP API gains **opt-in** inbound authentication for the **loom

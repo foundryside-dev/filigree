@@ -31,8 +31,10 @@ MCP and CLI reflect the living surface only. They evolve forward with each relea
 By default Filigree's HTTP API performs **no** inbound authentication: it is
 loopback-only and the transport is the trust boundary ([ADR-012](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-012-actor-identity-threat-model.md)).
 
-When an operator sets the **`FILIGREE_API_TOKEN`** environment variable on the
-Filigree server, the **loom federation surface** is gated behind a bearer token
+When an operator sets the **`WEFT_FEDERATION_TOKEN`** environment variable on the
+Filigree server (the deprecated `FILIGREE_FEDERATION_API_TOKEN` / `FILIGREE_API_TOKEN`
+names are still read as a backward-compatible fallback, removal post-1.0), the
+**loom federation surface** is gated behind a bearer token
 ([ADR-018](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-018-loom-bearer-token-auth.md)):
 
 - **Enforced paths:** `/api/weft/*` and the living-surface federation aliases
@@ -42,7 +44,7 @@ Filigree server, the **loom federation surface** is gated behind a bearer token
   `/api/v1/scan-results`), the local dashboard (`/`), and `/api/health`. The
   classic `/api/v1/scan-results` outlier is **not** gated — federation producers
   should post to `/api/weft/scan-results` or `/api/scan-results`.
-- **Request:** send `Authorization: Bearer <FILIGREE_API_TOKEN>`. The comparison
+- **Request:** send `Authorization: Bearer <WEFT_FEDERATION_TOKEN>`. The comparison
   is constant-time.
 - **Rejection:** a missing/invalid token on an enforced path returns
   `401` with the standard envelope `{"error": "...", "code": "PERMISSION"}` and a

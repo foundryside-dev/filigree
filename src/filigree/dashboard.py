@@ -63,8 +63,16 @@ from filigree.types.api import SchemaVersionMismatchError
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 8377
-FEDERATION_API_ENV_VAR = "FILIGREE_FEDERATION_API_TOKEN"
-LEGACY_API_ENV_VAR = "FILIGREE_API_TOKEN"
+# Canonical inbound federation bearer env var (3.0.0). Gates Filigree's own
+# /api/weft/* + /mcp HTTP surface. Federation plumbing → Weft prefix. The two
+# FILIGREE_*_API_TOKEN names are deprecated aliases read as a soft fallback so
+# existing exports keep working; scheduled for removal post-1.0. (Distinct from
+# the OUTBOUND registry token WEFT_TOKEN in registry.py.)
+WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
+FEDERATION_API_ENV_VAR = "FILIGREE_FEDERATION_API_TOKEN"  # deprecated alias
+LEGACY_API_ENV_VAR = "FILIGREE_API_TOKEN"  # deprecated alias
+# Read order: canonical first, then deprecated aliases.
+FEDERATION_TOKEN_ENV_VARS = (WEFT_FEDERATION_ENV_VAR, FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +90,7 @@ _DASHBOARD_STATE_ATTR = "filigree_dashboard_state"
 def _resolve_federation_api_token() -> tuple[str, str | None]:
     """Resolve the opt-in bearer token for federation/MCP HTTP surfaces."""
     empty_envs: list[str] = []
-    for env_name in (FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR):
+    for env_name in FEDERATION_TOKEN_ENV_VARS:
         raw = os.environ.get(env_name)
         if raw is None:
             continue
@@ -736,8 +744,8 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     )
 
     # Opt-in bearer-token auth for the loom federation surface (ADR-018).
-    # Active only when FILIGREE_FEDERATION_API_TOKEN (or legacy
-    # FILIGREE_API_TOKEN) is set; otherwise the middleware is not installed for
+    # Active only when WEFT_FEDERATION_TOKEN (or a deprecated FILIGREE_*_API_TOKEN
+    # alias) is set; otherwise the middleware is not installed for
     # loom routes. The MCP HTTP transport is never mounted without this token.
     # Added after CORS so CORS remains inner and still decorates
     # classic/dashboard responses; loom OPTIONS preflight passes through.

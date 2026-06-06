@@ -39,6 +39,26 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Added
 
+- **`WEFT_FEDERATION_TOKEN` canonical inbound federation bearer + token
+  negotiation (filigree-0e4bc3d81a).** The bearer that gates Filigree's own
+  `/api/weft/*` + `/mcp` HTTP surface is now read from `WEFT_FEDERATION_TOKEN`
+  first, falling back to the **deprecated** `FILIGREE_FEDERATION_API_TOKEN` and
+  `FILIGREE_API_TOKEN` (soft migration — existing exports keep working; removal
+  post-1.0). This is the *inbound* surface token and is distinct from the
+  *outbound* registry token `WEFT_TOKEN`; it is federation/deconfliction
+  plumbing, not a security secret. Server-mode `filigree install` now writes the
+  `.mcp.json` Authorization header as `Bearer ${WEFT_FEDERATION_TOKEN}` (it
+  previously wrote none, so the transport could not authenticate) and
+  *negotiates* a token: it reuses an exported one, prints a one-line migration
+  for a deprecated-alias value, or mints + records one under the gitignored
+  `.filigree/federation_token` and prints the `export` the operator must run
+  (filigree cannot write the agent's process env). `filigree doctor` now fails
+  the Claude Code MCP check when a streamable-http Authorization header
+  references an env var that does not resolve — turning the previously silent
+  `/mcp` 401 (an agent coordinating blind) into a diagnosable connectivity
+  check — and `doctor --fix` rewrites a committed header from a deprecated token
+  name to `${WEFT_FEDERATION_TOKEN}` (commit-safe; never writes a secret value).
+
 - **Reconciliation-debt list surface (B2).** When the Legis closure gate defers
   a governed finding→issue auto-close (blocked or unconfirmable), the deferral is
   recorded as reconciliation debt. A new read surface lists the issues that carry

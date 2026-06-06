@@ -171,14 +171,14 @@ The session hook runs `filigree session-context` at startup, giving the agent a 
 
 ### Dashboard Authentication Scope
 
-The dashboard is local-first and assumes loopback/local filesystem trust by default. Setting `FILIGREE_FEDERATION_API_TOKEN` enables bearer-token authentication only for federation and agent-ingest surfaces; the older `FILIGREE_API_TOKEN` is still accepted as a backward-compatible fallback. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled.
+The dashboard is local-first and assumes loopback/local filesystem trust by default. Setting `WEFT_FEDERATION_TOKEN` enables bearer-token authentication only for federation and agent-ingest surfaces; the older `FILIGREE_FEDERATION_API_TOKEN` and `FILIGREE_API_TOKEN` names are still accepted as deprecated, backward-compatible fallbacks (removal scheduled post-1.0). This token is federation/deconfliction plumbing, not a security secret. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled.
 
 | Route class | Authentication |
 |-------------|----------------|
 | Dashboard UI (`/`) | Open under the local loopback trust boundary |
 | Classic dashboard API (`/api/issues`, `/api/issue/{id}`, `/api/health`) | Open under the local loopback trust boundary |
-| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
-| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
+| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `WEFT_FEDERATION_TOKEN` (or a deprecated `FILIGREE_*_API_TOKEN` alias) is set |
+| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `WEFT_FEDERATION_TOKEN` (or a deprecated `FILIGREE_*_API_TOKEN` alias) is set |
 
 ## Why Filigree?
 

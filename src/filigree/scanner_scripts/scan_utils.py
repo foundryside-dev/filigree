@@ -34,8 +34,14 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────
 
 DEFAULT_SCANNER_API_URL = "http://localhost:8377"
-DEFAULT_SCANNER_API_TOKEN_ENV = "FILIGREE_FEDERATION_API_TOKEN"  # noqa: S105 - env var name, not a token value
-LEGACY_SCANNER_API_TOKEN_ENV = "FILIGREE_API_TOKEN"  # noqa: S105 - env var name, not a token value
+# Canonical inbound federation bearer env var (3.0.0). The FILIGREE_*_API_TOKEN
+# names are deprecated aliases read as a fallback; removal scheduled post-1.0.
+DEFAULT_SCANNER_API_TOKEN_ENV = "WEFT_FEDERATION_TOKEN"  # noqa: S105 - env var name, not a token value
+DEPRECATED_SCANNER_API_TOKEN_ENVS = (
+    "FILIGREE_FEDERATION_API_TOKEN",
+    "FILIGREE_API_TOKEN",
+)
+LEGACY_SCANNER_API_TOKEN_ENV = "FILIGREE_API_TOKEN"  # noqa: S105 - deprecated alias, kept for back-compat refs
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -349,7 +355,12 @@ def _resolve_api_token_from_env(api_token_env: str) -> str | None:
     api_token = os.environ.get(api_token_env, "").strip()
     if api_token or api_token_env != DEFAULT_SCANNER_API_TOKEN_ENV:
         return api_token or None
-    return os.environ.get(LEGACY_SCANNER_API_TOKEN_ENV, "").strip() or None
+    # Default env name in use but unset — walk the deprecated-alias fallback chain.
+    for fallback in DEPRECATED_SCANNER_API_TOKEN_ENVS:
+        value = os.environ.get(fallback, "").strip()
+        if value:
+            return value
+    return None
 
 
 def post_to_api(

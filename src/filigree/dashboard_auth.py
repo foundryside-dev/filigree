@@ -2,8 +2,8 @@
 
 Filigree's HTTP API is loopback-only and historically performs no inbound
 auth (ADR-012: the transport is the trust boundary). When an operator sets
-``FILIGREE_FEDERATION_API_TOKEN`` (or the legacy ``FILIGREE_API_TOKEN``),
-this module gates the **loom federation surface** (``/api/weft/*`` plus the
+``WEFT_FEDERATION_TOKEN`` (or the deprecated aliases ``FILIGREE_FEDERATION_API_TOKEN``
+/ ``FILIGREE_API_TOKEN``), this module gates the **loom federation surface** (``/api/weft/*`` plus the
 living-surface federation aliases), scanner ingest aliases, and dashboard MCP
 HTTP endpoint behind a bearer token, while leaving the classic dashboard API
 and the local dashboard UI open.

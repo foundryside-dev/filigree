@@ -50,16 +50,18 @@ def pytest_runtest_teardown() -> None:
 def _isolate_federation_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the federation bearer token hermetic across the whole suite.
 
-    The dashboard reads ``FILIGREE_FEDERATION_API_TOKEN`` / ``FILIGREE_API_TOKEN``
+    The dashboard reads ``WEFT_FEDERATION_TOKEN`` (and the deprecated aliases
+    ``FILIGREE_FEDERATION_API_TOKEN`` / ``FILIGREE_API_TOKEN``)
     at ``create_app()`` time (T1, commit 56e2ec6) to decide whether to gate the
     ``/api/weft`` federation surface. A developer running the local daemon
     exports the token in their shell; without isolation it leaks into every
     ``create_app()`` and 401s every tokenless ``/api/weft`` test — so the suite
-    passes or fails by accident of the developer's environment. Clear both here
+    passes or fails by accident of the developer's environment. Clear all three here
     so each test controls auth explicitly: tests that exercise the gated path
     ``monkeypatch.setenv`` their own token (which, sharing this test's
     monkeypatch instance, is applied after this autouse delenv and wins).
     """
+    monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
     monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
     monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
 

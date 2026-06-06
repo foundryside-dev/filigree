@@ -1932,3 +1932,50 @@ class TestMetricsDaysValidation:
         runner, _project = cli_in_project
         result = runner.invoke(cli, ["metrics", "--days=30"])
         assert result.exit_code == 0
+
+
+class TestFixMcpTokenReference:
+    """doctor --fix migrates a deprecated token env-var name in the .mcp.json
+    header to the canonical ${WEFT_FEDERATION_TOKEN} (commit-safe, no secret)."""
+
+    def _write_mcp(self, root: Path, auth: str) -> None:
+        (root / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "filigree": {
+                            "type": "streamable-http",
+                            "url": "http://localhost:8749/mcp/?project=x",
+                            "headers": {"Authorization": auth},
+                        }
+                    }
+                }
+            )
+        )
+
+    def test_migrates_deprecated_name(self, tmp_path: Path) -> None:
+        from filigree.cli_commands.admin import _fix_mcp_token_reference
+
+        self._write_mcp(tmp_path, "Bearer ${FILIGREE_FEDERATION_API_TOKEN}")
+        ok, _msg = _fix_mcp_token_reference(tmp_path)
+        assert ok is True
+        mcp = json.loads((tmp_path / ".mcp.json").read_text())
+        assert mcp["mcpServers"]["filigree"]["headers"]["Authorization"] == "Bearer ${WEFT_FEDERATION_TOKEN}"
+
+    def test_already_canonical_is_noop(self, tmp_path: Path) -> None:
+        from filigree.cli_commands.admin import _fix_mcp_token_reference
+
+        self._write_mcp(tmp_path, "Bearer ${WEFT_FEDERATION_TOKEN}")
+        ok, msg = _fix_mcp_token_reference(tmp_path)
+        # Not a fixable rewrite — the blocker is an unset env var, not a stale name.
+        assert ok is False
+        assert "WEFT_FEDERATION_TOKEN" in msg
+
+    def test_does_not_write_secret_value(self, tmp_path: Path) -> None:
+        from filigree.cli_commands.admin import _fix_mcp_token_reference
+
+        self._write_mcp(tmp_path, "Bearer ${FILIGREE_API_TOKEN}")
+        _fix_mcp_token_reference(tmp_path)
+        raw = (tmp_path / ".mcp.json").read_text()
+        # Only the env-var reference survives; no expanded token literal.
+        assert "${WEFT_FEDERATION_TOKEN}" in raw

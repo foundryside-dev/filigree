@@ -5,6 +5,13 @@
 **Tracking issue:** `filigree-30cd35bcb9` (Reconcile inbound auth posture across Filigree↔Clarion — token sent, ignored)
 **Related:** `filigree-81d3971467` (transport-bound *identity* — stays open), ADR-012 (actor-identity threat model), ADR-002 (API generations / federation posture)
 
+> **Amendment (3.0.0, 2026-06-07, `filigree-0e4bc3d81a`):** the env var named
+> `FILIGREE_API_TOKEN` throughout this spec was renamed to **`WEFT_FEDERATION_TOKEN`**
+> (federation plumbing takes the Weft prefix). `FILIGREE_FEDERATION_API_TOKEN` and
+> `FILIGREE_API_TOKEN` are now deprecated, backward-compatible fallbacks
+> (read order: `WEFT_FEDERATION_TOKEN` → `FILIGREE_FEDERATION_API_TOKEN` →
+> `FILIGREE_API_TOKEN`; removal post-1.0). Names below are historical.
+
 ## Problem
 
 Clarion's Filigree HTTP client sends `Authorization: Bearer <FILIGREE_API_TOKEN>`

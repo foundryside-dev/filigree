@@ -32,7 +32,13 @@ from filigree.core import (
     write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
-from filigree.install_support.doctor import CheckResult, build_doctor_summary, doctor_check_id
+from filigree.install_support.doctor import (
+    _DEPRECATED_FEDERATION_ENV_VARS,
+    _WEFT_FEDERATION_ENV_VAR,
+    CheckResult,
+    build_doctor_summary,
+    doctor_check_id,
+)
 from filigree.install_support.version_marker import (
     format_schema_mismatch_guidance,
     read_install_version,
@@ -411,6 +417,40 @@ def _remove_stale_doctor_pointer(path: Path) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
+    """Migrate a deprecated token env-var name in the .mcp.json filigree header to
+    the canonical ``${WEFT_FEDERATION_TOKEN}``.
+
+    Commit-safe: only the *name* changes, never a secret value. Returns
+    ``(fixed, message)``. Does NOT claim to fix the case where the canonical var is
+    merely unset in the environment — filigree cannot write the agent's process
+    env, so that stays the operator's one export.
+    """
+    mcp_path = project_root / ".mcp.json"
+    try:
+        data = json_mod.loads(mcp_path.read_text())
+        entry = data["mcpServers"]["filigree"]
+        auth = entry["headers"]["Authorization"]
+    except (OSError, json_mod.JSONDecodeError, KeyError, TypeError):
+        return False, "Could not read .mcp.json filigree Authorization header"
+    if not isinstance(auth, str):
+        return False, "filigree Authorization header is not a string"
+
+    new_auth = auth
+    for deprecated in _DEPRECATED_FEDERATION_ENV_VARS:
+        new_auth = new_auth.replace(f"${{{deprecated}}}", f"${{{_WEFT_FEDERATION_ENV_VAR}}}")
+    if new_auth == auth:
+        return False, (
+            f"Header already references ${{{_WEFT_FEDERATION_ENV_VAR}}}; "
+            f"export {_WEFT_FEDERATION_ENV_VAR}=<token> and restart the daemon "
+            "(filigree can't set the agent's environment)."
+        )
+
+    entry["headers"]["Authorization"] = new_auth
+    mcp_path.write_text(json_mod.dumps(data, indent=2) + "\n")
+    return True, (f"Migrated header to ${{{_WEFT_FEDERATION_ENV_VAR}}} — export {_WEFT_FEDERATION_ENV_VAR}=<token> to connect.")
+
+
 def _apply_doctor_fixes(
     results: list[CheckResult],
     *,
@@ -468,6 +508,21 @@ def _apply_doctor_fixes(
     fixed_check_names: set[str] = set()
     for r in results:
         if r.passed or r.name not in fixable:
+            continue
+
+        # Token-reference repair is commit-safe and targeted: migrate a deprecated
+        # token env-var NAME in the .mcp.json header to the canonical one. It must
+        # take precedence over the generic reinstall path, which would rewrite the
+        # whole entry (URL/port) and falsely report "fixed" when the real blocker is
+        # an unset env var that filigree cannot write.
+        if r.code == "mcp_token_unresolved":
+            ok, msg = _fix_mcp_token_reference(project_root)
+            if emit is not None:
+                emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            if ok:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
             continue
 
         fix_key = fixable[r.name]

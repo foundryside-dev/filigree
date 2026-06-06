@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,82 @@ from filigree.install_support.safe_paths import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Canonical inbound federation bearer env var (source of truth:
+# dashboard.FEDERATION_TOKEN_ENV_VARS). Duplicated here as plain strings so the
+# installer needn't import the heavy dashboard/FastAPI module. The FILIGREE_*
+# names are deprecated aliases, read as a soft fallback; removal post-1.0.
+WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
+_DEPRECATED_FEDERATION_ENV_VARS = (
+    "FILIGREE_FEDERATION_API_TOKEN",
+    "FILIGREE_API_TOKEN",
+)
+_FEDERATION_ENV_VARS = (WEFT_FEDERATION_ENV_VAR, *_DEPRECATED_FEDERATION_ENV_VARS)
+
+
+def _resolve_federation_token() -> tuple[str | None, str | None]:
+    """Return (value, env_name) of the first set federation token, else (None, None)."""
+    for name in _FEDERATION_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, name
+    return None, None
+
+
+def _ensure_minted_federation_token(project_root: Path) -> str:
+    """Return a persisted federation token, minting + storing one if absent.
+
+    Idempotent: re-running install reuses the recorded token rather than churning
+    a new value. Stored under the (gitignored) ``.filigree/`` dir at 0600. This is
+    deconfliction plumbing, not a security secret — file permissions are the only
+    boundary (README security note); do not add hardening.
+    """
+    token_file = project_root / FILIGREE_DIR_NAME / "federation_token"
+    try:
+        existing = token_file.read_text().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    try:
+        token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
+    except OSError as exc:
+        logger.warning("Could not persist federation token to %s: %s", token_file, exc)
+    return token
+
+
+def _negotiate_federation_token_message(project_root: Path) -> str:
+    """Ensure a usable ``WEFT_FEDERATION_TOKEN`` and return operator guidance.
+
+    The committed header references ``${WEFT_FEDERATION_TOKEN}``; Claude Code
+    expands it from its own process env, which filigree cannot write at install
+    time. So we *negotiate*: reuse an existing canonical token, migrate a
+    deprecated alias's value, or mint a fresh one — and tell the operator the one
+    line they must export (which also reaches the daemon, since the SessionStart
+    hook starts it from the same shell).
+    """
+    value, env_name = _resolve_federation_token()
+    if env_name == WEFT_FEDERATION_ENV_VAR:
+        return ""  # canonical token already exported — header resolves, daemon agrees
+    if value is not None:
+        # A deprecated alias is set; migrate its value onto the canonical name.
+        return (
+            f"\n  NOTE: a federation token is set under the deprecated ${env_name}, but the "
+            f"config references ${WEFT_FEDERATION_ENV_VAR}. To connect, run:\n"
+            f'    export {WEFT_FEDERATION_ENV_VAR}="${env_name}"\n'
+            "  (add it to your shell profile and restart the daemon)."
+        )
+    token = _ensure_minted_federation_token(project_root)
+    return (
+        f"\n  No federation token was set — minted one. The /mcp transport will 401 until "
+        "you export it (filigree can't set the agent's environment). Run:\n"
+        f"    export {WEFT_FEDERATION_ENV_VAR}={token}\n"
+        f"  (add it to your shell profile and restart the daemon; value recorded in "
+        f"{FILIGREE_DIR_NAME}/federation_token)."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Command discovery
@@ -292,25 +369,23 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     except UnsafeInstallPathError as exc:
         return False, str(exc)
 
+    # The committed .mcp.json references the canonical env var rather than a
+    # literal token — a secret can never get committed by accident (filigree-3ee7250b54).
+    # Claude Code expands ${WEFT_FEDERATION_TOKEN} from its own process env at load time.
     mcp_config["mcpServers"]["filigree"] = {
         "type": "streamable-http",
         "url": _codex_server_mode_url(project_root, port),
+        "headers": {"Authorization": f"Bearer ${{{WEFT_FEDERATION_ENV_VAR}}}"},
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
     msg = f"Wrote {mcp_json_path} (streamable-http, port {port})"
     # Server-mode points Claude/Codex at the dashboard daemon's /mcp transport,
-    # which is only mounted when a federation bearer token is configured. Warn
-    # loudly if none is set, or the MCP endpoint will 404 at runtime.
-    if not (os.environ.get("FILIGREE_FEDERATION_API_TOKEN") or os.environ.get("FILIGREE_API_TOKEN")):
-        logger.warning(
-            "Server-mode MCP installed but no federation bearer token is set; the "
-            "daemon will not mount /mcp until FILIGREE_FEDERATION_API_TOKEN is configured."
-        )
-        msg += (
-            " (WARNING: set FILIGREE_FEDERATION_API_TOKEN and restart the daemon — "
-            "the /mcp HTTP transport is not mounted without it, so this config will 404)"
-        )
+    # which is only mounted when a federation bearer token is configured, and the
+    # client header above only resolves if WEFT_FEDERATION_TOKEN is exported into
+    # the agent's environment. "Negotiate" a key as needed: reuse an existing
+    # token, migrate a deprecated alias, or mint a fresh one — then instruct.
+    msg += _negotiate_federation_token_message(project_root)
     return True, msg
 
 
