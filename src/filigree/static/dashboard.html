@@ -185,7 +185,7 @@ tailwind.config = {
       <button id="pillActive" onclick="toggleStatusPill('active')" class="px-2 py-1 rounded text-xs font-medium bg-accent text-primary">Active</button>
       <div class="relative">
         <button id="pillDone" onclick="toggleStatusPill('done')" class="px-2 py-1 rounded text-xs font-medium bg-overlay text-secondary border border-strong">Done</button>
-        <select id="doneTimeBound" onchange="onDoneTimeBoundChange()" class="hidden absolute top-full right-0 mt-1 bg-overlay text-primary text-xs rounded px-1 py-0.5 border border-strong z-10">
+        <select id="doneTimeBound" onchange="onDoneTimeBoundChange()" class="hidden absolute top-full right-0 mt-1 bg-overlay text-primary text-xs rounded px-1 py-0.5 border border-strong z-10" aria-label="Time bound for done issues">
           <option value="1">24 hours</option>
           <option value="3">3 days</option>
           <option value="7">7 days</option>
@@ -217,7 +217,7 @@ tailwind.config = {
 
   <div class="flex items-center gap-3 text-xs text-secondary">
     <span id="refreshIndicator" class="opacity-0 text-accent">Refreshing...</span>
-    <span id="healthBadge" onclick="showHealthBreakdown()" class="cursor-pointer px-2 py-0.5 rounded text-xs font-bold" title="System Health Score — click for breakdown">--</span>
+    <button id="healthBadge" onclick="showHealthBreakdown()" class="cursor-pointer px-2 py-0.5 rounded text-xs font-bold" title="System Health Score — click for breakdown" style="min-height: unset">--</button>
     <div class="relative">
       <button onclick="toggleSettingsMenu(event)" id="settingsGear" class="text-xs px-2 py-1 rounded bg-overlay bg-overlay-hover" title="Settings" aria-label="Settings menu">&#9881;</button>
       <div id="settingsDropdown" class="hidden absolute right-0 top-full mt-1 rounded-lg shadow-xl text-xs z-50" style="background:var(--surface-base);border:1px solid var(--border-strong);min-width:160px">
@@ -340,7 +340,7 @@ tailwind.config = {
       <button id="btnCluster" onclick="switchKanbanMode('cluster')" class="px-2 py-0.5 rounded" title="Group issues by parent epic with progress bars">Cluster</button>
       <button id="btnList" onclick="switchKanbanMode('list')" class="px-2 py-0.5 rounded" title="Table list view for large projects">List</button>
       <span class="text-muted">|</span>
-      <select id="filterType" onchange="applyTypeFilter()" class="bg-overlay text-primary text-xs rounded px-2 py-0.5 border border-strong" title="Filter to one issue type and show its workflow states as columns">
+      <select id="filterType" onchange="applyTypeFilter()" class="bg-overlay text-primary text-xs rounded px-2 py-0.5 border border-strong" title="Filter to one issue type and show its workflow states as columns" aria-label="Filter by issue type">
         <option value="">All types</option>
       </select>
       <span id="typeFilterPill" class="hidden text-xs px-2 py-0.5 rounded border text-accent" style="background:var(--accent-subtle);border-color:var(--accent)">
@@ -373,7 +373,7 @@ tailwind.config = {
     <div class="shrink-0 px-6 pt-6 pb-2">
       <div class="max-w-3xl mx-auto flex items-center gap-3">
         <span class="text-base font-semibold text-primary">Insights</span>
-        <select id="insightsDays" onchange="loadMetrics()" class="bg-overlay text-xs rounded px-2 py-1 border border-strong">
+        <select id="insightsDays" onchange="loadMetrics()" class="bg-overlay text-xs rounded px-2 py-1 border border-strong" aria-label="Time range for insights">
           <option value="7">7 days</option>
           <option value="30" selected>30 days</option>
           <option value="90">90 days</option>
@@ -394,7 +394,7 @@ tailwind.config = {
         <span class="text-base font-semibold text-primary">Files</span>
         <div class="flex items-center gap-2">
           <input id="filesSearch" type="text" placeholder="Filter by path..."
-                 class="bg-overlay text-primary text-xs rounded px-3 py-1 border border-strong w-64 focus:outline-none focus-accent">
+                 class="bg-overlay text-primary text-xs rounded px-3 py-1 border border-strong w-64 focus:outline-none focus-accent" aria-label="Filter files by path">
           <label class="flex items-center gap-1 text-xs text-secondary">
             <input type="checkbox" id="filesCriticalOnly" style="accent-color:var(--accent)"> Critical only
           </label>
@@ -468,7 +468,7 @@ tailwind.config = {
   <span>Blocked: <b id="footBlocked" class="text-red-400">0</b></span>
   <span>Deps: <b id="footDeps" class="text-primary">0</b></span>
   <canvas id="sparkline" width="100" height="20" title="14-day throughput trend" class="opacity-70"></canvas>
-  <span id="staleBadge" class="hidden text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded border border-red-800 cursor-pointer" onclick="showStaleIssues()" title="WIP issues with no updates for >2 hours. Click to view."></span>
+  <button id="staleBadge" class="hidden text-xs bg-red-900/50 text-red-400 px-2 py-0.5 rounded border border-red-800 cursor-pointer" onclick="showStaleIssues()" title="WIP issues with no updates for >2 hours. Click to view." style="min-height: unset"></button>
   <span class="ml-auto text-muted" id="footVersion"></span>
 </footer>
 

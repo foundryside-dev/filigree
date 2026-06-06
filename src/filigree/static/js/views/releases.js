@@ -7,12 +7,12 @@ import { escHtml, escJsSingleAttr } from "../ui.js";
 
 // --- Module-level state ---
 
-let expandedReleaseIds = new Set();
-let releaseTreeCache = new Map();
-let expandedNodeIds = new Set();
+const expandedReleaseIds = new Set();
+const releaseTreeCache = new Map();
+const expandedNodeIds = new Set();
 let showReleased = false;
-let loadingReleaseIds = new Set();
-let errorReleaseIds = new Set();
+const loadingReleaseIds = new Set();
+const errorReleaseIds = new Set();
 let _pendingFocusTarget = null;
 
 export function scrollToReleaseCard(cardId) {
