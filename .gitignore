@@ -49,3 +49,6 @@ clarion.yaml
 AGENTS.md
 CLAUDE.md
 .loomweave/instance_id
+loomweave.yaml
+wardline.yaml
+.loomweave/loomweave.lock
