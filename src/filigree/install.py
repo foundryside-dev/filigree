@@ -92,6 +92,7 @@ __all__ = [
     "_instructions_version",
     "_read_mcp_json",
     "_upgrade_hook_commands",
+    "ensure_filigree_dir_gitignore",
     "ensure_gitignore",
     "inject_instructions",
     "install_claude_code_hooks",
@@ -252,6 +253,81 @@ def ensure_gitignore(project_root: Path) -> tuple[bool, str]:
     else:
         _atomic_write_text(gitignore, f"# Filigree issue tracker\n{filigree_pattern}\n")
         return True, f"Created .gitignore with {filigree_pattern}"
+
+
+# A stable substring that marks the nested .filigree/.gitignore as ours, so
+# re-runs are idempotent and a user-authored file is appended-to rather than
+# clobbered.
+FILIGREE_DIR_GITIGNORE_MARKER = "managed-by: filigree (ephemeral runtime files)"
+
+# The shipped nested ignore for the runtime dot-dir. filigree.db and
+# config.json are deliberately ABSENT (durable): when a project removes the
+# project-root `.filigree/` rule to track its tracker as committed payload —
+# a shared team DB, or a tech demo — the issue data still commits while these
+# ephemeral siblings never do. Mirrors loomweave's ADR-005 nested ignore and
+# the suite-wide "every tool ships a complete nested .gitignore" standard.
+FILIGREE_DIR_GITIGNORE = """\
+# .filigree/.gitignore — managed-by: filigree (ephemeral runtime files)
+#
+# By default the project-root .gitignore ignores this whole directory, so
+# nothing here is committed. If you remove that root `.filigree/` rule to
+# track your tracker as committed payload (a shared team DB, or a demo), this
+# file keeps the *ephemeral* runtime files out of every commit.
+#
+# Durable (committed when this dir is tracked): filigree.db, config.json,
+#   INSTALL_VERSION, scanners/*.toml.  Ephemeral (never committed): below.
+
+# SQLite write-ahead-log sidecars and rollback journals
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Migration backups (e.g. filigree.db.pre-v26-bak)
+*.db.*-bak
+
+# Logs
+*.log
+
+# Per-instance / per-run runtime state
+ephemeral.lock
+ephemeral.pid
+ephemeral.port
+instance_id
+
+# Generated project snapshot (regenerated on demand)
+context.md
+"""
+
+
+def ensure_filigree_dir_gitignore(filigree_dir: Path) -> tuple[bool, str]:
+    """Ship ``.filigree/.gitignore`` so ephemeral runtime files never commit.
+
+    The project-root ``.gitignore`` ignores ``.filigree/`` wholesale by
+    default (see :func:`ensure_gitignore`); this nested file is the safety net
+    for projects that deliberately track the dir. It excludes SQLite sidecars,
+    rollback journals, migration backups, logs, locks/pid/port, the
+    per-instance id, and the generated ``context.md`` — but intentionally not
+    ``filigree.db`` / ``config.json`` (durable). See filigree-694f777d5c.
+
+    Idempotent: a file already carrying our marker is left untouched; a
+    user-authored ``.gitignore`` is appended to rather than clobbered.
+    """
+    try:
+        nested = project_path(filigree_dir, ".gitignore")
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
+
+    if nested.exists():
+        content = nested.read_text()
+        if FILIGREE_DIR_GITIGNORE_MARKER in content:
+            return True, ".filigree/.gitignore already present"
+        if not content.endswith("\n"):
+            content += "\n"
+        content += "\n" + FILIGREE_DIR_GITIGNORE
+        _atomic_write_text(nested, content)
+        return True, "Added filigree ephemeral rules to .filigree/.gitignore"
+    _atomic_write_text(nested, FILIGREE_DIR_GITIGNORE)
+    return True, "Created .filigree/.gitignore"
 
 
 # ---------------------------------------------------------------------------

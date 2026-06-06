@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from filigree.install import (
     _has_hook_command,
     _instructions_hash,
     _instructions_version,
+    ensure_filigree_dir_gitignore,
     ensure_gitignore,
     inject_instructions,
     install_claude_code_hooks,
@@ -322,6 +324,92 @@ class TestEnsureGitignore:
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
+
+
+class TestEnsureFiligreeDirGitignore:
+    """The nested ``.filigree/.gitignore`` keeps ephemeral runtime files out of
+    commits when a project deliberately tracks its ``.filigree/`` dir (e.g. a
+    demo or a team that commits its issue DB). See filigree-694f777d5c.
+    """
+
+    def _make_dir(self, tmp_path: Path) -> Path:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        return filigree_dir
+
+    def test_creates_nested_gitignore(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        ok, _msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        nested = filigree_dir / ".gitignore"
+        assert nested.exists()
+        body = nested.read_text()
+        # Ephemeral sidecars / logs / runtime state are excluded.
+        for pattern in ("*.db-wal", "*.db-shm", "*.log", "context.md", "ephemeral.port"):
+            assert pattern in body, f"expected {pattern!r} in nested .gitignore"
+
+    def test_does_not_ignore_durable_files(self, tmp_path: Path) -> None:
+        """Design decision: filigree.db and config.json are DURABLE — the nested
+        file must not list them, so a tracked dir still commits the issue data.
+        """
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+        body = filigree_dir / ".gitignore"
+        lines = {ln.strip() for ln in body.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")}
+        assert DB_FILENAME not in lines
+        assert CONFIG_FILENAME not in lines
+
+    def test_git_check_ignore_semantics(self, tmp_path: Path) -> None:
+        """Verify against *real* git: ephemeral ignored, durable tracked.
+
+        Exercises the actual scenario — a project tracking its ``.filigree/``
+        dir (no root rule), relying on the nested file to keep ephemerals out.
+        """
+        if not shutil.which("git"):
+            pytest.skip("git not available")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+
+        def ignored(rel: str) -> bool:
+            return (
+                subprocess.run(
+                    ["git", "check-ignore", "-q", rel],
+                    cwd=tmp_path,
+                ).returncode
+                == 0
+            )
+
+        # Ephemeral → ignored
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db-wal")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db-shm")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.log")
+        assert ignored(f"{FILIGREE_DIR_NAME}/context.md")
+        assert ignored(f"{FILIGREE_DIR_NAME}/ephemeral.lock")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db.pre-v26-bak")
+        # Durable → NOT ignored
+        assert not ignored(f"{FILIGREE_DIR_NAME}/{DB_FILENAME}")
+        assert not ignored(f"{FILIGREE_DIR_NAME}/{CONFIG_FILENAME}")
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+        ok, msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        assert "already" in msg
+        # No duplicate marker block.
+        body = (filigree_dir / ".gitignore").read_text()
+        assert body.count("*.db-wal") == 1
+
+    def test_preserves_user_content(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        nested = filigree_dir / ".gitignore"
+        nested.write_text("# my own rule\nsecret-notes.txt\n")
+        ok, _msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        body = nested.read_text()
+        assert "secret-notes.txt" in body
+        assert "*.db-wal" in body
 
 
 class TestRunDoctor:

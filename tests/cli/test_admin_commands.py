@@ -39,6 +39,41 @@ class TestOnboardingBreadcrumbs:
         assert "Next: filigree ready" in result.output
 
 
+class TestNestedGitignoreWiring:
+    """`filigree init` / `install` ship .filigree/.gitignore (filigree-694f777d5c)."""
+
+    def test_init_creates_nested_gitignore(self, tmp_path: Path, cli_runner: CliRunner) -> None:
+        original = os.getcwd()
+        os.chdir(str(tmp_path))
+        try:
+            result = cli_runner.invoke(cli, ["init"])
+            assert result.exit_code == 0
+            nested = tmp_path / ".filigree" / ".gitignore"
+            assert nested.exists()
+            body = nested.read_text()
+            assert "managed-by: filigree" in body
+            assert "*.db-wal" in body
+        finally:
+            os.chdir(original)
+
+    def test_install_gitignore_flag_creates_nested(self, tmp_path: Path, cli_runner: CliRunner) -> None:
+        original = os.getcwd()
+        os.chdir(str(tmp_path))
+        try:
+            cli_runner.invoke(cli, ["init"])
+            # Simulate a project created before the fix.
+            nested = tmp_path / ".filigree" / ".gitignore"
+            nested.unlink(missing_ok=True)
+            result = cli_runner.invoke(cli, ["install", "--gitignore"])
+            assert result.exit_code == 0
+            assert nested.exists()
+            assert "*.db-wal" in nested.read_text()
+            # Root-level whole-dir rule is still applied too.
+            assert ".filigree/" in (tmp_path / ".gitignore").read_text()
+        finally:
+            os.chdir(original)
+
+
 class TestActorFlag:
     def test_create_with_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

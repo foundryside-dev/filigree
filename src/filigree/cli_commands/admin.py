@@ -115,6 +115,9 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
         if old_version is not None and new_version > old_version:
             click.echo(f"  Schema upgraded v{old_version} → v{new_version}")
         (filigree_dir / "scanners").mkdir(exist_ok=True)
+        from filigree.install import ensure_filigree_dir_gitignore
+
+        ensure_filigree_dir_gitignore(filigree_dir)
         # filigree-f22fc98687: backfill the v2.0 anchor on legacy installs
         # where the existing-project branch was reached without a conf. Do
         # not overwrite an existing custom anchor.
@@ -162,6 +165,10 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     mode = mode or "ethereal"
     filigree_dir.mkdir()
     (filigree_dir / "scanners").mkdir()
+
+    from filigree.install import ensure_filigree_dir_gitignore
+
+    ensure_filigree_dir_gitignore(filigree_dir)
 
     config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
     write_config(filigree_dir, config)
@@ -238,6 +245,7 @@ def install(
     With specific flags, installs only the selected components.
     """
     from filigree.install import (
+        ensure_filigree_dir_gitignore,
         ensure_gitignore,
         inject_instructions,
         install_claude_code_hooks,
@@ -310,6 +318,11 @@ def install(
             install_all or gitignore,
             ".gitignore",
             lambda: ensure_gitignore(project_root),
+        ),
+        (
+            install_all or gitignore,
+            ".filigree/.gitignore",
+            lambda: ensure_filigree_dir_gitignore(filigree_dir),
         ),
         (
             install_all or hooks_only,

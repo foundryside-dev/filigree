@@ -106,6 +106,20 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Fixed
 
+- **`filigree init`/`install` now ship a nested `.filigree/.gitignore`.** A project
+  that tracks its `.filigree/` dir as committed payload (a shared team issue DB, or a
+  demo) — or a naive `git add -A` in the window between `init` and `install` —
+  previously committed the SQLite write-ahead-log sidecars (`-wal`/`-shm`, which yield
+  a torn/corrupt DB on checkout), rollback journals, migration backups (`*.db.*-bak`),
+  logs, the per-run lock/pid/port and `instance_id`, and the generated `context.md`.
+  The shipped nested ignore excludes all of those. `filigree.db` and `config.json` are
+  intentionally **durable** (committable when the dir is tracked) so the issue data
+  still ships in the payload case; the project-root whole-dir `.filigree/` rule (added
+  by `install`) remains the default that keeps the entire dir out otherwise. A header
+  in the file documents the durable/ephemeral split. Committing the DB itself as a
+  clean point-in-time artifact additionally needs WAL checkpoint-on-snapshot (see the
+  separate WAL-hygiene task).
+
 - **Legis closure gate was bypassable through every non-`close` write path.** The
   gate (B5) was enforced per transport verb — only `close_issue`/`batch_close` —
   but `close_issue` routes through `update_issue`, so a governed issue could be
