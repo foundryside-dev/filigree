@@ -417,6 +417,7 @@ def _apply_doctor_fixes(
     emit: Callable[[str], None] | None,
 ) -> tuple[int, set[str], set[str]]:
     from filigree.install import (
+        inject_instructions,
         install_claude_code_hooks,
         install_claude_code_mcp,
         install_codex_mcp,
@@ -445,12 +446,21 @@ def _apply_doctor_fixes(
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
 
+    # filigree-f57cb498d4: instruction files and the generated context.md are
+    # filigree-owned artifacts that `--fix` repairs directly. CLAUDE.md/AGENTS.md
+    # go through inject_instructions (non-destructive: it manages only its own
+    # marked block, preserving user content); context.md is regenerated from the
+    # DB. ``.gitignore`` is still deliberately NOT auto-repaired here — see
+    # test_doctor_fix_json_does_not_repair_gitignore.
     fixable: dict[str, str] = {
         "Claude Code MCP": "claude_code_mcp",
         "Codex MCP": "codex_mcp",
         "Claude Code hooks": "hooks",
         "Ephemeral PID": "ephemeral_pid",
         "Ephemeral port": "ephemeral_port",
+        "CLAUDE.md": "claude_md",
+        "AGENTS.md": "agents_md",
+        "context.md": "context_md",
     }
 
     fixed = 0
@@ -483,6 +493,29 @@ def _apply_doctor_fixes(
                 ok, msg = _remove_stale_doctor_pointer(filigree_dir / "ephemeral.port")
                 if emit is not None:
                     emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "claude_md":
+                ok, msg = inject_instructions(project_root / "CLAUDE.md")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "agents_md":
+                ok, msg = inject_instructions(project_root / "AGENTS.md")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "context_md":
+                # Regenerate filigree's own generated snapshot. Open the DB via
+                # the v2.0 anchor-aware constructors (not get_db(), which
+                # sys.exits past this try/except on a broken DB); a genuine DB
+                # failure then surfaces as "Cannot fix context.md" and the loop
+                # continues rather than aborting the whole doctor run.
+                conf_path = project_root / CONF_FILENAME
+                db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
+                try:
+                    write_summary(db, filigree_dir / SUMMARY_FILENAME)
+                finally:
+                    db.close()
+                ok, msg = True, "Regenerated context.md"
+                if emit is not None:
+                    emit(f"  OK {r.name}: {msg}")
             if ok:
                 fixed += 1
                 fixed_check_ids.add(doctor_check_id(r))

@@ -27,6 +27,7 @@ from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
     SKILL_NAME,
     CheckResult,
+    _atomic_write_text,
     _find_filigree_mcp_command,
     _has_hook_command,
     _instructions_hash,
@@ -131,6 +132,82 @@ class TestInjectInstructions:
         # Stale body must not survive repair.
         assert "stale body line 1" not in content
         assert "stale body line 2" not in content
+
+
+class TestAtomicWriteEmptyGuard:
+    """filigree-04bad2a2bf: the atomic writer must never truncate a user-visible
+    file to 0 bytes. Every legitimate caller has non-empty content, so an empty
+    or whitespace-only payload is corruption/logic-bug — refuse it loudly."""
+
+    def test_refuses_empty_content_on_new_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        assert not target.exists()
+
+    def test_refuses_whitespace_only_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "   \n\t\n")
+        assert not target.exists()
+
+    def test_refuses_empty_and_preserves_existing_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        original = "# My instructions\n\nImportant content.\n"
+        target.write_text(original)
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        # The populated file must be left exactly as it was.
+        assert target.read_text() == original
+
+    def test_does_not_leak_temp_file_on_refusal(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        # The guard fires before mkstemp, so no .tmp sidecar is left behind.
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestInstructionWriteLock:
+    """filigree-04bad2a2bf: inject_instructions serialises its read-modify-write
+    across processes with a blocking exclusive lock under .filigree/."""
+
+    def test_uses_blocking_exclusive_lock_when_project_initialised(self, tmp_path: Path) -> None:
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        # Locked exactly once, exclusively (blocking — never LOCK_NB).
+        mock_lock.assert_called_once()
+        import portalocker
+
+        flags = mock_lock.call_args.args[1]
+        assert flags & portalocker.LOCK_EX
+        assert not (flags & portalocker.LOCK_NB)
+        assert (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
+
+    def test_proceeds_unlocked_without_filigree_dir(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        mock_lock.assert_not_called()
+
+    def test_concurrent_injections_preserve_user_content(self, tmp_path: Path) -> None:
+        """Serialised real-flock injections must not drop surrounding user text."""
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# User heading\n\nUser body.\n")
+        # Two sequential injections (the lock makes concurrent ones equivalent).
+        inject_instructions(target)
+        inject_instructions(target)
+        content = target.read_text()
+        assert "User heading" in content
+        assert "User body." in content
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
 
 
 class TestInstructionsVersionFallback:

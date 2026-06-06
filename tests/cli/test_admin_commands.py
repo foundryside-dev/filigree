@@ -592,9 +592,16 @@ class TestDoctorCli:
         assert {"id": "scanner.registration", "status": "failed", "fixed": False} in payload["checks"]
         assert payload["next_actions"] == ["scanner.registration: Run: filigree scanner enable codex --force"]
 
-    def test_doctor_fix_json_only_repairs_local_bindings_and_stale_dashboard_pointers(
+    def test_doctor_fix_json_does_not_repair_gitignore(
         self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """``.gitignore`` remains the one deliberate ``--fix`` exclusion.
+
+        filigree-f57cb498d4 restored instruction-file and context.md repair to
+        ``--fix``, but ``.gitignore`` is still NOT auto-edited here — the user
+        runs ``filigree install --gitignore`` for that. Local bindings (MCP) and
+        stale dashboard pointers are still repaired.
+        """
         runner, _ = cli_in_project
 
         from filigree.install_support.doctor import CheckResult
@@ -622,6 +629,50 @@ class TestDoctorCli:
         assert checks["git.ignore"] == {"id": "git.ignore", "status": "failed", "fixed": False}
         assert checks["mcp.registration"] == {"id": "mcp.registration", "status": "fixed", "fixed": True}
         assert checks["dashboard.port"] == {"id": "dashboard.port", "status": "fixed", "fixed": True}
+
+    def test_doctor_fix_repairs_instruction_files_and_context_md(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """filigree-f57cb498d4: ``--fix`` repairs CLAUDE.md/AGENTS.md/context.md.
+
+        These are filigree-owned artifacts — CLAUDE.md/AGENTS.md via the
+        non-destructive marked-block injection, context.md regenerated from the
+        DB. Run against the real initialised project so the DB-backed context.md
+        regen and the on-disk instruction injection are exercised end to end.
+        """
+        runner, project_root = cli_in_project
+
+        from filigree.core import FILIGREE_DIR_NAME, SUMMARY_FILENAME
+        from filigree.install import FILIGREE_INSTRUCTIONS_MARKER
+        from filigree.install_support.doctor import CheckResult
+
+        monkeypatch.setattr(
+            "filigree.install.run_doctor",
+            lambda **_kw: [
+                CheckResult("CLAUDE.md", False, "No filigree instructions", fix_hint="Run: filigree install --claude-md"),
+                CheckResult("AGENTS.md", False, "File not found", fix_hint="Run: filigree install --agents-md"),
+                CheckResult("context.md", False, "Missing", fix_hint="Run any filigree mutation command."),
+            ],
+        )
+
+        # context.md missing to start; instruction files absent.
+        summary_path = project_root / FILIGREE_DIR_NAME / SUMMARY_FILENAME
+        summary_path.unlink(missing_ok=True)
+
+        result = runner.invoke(cli, ["doctor", "--fix", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks["instructions.claude_md"] == {"id": "instructions.claude_md", "status": "fixed", "fixed": True}
+        assert checks["instructions.agents_md"] == {"id": "instructions.agents_md", "status": "fixed", "fixed": True}
+        assert checks["context.summary"] == {"id": "context.summary", "status": "fixed", "fixed": True}
+
+        # The artifacts actually exist on disk now.
+        assert FILIGREE_INSTRUCTIONS_MARKER in (project_root / "CLAUDE.md").read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER in (project_root / "AGENTS.md").read_text()
+        assert summary_path.exists()
+        assert summary_path.read_text().strip()
 
     def test_doctor_fix_reports_manual_intervention_on_fixer_failure(
         self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch

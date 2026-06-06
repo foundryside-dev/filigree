@@ -11,14 +11,21 @@ this module re-exports all public symbols for backward compatibility.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import importlib.resources
+import logging
 import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+
+import portalocker
+
+from filigree.core import FILIGREE_DIR_NAME
 
 # ---------------------------------------------------------------------------
 # Re-exports from install_support subpackage
@@ -66,6 +73,8 @@ from filigree.install_support.safe_paths import (
     project_path,
     reject_symlink,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Constants
@@ -155,6 +164,15 @@ def _atomic_write_text(path: Path, content: str) -> None:
     chmod, the rename would leak that mode onto the destination, making
     user-visible files (CLAUDE.md, .gitignore, etc.) owner-only.
     """
+    # Refuse-to-empty guard (filigree-04bad2a2bf). Every caller of this writer
+    # (instruction injection, .gitignore management) always has non-empty
+    # content; an empty or whitespace-only payload can only be corruption or a
+    # logic bug. Filigree's atomic path is structurally incapable of truncating
+    # a user-visible file to 0 bytes — refuse loudly rather than rename an empty
+    # temp file over a populated CLAUDE.md/.gitignore.
+    if not content.strip():
+        raise ValueError(f"refusing to write empty content to {path}")
+
     existing_mode: int | None
     reject_symlink(path)
     try:
@@ -184,18 +202,69 @@ def _atomic_write_text(path: Path, content: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _instruction_write_lock(file_path: Path) -> Iterator[None]:
+    """Serialise the instruction-file read-modify-write across processes.
+
+    ``inject_instructions`` reads a markdown file, splices its managed block,
+    and renames the result back. Two filigree processes racing on the same
+    file — e.g. concurrent SessionStart hooks from two Claude sessions in one
+    repo, or a hook racing a manual ``filigree install`` — can interleave that
+    read-modify-write and clobber each other's work (filigree-04bad2a2bf).
+
+    The lock lives in ``.filigree/`` (already gitignored, the home of
+    ``ephemeral.lock``/``server.lock``) and is taken with a *blocking*
+    exclusive flock: correctness requires waiting for the other writer, not
+    skipping. ``flock`` is released automatically on fd close or process death,
+    so a crashed holder cannot wedge the lock.
+
+    Best-effort: when ``.filigree/`` is absent (a bare file with no initialised
+    project, as in unit tests) there is no shared project to race over, so
+    proceed unlocked rather than fabricate the directory.
+    """
+    filigree_dir = file_path.parent / FILIGREE_DIR_NAME
+    if not filigree_dir.is_dir():
+        yield
+        return
+
+    lock_path = filigree_dir / "instructions.lock"
+    try:
+        lock_fd = open(lock_path, "w")  # noqa: SIM115 — held for the with-block
+    except OSError as exc:
+        # Can't create the lock file (read-only dir, etc.). Don't block a
+        # legitimate single-writer install on a locking-substrate failure.
+        logger.debug("instruction write lock unavailable (%s); proceeding unlocked", exc)
+        yield
+        return
+    try:
+        portalocker.lock(lock_fd, portalocker.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            portalocker.unlock(lock_fd)
+        lock_fd.close()
+
+
 def inject_instructions(file_path: Path) -> tuple[bool, str]:
     """Inject filigree workflow instructions into a markdown file.
 
     If the file doesn't exist, creates it with just the instructions.
     If it exists and already has the marker, replaces the block.
     If it exists without the marker, appends the block.
+
+    The read-modify-write is serialised across processes by an exclusive
+    ``.filigree/instructions.lock`` (filigree-04bad2a2bf).
     """
     try:
         reject_symlink(file_path)
     except UnsafeInstallPathError as exc:
         return False, str(exc)
 
+    with _instruction_write_lock(file_path):
+        return _inject_instructions_locked(file_path)
+
+
+def _inject_instructions_locked(file_path: Path) -> tuple[bool, str]:
     if file_path.exists():
         content = file_path.read_text()
         if FILIGREE_INSTRUCTIONS_MARKER in content:
@@ -292,6 +361,7 @@ FILIGREE_DIR_GITIGNORE = """\
 ephemeral.lock
 ephemeral.pid
 ephemeral.port
+instructions.lock
 instance_id
 
 # Generated project snapshot (regenerated on demand)

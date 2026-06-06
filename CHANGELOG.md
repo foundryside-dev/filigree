@@ -108,6 +108,32 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Fixed
 
+- **Instruction-file write hardening against 0-byte data loss (filigree-04bad2a2bf).**
+  Two defensive gaps closed around the CLAUDE.md/AGENTS.md/`.gitignore` write path.
+  (a) A *refuse-to-empty* guard: the shared atomic writer (`_atomic_write_text`)
+  now raises before touching the filesystem if handed empty or whitespace-only
+  content, so filigree's write path is structurally incapable of renaming a
+  0-byte temp file over a populated user file — every caller always has non-empty
+  content, so an empty payload is corruption or a logic bug. (b) A *cross-process
+  lock*: `inject_instructions`' read-modify-write is now serialised by a blocking
+  exclusive `portalocker` flock at `.filigree/instructions.lock` (mirroring
+  `ephemeral.lock`/`server.lock`), so two concurrent SessionStart hooks — or a
+  hook racing a manual `filigree install` — can no longer interleave and clobber
+  each other's injection. Best-effort: when `.filigree/` is absent there is no
+  shared project to race over, so the write proceeds unlocked. The nested
+  `.filigree/.gitignore` now lists `instructions.lock`.
+
+- **`doctor --fix` repairs instruction files and `context.md` again
+  (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the
+  generated `context.md` back into its fixable set: instruction files via the
+  non-destructive marked-block injection (which preserves surrounding user
+  content), and `context.md` regenerated from the DB. This **partially reverses**
+  the `doctor --fix` narrowing in `54cdd65` for these filigree-owned/-managed
+  artifacts; `.gitignore` is *intentionally* left excluded (the user runs
+  `filigree install --gitignore` for that). `context.md` opens the DB via the
+  anchor-aware constructors so a broken DB surfaces as "Cannot fix context.md"
+  rather than aborting the whole doctor run.
+
 - **Governed→ungoverned closure-gate bypass via the signature field (schema v27).**
   Two reachable paths defeated the closure gate by making a governed issue read
   ungoverned. (a) A blank-string `signature` was stored verbatim and the gate's
