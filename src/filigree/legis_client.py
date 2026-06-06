@@ -100,6 +100,20 @@ def check_closure_gate(issue_id: str, *, timeout: float = DEFAULT_TIMEOUT_SECOND
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (URL is operator-configured)
             body = _read_json(resp.read())
+            # Fail closed unless the 2xx body explicitly affirms allowed=true.
+            # The wire contract is 200={"allowed": true}=allow / 409=blocked, so
+            # any 2xx that does not carry allowed=true is a contract violation:
+            # an empty/unparseable body ({} from _read_json), allowed=false, or a
+            # non-true value (incl. an interposed proxy/cache/captive-portal 2xx).
+            # Trusting it would defeat the gate's fail-closed posture (DECISION 2).
+            # Do not echo body['reason'] here — an interposed 2xx could inject a
+            # reassuring message; name the contract violation instead. (B7)
+            if body.get("allowed") is not True:
+                logger.warning("Legis closure-gate returned 2xx without allowed=true for %s", issue_id)
+                return LegisGateResult(
+                    LegisGateStatus.UNREACHABLE,
+                    reason="Legis 2xx did not affirm allowed=true (wire-contract violation; fail-closed)",
+                )
             return LegisGateResult(
                 LegisGateStatus.ALLOWED,
                 reason=str(body.get("reason", "")),

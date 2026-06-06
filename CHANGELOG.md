@@ -169,6 +169,17 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Security
 
+- **Legis closure gate fails closed on contract-violating 2xx (B7, PR #52).**
+  `legis_client.check_closure_gate` previously treated *any* HTTP 2xx as
+  `ALLOWED`, reading only `reason`/`evidence` and never `allowed`. A `200
+  {"allowed": false}`, a `200` with an empty/unparseable body (`_read_json`
+  yields `{}`), or any interposed 2xx (proxy, cache, captive portal) therefore
+  defeated the gate's fail-closed posture (DECISION 2) and let a governed issue
+  close. The 2xx branch now requires `body["allowed"] is True` (the JSON `true`
+  literal — no truthiness coercion); anything else degrades to `UNREACHABLE`,
+  which the governance layer maps to a fail-closed block. The wire contract is
+  unchanged (`200 {"allowed": true}` = allow / `409` = blocked).
+
 - **Bidirectional back-pointer verification for git-worktree discovery.**
   Worktree-aware anchor discovery previously redirected to a main worktree on
   the strength of a worktree's `.git` pointer alone. A spoofed `.git` file

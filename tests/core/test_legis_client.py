@@ -38,6 +38,41 @@ def test_200_maps_to_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.evidence == {"signoff_seq": 3}
 
 
+def test_200_allowed_false_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 200 carrying ``allowed: false`` violates the wire contract (409 means
+    blocked), so it must NOT read as ALLOWED. The gate fails closed (B7)."""
+    with legis_stub() as (url, state):
+        state.status = 200
+        state.body = {"allowed": False, "reason": "no verified binding"}
+        _set_url(monkeypatch, url)
+        result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.UNREACHABLE
+
+
+def test_200_empty_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 200 with no ``allowed`` field — an empty/unparseable body (``{}`` from
+    ``_read_json``) or an interposed proxy/cache 2xx — must not be silently
+    treated as an allow (B7)."""
+    with legis_stub() as (url, state):
+        state.status = 200
+        state.body = {}
+        _set_url(monkeypatch, url)
+        result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.UNREACHABLE
+
+
+def test_200_non_true_allowed_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``allowed`` must be the JSON ``true`` literal: a truthy string or ``1`` is
+    a contract violation, not an allow — no truthiness coercion on a security
+    gate (B7)."""
+    with legis_stub() as (url, state):
+        state.status = 200
+        state.body = {"allowed": "true", "reason": "stringly-typed"}
+        _set_url(monkeypatch, url)
+        result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.UNREACHABLE
+
+
 def test_409_maps_to_blocked_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     with legis_stub() as (url, state):
         state.status = 409
