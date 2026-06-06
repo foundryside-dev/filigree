@@ -956,7 +956,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     if mismatch is not None:
                         out = _inject_warnings(out, [dict(mismatch)])
             except Exception:
-                pass
+                # Non-blocking by design (a mismatch must never break a tool
+                # call) but never silent: a systemic break here would make
+                # every MCP actor-mismatch invisible server-wide. See
+                # filigree-61127de02c.
+                logging.getLogger(__name__).debug("actor-mismatch warning injection failed", exc_info=True)
             return out
         except Exception:
             if _logger:

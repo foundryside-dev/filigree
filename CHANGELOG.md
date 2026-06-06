@@ -172,6 +172,18 @@ checklist is complete and a coordinated consumer-migration window is published.
   unregistered. Gone-directory only — a live project re-registers on next use —
   and the data plane (issues/findings) is never mutated.
 
+- **MCP actor-mismatch warning no longer fails silently (PR #52 review #3).** The
+  ADR-012 surfacing block in `call_tool` — resolve verified identity, build the
+  `ACTOR_MISMATCH` warning, inject it into the response envelope's `warnings[]` —
+  was wrapped in `except Exception: pass`. Non-blocking is correct by design (a
+  mismatch must never break a tool call), but log-less was not: any failure
+  (import error, `_inject_warnings` bug, `_verified_actor` attribute error)
+  dropped the warning with zero signal, and a systemic break would have made every
+  MCP actor-mismatch invisible server-wide while the identity-verification feature
+  appeared healthy. The handler now logs at DEBUG (`exc_info=True`) instead of
+  swallowing — still non-blocking, never silent. The CLI path already surfaced the
+  same mismatch on stderr.
+
 ### Changed
 
 - **Accessibility: ARIA labels on icon-only dashboard buttons.** Icon-only
