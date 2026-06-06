@@ -46,6 +46,52 @@ def pytest_runtest_teardown() -> None:
     _close_idle_current_event_loop()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_federation_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the federation bearer token hermetic across the whole suite.
+
+    The dashboard reads ``FILIGREE_FEDERATION_API_TOKEN`` / ``FILIGREE_API_TOKEN``
+    at ``create_app()`` time (T1, commit 56e2ec6) to decide whether to gate the
+    ``/api/weft`` federation surface. A developer running the local daemon
+    exports the token in their shell; without isolation it leaks into every
+    ``create_app()`` and 401s every tokenless ``/api/weft`` test — so the suite
+    passes or fails by accident of the developer's environment. Clear both here
+    so each test controls auth explicitly: tests that exercise the gated path
+    ``monkeypatch.setenv`` their own token (which, sharing this test's
+    monkeypatch instance, is applied after this autouse delenv and wins).
+    """
+    monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
+    monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _restore_cwd() -> Generator[None, None, None]:
+    """Keep the process working directory hermetic across the suite.
+
+    Hundreds of CLI/util tests ``os.chdir`` into a per-test tmp project (via
+    ``CliRunner`` flows and the ``initialized_project`` fixture) and do not all
+    restore the cwd on every path. A leaked cwd — often a since-deleted tmp dir —
+    silently breaks later tests that read repo-relative paths (``docs/mcp.md``,
+    the ``tests/api/*.py`` static guardrails), a pollution that only surfaces
+    under particular orderings. After every test, force the cwd back to the
+    repo root (derived from ``__file__``, not the possibly-already-polluted
+    live cwd) so no test inherits a prior test's chdir and the pollution cannot
+    propagate forward.
+    """
+    try:
+        yield
+    finally:
+        try:
+            current = os.getcwd()
+        except OSError:
+            current = None  # cwd was a tmp dir already cleaned up mid-test
+        if current != str(_REPO_ROOT):
+            os.chdir(_REPO_ROOT)
+
+
 @dataclass
 class PopulatedDB:
     """Wrapper around FiligreeDB with pre-seeded issue IDs.
