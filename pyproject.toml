@@ -38,10 +38,10 @@ dependencies = [
 docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
 
 [project.urls]
-Homepage = "https://github.com/tachyon-beep/filigree"
-Repository = "https://github.com/tachyon-beep/filigree"
-Issues = "https://github.com/tachyon-beep/filigree/issues"
-Changelog = "https://github.com/tachyon-beep/filigree/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/foundryside-dev/filigree"
+Repository = "https://github.com/foundryside-dev/filigree"
+Issues = "https://github.com/foundryside-dev/filigree/issues"
+Changelog = "https://github.com/foundryside-dev/filigree/blob/main/CHANGELOG.md"
 Documentation = "https://filigree.foundryside.dev"
 
 [project.scripts]

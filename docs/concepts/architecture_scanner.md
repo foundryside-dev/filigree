@@ -1,7 +1,7 @@
 # Architecture Scanner: A Deterministic, Graph-Based Codebase Representation for AI Agents
 
 > **Status:** Concept — reviewed by 6-person design panel (2026-02-28).
-> See [architecture_scanner_synthesis.md](https://github.com/tachyon-beep/filigree/blob/main/docs/concepts/architecture_scanner_synthesis.md) for the full debate record.
+> See [architecture_scanner_synthesis.md](https://github.com/foundryside-dev/filigree/blob/main/docs/concepts/architecture_scanner_synthesis.md) for the full debate record.
 
 ## 1. System Objective
 

@@ -78,4 +78,4 @@ Filigree is an issue tracker designed for AI coding agents. This roadmap outline
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved. Feature requests and bug reports are welcome via [GitHub Issues](https://github.com/tachyon-beep/filigree/issues).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved. Feature requests and bug reports are welcome via [GitHub Issues](https://github.com/foundryside-dev/filigree/issues).

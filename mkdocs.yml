@@ -1,8 +1,8 @@
 site_name: Filigree
 site_description: Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, no cloud, no accounts.
 site_url: https://filigree.foundryside.dev
-repo_url: https://github.com/tachyon-beep/filigree
-repo_name: tachyon-beep/filigree
+repo_url: https://github.com/foundryside-dev/filigree
+repo_name: foundryside-dev/filigree
 edit_uri: edit/main/docs/
 
 theme:
@@ -83,6 +83,6 @@ nav:
       - Upgrading: UPGRADING.md
       - Schema migrations: SCHEMA_MIGRATIONS.md
   - About:
-      - Changelog: https://github.com/tachyon-beep/filigree/blob/main/CHANGELOG.md
-      - Contributing: https://github.com/tachyon-beep/filigree/blob/main/CONTRIBUTING.md
-      - License: https://github.com/tachyon-beep/filigree/blob/main/LICENSE
+      - Changelog: https://github.com/foundryside-dev/filigree/blob/main/CHANGELOG.md
+      - Contributing: https://github.com/foundryside-dev/filigree/blob/main/CONTRIBUTING.md
+      - License: https://github.com/foundryside-dev/filigree/blob/main/LICENSE

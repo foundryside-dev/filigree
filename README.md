@@ -2,10 +2,10 @@
 
 Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, no cloud, no accounts.
 
-[![CI](https://github.com/tachyon-beep/filigree/actions/workflows/ci.yml/badge.svg)](https://github.com/tachyon-beep/filigree/actions/workflows/ci.yml)
+[![CI](https://github.com/foundryside-dev/filigree/actions/workflows/ci.yml/badge.svg)](https://github.com/foundryside-dev/filigree/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/filigree)](https://pypi.org/project/filigree/)
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/filigree)](https://pypi.org/project/filigree/)
-[![License: MIT](https://img.shields.io/pypi/l/filigree)](https://github.com/tachyon-beep/filigree/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/pypi/l/filigree)](https://github.com/foundryside-dev/filigree/blob/main/LICENSE)
 
 ## What Is Filigree?
 
@@ -143,7 +143,7 @@ pip install filigree                     # CLI + MCP server + Web dashboard
 Or from source:
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree && uv sync
 ```
 
@@ -254,7 +254,7 @@ Node-backed static dashboard pytest tests and dashboard JavaScript quality
 gates.
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync --group dev
 

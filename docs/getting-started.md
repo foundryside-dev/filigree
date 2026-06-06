@@ -23,7 +23,7 @@ uv add filigree
 ### From source
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync
 ```

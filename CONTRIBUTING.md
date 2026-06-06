@@ -4,7 +4,7 @@ Thank you for considering a contribution to filigree. Whether it's a bug report,
 
 ## How to Report Bugs
 
-Open a [bug report](https://github.com/tachyon-beep/filigree/issues/new?template=bug_report.yml) on GitHub. Include:
+Open a [bug report](https://github.com/foundryside-dev/filigree/issues/new?template=bug_report.yml) on GitHub. Include:
 
 - Filigree version (`filigree --version`)
 - Whether you hit the issue via CLI, MCP, or the dashboard
@@ -14,12 +14,12 @@ Open a [bug report](https://github.com/tachyon-beep/filigree/issues/new?template
 
 ## How to Suggest Features
 
-Open a [feature request](https://github.com/tachyon-beep/filigree/issues/new?template=feature_request.yml). Describe the problem you're solving and your proposed approach.
+Open a [feature request](https://github.com/foundryside-dev/filigree/issues/new?template=feature_request.yml). Describe the problem you're solving and your proposed approach.
 
 ## Development Setup
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync --group dev
 ```
@@ -87,7 +87,7 @@ Keep PRs focused. One logical change per PR is easier to review than a large omn
 
 ## First-Time Contributors
 
-Look for issues labeled [`good first issue`](https://github.com/tachyon-beep/filigree/labels/good%20first%20issue). Good starting points include:
+Look for issues labeled [`good first issue`](https://github.com/foundryside-dev/filigree/labels/good%20first%20issue). Good starting points include:
 
 - Documentation improvements
 - Adding tests for uncovered code paths

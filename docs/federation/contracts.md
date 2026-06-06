@@ -1,6 +1,6 @@
 # Filigree Federation Contracts
 
-This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
+This directory documents filigree's published HTTP contracts for federation consumers — the stable, pinnable targets introduced by [ADR-002](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md).
 
 > **Authority note (added 2026-06-05).** The **route shapes, envelopes, generation
 > definitions, and intake contracts in this document are Filigree-owned and
@@ -29,13 +29,13 @@ MCP and CLI reflect the living surface only. They evolve forward with each relea
 ## Authentication (opt-in, loom surface) — ADR-018
 
 By default Filigree's HTTP API performs **no** inbound authentication: it is
-loopback-only and the transport is the trust boundary ([ADR-012](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-012-actor-identity-threat-model.md)).
+loopback-only and the transport is the trust boundary ([ADR-012](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-012-actor-identity-threat-model.md)).
 
 When an operator sets the **`WEFT_FEDERATION_TOKEN`** environment variable on the
 Filigree server (the deprecated `FILIGREE_FEDERATION_API_TOKEN` / `FILIGREE_API_TOKEN`
 names are still read as a backward-compatible fallback, removal post-1.0), the
 **loom federation surface** is gated behind a bearer token
-([ADR-018](https://github.com/tachyon-beep/filigree/blob/main/docs/architecture/decisions/ADR-018-loom-bearer-token-auth.md)):
+([ADR-018](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-018-loom-bearer-token-auth.md)):
 
 - **Enforced paths:** `/api/weft/*` and the living-surface federation aliases
   that route to loom (today: `POST /api/scan-results`), including under the
