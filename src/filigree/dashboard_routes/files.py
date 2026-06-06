@@ -983,7 +983,7 @@ def create_weft_router() -> APIRouter:
         auto-reopens (``fixed`` → ``open``) with its ``seen_count`` intact.
         See ADR-015 for the retention policy and the scan-run contract.
 
-        Enrich-only (loom.md sec 3-5, ADR-002 sec 7): pure local DB write,
+        Enrich-only (weft.md sec 3-5, ADR-002 sec 7): pure local DB write,
         fully functional with no federation peer present.
 
         ``scan_source`` is REQUIRED here — it is an *accident-guard*, not an

@@ -631,7 +631,7 @@ def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
 
     Binds Filigree issues to Loomweave entities via opaque string IDs.
     Filigree does not parse the ID grammar — the federation enrich-only
-    rule (loom.md §5) requires that Loomweave's entity-ID format remain
+    rule (weft.md §5) requires that Loomweave's entity-ID format remain
     Loomweave's contract with itself.
     """
     conn.execute("""
