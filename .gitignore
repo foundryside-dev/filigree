@@ -48,3 +48,4 @@ clarion.yaml
 # Agent instruction files (untracked per-checkout)
 AGENTS.md
 CLAUDE.md
+.loomweave/instance_id
