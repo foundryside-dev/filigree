@@ -686,19 +686,6 @@ class IssuesMixin(DBMixinProtocol):
             for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", chunk).fetchall():
                 children_by_id[r["parent_id"]].append(r["id"])
 
-        # 6. Batch compute open blocker counts — same blocker semantics as step 4.
-        open_blockers_by_id: dict[str, int] = dict.fromkeys(issue_ids, 0)
-        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
-            placeholders = ",".join("?" * len(chunk))
-            for r in self.conn.execute(
-                f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
-                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
-                f"GROUP BY d.issue_id",
-                [*chunk, *blocker_done_params],
-            ).fetchall():
-                open_blockers_by_id[r["issue_id"]] = r["cnt"]
-
         # Build Issue objects preserving input order
         result: list[Issue] = []
         for iid in issue_ids:
@@ -732,7 +719,9 @@ class IssuesMixin(DBMixinProtocol):
                         # state name shared across types in different categories
                         # is classified correctly.
                         self._resolve_status_category(row["type"], row["status"]) == "open"
-                        and open_blockers_by_id.get(iid, 0) == 0
+                        # ⚡ Bolt Optimization: Removed redundant DB COUNT(*) query for open blockers.
+                        # blocked_by_id already contains the exact same filtered list of open blockers.
+                        and len(blocked_by_id.get(iid, [])) == 0
                         and not (row["assignee"] or "")
                     ),
                     children=children_by_id.get(iid, []),
