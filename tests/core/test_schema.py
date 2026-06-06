@@ -201,6 +201,7 @@ class TestEntityAssociationsSchema:
             "entity_kind",
             "signature",
             "signoff_seq",
+            "signed_content_hash",
         }
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
@@ -460,6 +461,64 @@ class TestEntityAssociationsSchema:
         conn.commit()
         assert "signature" in _get_table_columns(conn, "entity_associations")
         assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v26_to_v27_adds_signed_content_hash_and_backfills(self, tmp_path: Path) -> None:
+        """Pin the v26->v27 migration (signature-bypass fix): ALTER adds the
+        nullable ``entity_associations.signed_content_hash`` (TEXT), backfilled
+        from ``content_hash_at_attach`` only where ``signature IS NOT NULL`` so
+        existing governed rows start out fresh; ungoverned rows read NULL."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v26 DB: drop the new column and stamp the prior version.
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signed_content_hash")
+        conn.execute("PRAGMA user_version = 26")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        # One governed row (has a signature) and one ungoverned row (no signature).
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by, signature, signoff_seq) "
+            "VALUES ('iss-1', 'sei:governed', 'gov-hash', ?, 'legis', 'sigX', 3)",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'sei:plain', 'plain-hash', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "signed_content_hash" not in _get_table_columns(conn, "entity_associations")
+
+        applied = apply_pending_migrations(conn, 27)
+        assert applied == 1
+        assert _get_schema_version(conn) == 27
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
+        governed = conn.execute("SELECT signed_content_hash FROM entity_associations WHERE loomweave_entity_id = 'sei:governed'").fetchone()
+        assert governed["signed_content_hash"] == "gov-hash"  # backfilled from content_hash_at_attach
+        plain = conn.execute("SELECT signed_content_hash FROM entity_associations WHERE loomweave_entity_id = 'sei:plain'").fetchone()
+        assert plain["signed_content_hash"] is None  # ungoverned -> not backfilled
+        conn.close()
+
+    def test_migration_v26_to_v27_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v26_to_v27
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Column already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v26_to_v27(conn)
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_v27_signed_content_hash_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
         conn.close()
 
     def test_migration_v25_to_v26_renames_column_and_rewrites_prefixes(self, tmp_path: Path) -> None:
@@ -2123,8 +2182,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_26(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 26
+    def test_current_schema_version_is_27(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 27
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

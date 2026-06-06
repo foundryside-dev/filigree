@@ -33,11 +33,54 @@ class _FakeDB:
 
 
 def _governed_rows() -> list[dict[str, object]]:
-    return [{"loomweave_entity_id": "sei:a", "signature": "deadbeef", "signoff_seq": 1}]
+    # Fresh governed binding: the signed snapshot still matches the current content.
+    return [
+        {
+            "loomweave_entity_id": "sei:a",
+            "signature": "deadbeef",
+            "signoff_seq": 1,
+            "content_hash_at_attach": "h1",
+            "signed_content_hash": "h1",
+        }
+    ]
 
 
 def _ungoverned_rows() -> list[dict[str, object]]:
-    return [{"loomweave_entity_id": "sei:a", "signature": None, "signoff_seq": None}]
+    return [
+        {
+            "loomweave_entity_id": "sei:a",
+            "signature": None,
+            "signoff_seq": None,
+            "content_hash_at_attach": "h1",
+            "signed_content_hash": None,
+        }
+    ]
+
+
+def _stale_governed_rows() -> list[dict[str, object]]:
+    # Drifted sign-off: signed over h1, but the content has since advanced to h2.
+    return [
+        {
+            "loomweave_entity_id": "sei:a",
+            "signature": "deadbeef",
+            "signoff_seq": 1,
+            "content_hash_at_attach": "h2",
+            "signed_content_hash": "h1",
+        }
+    ]
+
+
+def _legacy_governed_rows() -> list[dict[str, object]]:
+    # Pre-v27 / backfill-absent governed row: no recorded snapshot -> read as fresh.
+    return [
+        {
+            "loomweave_entity_id": "sei:a",
+            "signature": "deadbeef",
+            "signoff_seq": 1,
+            "content_hash_at_attach": "h1",
+            "signed_content_hash": None,
+        }
+    ]
 
 
 def test_governance_off_proceeds_without_reading_db(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,6 +139,44 @@ def test_governed_integrity_failure_fails_closed(monkeypatch: pytest.MonkeyPatch
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
     decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
     assert decision.outcome is GateOutcome.INTEGRITY_FAILURE
+
+
+# --- v27 drift: a governed sign-off whose bound content has moved on ----------
+# The Legis signature is an HMAC over the content snapshot recorded in
+# signed_content_hash. When it no longer matches content_hash_at_attach the
+# sign-off has drifted; the gate fails closed as STALE with NO network call
+# (the issue-id-only gate call cannot convey the drift to Legis).
+
+
+def test_governed_stale_fails_closed_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    db = _FakeDB(_stale_governed_rows())
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.STALE
+    assert db.calls == ["test-1"]  # governed-ness + freshness were read
+    assert spy == []  # but Legis was NOT consulted — fail closed locally
+
+
+def test_governed_legacy_null_snapshot_reads_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A governed row with no recorded snapshot (pre-v27 / backfill-absent) is
+    treated as fresh and consults Legis — the compatibility shim."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    decision = governance.evaluate_closure_gate(_FakeDB(_legacy_governed_rows()), "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+
+
+def test_any_stale_signed_association_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An issue with one fresh + one stale signed association fails closed:
+    a drifted sign-off on any governed binding compromises the close."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    rows = _governed_rows() + _stale_governed_rows()
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    decision = governance.evaluate_closure_gate(_FakeDB(rows), "test-1")
+    assert decision.outcome is GateOutcome.STALE
+    assert spy == []
 
 
 # --- C1: evaluate_status_change_gate ------------------------------------
@@ -207,3 +288,43 @@ def test_status_change_unknown_status_proceeds_for_validator(monkeypatch: pytest
     db = _StatusFakeDB(_governed_rows())
     decision = governance.evaluate_status_change_gate(db, "test-1", "bogus-status")
     assert decision.outcome is GateOutcome.PROCEED
+
+
+# --- v27 drift, end-to-end through the REAL FiligreeDB -------------------------
+# The _FakeDB doubles above would pass even if signed_content_hash were never
+# plumbed through the real SELECT/serializer (the legacy-NULL shim hides the
+# gap). This test drives the actual add_entity_association UPSERT + read path so
+# a plumbing regression that silently disables drift detection cannot hide.
+
+
+def test_real_db_signatureless_reattach_drifts_to_stale(db: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    from filigree.core import FiligreeDB
+
+    assert isinstance(db, FiligreeDB)
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+
+    def _record(issue_id: str) -> LegisGateResult:
+        spy.append(issue_id)
+        return LegisGateResult(LegisGateStatus.ALLOWED)
+
+    monkeypatch.setattr(governance, "check_closure_gate", _record)
+
+    issue = db.create_issue("Governed then drifted", priority=1)
+    # Legis-signed binding at content h1 -> fresh, consults Legis.
+    db.add_entity_association(issue.id, "sei:x", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
+    assert governance.evaluate_closure_gate(db, issue.id).outcome is GateOutcome.PROCEED
+    assert spy == [issue.id]
+
+    # Agent drift refresh (no signature) advances content to h2; the preserved
+    # sign-off now covers stale content.
+    spy.clear()
+    db.add_entity_association(issue.id, "sei:x", content_hash="h2", actor="agent")
+    decision = governance.evaluate_closure_gate(db, issue.id)
+    assert decision.outcome is GateOutcome.STALE
+    assert spy == []  # fail closed locally, no Legis call
+
+    # Legis re-signs over the new content -> fresh again, consults Legis.
+    db.add_entity_association(issue.id, "sei:x", content_hash="h2", actor="legis", signature="sig2", signoff_seq=2)
+    assert governance.evaluate_closure_gate(db, issue.id).outcome is GateOutcome.PROCEED
+    assert spy == [issue.id]

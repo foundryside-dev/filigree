@@ -383,15 +383,49 @@ class TestSignatureAndSignoffSeq:
         assert second["signoff_seq"] == 2
         assert second["attached_by"] == "alice"  # preserved
 
-    def test_reattach_without_signature_clears_prior(self, db: FiligreeDB) -> None:
-        """A signatureless re-attach (Legis sends none when no key configured)
-        refreshes signature/signoff_seq to NULL, mirroring content_hash. This is
-        the documented governed->ungoverned flip noted in the B1 plan."""
-        issue = db.create_issue("Governed then not", priority=2)
+    def test_reattach_without_signature_preserves_prior(self, db: FiligreeDB) -> None:
+        """A signatureless re-attach PRESERVES the prior Legis sign-off (v27,
+        sticky governance — PR #52 fix). Only Legis can sign; an agent's drift
+        refresh must not silently revoke governance by clobbering the signature
+        to NULL. signature/signoff_seq/signed_content_hash all survive, while
+        content_hash_at_attach advances — leaving the binding governed-but-stale."""
+        issue = db.create_issue("Governed stays governed", priority=2)
         db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="alice", signature="sig1", signoff_seq=1)
         second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="bob")
-        assert second["signature"] is None
-        assert second["signoff_seq"] is None
+        assert second["signature"] == "sig1"  # preserved, not clobbered
+        assert second["signoff_seq"] == 1
+        assert second["signed_content_hash"] == "h1"  # still bound to the signed snapshot
+        assert second["content_hash_at_attach"] == "h2"  # but the content advanced -> stale
+
+    def test_signed_attach_records_signed_content_hash(self, db: FiligreeDB) -> None:
+        """A signed write records the content the signature was cut over."""
+        issue = db.create_issue("Governed", priority=2)
+        row = db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
+        assert row["signed_content_hash"] == "h1"
+
+    def test_unsigned_attach_leaves_signed_content_hash_null(self, db: FiligreeDB) -> None:
+        """An ungoverned binding has no signed snapshot."""
+        issue = db.create_issue("Ungoverned", priority=2)
+        row = db.add_entity_association(issue.id, "sei:plain", content_hash="h1", actor="x")
+        assert row["signed_content_hash"] is None
+
+    def test_signed_reattach_advances_signed_content_hash(self, db: FiligreeDB) -> None:
+        """A re-sign (write carrying a new signature) re-binds the snapshot to the
+        new content, making the binding fresh again."""
+        issue = db.create_issue("Re-signed", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="legis", signature="sig2", signoff_seq=2)
+        assert second["signature"] == "sig2"
+        assert second["signed_content_hash"] == "h2"  # re-bound to current content
+        assert second["content_hash_at_attach"] == "h2"  # fresh again
+
+    def test_empty_string_signature_normalises_to_null(self, db: FiligreeDB) -> None:
+        """A blank signature is stored as NULL (data-layer normalisation), so it
+        cannot masquerade as a governed-but-falsy binding (vector a)."""
+        issue = db.create_issue("Blank sig", priority=2)
+        row = db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="x", signature="")
+        assert row["signature"] is None
+        assert row["signed_content_hash"] is None
 
     def test_export_import_round_trips_signature_and_signoff_seq(self, tmp_path: object) -> None:
         """B1: a governed binding's signature/signoff_seq survive a JSONL
@@ -403,6 +437,10 @@ class TestSignatureAndSignoffSeq:
         src = FiligreeDB.from_filigree_dir(src_dir)
         issue = src.create_issue(title="Governed", priority=2)
         src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
+        # Drift the content via a signatureless re-attach so signed_content_hash
+        # (h1) and content_hash_at_attach (h2) diverge — the round-trip must keep
+        # them distinct or a backup/restore silently un-stales a drifted binding.
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="agent")
         export_path = Path(str(tmp_path)) / "dump.jsonl"
         src.export_jsonl(export_path)
 
@@ -419,9 +457,44 @@ class TestSignatureAndSignoffSeq:
         # Read via raw conn: the imported issue keeps its source prefix, which
         # the dst project's _check_id_prefix would reject on the public read path.
         row = dst.conn.execute(
-            "SELECT signature, signoff_seq FROM entity_associations WHERE issue_id = ?",
+            "SELECT signature, signoff_seq, signed_content_hash, content_hash_at_attach FROM entity_associations WHERE issue_id = ?",
             (issue.id,),
         ).fetchone()
         assert row is not None
-        assert row["signature"] == "sigX"
+        assert row["signature"] == "sigX"  # preserved across the drift refresh
         assert row["signoff_seq"] == 9
+        assert row["signed_content_hash"] == "h1"  # signed snapshot survives restore
+        assert row["content_hash_at_attach"] == "h2"  # drifted content survives -> still stale
+
+    def test_import_normalises_blank_signature_to_null(self, tmp_path: object) -> None:
+        """A foreign/hand-built JSONL carrying ``signature: ""`` must not land an
+        empty string in the column (import uses a raw INSERT that bypasses
+        add_entity_association, so the normalisation is applied there too). Else a
+        blank signature would be classified governed (``is not None``) on a row
+        whose blank value was never a real sign-off."""
+        from pathlib import Path
+
+        src_dir = Path(str(tmp_path)) / "src" / ".filigree"
+        src_dir.mkdir(parents=True)
+        src = FiligreeDB.from_filigree_dir(src_dir)
+        issue = src.create_issue(title="Blank sig on import", priority=2)
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
+        export_path = Path(str(tmp_path)) / "dump.jsonl"
+        src.export_jsonl(export_path)
+
+        # Tamper the export: blank out the signature on the entity_association line.
+        tampered = export_path.read_text().replace('"signature": "sigX"', '"signature": ""')
+        assert '"signature": ""' in tampered
+        export_path.write_text(tampered)
+
+        dst_dir = Path(str(tmp_path)) / "dst" / ".filigree"
+        dst_dir.mkdir(parents=True)
+        dst = FiligreeDB.from_filigree_dir(dst_dir)
+        dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+        row = dst.conn.execute(
+            "SELECT signature FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchone()
+        assert row is not None
+        assert row["signature"] is None  # "" normalised away on import

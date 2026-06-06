@@ -39,6 +39,11 @@ class GateOutcome(Enum):
     BLOCKED = "blocked"
     UNAVAILABLE = "unavailable"
     INTEGRITY_FAILURE = "integrity_failure"
+    # v27: a governed binding whose Legis sign-off has drifted (the bound content
+    # moved on since it was signed). Fails closed like BLOCKED, but is a *local*
+    # per-issue verdict — distinct from UNAVAILABLE so it never short-circuits a
+    # whole cascade batch the way a Legis-down verdict does.
+    STALE = "stale"
 
 
 @dataclass(frozen=True)
@@ -77,17 +82,46 @@ def check_closure_gate(issue_id: str) -> LegisGateResult:
     return legis_client.check_closure_gate(issue_id)
 
 
+def _signed_row_is_stale(row: Any) -> bool:
+    """A signed association is stale when the content it was signed over no
+    longer matches the current attached content.
+
+    The Legis signature is an HMAC bound to a content snapshot, recorded in
+    ``signed_content_hash``. ``content_hash_at_attach`` advances on every
+    re-attach; when they diverge, the sign-off vouches for content that has since
+    drifted. ``signed_content_hash`` NULL = a legacy / backfilled row with no
+    recorded snapshot → treated as fresh (the compatibility shim).
+    """
+    signed = row.get("signed_content_hash")
+    if signed is None:
+        return False
+    return bool(signed != row.get("content_hash_at_attach"))
+
+
 def evaluate_closure_gate(db: _AssocReader, issue_id: str) -> GateDecision:
     """Decide whether *issue_id* may be closed.
 
     Short-circuits to ``PROCEED`` when governance is off, and again for
-    ungoverned issues — only a governed issue triggers a network call.
+    ungoverned issues — only a governed issue triggers a network call. A
+    *governed* issue whose Legis sign-off has drifted (any signed binding's
+    content moved on since it was signed) fails closed as ``STALE`` with no
+    network call: Filigree cannot treat a sign-off over old content as covering
+    new content, and the issue-id-only gate call cannot convey the drift to
+    Legis — only a fresh Legis sign-off (a signed write) clears it (v27).
     """
     if not legis_client.is_configured():
         return _PROCEED
     rows = db.list_entity_associations(make_issue_id(str(issue_id)))
-    if not any(row.get("signature") for row in rows):
+    # Governed = >=1 association carries a non-null Legis signature (DECISION 1A).
+    # ``is not None`` rather than truthiness so a blank signature cannot
+    # masquerade as ungoverned (the data layer also normalises "" -> NULL).
+    signed_rows = [row for row in rows if row.get("signature") is not None]
+    if not signed_rows:
         return _PROCEED  # ungoverned — no network call (DECISION 1A)
+    if any(_signed_row_is_stale(row) for row in signed_rows):
+        # Fail closed locally — do NOT consult Legis (it is asked only issue_id
+        # and would answer for the stale snapshot it last saw).
+        return GateDecision(GateOutcome.STALE, "entity content drifted since the Legis sign-off; awaiting re-sign")
     return _map_result(check_closure_gate(str(issue_id)))
 
 

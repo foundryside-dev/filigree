@@ -432,6 +432,13 @@ CREATE TABLE IF NOT EXISTS entity_associations (
     -- stored verbatim and echoed back, exactly like content_hash_at_attach.
     signature               TEXT,
     signoff_seq             INTEGER,
+    -- v27 (signature-bypass fix): the content_hash the current ``signature``
+    -- was cut over (the HMAC binds content_hash). Set = content_hash whenever a
+    -- write carries a signature; PRESERVED across a signatureless re-attach
+    -- while content_hash_at_attach advances. The gate treats
+    -- signed_content_hash != content_hash_at_attach as a drifted (stale) sign-off
+    -- and fails closed. NULL for non-governed / pre-v27 rows (read as fresh).
+    signed_content_hash     TEXT,
     PRIMARY KEY (issue_id, loomweave_entity_id)
 );
 
@@ -584,4 +591,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 27

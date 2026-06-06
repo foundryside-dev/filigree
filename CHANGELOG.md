@@ -57,11 +57,13 @@ checklist is complete and a coordinated consumer-migration window is published.
   `entity_association_list` / `_list_by_entity`) — it has no key and **never**
   verifies the signature, exactly as it treats `content_hash_at_attach`. Both
   columns are nullable: Legis omits them when no key is configured, and
-  pre-v25 / non-governed bindings read `NULL`. Re-attach refreshes them to the
-  latest binding (a signatureless re-attach clears a prior signature); the attach
-  idempotency key `(issue_id, entity_id)` is unchanged. `export`/`import`
-  round-trips the new columns. Wrong-typed `signature`/`signoff_seq` (incl. a
-  `bool` for the sequence) are rejected `400 VALIDATION`.
+  pre-v25 / non-governed bindings read `NULL`. A re-attach that carries a
+  signature refreshes the binding; a *signatureless* re-attach **preserves** the
+  prior sign-off (sticky governance — see the v27 fix below), so a routine drift
+  refresh never silently revokes governance. The attach idempotency key
+  `(issue_id, entity_id)` is unchanged. `export`/`import` round-trips the new
+  columns. Wrong-typed `signature`/`signoff_seq` (incl. a `bool` for the
+  sequence) are rejected `400 VALIDATION`.
 
 - **Legis closure-gate enforcement (B5).** Closing a *governed* issue — one with
   at least one entity-association carrying a Legis `signature` — now consults
@@ -105,6 +107,29 @@ checklist is complete and a coordinated consumer-migration window is published.
   Wardline already emits this field; Filigree previously dropped it silently.
 
 ### Fixed
+
+- **Governed→ungoverned closure-gate bypass via the signature field (schema v27).**
+  Two reachable paths defeated the closure gate by making a governed issue read
+  ungoverned. (a) A blank-string `signature` was stored verbatim and the gate's
+  truthiness predicate read it as ungoverned — contradicting DECISION 1A
+  ("governed = *non-null* signature"). (b) A signatureless re-attach (a routine
+  drift refresh; the MCP surface and Legis-without-key both omit the signature)
+  **unconditionally clobbered** a stored signature to `NULL`, flipping a
+  previously-governed issue ungoverned so the gate skipped Legis entirely. Fix:
+  the data layer normalises blank signatures to `NULL` and the gate classifies
+  governed-ness by `is not None`; the re-attach UPSERT is now **sticky** —
+  `signature`/`signoff_seq`/`signed_content_hash` change only on a write that
+  carries a signature, so only Legis (which signs via the HTTP route) can move a
+  binding between governed states. A new nullable `signed_content_hash` column
+  records the content the signature was cut over (the HMAC binds `content_hash`);
+  when it diverges from `content_hash_at_attach` the sign-off has **drifted** and
+  the gate fails closed with the new `STALE` verdict (a `409`, no network call)
+  until Legis re-signs over the new content — distinct from `UNAVAILABLE` so a
+  single drifted issue does not short-circuit a finding-cascade batch. Migration
+  backfills `signed_content_hash = content_hash_at_attach WHERE signature IS NOT
+  NULL`; `export`/`import` round-trips it. Detects *content* drift, not *identity*
+  drift (the v26 rebrand's `entity_id` rewrite is resolved by Legis on the gate
+  call).
 
 - **`filigree init`/`install` now ship a nested `.filigree/.gitignore`.** A project
   that tracks its `.filigree/` dir as committed payload (a shared team issue DB, or a

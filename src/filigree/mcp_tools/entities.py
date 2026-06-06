@@ -193,6 +193,12 @@ async def _handle_add_entity_association(arguments: dict[str, Any]) -> list[Text
         return _text(ErrorResponse(error="entity_kind must be a string", code=ErrorCode.VALIDATION))
 
     try:
+        # No signature/signoff_seq: the MCP surface is signature-PRESERVING, never
+        # signature-SETTING. Only Legis can sign (it holds the key), and it binds a
+        # governed sign-off through the HTTP entity-association route. An agent's
+        # MCP re-attach (a drift refresh) preserves any existing sign-off via the
+        # sticky-governance UPSERT (v27); a content drift surfaces as a STALE close
+        # gate until Legis re-signs over the HTTP route.
         row = tracker.add_entity_association(
             make_issue_id(issue_id),
             make_loomweave_entity_id(entity_id),

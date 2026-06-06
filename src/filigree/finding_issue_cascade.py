@@ -93,9 +93,10 @@ class FindingIssueCascadeService:
         """Best-effort close of an issue whose linked finding just went fixed.
 
         Governed issues (DECISION 1A) are closed only if the Legis closure gate
-        allows; a blocked / unavailable / integrity verdict fails closed and is
-        recorded as reconciliation debt (Design A). The gate makes no network
-        call for ungoverned issues or when ``LEGIS_URL`` is unset.
+        allows; a blocked / unavailable / stale / integrity verdict fails closed
+        and is recorded as reconciliation debt (Design A). The gate makes no
+        network call for ungoverned issues, for a drifted (stale) sign-off, or
+        when ``LEGIS_URL`` is unset.
         """
         # Function-local import: the data layer must not import the (network-
         # touching) governance module at module scope.

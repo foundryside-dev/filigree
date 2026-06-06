@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
+from filigree.db_entity_associations import _normalise_optional_signature
 from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES, _normalize_project_relative_scan_path
 from filigree.db_issues import _check_expected_assignee, _validate_fields_payload, _validate_priority_value
 from filigree.db_observations import _expires_iso
@@ -1420,8 +1421,8 @@ class MetaMixin(DBMixinProtocol):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO entity_associations "
                     "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by, "
-                    "migration_orphaned_at, signature, signoff_seq) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "migration_orphaned_at, signature, signoff_seq, signed_content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["issue_id"],
                         record["loomweave_entity_id"],
@@ -1434,8 +1435,16 @@ class MetaMixin(DBMixinProtocol):
                         record.get("migration_orphaned_at"),
                         # Legis governed-sign-off binding (v25, B1). Opaque,
                         # preserved verbatim; absent in pre-v25 exports → NULL.
-                        record.get("signature"),
+                        # Normalised here too (raw INSERT bypasses
+                        # add_entity_association) so a foreign/hand-built JSONL
+                        # carrying a blank signature cannot land "" in the column,
+                        # keeping governed-ness classification consistent.
+                        _normalise_optional_signature(record.get("signature")),
                         record.get("signoff_seq"),
+                        # v27: content the signature was cut over. Threaded verbatim
+                        # so drift detection survives a backup/restore of governed
+                        # rows; absent in pre-v27 exports → NULL (read as fresh).
+                        record.get("signed_content_hash"),
                     ),
                 )
                 count += cursor.rowcount

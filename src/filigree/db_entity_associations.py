@@ -64,6 +64,11 @@ class EntityAssociationRow(TypedDict):
     # non-governed bindings. Echoed on read, treated like content_hash_at_attach.
     signature: str | None
     signoff_seq: int | None
+    # v27: the content_hash the current ``signature`` was cut over (the HMAC binds
+    # content_hash). Set = content_hash on any write carrying a signature, PRESERVED
+    # across a signatureless re-attach. ``signed_content_hash != content_hash_at_attach``
+    # means the sign-off has drifted — the gate fails closed (GateOutcome.STALE).
+    signed_content_hash: ContentHash | None
 
 
 def _normalise_optional_entity_kind(entity_kind: str | None) -> str:
@@ -73,6 +78,24 @@ def _normalise_optional_entity_kind(entity_kind: str | None) -> str:
         msg = "entity_kind must be a string"
         raise TypeError(msg)
     return entity_kind.strip()
+
+
+def _normalise_optional_signature(signature: str | None) -> str | None:
+    """Collapse a blank Legis ``signature`` to ``None`` (data-layer, covers every
+    write path: route, MCP, import, promote).
+
+    DECISION 1A defines governed-ness as a *non-null* signature, but a blank
+    string is non-null-yet-falsy and would masquerade as ungoverned. Mapping
+    ""/whitespace -> None here means the column is strictly {real-signature |
+    NULL} no matter which surface wrote it. A real signature is preserved
+    verbatim (an HMAC is exact — never stripped).
+    """
+    if signature is None:
+        return None
+    if not isinstance(signature, str):
+        msg = "signature must be a string"
+        raise TypeError(msg)
+    return signature if signature.strip() else None
 
 
 def _freshness_status(content_hash_at_attach: str, current_content_hash: str | None) -> str:
@@ -100,6 +123,7 @@ def _row_to_entity_association(r: Mapping[str, Any], *, current_content_hash: st
         freshness_status=_freshness_status(str(content_hash_at_attach), current_content_hash),
         signature=r["signature"],
         signoff_seq=r["signoff_seq"],
+        signed_content_hash=ContentHash(r["signed_content_hash"]) if r["signed_content_hash"] else None,
     )
 
 
@@ -156,6 +180,12 @@ class EntityAssociationsMixin(DBMixinProtocol):
         entity_id = make_loomweave_entity_id(entity_id)
         content_hash = make_content_hash(content_hash)
         entity_kind = _normalise_optional_entity_kind(entity_kind)
+        signature = _normalise_optional_signature(signature)
+        # The signature binds to this content snapshot (the HMAC covers
+        # content_hash); record what it was so the gate can detect later drift.
+        # NULL when this write carries no signature, so an ungoverned row keeps a
+        # NULL signed_content_hash (consistent with the v27 backfill).
+        signed_content_hash = str(content_hash) if signature is not None else None
         self._check_id_prefix(issue_id)
         # Validate issue exists (FK would catch this too, but the SQLite
         # error is less informative than a typed ValueError).
@@ -178,16 +208,24 @@ class EntityAssociationsMixin(DBMixinProtocol):
         # excluded.* alias is the row we tried to insert; we
         # deliberately do NOT update attached_by, preserving the
         # original attribution.
-        # signature/signoff_seq (v25, B1) are refreshed on re-attach because
-        # they pertain to the *latest* binding, mirroring content_hash_at_attach.
-        # A signatureless re-attach therefore clears a prior signature back to
-        # NULL — the documented governed->ungoverned flip.
+        #
+        # Governance stickiness (v27, PR #52 fix): the three Legis governed
+        # sign-off columns (signature, signoff_seq, signed_content_hash) are
+        # updated ONLY when *this* write carries a signature. A signatureless
+        # re-attach (a routine drift refresh by an agent, who structurally can
+        # never sign — only Legis can) therefore PRESERVES the existing sign-off
+        # instead of clobbering it to NULL. content_hash_at_attach still advances
+        # unconditionally, so a drifted-but-still-signed binding ends up with
+        # signed_content_hash != content_hash_at_attach, which the closure gate
+        # reads as STALE and fails closed. Only Legis (a signed write via the
+        # HTTP binding route) moves a binding between governed states — never an
+        # incidental work-state refresh.
         self.conn.execute(
             """
             INSERT INTO entity_associations
                 (issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by,
-                 entity_kind, signature, signoff_seq)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 entity_kind, signature, signoff_seq, signed_content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(issue_id, loomweave_entity_id) DO UPDATE SET
                 content_hash_at_attach = excluded.content_hash_at_attach,
                 attached_at = excluded.attached_at,
@@ -195,10 +233,20 @@ class EntityAssociationsMixin(DBMixinProtocol):
                     WHEN excluded.entity_kind <> '' THEN excluded.entity_kind
                     ELSE entity_associations.entity_kind
                 END,
-                signature = excluded.signature,
-                signoff_seq = excluded.signoff_seq
+                signature = CASE
+                    WHEN excluded.signature IS NOT NULL THEN excluded.signature
+                    ELSE entity_associations.signature
+                END,
+                signoff_seq = CASE
+                    WHEN excluded.signature IS NOT NULL THEN excluded.signoff_seq
+                    ELSE entity_associations.signoff_seq
+                END,
+                signed_content_hash = CASE
+                    WHEN excluded.signature IS NOT NULL THEN excluded.signed_content_hash
+                    ELSE entity_associations.signed_content_hash
+                END
             """,
-            (issue_id, entity_id, content_hash, now, actor, entity_kind, signature, signoff_seq),
+            (issue_id, entity_id, content_hash, now, actor, entity_kind, signature, signoff_seq, signed_content_hash),
         )
 
         # Re-read the row — necessary because re-attach preserves the
@@ -207,7 +255,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
         stored = self.conn.execute(
             """
             SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq,
+                   signed_content_hash
             FROM entity_associations
             WHERE issue_id = ? AND loomweave_entity_id = ?
             """,
@@ -284,7 +333,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
         rows = self.conn.execute(
             """
             SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq,
+                   signed_content_hash
             FROM entity_associations
             WHERE issue_id = ?
             ORDER BY attached_at ASC, loomweave_entity_id ASC
@@ -320,7 +370,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
         rows = self.conn.execute(
             """
             SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq
+                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq,
+                   signed_content_hash
             FROM entity_associations
             WHERE loomweave_entity_id = ?
             ORDER BY attached_at ASC, issue_id ASC

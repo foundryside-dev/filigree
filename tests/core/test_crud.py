@@ -1423,6 +1423,7 @@ class TestImportJsonl:
                 "entity_kind": "",
                 "signature": None,
                 "signoff_seq": None,
+                "signed_content_hash": None,
             }
         ]
 

@@ -887,6 +887,37 @@ def migrate_v25_to_v26(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE scan_findings SET rule_id = 'LMWV-' || substr(rule_id, length('CLA-') + 1) WHERE rule_id LIKE 'CLA-%'")
 
 
+def migrate_v26_to_v27(conn: sqlite3.Connection) -> None:
+    """v26 -> v27: Add nullable ``signed_content_hash`` to ``entity_associations``
+    and close the governed->ungoverned signature bypass (PR #52 security gate).
+
+    The Legis ``signature`` is an HMAC over
+    ``{issue_id, entity_id, content_hash, signoff_seq}`` — it is bound to a
+    specific content snapshot. ``signed_content_hash`` records the content_hash
+    that snapshot was, so the closure gate can tell a *fresh* governed binding
+    (signature still covers the current content) from a *drifted* one (content
+    has moved on since the sign-off) and fail closed on the latter.
+
+    Backfill: ``signed_content_hash = content_hash_at_attach WHERE
+    signature IS NOT NULL``. This is sound for existing governed rows because
+    the *old* (pre-fix) re-attach UNCONDITIONALLY clobbered ``signature`` to NULL
+    on any signatureless refresh — so any row that STILL holds a signature has
+    not been re-attached since it was signed, hence its content_hash_at_attach
+    still equals the content the signature was cut over. Non-governed rows and
+    pre-v27 DBs read NULL (the gate treats NULL as fresh — a no-op compatibility
+    shim). Additive + idempotent (``add_column`` no-ops if present).
+
+    Scope boundary: this detects CONTENT drift, not IDENTITY drift. The
+    v25->v26 rebrand rewrote entity_id (SEI prefix) in place, changing the HMAC
+    input while leaving content_hash untouched; those rows backfill as
+    content-fresh, the gate consults Legis on the network call, and Legis
+    resolves the identity drift there (it re-signs in lockstep — see
+    migrate_v25_to_v26). That is the safe path, not a bug.
+    """
+    add_column(conn, "entity_associations", "signed_content_hash", "TEXT", default=None)
+    conn.execute("UPDATE entity_associations SET signed_content_hash = content_hash_at_attach WHERE signature IS NOT NULL")
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -913,6 +944,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     23: migrate_v23_to_v24,
     24: migrate_v24_to_v25,
     25: migrate_v25_to_v26,
+    26: migrate_v26_to_v27,
 }
 
 
