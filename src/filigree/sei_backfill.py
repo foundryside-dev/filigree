@@ -175,7 +175,11 @@ def _require_sei_capable(db: FiligreeDB) -> None:
 
     # 2. Local database sync checks (only run if db.project_root is not None and .git directory exists)
     if db.project_root is not None and (db.project_root / ".git").exists():
-        loomweave_db_path = db.project_root / ".clarion" / "clarion.db"
+        # Loomweave's local index DB (its own dot-dir, mirroring filigree's
+        # .filigree/filigree.db convention). Hard cutover from the pre-rebrand
+        # .clarion/clarion.db — Clarion never shipped, so there is no installed
+        # base to fall back to (3.0.0 rebrand: no compatibility aliases).
+        loomweave_db_path = db.project_root / ".loomweave" / "loomweave.db"
         if not loomweave_db_path.is_file():
             raise LoomweaveOutOfSyncError("Local Loomweave database not found.")
 

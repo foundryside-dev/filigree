@@ -196,12 +196,12 @@ def test_sei_backfill_maps_out_of_sync_error_to_code_3_and_envelope(
 def test_sei_backfill_sync_check_missing_db(
     cli_in_project: tuple[CliRunner, Path],
 ) -> None:
-    """If db.project_root is set but .clarion/clarion.db is missing, it raises LoomweaveOutOfSyncError."""
+    """If db.project_root is set but .loomweave/loomweave.db is missing, it raises LoomweaveOutOfSyncError."""
     runner, project = cli_in_project
     (project / ".git").mkdir(exist_ok=True)
     with clarion_stub(sei_supported=True) as (base_url, _state):
         _switch_to_loomweave_mode(project, base_url)
-        # Run command — since `.clarion/clarion.db` does not exist, it should raise LoomweaveOutOfSyncError, exit with code 3.
+        # Run command — since `.loomweave/loomweave.db` does not exist, it should raise LoomweaveOutOfSyncError, exit with code 3.
         result = runner.invoke(cli, ["sei-backfill", "--json"])
         assert result.exit_code == 3
         payload = json.loads(result.output)
@@ -213,14 +213,14 @@ def test_sei_backfill_sync_check_hash_mismatch(
     cli_in_project: tuple[CliRunner, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If .clarion/clarion.db exists but analyzed_at_commit does not match git HEAD, it raises LoomweaveOutOfSyncError."""
+    """If .loomweave/loomweave.db exists but analyzed_at_commit does not match git HEAD, it raises LoomweaveOutOfSyncError."""
     runner, project = cli_in_project
     (project / ".git").mkdir(exist_ok=True)
 
-    # 1. Create a dummy .clarion/clarion.db
-    loomweave_dir = project / ".clarion"
+    # 1. Create a dummy .loomweave/loomweave.db
+    loomweave_dir = project / ".loomweave"
     loomweave_dir.mkdir(parents=True, exist_ok=True)
-    loomweave_db_path = loomweave_dir / "clarion.db"
+    loomweave_db_path = loomweave_dir / "loomweave.db"
 
     import sqlite3
 
@@ -255,3 +255,54 @@ def test_sei_backfill_sync_check_hash_mismatch(
         assert "out of sync with git HEAD" in payload["error"]
         assert "mismatched_commit_hash" in payload["error"]
         assert "expected_git_head_commit_hash" in payload["error"]
+
+
+def test_sei_backfill_sync_check_passes_with_synced_db(
+    cli_in_project: tuple[CliRunner, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for filigree-0e4bc3d81a's sibling bug: a project WITH a
+    .git dir and a .loomweave/loomweave.db whose latest completed run matches git
+    HEAD must PASS the sync gate and proceed to backfill. Pre-fix the gate read a
+    stale .clarion/clarion.db that never exists, so every real rebranded project
+    raised LoomweaveOutOfSyncError — and no test exercised the pass branch against
+    the real path."""
+    runner, project = cli_in_project
+    (project / ".git").mkdir(exist_ok=True)
+
+    synced_head = "synced_head_commit_hash"
+    loomweave_dir = project / ".loomweave"
+    loomweave_dir.mkdir(parents=True, exist_ok=True)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(loomweave_dir / "loomweave.db"))
+    conn.execute("CREATE TABLE runs (status TEXT, analyzed_at_commit TEXT, started_at TEXT)")
+    conn.execute("INSERT INTO runs VALUES ('completed', ?, '2026-01-01T00:00:00Z')", (synced_head,))
+    conn.commit()
+    conn.close()
+
+    import subprocess
+
+    class MockCompletedProcess:
+        def __init__(self) -> None:
+            self.stdout = f"{synced_head}\n"
+            self.stderr = ""
+            self.returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: MockCompletedProcess())
+
+    loc = "py:func:mod::f"
+    sei = "loomweave:eid:0000000000000000000000000000ace0"
+    with get_db() as db:
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, loc, content_hash="sha256:a")
+
+    with clarion_stub(sei_supported=True, sei_by_locator={loc: sei}) as (base_url, _state):
+        _switch_to_loomweave_mode(project, base_url)
+        result = runner.invoke(cli, ["sei-backfill", "--execute", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload.get("code") != "LOOMWEAVE_OUT_OF_SYNC"
+    assert payload["associations_migrated"] == 1
