@@ -36,6 +36,8 @@ class TestIsLoomScopedPath:
             "/api/observations",  # living-surface observation ingest alias
             "/api/p/acme/observations",  # observation alias under server-mode mount
             "/api/v1/scan-results",  # classic scanner callback alias
+            "/api/v1/observations",  # classic observation-write alias (B1)
+            "/api/p/acme/v1/observations",  # classic observation alias under server-mode mount
             "/mcp",  # dashboard-mounted MCP streamable HTTP endpoint
             "/mcp/session",  # MCP subpaths inherit the same bearer boundary
         ],
@@ -82,6 +84,66 @@ class TestIsLoomScopedPath:
             # server mode) — both forms must be gated.
             assert is_loom_scoped_path(f"/api{route.path}") is True, route.path
             assert is_loom_scoped_path(f"/api/p/acme{route.path}") is True, route.path
+
+    def test_classic_v1_observations_is_loom_scoped(self) -> None:
+        """Regression (B1): the classic observation-write alias must be gated.
+
+        ``/api/v1/observations`` dispatches the same ``_create_observation_handler``
+        as the gated ``/api/observations`` and ``/api/weft/observations``; it was
+        the lone ungated sibling because it sits on the *classic* router, which
+        the living-only drift guard above never iterated.
+        """
+        assert is_loom_scoped_path("/api/v1/observations") is True
+        assert is_loom_scoped_path("/api/p/acme/v1/observations") is True
+
+    def test_every_federation_write_alias_is_loom_scoped(self) -> None:
+        """Cross-generation drift guard — the one the v1/observations hole needed.
+
+        A federation-write op (observation / scan-results ingest) is exposed
+        across generations: weft (``/api/weft/...``), living (``/api/...``), and a
+        versioned classic alias (``/api/v1/...``). Every alias of such an op must
+        be gated; a divergence (one gated, a sibling open) is exactly the
+        ``/api/v1/observations`` defect. The existing living-only guard missed it
+        because the hole was on the classic router — so this iterates the classic,
+        living, AND weft routers.
+
+        Soundness: the federation-write op set is derived from
+        ``LIVING_FEDERATION_ALIASES``. This is complete only because every classic
+        federation-write alias is a version-prefixed variant of an op that *also*
+        has a living-surface route (so its bare name is forced into
+        ``LIVING_FEDERATION_ALIASES`` by the living guard above). A brand-new
+        federation op with NO living-surface route would escape both this guard
+        and the gate — add it to the alias sets explicitly.
+        """
+        from fastapi.routing import APIRoute
+
+        from filigree.dashboard_auth import LIVING_FEDERATION_ALIASES
+        from filigree.dashboard_routes import analytics, files
+
+        ungenerationed = [
+            analytics.create_classic_router(),
+            files.create_classic_router(),
+            analytics.create_living_surface_router(),
+            files.create_living_surface_router(),
+        ]
+        weft = [analytics.create_weft_router(), files.create_weft_router()]
+
+        checked = 0
+        for router in ungenerationed:
+            for r in router.routes:
+                if isinstance(r, APIRoute) and r.path.rsplit("/", 1)[-1] in LIVING_FEDERATION_ALIASES:
+                    full = f"/api{r.path}"
+                    assert is_loom_scoped_path(full) is True, full
+                    # server-mode mount /api/p/{key}/... must gate identically
+                    assert is_loom_scoped_path(full.replace("/api/", "/api/p/acme/", 1)) is True, full
+                    checked += 1
+        for router in weft:
+            for r in router.routes:
+                if isinstance(r, APIRoute) and r.path.rsplit("/", 1)[-1] in LIVING_FEDERATION_ALIASES:
+                    assert is_loom_scoped_path(f"/api/weft{r.path}") is True, r.path
+                    checked += 1
+        # weft + living + classic aliases for both ops — must not pass vacuously.
+        assert checked >= 5
 
 
 class TestTokenMatches:
@@ -197,6 +259,21 @@ class TestLoomAuthEnforcement:
         async with _client(app) as c:
             resp = await c.post("/api/v1/scan-results", json={})
         assert resp.status_code == 401
+
+    async def test_classic_v1_observations_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
+        """B1: the classic observation-write alias must require the bearer token,
+        like its living (/api/observations) and weft (/api/weft/observations)
+        siblings — 401 without the token, 201 (first create) with it."""
+        app = app_factory(TOKEN)
+        async with _client(app) as c:
+            unauth = await c.post("/api/v1/observations", json={"summary": "must be gated"})
+            authed = await c.post(
+                "/api/v1/observations",
+                headers={"Authorization": f"Bearer {TOKEN}"},
+                json={"summary": "classic alias accepted"},
+            )
+        assert unauth.status_code == 401
+        assert authed.status_code == 201
 
     async def test_dashboard_mounted_mcp_endpoint_enforced(self, app_factory: Callable[[str | None], FastAPI]) -> None:
         """The dashboard-mounted HTTP MCP surface shares the bearer boundary."""

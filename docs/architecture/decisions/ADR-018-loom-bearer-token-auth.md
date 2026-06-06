@@ -13,6 +13,18 @@ issue, chosen by the project lead during the 2026-06-03 API review.
 > are still read as deprecated, backward-compatible fallbacks (removal post-1.0).
 > Read order: `WEFT_FEDERATION_TOKEN` → `FILIGREE_FEDERATION_API_TOKEN` →
 > `FILIGREE_API_TOKEN`. References to `FILIGREE_API_TOKEN` below are historical.
+>
+> **Amendment (3.0.0, PR #52 B1):** the "classic federation-write aliases stay
+> open" boundary recorded below (originally only `/api/v1/scan-results`) is
+> **superseded**. The classic versioned ingest aliases — `/api/v1/scan-results`
+> **and** `/api/v1/observations` — are now gated alongside their living/weft
+> siblings via `CLASSIC_FEDERATION_ALIASES`, because they dispatch the same
+> federation-write handlers and an ungated sibling was a deconfliction gap (a
+> federation producer could write the project DB without the token its
+> siblings require). The *human/legacy classic surface* (`/api/issue/…`,
+> `/api/issues`, the dashboard UI) stays open as before — only the classic
+> **federation-write** aliases moved behind the gate. The "Negative / known
+> boundaries" note about `/api/v1/scan-results` being unenforced is historical.
 
 ## Summary
 

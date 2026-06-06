@@ -109,7 +109,7 @@ def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) ->
         "federation": {
             "enabled": federation_enabled,
             "token_env": token_env,
-            "protected_paths": ["/api/weft/*", "/api/scan-results", "/api/observations", "/api/v1/scan-results"],
+            "protected_paths": ["/api/weft/*", "/api/scan-results", "/api/observations", "/api/v1/scan-results", "/api/v1/observations"],
         },
         "mcp_http": {
             "enabled": federation_enabled,

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 #: loom generation and must be enforced alongside ``/api/weft/*``. Add new
 #: federation-write aliases here when living-surface routers grow.
 LIVING_FEDERATION_ALIASES: frozenset[str] = frozenset({"scan-results", "observations"})
-CLASSIC_FEDERATION_ALIASES: frozenset[str] = frozenset({"v1/scan-results"})
+CLASSIC_FEDERATION_ALIASES: frozenset[str] = frozenset({"v1/scan-results", "v1/observations"})
 
 
 def is_loom_scoped_path(path: str) -> bool:
