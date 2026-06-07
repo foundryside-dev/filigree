@@ -2546,6 +2546,34 @@ class FilesMixin(DBMixinProtocol):
             "info": row["info"] or 0,
         }
 
+    def unbridged_finding_stats(self) -> dict[str, int]:
+        """Count OPEN analyzer findings not yet bridged to an issue (F2).
+
+        "Un-bridged" = a non-terminal (``_OPEN_FINDINGS_FILTER``) scan finding
+        with ``issue_id IS NULL`` — i.e. a live defect that has not been promoted
+        to a tracked issue. Returns ``{"total", "actionable", "suppressed"}``,
+        splitting the un-bridged set by the wardline ``suppression_state`` that
+        survives the emit: a baselined/waived/judged finding is an already-accepted
+        defect, *not* actionable work, so it must not read as a unit of work in
+        session orientation. Off-contract / absent metadata counts as actionable
+        (matches the promote-guard's "absent => active" contract). Terminal
+        findings (fixed/false_positive) and already-bridged ones are excluded —
+        only hidden work is counted.
+        """
+        # Guard json_extract with json_valid: a single corrupt metadata row would
+        # otherwise raise OperationalError and break session context entirely.
+        suppressed = "(json_valid(metadata) AND json_extract(metadata, '$.wardline.suppression_state') IS NOT NULL)"
+        row = self.conn.execute(
+            f"SELECT "
+            f"SUM(CASE WHEN {suppressed} THEN 1 ELSE 0 END) AS suppressed, "
+            f"SUM(CASE WHEN NOT {suppressed} THEN 1 ELSE 0 END) AS actionable "
+            f"FROM scan_findings "
+            f"WHERE issue_id IS NULL AND {self._OPEN_FINDINGS_FILTER}"
+        ).fetchone()
+        actionable = row["actionable"] or 0
+        suppressed_count = row["suppressed"] or 0
+        return {"total": actionable + suppressed_count, "actionable": actionable, "suppressed": suppressed_count}
+
     def get_file_detail(self, file_id: str) -> FileDetail:
         """Get a structured file detail response with separated data layers."""
         f = self.get_file(file_id)

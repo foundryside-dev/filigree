@@ -157,6 +157,59 @@ class TestBuildContext:
         with patch.object(db, "observation_stats", side_effect=TypeError("bad type")), pytest.raises(TypeError, match="bad type"):
             _build_context(db)
 
+    # --- F2: un-bridged analyzer findings surface in orientation ---
+
+    @staticmethod
+    def _wln(path: str, fp: str, **md: Any) -> dict[str, Any]:
+        f = {"path": path, "rule_id": "R", "message": "m", "severity": "high", "line_start": 1, "fingerprint": fp}
+        if md:
+            f["metadata"] = md
+        return f
+
+    def test_no_findings_no_analyzer_mention(self, db: FiligreeDB) -> None:
+        """Honest-empty (C-6): a project with no findings shows no ANALYZER line."""
+        assert "ANALYZER FINDINGS" not in _build_context(db)
+
+    def test_unbridged_findings_shown_with_split(self, db: FiligreeDB) -> None:
+        """F2: un-bridged findings surface, split so a baselined defect does not
+        read as actionable work. A promoted (bridged) finding is excluded."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                self._wln("a.py", "fp1"),
+                self._wln("b.py", "fp2"),
+                self._wln("c.py", "fp3", wardline={"suppression_state": "baselined"}),
+                self._wln("d.py", "fp4"),  # will be bridged
+            ],
+        )
+        bridged = db.find_finding_by_fingerprint("wardline", "fp4")
+        assert bridged is not None
+        db.promote_finding_to_issue(bridged["id"], actor="t")
+
+        result = _build_context(db)
+        # 3 un-bridged (2 actionable + 1 suppressed); fp4 bridged → excluded.
+        assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
+        assert "finding_promote" in result
+
+    def test_all_bridged_no_analyzer_line(self, db: FiligreeDB) -> None:
+        """Honest-empty: when every finding is bridged, no misleading absence — the
+        line is omitted (not '0 not yet bridged')."""
+        db.process_scan_results(scan_source="wardline", findings=[self._wln("a.py", "fp1")])
+        f = db.find_finding_by_fingerprint("wardline", "fp1")
+        assert f is not None
+        db.promote_finding_to_issue(f["id"], actor="t")
+        result = _build_context(db)
+        assert "ANALYZER FINDINGS" not in result
+
+    def test_finding_stats_operational_error_silent_in_context(self, db: FiligreeDB) -> None:
+        """A pre-findings DB (no scan_findings table) must not break orientation."""
+        import sqlite3
+
+        with patch.object(db, "unbridged_finding_stats", side_effect=sqlite3.OperationalError("no such table")):
+            result = _build_context(db)
+        assert "Filigree Project Snapshot" in result
+        assert "ANALYZER FINDINGS" not in result
+
 
 class TestGenerateSessionContext:
     def test_returns_none_without_filigree_dir(self, tmp_path: Path) -> None:

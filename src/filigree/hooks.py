@@ -147,6 +147,23 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
     blocked_count = stats.get("blocked_count", 0)
     lines.append(f"STATS: {ready_count} ready, {blocked_count} blocked")
 
+    # Analyzer findings awareness (F2): surface un-bridged findings so orientation
+    # never silently reads "nothing to do" while un-promoted findings sit in
+    # scan_findings. The baselined/suppressed split keeps an already-accepted
+    # defect from reading as actionable work. Honest-empty: omit when 0 unbridged.
+    # Guarded for pre-findings DBs where scan_findings may not exist.
+    try:
+        fstats = db.unbridged_finding_stats()
+        if fstats["total"] > 0:
+            lines.append("")
+            lines.append(
+                f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
+                f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
+                f"— review with `finding_list`, bridge with `finding_promote`"
+            )
+    except sqlite3.OperationalError:
+        logger.debug("finding stats unavailable in session context", exc_info=True)
+
     # Observation awareness (read-only, guarded for pre-v7 DBs)
     try:
         obs_stats = db.observation_stats(sweep=False)
