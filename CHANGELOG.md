@@ -175,6 +175,25 @@ checklist is complete and a coordinated consumer-migration window is published.
   makes the unconditional refresh safe and cheap, and the committed case
   short-circuits at the top guard so re-copy never fires post-commit.
 
+- **An aborted store migration no longer orphans the legacy DB on confless
+  installs (filigree-37e3f26145).** `migrate_store_to_weft` created
+  `.weft/filigree/` (`weft_store.mkdir`) *before* the busy-abortable checkpoint,
+  so a live writer holding the legacy DB raised `StoreMigrationBusyError` and
+  left an **empty** `.weft/filigree/` husk behind. `resolve_store_dir` then
+  declared that husk canonical purely on `is_dir()`, so the next confless open
+  (no `.filigree.conf` to pin the legacy DB) stamped a fresh empty database into
+  the husk and orphaned the real issue data still sitting in `.filigree/` —
+  reachable on the documented deploy recipe (a running daemon holds the legacy
+  DB while `filigree init` migrates). Conf installs were unaffected (the conf
+  still pinned legacy). Fixed at two layers: `resolve_store_dir` now keys the
+  `.weft/filigree/` choice on DB *presence*, not bare directory existence — an
+  empty weft husk never shadows a legacy store that holds the DB (this also
+  defends against an empty husk left by a copy failure); and the eager
+  `weft_store.mkdir` is deferred until after the busy check passes, so a busy
+  abort leaves no husk at all. `find_filigree_anchor` inherits the fix for free
+  (it derives `store_dir` from `resolve_store_dir`). Distinct from the atomic-copy
+  fix above.
+
 - **`doctor --fix` repairs instruction files and `context.md` again
   (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the
   generated `context.md` back into its fixable set: instruction files via the

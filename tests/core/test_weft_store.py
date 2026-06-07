@@ -94,6 +94,29 @@ class TestResolveStoreDir:
         (tmp_path / "weft.toml").write_text('[loomweave]\nstore_dir = "ignored"\n')
         assert resolve_store_dir(tmp_path) == tmp_path / FILIGREE_DIR_NAME
 
+    def test_empty_weft_dir_does_not_shadow_legacy_holding_the_db(self, tmp_path: Path) -> None:
+        # Data-loss guard: an *empty* .weft/filigree/ (no DB) — e.g. left behind by
+        # a busy- or copy-aborted migration that pre-created the dir before the
+        # copy — must NOT shadow a legacy .filigree/ that still holds the real DB.
+        # Resolution keys on DB presence, not bare directory existence; otherwise
+        # a confless open would stamp a fresh empty DB over live legacy data.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        (legacy / DB_FILENAME).write_bytes(b"SQLite format 3\x00")  # the canonical DB lives here
+        _weft_store(tmp_path).mkdir(parents=True)  # empty weft dir, no DB inside
+        assert resolve_store_dir(tmp_path) == legacy
+
+    def test_weft_dir_with_db_still_wins_over_legacy_husk(self, tmp_path: Path) -> None:
+        # The committed / mid-commit state: once weft holds the DB it is canonical
+        # and wins even with a lingering legacy husk that also has a DB.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        (legacy / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        (store / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
+        assert resolve_store_dir(tmp_path) == store
+
 
 class TestReadWeftFiligreeTable:
     def test_absent_file_returns_empty(self, tmp_path: Path) -> None:
@@ -523,11 +546,13 @@ class TestMigrationWalAndBusy:
             blocker.rollback()
             blocker.close()
 
-        # Aborted before any mutation: legacy DB present, conf untouched, no weft DB
-        # published (the dir may be pre-created, but the copy never completed).
+        # Aborted before any mutation: legacy DB present, conf untouched, and no
+        # weft store left behind at all — the eager mkdir is deferred until after
+        # the busy check passes, so a busy abort never litters an empty
+        # .weft/filigree/ husk that a confless open could mistake for canonical.
         assert (legacy / DB_FILENAME).is_file()
         assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
-        assert not (_weft_store(tmp_path) / DB_FILENAME).exists()
+        assert not _weft_store(tmp_path).exists()
         assert not (legacy / LEGACY_MOVED_BREADCRUMB).exists()  # no breadcrumb on abort
 
         # With the writer gone, a re-run completes and the seeded data survives.
@@ -538,6 +563,50 @@ class TestMigrationWalAndBusy:
             assert db2.get_issue(created.id) is not None
         finally:
             db2.close()
+
+    def test_confless_busy_abort_does_not_orphan_legacy_data(self, tmp_path: Path) -> None:
+        """Data-loss regression (confless installs).
+
+        The conf-install variant above is safe because the conf still pins the
+        legacy DB, so discovery opens the right database regardless of any empty
+        weft dir. A *confless* install has no conf: discovery resolves purely on
+        store layout. A busy-aborted migration pre-creates an empty
+        ``.weft/filigree/`` (the eager ``mkdir`` runs before the abortable
+        checkpoint), and an empty weft dir must not win over a legacy dir that
+        holds the DB — otherwise the next confless open stamps a fresh empty DB
+        there and orphans the real data in legacy. Reachable on the deploy
+        recipe: a live daemon holds the legacy DB while ``filigree init`` runs.
+        """
+        # Confless legacy install: .filigree/ + DB + config.json, NO .filigree.conf.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        write_config(legacy, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        db = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        db.initialize()
+        try:
+            created = db.create_issue("seed before busy", type="task")
+        finally:
+            db.close()
+        assert not (tmp_path / CONF_FILENAME).exists()  # genuinely confless
+
+        blocker = sqlite3.connect(str(legacy / DB_FILENAME), isolation_level=None)
+        try:
+            blocker.execute("PRAGMA journal_mode=WAL")
+            blocker.execute("BEGIN IMMEDIATE")  # hold the write lock → checkpoint busy
+            with pytest.raises(StoreMigrationBusyError):
+                migrate_store_to_weft(tmp_path)
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+        # Reopen through the real confless entry point (what a CLI / daemon uses).
+        # The seeded issue MUST still be retrievable — not orphaned behind a
+        # freshly-stamped empty weft DB.
+        reopened = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert reopened.get_issue(created.id) is not None
+        finally:
+            reopened.close()
 
 
 class TestDeepStoreDirOverrideProjectRoot:

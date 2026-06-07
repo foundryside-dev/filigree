@@ -504,7 +504,11 @@ def resolve_store_dir(project_root: Path) -> Path:
          store dir through the ``.filigree.conf`` ``db`` field, whose trust
          boundary forbids absolute / escaping paths, so such a value cannot be
          represented consistently and is never honoured half-way.
-      2. ``.weft/filigree/`` if it already exists (the federation default).
+      2. ``.weft/filigree/`` if it exists — UNLESS it is an empty husk (no DB)
+         while legacy ``.filigree/`` still holds the DB. The choice keys on DB
+         *presence*, not bare dir existence: an aborted migration can leave an
+         empty ``.weft/filigree/`` behind, and selecting it would let a confless
+         open stamp a fresh empty DB over the live legacy data (data loss).
       3. legacy ``.filigree/`` (back-compat; also the bare fallback that a fresh
          install's default ``db`` literal points beside before the dir exists).
 
@@ -538,9 +542,19 @@ def resolve_store_dir(project_root: Path) -> Path:
             else:
                 return project_root / candidate
     weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
-    if weft_store.is_dir():
-        return weft_store
     legacy = project_root / FILIGREE_DIR_NAME
+    # Prefer the federation store — but NOT when it is an empty husk while legacy
+    # still holds the DB. A busy- or copy-aborted migration can leave an empty
+    # ``.weft/filigree/`` behind (the dir is created before the abortable copy);
+    # selecting it on bare directory existence would let a confless open stamp a
+    # fresh empty DB there and orphan the real data in legacy (data loss). So key
+    # the choice on DB *presence*, not dir existence: weft wins unless it lacks a
+    # DB that legacy still has. A genuinely fresh weft install (config.json, DB
+    # not yet stamped, no legacy) is unaffected — its legacy_db guard is False.
+    weft_db_present = (weft_store / DB_FILENAME).is_file()
+    legacy_db_present = (legacy / DB_FILENAME).is_file()
+    if weft_store.is_dir() and not (legacy_db_present and not weft_db_present):
+        return weft_store
     if legacy.is_dir():
         return legacy
     # Neither layout materialised yet (e.g. a fresh project_root): the canonical
@@ -674,7 +688,15 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         # Nothing to carry forward (e.g. conf with no DB yet) — leave as-is.
         return resolve_store_dir(project_root), False
 
-    weft_store.mkdir(parents=True, exist_ok=True)
+    # Do NOT pre-create weft_store here: the copy below can abort
+    # (StoreMigrationBusyError before any mutation), and an empty .weft/filigree/
+    # left behind would be picked up as canonical by a confless open and stamped
+    # with a fresh empty DB (data loss — resolve_store_dir now also defends
+    # against this, but we avoid littering the husk in the first place). The dir
+    # is created inside _checkpoint_and_copy_sqlite, AFTER the busy check passes;
+    # the metadata loop and conf rewrite below only run once weft_store exists
+    # (legacy_db present → copy created it; legacy_db absent → weft_db present,
+    # so the dir already exists).
     # 1. Copy the DB forward while the legacy DB exists. Re-copy is
     #    *unconditional* — NOT gated on the destination looking valid. Until the
     #    conf commits to weft, the conf-pinned legacy DB is canonical and may
