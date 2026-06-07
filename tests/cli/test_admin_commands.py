@@ -2052,8 +2052,14 @@ class TestMetricsDaysValidation:
 
 
 class TestFixMcpTokenReference:
-    """doctor --fix migrates a deprecated token env-var name in the .mcp.json
-    header to the canonical ${WEFT_FEDERATION_TOKEN} (commit-safe, no secret)."""
+    """doctor --fix embeds the literal server federation token in the .mcp.json
+    header (deconfliction plumbing, not a secret), so the client needs no export."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_server_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", tmp_path / "_srvcfg")
+        for _v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(_v, raising=False)
 
     def _write_mcp(self, root: Path, auth: str) -> None:
         (root / ".mcp.json").write_text(
@@ -2070,29 +2076,23 @@ class TestFixMcpTokenReference:
             )
         )
 
-    def test_migrates_deprecated_name(self, tmp_path: Path) -> None:
-        from filigree.cli_commands.admin import _fix_mcp_token_reference
-
-        self._write_mcp(tmp_path, "Bearer ${FILIGREE_FEDERATION_API_TOKEN}")
-        ok, _msg = _fix_mcp_token_reference(tmp_path)
-        assert ok is True
-        mcp = json.loads((tmp_path / ".mcp.json").read_text())
-        assert mcp["mcpServers"]["filigree"]["headers"]["Authorization"] == "Bearer ${WEFT_FEDERATION_TOKEN}"
-
-    def test_already_canonical_is_noop(self, tmp_path: Path) -> None:
+    def test_embeds_literal_token(self, tmp_path: Path) -> None:
         from filigree.cli_commands.admin import _fix_mcp_token_reference
 
         self._write_mcp(tmp_path, "Bearer ${WEFT_FEDERATION_TOKEN}")
-        ok, msg = _fix_mcp_token_reference(tmp_path)
-        # Not a fixable rewrite — the blocker is an unset env var, not a stale name.
-        assert ok is False
-        assert "WEFT_FEDERATION_TOKEN" in msg
+        ok, _msg = _fix_mcp_token_reference(tmp_path)
+        assert ok is True
+        token = (tmp_path / "_srvcfg" / "federation_token").read_text().strip()
+        auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
+        assert auth == f"Bearer {token}"
+        assert "${" not in auth
 
-    def test_does_not_write_secret_value(self, tmp_path: Path) -> None:
+    def test_idempotent_when_already_literal(self, tmp_path: Path) -> None:
         from filigree.cli_commands.admin import _fix_mcp_token_reference
+        from filigree.federation_token import mint_token_file
 
-        self._write_mcp(tmp_path, "Bearer ${FILIGREE_API_TOKEN}")
-        _fix_mcp_token_reference(tmp_path)
-        raw = (tmp_path / ".mcp.json").read_text()
-        # Only the env-var reference survives; no expanded token literal.
-        assert "${WEFT_FEDERATION_TOKEN}" in raw
+        token = mint_token_file(tmp_path / "_srvcfg")
+        self._write_mcp(tmp_path, f"Bearer {token}")
+        ok, msg = _fix_mcp_token_reference(tmp_path)
+        assert ok is False
+        assert "already" in msg.lower()

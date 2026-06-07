@@ -1949,7 +1949,8 @@ class TestMcpTokenReference:
         assert result is not None
         assert result.passed is False
         assert result.code == "mcp_token_unresolved"
-        assert "WEFT_FEDERATION_TOKEN" in result.fix_hint
+        assert "WEFT_FEDERATION_TOKEN" in result.message
+        assert "doctor --fix" in result.fix_hint
 
     def test_token_result_deprecated_name_hints_fix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)

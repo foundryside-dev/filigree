@@ -40,8 +40,6 @@ from filigree.core import (
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.doctor import (
-    _DEPRECATED_FEDERATION_ENV_VARS,
-    _WEFT_FEDERATION_ENV_VAR,
     CheckResult,
     build_doctor_summary,
     doctor_check_id,
@@ -469,13 +467,14 @@ def _remove_stale_doctor_pointer(path: Path) -> tuple[bool, str]:
 
 
 def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
-    """Migrate a deprecated token env-var name in the .mcp.json filigree header to
-    the canonical ``${WEFT_FEDERATION_TOKEN}``.
+    """Embed the literal server federation token into the .mcp.json filigree header.
 
-    Commit-safe: only the *name* changes, never a secret value. Returns
-    ``(fixed, message)``. Does NOT claim to fix the case where the canonical var is
-    merely unset in the environment — filigree cannot write the agent's process
-    env, so that stays the operator's one export.
+    The header historically referenced ``${WEFT_FEDERATION_TOKEN}`` (or a deprecated
+    alias), which 401s unless the operator exports it in every client shell. The
+    token is loopback deconfliction plumbing, not a secret, so ``doctor --fix`` now
+    writes the literal value the server daemon validates against (the token minted
+    in ``SERVER_CONFIG_DIR``), eliminating the export. Idempotent: a no-op when the
+    header already carries that literal.
     """
     mcp_path = project_root / ".mcp.json"
     try:
@@ -487,19 +486,16 @@ def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
     if not isinstance(auth, str):
         return False, "filigree Authorization header is not a string"
 
-    new_auth = auth
-    for deprecated in _DEPRECATED_FEDERATION_ENV_VARS:
-        new_auth = new_auth.replace(f"${{{deprecated}}}", f"${{{_WEFT_FEDERATION_ENV_VAR}}}")
+    from filigree.federation_token import mint_token_file
+    from filigree.server import SERVER_CONFIG_DIR
+
+    new_auth = f"Bearer {mint_token_file(SERVER_CONFIG_DIR)}"
     if new_auth == auth:
-        return False, (
-            f"Header already references ${{{_WEFT_FEDERATION_ENV_VAR}}}; "
-            f"export {_WEFT_FEDERATION_ENV_VAR}=<token> and restart the daemon "
-            "(filigree can't set the agent's environment)."
-        )
+        return False, "filigree Authorization header already carries the literal federation token"
 
     entry["headers"]["Authorization"] = new_auth
     mcp_path.write_text(json_mod.dumps(data, indent=2) + "\n")
-    return True, (f"Migrated header to ${{{_WEFT_FEDERATION_ENV_VAR}}} — export {_WEFT_FEDERATION_ENV_VAR}=<token> to connect.")
+    return True, "Embedded literal federation token in .mcp.json header (no export needed)"
 
 
 def _apply_doctor_fixes(

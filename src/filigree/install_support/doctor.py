@@ -221,13 +221,6 @@ def _validate_filigree_mcp_entry(entry: object) -> dict[str, object]:
     return entry
 
 
-# Canonical inbound federation bearer env var (mirrors dashboard.FEDERATION_TOKEN_ENV_VARS[0]).
-# Duplicated as a plain string to keep doctor's import surface light.
-_WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
-_DEPRECATED_FEDERATION_ENV_VARS = (
-    "FILIGREE_FEDERATION_API_TOKEN",
-    "FILIGREE_API_TOKEN",
-)
 _ENV_REF_RE = re.compile(r"\$\{(?P<var>[A-Za-z_][A-Za-z0-9_]*)(:-(?P<default>[^}]*))?\}")
 
 
@@ -269,15 +262,7 @@ def _doctor_mcp_token_result(entry: dict[str, object]) -> CheckResult | None:
     unresolved = _unresolved_env_refs(auth)
     if not unresolved:
         return None
-    deprecated = [v for v in unresolved if v in _DEPRECATED_FEDERATION_ENV_VARS]
-    if deprecated:
-        hint = (
-            f"Header references deprecated {', '.join(deprecated)}. Run `filigree doctor --fix` "
-            f"to migrate it to ${{{_WEFT_FEDERATION_ENV_VAR}}}, then export {_WEFT_FEDERATION_ENV_VAR}=<token> "
-            "and restart the daemon."
-        )
-    else:
-        hint = f"Export the token: {_WEFT_FEDERATION_ENV_VAR}=<token>, then restart the daemon."
+    hint = "Run `filigree doctor --fix` to embed the literal federation token in the header (no env export needed)."
     return CheckResult(
         "Claude Code MCP",
         False,

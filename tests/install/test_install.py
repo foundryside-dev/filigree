@@ -2645,6 +2645,13 @@ class TestDoctorConnectionLeak:
 
 
 class TestInstallMcpServerMode:
+    @pytest.fixture(autouse=True)
+    def _isolate_server_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Mint the server token into a temp dir, never the real ~/.config/filigree.
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", tmp_path / "_srvcfg")
+        for _v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(_v, raising=False)
+
     def test_server_mode_writes_streamable_http(self, tmp_path: Path) -> None:
         project_root = tmp_path
         filigree_dir = project_root / ".filigree"
@@ -2660,42 +2667,18 @@ class TestInstallMcpServerMode:
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
 
-    def test_server_mode_mints_and_instructs_without_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Greenfield: with no federation token set anywhere, server-mode install
-        mints one and prints the export the operator must run. The committed header
-        references the canonical ${WEFT_FEDERATION_TOKEN}."""
-        (tmp_path / ".filigree").mkdir()
-        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
-        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
-        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+    def test_server_mode_embeds_literal_token(self, tmp_path: Path) -> None:
+        """Server-mode install embeds the LITERAL server federation token in the
+        header — no ${ENV} indirection, no export. The value matches the token the
+        server daemon validates against (SERVER_CONFIG_DIR/federation_token)."""
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
-            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
-        assert "export WEFT_FEDERATION_TOKEN=" in msg
-        mcp = json.loads((tmp_path / ".mcp.json").read_text())
-        assert mcp["mcpServers"]["filigree"]["headers"]["Authorization"] == "Bearer ${WEFT_FEDERATION_TOKEN}"
-        # Idempotent: the minted token is recorded under the gitignored .filigree dir.
-        assert (tmp_path / ".filigree" / "federation_token").read_text().strip()
-
-    def test_server_mode_clean_with_canonical_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With WEFT_FEDERATION_TOKEN exported, the header resolves and the install
-        message carries no migration note or mint instruction."""
-        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "tok")
-        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
-            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
-        assert ok
-        assert "export" not in msg
-        assert "NOTE" not in msg
-
-    def test_server_mode_migrates_deprecated_alias(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A token set only under a deprecated alias yields a one-line migration hint
-        onto the canonical name (the header references the canonical name)."""
-        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
-        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
-        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
-            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
-        assert ok
-        assert 'export WEFT_FEDERATION_TOKEN="$FILIGREE_FEDERATION_API_TOKEN"' in msg
+        token = (tmp_path / "_srvcfg" / "federation_token").read_text().strip()
+        assert token
+        auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
+        assert auth == f"Bearer {token}"
+        assert "${" not in auth  # literal, not an env-var reference
 
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path

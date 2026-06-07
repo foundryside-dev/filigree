@@ -26,58 +26,11 @@ from filigree.install_support.safe_paths import (
 
 logger = logging.getLogger(__name__)
 
-# Canonical inbound federation bearer env var. Full env-var list + 3-tier
-# resolution live in filigree.federation_token; only the canonical name is needed
-# here (for the operator-guidance message), kept as a plain string so the
-# installer needn't import the dashboard/FastAPI module.
-WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
-
-
-def _ensure_minted_federation_token(project_root: Path) -> str:
-    """Return a persisted federation token for *project_root*, minting if absent.
-
-    Thin wrapper over :func:`filigree.federation_token.mint_token_file`, keyed on
-    the project's resolved store dir. Idempotent; stored 0600. Deconfliction
-    plumbing, not a security secret — file perms are the only boundary; do not add
-    hardening.
-    """
-    from filigree.federation_token import mint_token_file
-
-    return mint_token_file(resolve_store_dir(project_root))
-
-
-def _negotiate_federation_token_message(project_root: Path) -> str:
-    """Persist a federation token and return operator guidance for exporting it.
-
-    Always pre-seeds the token file (``<store>/federation_token``) so a token
-    exists after install regardless of which env var (if any) is set. The daemon
-    reads this file as tier 2, so on a single host federation auth now works with
-    no export at all. The committed ``.mcp.json`` header still references
-    ``${WEFT_FEDERATION_TOKEN}``, which Claude Code expands from its OWN process
-    env (filigree cannot write that), so we still surface the one export line for
-    the cases that send the bearer header (a remote/cross-host agent client).
-    """
-    from filigree.federation_token import read_env_token
-
-    token = _ensure_minted_federation_token(project_root)
-    value, env_name = read_env_token()
-    if env_name == WEFT_FEDERATION_ENV_VAR:
-        return ""  # canonical token already exported — header resolves, daemon agrees
-    if value:
-        # A deprecated alias is set; point the operator at the canonical name.
-        return (
-            f"\n  NOTE: a federation token is set under the deprecated ${env_name}, but the "
-            f"config header references ${WEFT_FEDERATION_ENV_VAR}. The local daemon already "
-            f"reads the minted token file; for an agent client that sends the header, run:\n"
-            f'    export {WEFT_FEDERATION_ENV_VAR}="${env_name}"\n'
-            "  (and add it to your shell profile)."
-        )
-    return (
-        f"\n  Minted a federation token ({resolve_store_dir(project_root).name}/federation_token); the local "
-        f"daemon reads it automatically. An agent client that sends the ${WEFT_FEDERATION_ENV_VAR} header still needs:\n"
-        f"    export {WEFT_FEDERATION_ENV_VAR}={token}\n"
-        "  (add it to your shell profile)."
-    )
+# The server-mode ``.mcp.json`` Authorization header carries the LITERAL
+# federation token (see ``_install_mcp_server_mode``), not a ``${ENV}`` reference:
+# the token is loopback deconfliction plumbing, not a security secret (0600 file,
+# do not harden), and the env-var indirection forced an export in every client
+# shell — recurring 401 toil. The daemon validates against the same minted token.
 
 
 # ---------------------------------------------------------------------------
@@ -345,24 +298,24 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     except UnsafeInstallPathError as exc:
         return False, str(exc)
 
-    # The committed .mcp.json references the canonical env var rather than a
-    # literal token — a secret can never get committed by accident (filigree-3ee7250b54).
-    # Claude Code expands ${WEFT_FEDERATION_TOKEN} from its own process env at load time.
+    # Embed the LITERAL server-global federation token (not a ${ENV} reference).
+    # The URL points at the shared server daemon, which validates against the
+    # token minted in SERVER_CONFIG_DIR; mint_token_file reads it (or pre-seeds it
+    # so the daemon reuses the same value on first serve). Writing the literal
+    # value means the client works with zero export — the token is loopback
+    # deconfliction plumbing, not a secret.
+    from filigree.federation_token import mint_token_file
+    from filigree.server import SERVER_CONFIG_DIR
+
+    token = mint_token_file(SERVER_CONFIG_DIR)
     mcp_config["mcpServers"]["filigree"] = {
         "type": "streamable-http",
         "url": _codex_server_mode_url(project_root, port),
-        "headers": {"Authorization": f"Bearer ${{{WEFT_FEDERATION_ENV_VAR}}}"},
+        "headers": {"Authorization": f"Bearer {token}"},
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
-    msg = f"Wrote {mcp_json_path} (streamable-http, port {port})"
-    # Server-mode points Claude/Codex at the dashboard daemon's /mcp transport,
-    # which is only mounted when a federation bearer token is configured, and the
-    # client header above only resolves if WEFT_FEDERATION_TOKEN is exported into
-    # the agent's environment. "Negotiate" a key as needed: reuse an existing
-    # token, migrate a deprecated alias, or mint a fresh one — then instruct.
-    msg += _negotiate_federation_token_message(project_root)
-    return True, msg
+    return True, f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded)"
 
 
 def install_claude_code_mcp(
