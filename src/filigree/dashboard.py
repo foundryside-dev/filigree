@@ -86,21 +86,19 @@ _config: dict[str, Any] = {}
 _DASHBOARD_STATE_ATTR = "filigree_dashboard_state"
 
 
-def _resolve_federation_api_token() -> tuple[str, str | None]:
-    """Resolve the opt-in bearer token for federation/MCP HTTP surfaces."""
-    empty_envs: list[str] = []
-    for env_name in FEDERATION_TOKEN_ENV_VARS:
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        token = raw.strip()
-        if token:
-            return token, env_name
-        empty_envs.append(env_name)
+def _resolve_federation_api_token(store_dir: Path | None = None) -> tuple[str, str | None]:
+    """Resolve the bearer token for the federation/MCP HTTP surfaces (read-only).
 
-    for env_name in empty_envs:
-        logger.warning("%s is set but empty/whitespace — loom federation auth is NOT enabled from that variable", env_name)
-    return "", None
+    3-tier: ``$WEFT_FEDERATION_TOKEN`` (+ deprecated aliases) → the daemon's
+    minted ``<store_dir>/federation_token`` → off. *store_dir* is the served
+    project's store dir (ethereal) or ``~/.config/filigree/`` (server mode); the
+    file is minted at daemon boot (see :func:`run`), never here, so this stays a
+    pure read. Returns ``(token, source)`` where *source* is the env-var name,
+    the file-source label, or ``None``.
+    """
+    from filigree.federation_token import resolve_federation_token
+
+    return resolve_federation_token(store_dir)
 
 
 def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
@@ -648,8 +646,18 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     )
 
     # Resolve federation auth before MCP setup so the high-privilege
-    # streamable-HTTP transport is only mounted when it can be protected.
-    _api_token, _api_token_env = _resolve_federation_api_token()
+    # streamable-HTTP transport is only mounted when it can be protected. Tier-2
+    # (the minted file) lives in the daemon's own store: the served project's
+    # store dir (ethereal) or the server config dir (server mode). Read-only here
+    # — the file is minted at daemon boot (run()), so create_app (which tests
+    # invoke directly) never writes.
+    if server_mode:
+        from filigree.server import SERVER_CONFIG_DIR
+
+        _token_store_dir: Path | None = SERVER_CONFIG_DIR
+    else:
+        _token_store_dir = dashboard_state.db.meta_dir if dashboard_state.db is not None else None
+    _api_token, _api_token_env = _resolve_federation_api_token(_token_store_dir)
 
     # --- MCP streamable-HTTP setup (optional, token-protected only) ---
     _mcp_handler: ASGIApp | None = None
@@ -1031,6 +1039,21 @@ def main(
             print(f"Error opening project database: {exc}", file=sys.stderr)
             print("Run `filigree doctor` for diagnosis.", file=sys.stderr)
             sys.exit(1)
+
+    # First-serve federation-token mint (tier 2). Auto-provision the daemon's own
+    # token file so single-host federation auth works with zero operator toil; the
+    # env var stays the cross-host override. Mints into the daemon's own subtree —
+    # the served project's store dir (ethereal) or the server config dir (server
+    # mode). Done here at real serve only, never in create_app (tests call that
+    # directly and must not write to a shared/real dir).
+    from filigree.federation_token import mint_token_file
+
+    if server_mode:
+        from filigree.server import SERVER_CONFIG_DIR
+
+        mint_token_file(SERVER_CONFIG_DIR)
+    elif _db is not None:
+        mint_token_file(_db.meta_dir)
 
     app = create_app(server_mode=server_mode)
 

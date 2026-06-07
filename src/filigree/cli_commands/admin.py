@@ -331,6 +331,13 @@ def install(
         mode = "ethereal"
 
     project_root = anchor.project_root
+    # Pre-seed the federation token so a single-host daemon enforces auth with
+    # zero operator toil (it reads <store>/federation_token as tier 2). Idempotent,
+    # and independent of which sub-integrations are selected below (the MCP step
+    # also negotiates one, but a token must exist even for a non-MCP install).
+    from filigree.federation_token import mint_token_file as _mint_federation_token
+
+    _mint_federation_token(filigree_dir)
     install_all = not any([claude_code, codex, claude_md, agents_md, gitignore, hooks_only, skills_only, codex_skills_only])
 
     results: list[tuple[str, bool, str]] = []
@@ -530,6 +537,17 @@ def _apply_doctor_fixes(
             server_port = read_server_config().port
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
+
+    # doctor --fix generates the federation token too (not just install): mint it
+    # into the store so a single-host daemon can enforce auth on next serve (it
+    # reads <store>/federation_token as tier 2). Idempotent — only reported when it
+    # actually minted, so repeat runs stay quiet.
+    from filigree.federation_token import FEDERATION_TOKEN_FILENAME, mint_token_file, read_token_file
+
+    _had_federation_token = bool(read_token_file(filigree_dir))
+    mint_token_file(filigree_dir)
+    if emit is not None and not _had_federation_token:
+        emit(f"  OK Federation token: minted {filigree_dir.name}/{FEDERATION_TOKEN_FILENAME}")
 
     # filigree-f57cb498d4: instruction files and the generated context.md are
     # filigree-owned artifacts that `--fix` repairs directly. CLAUDE.md/AGENTS.md

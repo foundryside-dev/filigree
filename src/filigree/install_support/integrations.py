@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -28,79 +26,57 @@ from filigree.install_support.safe_paths import (
 
 logger = logging.getLogger(__name__)
 
-# Canonical inbound federation bearer env var (source of truth:
-# dashboard.FEDERATION_TOKEN_ENV_VARS). Duplicated here as plain strings so the
-# installer needn't import the heavy dashboard/FastAPI module. The FILIGREE_*
-# names are deprecated aliases, read as a soft fallback; removal post-1.0.
+# Canonical inbound federation bearer env var. Full env-var list + 3-tier
+# resolution live in filigree.federation_token; only the canonical name is needed
+# here (for the operator-guidance message), kept as a plain string so the
+# installer needn't import the dashboard/FastAPI module.
 WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
-_DEPRECATED_FEDERATION_ENV_VARS = (
-    "FILIGREE_FEDERATION_API_TOKEN",
-    "FILIGREE_API_TOKEN",
-)
-_FEDERATION_ENV_VARS = (WEFT_FEDERATION_ENV_VAR, *_DEPRECATED_FEDERATION_ENV_VARS)
-
-
-def _resolve_federation_token() -> tuple[str | None, str | None]:
-    """Return (value, env_name) of the first set federation token, else (None, None)."""
-    for name in _FEDERATION_ENV_VARS:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value, name
-    return None, None
 
 
 def _ensure_minted_federation_token(project_root: Path) -> str:
-    """Return a persisted federation token, minting + storing one if absent.
+    """Return a persisted federation token for *project_root*, minting if absent.
 
-    Idempotent: re-running install reuses the recorded token rather than churning
-    a new value. Stored under the (gitignored) machine-owned store dir at 0600.
-    This is deconfliction plumbing, not a security secret — file permissions are
-    the only boundary (README security note); do not add hardening.
+    Thin wrapper over :func:`filigree.federation_token.mint_token_file`, keyed on
+    the project's resolved store dir. Idempotent; stored 0600. Deconfliction
+    plumbing, not a security secret — file perms are the only boundary; do not add
+    hardening.
     """
-    token_file = resolve_store_dir(project_root) / "federation_token"
-    try:
-        existing = token_file.read_text().strip()
-        if existing:
-            return existing
-    except OSError:
-        pass
-    token = secrets.token_urlsafe(32)
-    try:
-        token_file.write_text(token + "\n")
-        token_file.chmod(0o600)
-    except OSError as exc:
-        logger.warning("Could not persist federation token to %s: %s", token_file, exc)
-    return token
+    from filigree.federation_token import mint_token_file
+
+    return mint_token_file(resolve_store_dir(project_root))
 
 
 def _negotiate_federation_token_message(project_root: Path) -> str:
-    """Ensure a usable ``WEFT_FEDERATION_TOKEN`` and return operator guidance.
+    """Persist a federation token and return operator guidance for exporting it.
 
-    The committed header references ``${WEFT_FEDERATION_TOKEN}``; Claude Code
-    expands it from its own process env, which filigree cannot write at install
-    time. So we *negotiate*: reuse an existing canonical token, migrate a
-    deprecated alias's value, or mint a fresh one — and tell the operator the one
-    line they must export (which also reaches the daemon, since the SessionStart
-    hook starts it from the same shell).
+    Always pre-seeds the token file (``<store>/federation_token``) so a token
+    exists after install regardless of which env var (if any) is set. The daemon
+    reads this file as tier 2, so on a single host federation auth now works with
+    no export at all. The committed ``.mcp.json`` header still references
+    ``${WEFT_FEDERATION_TOKEN}``, which Claude Code expands from its OWN process
+    env (filigree cannot write that), so we still surface the one export line for
+    the cases that send the bearer header (a remote/cross-host agent client).
     """
-    value, env_name = _resolve_federation_token()
+    from filigree.federation_token import read_env_token
+
+    token = _ensure_minted_federation_token(project_root)
+    value, env_name = read_env_token()
     if env_name == WEFT_FEDERATION_ENV_VAR:
         return ""  # canonical token already exported — header resolves, daemon agrees
-    if value is not None:
-        # A deprecated alias is set; migrate its value onto the canonical name.
+    if value:
+        # A deprecated alias is set; point the operator at the canonical name.
         return (
             f"\n  NOTE: a federation token is set under the deprecated ${env_name}, but the "
-            f"config references ${WEFT_FEDERATION_ENV_VAR}. To connect, run:\n"
+            f"config header references ${WEFT_FEDERATION_ENV_VAR}. The local daemon already "
+            f"reads the minted token file; for an agent client that sends the header, run:\n"
             f'    export {WEFT_FEDERATION_ENV_VAR}="${env_name}"\n'
-            "  (add it to your shell profile and restart the daemon)."
+            "  (and add it to your shell profile)."
         )
-    token = _ensure_minted_federation_token(project_root)
     return (
-        f"\n  No federation token was set — minted one. The /mcp transport will 401 until "
-        "you export it (filigree can't set the agent's environment). Run:\n"
+        f"\n  Minted a federation token ({resolve_store_dir(project_root).name}/federation_token); the local "
+        f"daemon reads it automatically. An agent client that sends the ${WEFT_FEDERATION_ENV_VAR} header still needs:\n"
         f"    export {WEFT_FEDERATION_ENV_VAR}={token}\n"
-        f"  (add it to your shell profile and restart the daemon; value recorded in "
-        f"{resolve_store_dir(project_root).name}/federation_token)."
+        "  (add it to your shell profile)."
     )
 
 
