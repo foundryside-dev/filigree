@@ -167,6 +167,10 @@ class TypeTemplate:
     reverse_transitions: tuple[TransitionDefinition, ...] = ()
     suggested_children: tuple[str, ...] = ()
     suggested_labels: tuple[str, ...] = ()
+    #: Aggregate/container type (release, epic, milestone, phase): it groups child
+    #: issues rather than being "done" itself, so the work picker never offers it as
+    #: startable work — you complete its children. Leaf types default False.
+    container: bool = False
 
     def canonical_working_status(self) -> str:
         """Return the unique wip-category status name for this type.
@@ -230,6 +234,15 @@ class TypeTemplate:
         None: the caller must choose a ``target_status``.
         """
         from filigree.types.api import AmbiguousTransitionError, InvalidTransitionError
+
+        # Aggregate/container types (release, epic, milestone, phase) are never
+        # startable work — they group child issues; you complete the children, you
+        # do not "do" the container. This is declarative (the type-schema `container`
+        # flag), so the picker can't be fooled by a container that happens to have a
+        # unique single-hop wip target (a release in `planning` -> `development`).
+        # Manual transitions are unaffected — only this startable gate changes.
+        if self.container:
+            return False, "complete child issues"
 
         try:
             self.reachable_working_status(current_status)
@@ -458,6 +471,15 @@ class TemplateRegistry:
                 raise ValueError(msg)
             return value
 
+        def optional_bool(mapping: dict[str, Any], key: str, default: bool, context: str) -> bool:
+            if key not in mapping:
+                return default
+            value = mapping[key]
+            if not isinstance(value, bool):
+                msg = f"{context}: '{key}' must be a boolean, got {type(value).__name__}"
+                raise ValueError(msg)
+            return value
+
         def optional_string_tuple(mapping: dict[str, Any], key: str, context: str) -> tuple[str, ...]:
             if key not in mapping:
                 return ()
@@ -669,6 +691,7 @@ class TemplateRegistry:
             reverse_transitions=reverse_transitions,
             suggested_children=optional_string_tuple(raw, "suggested_children", f"Type '{type_name}'"),
             suggested_labels=optional_string_tuple(raw, "suggested_labels", f"Type '{type_name}'"),
+            container=optional_bool(raw, "container", False, f"Type '{type_name}'"),
         )
 
     @staticmethod

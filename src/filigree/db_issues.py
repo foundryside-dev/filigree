@@ -2187,20 +2187,26 @@ class IssuesMixin(DBMixinProtocol):
             if priority_max is not None and issue.priority > priority_max:
                 continue
 
+            tpl = self.templates.get_type(issue.type)
+            if tpl is None:
+                skipped += 1
+                logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
+                continue
+            # F3: the auto-picker never claims an aggregate/container type (release,
+            # epic, milestone, phase) — you complete its children, not the
+            # container. Declarative (the type-schema `container` flag), the SAME
+            # predicate behind work_ready's startable=False, so the two cannot
+            # diverge. Manual start_work / update --status on a container is
+            # unaffected — only this auto-picker skips them.
+            if tpl.container:
+                skipped += 1
+                logger.debug("start_next_work: skipping container %s (type %r)", issue.id, issue.type)
+                continue
+
             # Resolve target_status per-candidate, lock-free. When no explicit
             # target was given, a candidate that has no single-hop wip target
-            # (e.g. a ``triage`` bug — ready but not startable,
-            # filigree-406e6b7ee0) or an ambiguous one is *skipped*, not fatal:
-            # "ready" no longer implies "startable", so start_next_work walks
-            # past it to the next candidate instead of throwing on the queue.
-            # An explicit ``target_status`` keeps its original error contract
-            # (handled below via ``first_explicit_transition_error``).
+            # (e.g. a ``triage`` bug) or an ambiguous one is *skipped*, not fatal.
             if target_status is None:
-                tpl = self.templates.get_type(issue.type)
-                if tpl is None:
-                    skipped += 1
-                    logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
-                    continue
                 try:
                     this_path = tpl.soft_path_to_working_status(issue.status) if advance else [tpl.reachable_working_status(issue.status)]
                 except (InvalidTransitionError, AmbiguousTransitionError) as exc:

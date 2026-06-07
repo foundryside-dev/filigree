@@ -172,6 +172,10 @@ class TestStartNextWorkRollbackPreservesPriorClaim:
     def test_failed_target_status_preserves_prior_claim(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Pre-owned ready", priority=1)
         db.claim_issue(issue.id, assignee="alice")
+        # A startable leaf candidate the picker will actually attempt (the
+        # auto-seeded release is a non-startable container post-F3, so it can no
+        # longer be the candidate that surfaces the invalid-target error).
+        db.create_issue("Other startable ready", type="task", priority=2)
 
         with pytest.raises(ValueError, match="Invalid status"):
             db.start_next_work(assignee="alice", target_status="nonexistent_status")
@@ -229,6 +233,50 @@ class TestStartableVsReady:
         assert "confirmed" in str(exc_info.value)
         # Named start_work must not silently no-op into a claim.
         assert db.get_issue(bug.id).assignee == ""
+
+
+class TestContainerNotStartable:
+    """F3 (weft-1ce99ceda8 sibling): aggregate/container types (release, epic,
+    milestone, phase) are ready but never STARTABLE — the work picker completes
+    their children, it never hands out the container itself.
+    """
+
+    def test_work_ready_marks_seeded_release_not_startable(self, db: FiligreeDB) -> None:
+        # A fresh project auto-seeds a "Future" [release] in `planning`. It is
+        # ready (open, unassigned, unblocked) but must NOT be startable.
+        ready = db.get_ready()
+        releases = [i for i in ready if i.type == "release"]
+        assert releases, "expected the auto-seeded Future release in the ready set"
+        startable, next_action = db.issue_startability(releases[0])
+        assert startable is False
+        assert next_action == "complete child issues"
+
+    def test_start_next_work_skips_container_only_ready_set(self, db: FiligreeDB) -> None:
+        # The only ready item is the seeded release container → no startable work.
+        result = db.start_next_work(assignee="alice")
+        assert result is None
+        # The container is never claimed.
+        releases = [i for i in db.get_ready() if i.type == "release"]
+        assert releases
+        assert releases[0].assignee == ""
+
+    def test_start_next_work_picks_leaf_over_container(self, db: FiligreeDB) -> None:
+        epic = db.create_issue("An epic", type="epic", priority=1)
+        task = db.create_issue("A task", type="task", priority=2)
+
+        result = db.start_next_work(assignee="alice")
+
+        assert result is not None
+        assert result.id == task.id
+        # The higher-priority epic container was skipped, not claimed.
+        assert db.get_issue(epic.id).assignee == ""
+
+    def test_manual_status_update_on_container_still_allowed(self, db: FiligreeDB) -> None:
+        """Only the auto-picker + startable flag change — an operator can still
+        move a container by hand (the soft open->in_progress edge stays valid)."""
+        epic = db.create_issue("An epic", type="epic", priority=1)
+        db.update_issue(epic.id, status="in_progress")
+        assert db.get_issue(epic.id).status == "in_progress"
 
 
 class TestAdvanceMultiHop:
@@ -310,6 +358,24 @@ class TestStartability:
         startable, next_action = tpl.startability("fixing")
         assert startable is True
         assert next_action is None
+
+    def test_container_type_not_startable_even_with_single_hop_wip(self, db: FiligreeDB) -> None:
+        """F3: an aggregate/container type (epic) is never startable, even though
+        its open->in_progress soft edge gives a unique single-hop wip target that
+        would otherwise make startability() return True. The declarative container
+        flag short-circuits before the wip-target check."""
+        tpl = db.templates.get_type("epic")
+        assert tpl is not None
+        assert tpl.container is True
+        startable, next_action = tpl.startability("open")
+        assert startable is False
+        assert next_action == "complete child issues"
+
+    def test_leaf_types_are_not_containers(self, db: FiligreeDB) -> None:
+        for leaf in ("task", "bug", "feature"):
+            tpl = db.templates.get_type(leaf)
+            assert tpl is not None
+            assert tpl.container is False, leaf
 
 
 class TestPriorityTypeValidation:
