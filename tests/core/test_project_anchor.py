@@ -261,7 +261,7 @@ class TestFindFiligreeAnchor:
     def test_returns_conf_path_for_v2_install(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": ".filigree/filigree.db"})
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -269,7 +269,7 @@ class TestFindFiligreeAnchor:
         """Legacy install: project_root is identified, conf_path is None."""
         legacy_dir = tmp_path / FILIGREE_DIR_NAME
         legacy_dir.mkdir()
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path is None
 
@@ -305,7 +305,7 @@ class TestFindFiligreeAnchor:
         original_mode = tmp_path.stat().st_mode
         os.chmod(tmp_path, 0o555)  # noqa: S103 — read-only mode is the test scenario
         try:
-            project_root, conf_path = find_filigree_anchor(tmp_path)
+            project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         finally:
             os.chmod(tmp_path, original_mode)
 
@@ -323,7 +323,7 @@ class TestFindFiligreeAnchor:
         child_conf = child / CONF_FILENAME
         write_conf(child_conf, {"version": 1, "project_name": "c", "prefix": "c", "db": ".filigree/filigree.db"})
 
-        project_root, conf_path = find_filigree_anchor(child)
+        project_root, conf_path, _store = find_filigree_anchor(child)
         assert project_root == child
         assert conf_path == child_conf
 
@@ -405,7 +405,7 @@ class TestForeignDatabaseDetection:
         conf = tmp_path / CONF_FILENAME
         write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": ".filigree/filigree.db"})
 
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -417,7 +417,7 @@ class TestForeignDatabaseDetection:
         sub = tmp_path / "src" / "deep"
         sub.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(sub)
+        project_root, conf_path, _store = find_filigree_anchor(sub)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -430,7 +430,7 @@ class TestForeignDatabaseDetection:
         sub = tmp_path / "sub"
         sub.mkdir()
 
-        project_root, _conf_path = find_filigree_anchor(sub)
+        project_root, _conf_path, _store = find_filigree_anchor(sub)
         assert project_root == tmp_path
 
     def test_find_filigree_conf_also_enforces_boundary(self, tmp_path: Path) -> None:
@@ -522,7 +522,7 @@ class TestGitWorktreeDiscovery:
         main = self._make_main_repo(tmp_path)
         wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
 
-        project_root, conf_path = find_filigree_anchor(wt)
+        project_root, conf_path, _store = find_filigree_anchor(wt)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -531,7 +531,7 @@ class TestGitWorktreeDiscovery:
         main = self._make_main_repo(tmp_path)
         wt = self._make_worktree(main, tmp_path / "sibling-worktree", "sibling")
 
-        project_root, conf_path = find_filigree_anchor(wt)
+        project_root, conf_path, _store = find_filigree_anchor(wt)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -542,7 +542,7 @@ class TestGitWorktreeDiscovery:
         deep = wt / "src" / "pkg"
         deep.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -607,7 +607,7 @@ class TestGitWorktreeDiscovery:
         ordinary_dir = wt / "src" / "pkg"
         ordinary_dir.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(ordinary_dir)
+        project_root, conf_path, _store = find_filigree_anchor(ordinary_dir)
 
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
@@ -624,7 +624,7 @@ class TestGitWorktreeDiscovery:
         (wt / ".git").write_text(f"gitdir: {rel}\n")
         (wt_admin / "gitdir").write_text(f"{wt / '.git'}\n")
 
-        project_root, _ = find_filigree_anchor(wt)
+        project_root, _, _store = find_filigree_anchor(wt)
         assert project_root == main
 
     def test_copied_worktree_root_conf_without_metadata_rolls_up_to_main(self, tmp_path: Path) -> None:
@@ -643,7 +643,7 @@ class TestGitWorktreeDiscovery:
 
         assert not (wt / FILIGREE_DIR_NAME).exists()
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
         assert find_filigree_conf(deep) == main / CONF_FILENAME
@@ -673,7 +673,7 @@ class TestGitWorktreeDiscovery:
         assert not (tracked_dir / CONFIG_FILENAME).exists()
         assert (tracked_dir / DB_FILENAME).exists()
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
         assert find_filigree_conf(deep) == main / CONF_FILENAME
@@ -691,7 +691,7 @@ class TestGitWorktreeDiscovery:
         deep = wt / "src" / "pkg"
         deep.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == wt
         assert conf_path == wt / CONF_FILENAME
         assert find_filigree_conf(deep) == wt / CONF_FILENAME
@@ -715,7 +715,7 @@ class TestGitWorktreeDiscovery:
         )
 
         # From inside the nested sub-project: nested wins, not main.
-        project_root, conf_path = find_filigree_anchor(nested / "src")
+        project_root, conf_path, _store = find_filigree_anchor(nested / "src")
         assert project_root == nested
         assert conf_path == nested_conf
 
@@ -724,7 +724,7 @@ class TestGitWorktreeDiscovery:
 
         # And from the worktree root itself (above nested): we redirect to
         # main (no nested anchor in this direct ancestry).
-        project_root, _ = find_filigree_anchor(wt)
+        project_root, _, _store = find_filigree_anchor(wt)
         assert project_root == main
 
     def test_nested_legacy_dir_inside_worktree_wins_over_main(self, tmp_path: Path) -> None:
@@ -735,7 +735,7 @@ class TestGitWorktreeDiscovery:
         nested.mkdir()
         (nested / FILIGREE_DIR_NAME).mkdir()
 
-        project_root, conf_path = find_filigree_anchor(nested / "deep" / "code")
+        project_root, conf_path, _store = find_filigree_anchor(nested / "deep" / "code")
         assert project_root == nested
         assert conf_path is None
 
@@ -873,8 +873,14 @@ class TestFindFiligreeRoot:
         Regression: returning ``db_path.parent`` made ``mcp_server._run`` reopen
         ``storage/filigree.db`` instead of the configured ``storage/track.db``,
         and made ``install`` derive the wrong project root via ``.parent``.
+
+        Under the WEFT store consolidation ``find_filigree_root`` returns the
+        resolved store dir (presence-probe), independently of the relocated
+        ``db``. A legacy relocated-db install keeps its ``.filigree/`` metadata
+        dir, so the store dir resolves there — never to ``storage/``.
         """
         (tmp_path / "storage").mkdir()
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
         write_conf(
             tmp_path / CONF_FILENAME,
             {"version": 1, "project_name": "p", "prefix": "p", "db": "storage/track.db"},

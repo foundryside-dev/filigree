@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
-from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, read_config
+from filigree.core import DB_FILENAME, read_config
 from tests.cli.conftest import _extract_id
 
 
@@ -22,8 +22,9 @@ class TestInit:
         try:
             result = cli_runner.invoke(cli, ["init"])
             assert result.exit_code == 0
-            assert (tmp_path / FILIGREE_DIR_NAME).is_dir()
-            assert (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).exists()
+            store = tmp_path / ".weft" / "filigree"
+            assert store.is_dir()
+            assert (store / DB_FILENAME).exists()
         finally:
             os.chdir(original)
 
@@ -33,7 +34,7 @@ class TestInit:
         try:
             result = cli_runner.invoke(cli, ["init", "--prefix", "myproj"])
             assert result.exit_code == 0
-            config = read_config(tmp_path / FILIGREE_DIR_NAME)
+            config = read_config(tmp_path / ".weft" / "filigree")
             assert config["prefix"] == "myproj"
         finally:
             os.chdir(original)
@@ -42,7 +43,7 @@ class TestInit:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["init"])
         assert result.exit_code == 0
-        assert "already exists" in result.output
+        assert "already initialized" in result.output
 
 
 class TestCreate:

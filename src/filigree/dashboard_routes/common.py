@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from fastapi.responses import JSONResponse
     from starlette.requests import Request
 
-from filigree.core import FILIGREE_DIR_NAME, FiligreeDB, read_config
+from filigree.core import FiligreeDB, read_config
 from filigree.types.api import ErrorCode, ErrorResponse, parse_response_detail
 from filigree.validation import sanitize_actor as _sanitize_actor
 
@@ -233,14 +233,11 @@ def _read_graph_runtime_config(db: FiligreeDB) -> dict[str, Any]:
     Note: read_config() already handles JSONDecodeError/OSError internally
     and returns defaults, so no outer try/except is needed here.
     """
-    # ``read_config`` expects the ``.filigree/`` metadata directory.
-    # For ``.filigree.conf`` projects the DB may be relocated (e.g.
-    # ``storage/track.db``), so ``db_path.parent`` is not the metadata
-    # dir — derive it from ``project_root`` when present, and only fall
-    # back to ``db_path.parent`` for the legacy ``.filigree/filigree.db``
-    # layout where they coincide.
-    config_dir = db.project_root / FILIGREE_DIR_NAME if db.project_root is not None else db.db_path.parent
-    return dict(read_config(config_dir))
+    # ``read_config`` expects the machine-owned store/metadata directory
+    # (``.weft/filigree/`` or legacy ``.filigree/``). ``db.meta_dir`` is the
+    # resolved store dir, set by the anchor-aware constructors, independent of
+    # where the conf's ``db`` field relocated the database file.
+    return dict(read_config(db.meta_dir))
 
 
 def _coerce_config_bool(value: Any, name: str) -> bool:

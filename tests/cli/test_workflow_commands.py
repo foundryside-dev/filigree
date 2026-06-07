@@ -247,7 +247,7 @@ class TestWorkflowCli:
         from filigree.types.api import ErrorCode
 
         runner, project_root = cli_in_project
-        config_path = project_root / ".filigree" / "config.json"
+        config_path = project_root / ".weft" / "filigree" / "config.json"
         config_path.write_text("{not valid json")
 
         result = runner.invoke(cli, ["templates", "reload", "--json"])
@@ -259,7 +259,7 @@ class TestWorkflowCli:
     def test_templates_reload_corrupt_config_plain_text(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """Bug filigree-259e5b58ef: without --json, corrupt config still exits non-zero with a clean message."""
         runner, project_root = cli_in_project
-        config_path = project_root / ".filigree" / "config.json"
+        config_path = project_root / ".weft" / "filigree" / "config.json"
         config_path.write_text("{not valid json")
 
         result = runner.invoke(cli, ["templates", "reload"])
@@ -273,7 +273,7 @@ class TestWorkflowCli:
         Mirrors tests/mcp/test_tools.py::test_reload_templates_refreshes_context_md.
         """
         runner, project_root = cli_in_project
-        summary_path = project_root / ".filigree" / "context.md"
+        summary_path = project_root / ".weft" / "filigree" / "context.md"
         summary_path.write_text("STALE-MARKER-BEFORE-RELOAD")
 
         result = runner.invoke(cli, ["templates", "reload"])
@@ -1292,7 +1292,7 @@ class TestEventsCli:
         from filigree.core import FiligreeDB
 
         _, project_root = cli_in_project
-        db = FiligreeDB.from_filigree_dir(project_root / ".filigree")
+        db = FiligreeDB.from_project(project_root)
         issue = db.create_issue("boundary test")
         db.conn.execute(
             "UPDATE events SET created_at = ? WHERE issue_id = ?",
@@ -1322,7 +1322,7 @@ class TestEventsCli:
         from filigree.core import FiligreeDB
 
         runner, project_root = cli_in_project
-        db = FiligreeDB.from_filigree_dir(project_root / ".filigree")
+        db = FiligreeDB.from_project(project_root)
         issue = db.create_issue("non-utc test")
         # Event at 12:30 UTC, half an hour after the cursor's chronological time.
         db.conn.execute(

@@ -12,13 +12,13 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from filigree.cli import cli
-from filigree.core import FILIGREE_DIR_NAME, FiligreeDB
+from filigree.core import FiligreeDB
 from filigree.finding_issue_cascade import record_reconciliation_debt_comment
 from tests.cli.conftest import _extract_id
 
 
 def _record_debt(project: Path, issue_id: str, text: str) -> None:
-    db = FiligreeDB.from_filigree_dir(project / FILIGREE_DIR_NAME)
+    db = FiligreeDB.from_project(project)
     record_reconciliation_debt_comment(db.conn, issue_id, text)
     db.close()
 

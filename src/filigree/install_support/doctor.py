@@ -26,7 +26,7 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     ForeignDatabaseError,
-    find_filigree_root,
+    find_filigree_anchor,
     read_conf,
     read_schema_version,
 )
@@ -669,43 +669,43 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     results: list[CheckResult] = []
     cwd = project_root or Path.cwd()
 
-    # 1. Check .filigree/ exists
-    filigree_dir = cwd / FILIGREE_DIR_NAME
-    if not filigree_dir.is_dir():
-        # Try walking up
-        try:
-            filigree_dir = find_filigree_root(cwd)
-        except ForeignDatabaseError as exc:
-            # Walk-up crossed a .git/ boundary — surface the full message so
-            # users (and agents) see exactly why we refused to open the
-            # ancestor anchor.  ``ForeignDatabaseError`` is also a
-            # ``FileNotFoundError`` so the generic handler would otherwise
-            # swallow it into a bland "No .filigree/ found" line.
-            results.append(
-                CheckResult(
-                    ".filigree/ directory",
-                    False,
-                    str(exc),
-                    fix_hint=f"Run `filigree init` in {exc.git_boundary} (this project).",
-                )
+    # 1. Resolve the project store directory (federation .weft/filigree/ or
+    # legacy .filigree/) via the single anchor resolver so project_root is
+    # correct regardless of layout (.weft/filigree/.parent is .weft, NOT root).
+    try:
+        anchor = find_filigree_anchor(cwd)
+    except ForeignDatabaseError as exc:
+        # Walk-up crossed a .git/ boundary — surface the full message so
+        # users (and agents) see exactly why we refused to open the
+        # ancestor anchor.  ``ForeignDatabaseError`` is also a
+        # ``FileNotFoundError`` so the generic handler would otherwise
+        # swallow it into a bland "No .filigree/ found" line.
+        results.append(
+            CheckResult(
+                ".filigree/ directory",
+                False,
+                str(exc),
+                fix_hint=f"Run `filigree init` in {exc.git_boundary} (this project).",
             )
-            return results  # Can't proceed without a local anchor
-        except FileNotFoundError:
-            results.append(
-                CheckResult(
-                    ".filigree/ directory",
-                    False,
-                    f"No {FILIGREE_DIR_NAME}/ found in {cwd} or parents",
-                    fix_hint="Run: filigree init",
-                )
+        )
+        return results  # Can't proceed without a local anchor
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                ".filigree/ directory",
+                False,
+                f"No {FILIGREE_DIR_NAME}/ found in {cwd} or parents",
+                fix_hint="Run: filigree init",
             )
-            return results  # Can't proceed without .filigree/
+        )
+        return results  # Can't proceed without a store dir
+    filigree_dir = anchor.store_dir
     results.append(CheckResult(".filigree/ directory", True, f"Found at {filigree_dir}"))
 
     # 1b. Check .filigree.conf anchor (v2.0). Warn if missing — this means the
     # project predates the conf anchor; running any filigree command will
     # auto-backfill on first open, but flagging it lets users see it's pending.
-    project_root = filigree_dir.parent
+    project_root = anchor.project_root
     conf_path = project_root / CONF_FILENAME
     # conf_db_path is the authoritative DB location when the conf declares it;
     # falls back to .filigree/DB_FILENAME for legacy installs or unreadable confs.
@@ -951,7 +951,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # Uses the same gitignore-aware parser as ``ensure_gitignore`` so the two
     # paths can't drift on edge cases (comments, ``!``-negations, non-root
     # substrings) — see filigree-bc5d2af1ef for the previous divergence.
-    gitignore = (filigree_dir.parent) / ".gitignore"
+    gitignore = project_root / ".gitignore"
     if gitignore.exists():
         try:
             content = gitignore.read_text()
@@ -987,7 +987,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 6. Check MCP configuration — Claude Code
-    mcp_json = (filigree_dir.parent) / ".mcp.json"
+    mcp_json = project_root / ".mcp.json"
     if mcp_json.exists():
         try:
             mcp = json.loads(mcp_json.read_text())
@@ -1065,7 +1065,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     results.append(_check_codex_mcp(filigree_dir))
 
     # 8. Check Claude Code hooks
-    settings_json = (filigree_dir.parent) / ".claude" / "settings.json"
+    settings_json = project_root / ".claude" / "settings.json"
     if settings_json.exists():
         try:
             s = json.loads(settings_json.read_text())
@@ -1123,7 +1123,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 9. Check Claude Code skills
-    skill_md = (filigree_dir.parent) / ".claude" / "skills" / SKILL_NAME / SKILL_MARKER
+    skill_md = project_root / ".claude" / "skills" / SKILL_NAME / SKILL_MARKER
     if skill_md.exists():
         results.append(CheckResult("Claude Code skills", True, f"{SKILL_NAME} skill installed"))
     else:
@@ -1137,7 +1137,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 9b. Check Codex skills
-    codex_skill_md = (filigree_dir.parent) / ".agents" / "skills" / SKILL_NAME / SKILL_MARKER
+    codex_skill_md = project_root / ".agents" / "skills" / SKILL_NAME / SKILL_MARKER
     if codex_skill_md.exists():
         results.append(CheckResult("Codex skills", True, f"{SKILL_NAME} skill installed"))
     else:
@@ -1151,7 +1151,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 10. Check CLAUDE.md has instructions
-    claude_md = (filigree_dir.parent) / "CLAUDE.md"
+    claude_md = project_root / "CLAUDE.md"
     if claude_md.exists():
         try:
             content = claude_md.read_text()
@@ -1187,7 +1187,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 11. Check AGENTS.md has instructions
-    agents_md = (filigree_dir.parent) / "AGENTS.md"
+    agents_md = project_root / "AGENTS.md"
     if agents_md.exists():
         try:
             content = agents_md.read_text()
@@ -1236,7 +1236,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # 15. Check git working tree status
     try:
         result = subprocess.run(
-            ["git", "-C", str(filigree_dir.parent), "status", "--porcelain"],
+            ["git", "-C", str(project_root), "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=5,

@@ -21,7 +21,15 @@ from typing import TypedDict
 
 import portalocker
 
-from filigree.core import CONF_FILENAME, DB_FILENAME, read_conf, read_config, write_atomic
+from filigree.core import (
+    CONF_FILENAME,
+    DB_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
+    read_conf,
+    read_config,
+    write_atomic,
+)
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.ephemeral import is_pid_alive, read_pid_file, verify_pid_ownership, write_pid_file
 
@@ -55,8 +63,20 @@ class ServerConfig:
             raise ValueError(f"port must be between 1 and 65535, got {self.port}")
 
 
+def _project_root_from_store_dir(store_dir: Path) -> Path:
+    """Return the project root for a registered store dir, layout-aware.
+
+    ``.weft/filigree/`` is two segments below the project root; legacy
+    ``.filigree/`` is one. Using ``store_dir.parent`` blindly would point a
+    federation-layout store's conf lookup at ``.weft/`` instead of the root.
+    """
+    if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
+        return store_dir.parent.parent
+    return store_dir.parent
+
+
 def _project_db_path(filigree_dir: Path) -> Path:
-    conf_path = filigree_dir.parent / CONF_FILENAME
+    conf_path = _project_root_from_store_dir(filigree_dir) / CONF_FILENAME
     if conf_path.is_file():
         conf = read_conf(conf_path)
         db_name: str = conf["db"]

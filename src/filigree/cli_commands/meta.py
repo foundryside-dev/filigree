@@ -266,7 +266,7 @@ def mcp_status(as_json: bool) -> None:
     # Lazy import: mcp_server pulls in mcp.server + starlette, which we do not
     # want to load on every CLI invocation. Mirror the MCP handler, which also
     # imports get_mcp_status_payload lazily (mcp_tools/workflow.py).
-    from filigree.core import FILIGREE_DIR_NAME, ProjectNotInitialisedError, find_filigree_anchor
+    from filigree.core import ProjectNotInitialisedError, find_filigree_anchor
     from filigree.mcp_server import _attempt_startup, get_mcp_status_payload
 
     # Resolve the project anchor exactly as the MCP server's _run() does, then
@@ -274,14 +274,14 @@ def mcp_status(as_json: bool) -> None:
     # reflects real project state (calling get_mcp_status_payload cold would
     # report "not_initialized" off the uninitialized globals).
     try:
-        project_root, conf_path = find_filigree_anchor()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         from filigree.cli_common import _emit_startup_failure
 
         _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
         sys.exit(1)
 
-    _attempt_startup(project_root / FILIGREE_DIR_NAME, conf_path=conf_path)
+    _attempt_startup(anchor.store_dir, conf_path=anchor.conf_path)
     payload = get_mcp_status_payload()
 
     if as_json:

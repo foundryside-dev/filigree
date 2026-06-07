@@ -49,11 +49,11 @@ from filigree import __version__
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
-    FILIGREE_DIR_NAME,
     FiligreeDB,
     ProjectNotInitialisedError,
     find_filigree_anchor,
     read_config,
+    store_dir_to_project_root,
 )
 
 # Re-export so test imports continue to work.
@@ -202,15 +202,22 @@ def _open_db_for_filigree_dir(
     config disables fallback would fail to construct against an offline
     Loomweave even though the operator just asked for fallback at startup.
     """
-    conf_path = filigree_dir.parent / CONF_FILENAME
+    # *filigree_dir* is a resolved store dir (legacy ``.filigree/`` or
+    # federation ``.weft/filigree/``). The conf anchor sits at the PROJECT ROOT,
+    # which is two segments up for the federation layout — derive it layout-aware
+    # rather than via a naive ``.parent`` (which would look in ``.weft/``).
+    project_root = store_dir_to_project_root(filigree_dir)
+    conf_path = project_root / CONF_FILENAME
     if conf_path.is_file():
         return FiligreeDB.from_conf(
             conf_path,
+            store_dir=filigree_dir,
             check_same_thread=check_same_thread,
             allow_local_fallback_override=allow_local_fallback_override,
         )
-    return FiligreeDB.from_filigree_dir(
+    return FiligreeDB.from_store_dir(
         filigree_dir,
+        project_root=project_root,
         check_same_thread=check_same_thread,
         allow_local_fallback_override=allow_local_fallback_override,
     )
@@ -979,12 +986,12 @@ def main(
         logger.info("Server mode: loaded %d project(s)", n)
     else:
         try:
-            project_root, _conf_path = find_filigree_anchor()
-            filigree_dir = project_root / FILIGREE_DIR_NAME
+            anchor = find_filigree_anchor()
+            filigree_dir = anchor.store_dir
             config = read_config(filigree_dir)
             _config.update(config)
-            db = _open_db_for_filigree_dir(
-                filigree_dir,
+            db = FiligreeDB.from_anchor(
+                anchor,
                 check_same_thread=False,
                 allow_local_fallback_override=True if allow_local_fallback else None,
             )

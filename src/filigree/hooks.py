@@ -22,12 +22,12 @@ from urllib.error import URLError
 import portalocker
 
 from filigree.core import (
-    FILIGREE_DIR_NAME,
     FiligreeDB,
     ForeignDatabaseError,
     find_filigree_command,
     find_filigree_conf,
     get_mode,
+    resolve_store_dir,
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
@@ -276,7 +276,7 @@ def generate_session_context() -> str | None:
         return None
 
     project_root = conf_path.parent
-    filigree_dir = project_root / FILIGREE_DIR_NAME
+    filigree_dir = resolve_store_dir(project_root)
 
     # Check instruction freshness (best-effort — don't let failures block context)
     freshness_messages: list[str] = []
@@ -352,7 +352,7 @@ def _find_agent_filigree_dir() -> Path:
     project.
     """
     conf_path = find_filigree_conf()
-    return conf_path.parent / FILIGREE_DIR_NAME
+    return resolve_store_dir(conf_path.parent)
 
 
 def ensure_dashboard_running(port: int | None = None) -> str:

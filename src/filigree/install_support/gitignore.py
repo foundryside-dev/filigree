@@ -15,15 +15,18 @@ from __future__ import annotations
 # (including the root); the ``/``-anchored variants are explicitly root-scoped.
 FILIGREE_IGNORE_RULES: frozenset[str] = frozenset({".filigree", ".filigree/", "/.filigree", "/.filigree/"})
 
+# The federation store dir (``.weft/filigree/`` lives under it). ``.weft/`` is
+# shared by all members, so the root-level rule ignores the whole shared dir.
+WEFT_IGNORE_RULES: frozenset[str] = frozenset({".weft", ".weft/", "/.weft", "/.weft/"})
 
-def has_active_filigree_ignore(content: str) -> bool:
-    """Return True if *content* has an active ignore rule for project-root ``.filigree/``.
+
+def has_active_ignore(content: str, rules: frozenset[str]) -> bool:
+    """Return True if *content* has an active gitignore rule in *rules*.
 
     Honours gitignore syntax: blank lines and ``#`` comments are skipped,
     trailing whitespace is stripped. ``!``-prefixed negations are processed
-    in declaration order — a later ``!.filigree/`` un-ignores an earlier
-    ``.filigree/`` rule, matching ``git``'s actual semantics. Substring
-    matches (``src/.filigree/cache/``, ``#.filigree/``) do not count.
+    in declaration order — a later ``!<rule>`` un-ignores an earlier rule,
+    matching ``git``'s actual semantics. Substring matches do not count.
     """
     state: bool | None = None
     for raw_line in content.splitlines():
@@ -35,6 +38,16 @@ def has_active_filigree_ignore(content: str) -> bool:
             continue
         negated = stripped.startswith("!")
         candidate = stripped[1:] if negated else stripped
-        if candidate in FILIGREE_IGNORE_RULES:
+        if candidate in rules:
             state = not negated
     return state is True
+
+
+def has_active_filigree_ignore(content: str) -> bool:
+    """Return True if *content* actively ignores project-root ``.filigree/``."""
+    return has_active_ignore(content, FILIGREE_IGNORE_RULES)
+
+
+def has_active_weft_ignore(content: str) -> bool:
+    """Return True if *content* actively ignores project-root ``.weft/``."""
+    return has_active_ignore(content, WEFT_IGNORE_RULES)

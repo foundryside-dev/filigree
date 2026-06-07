@@ -306,14 +306,14 @@ class TestProjectStore:
         """filigree-732f6b31e4: concurrent first get_db() must open exactly once.
 
         Without the internal lock, two threads each pass the cache-miss check
-        and each call ``FiligreeDB.from_filigree_dir`` (which migrates and
+        and each call ``FiligreeDB.from_store_dir`` (which migrates and
         seeds-inserts), only the loser's handle gets cached, and the winner's
         handle is leaked unclosed.
         """
         import threading
         from unittest.mock import patch
 
-        original = FiligreeDB.from_filigree_dir
+        original = FiligreeDB.from_store_dir
         opened: list[FiligreeDB] = []
         opened_lock = threading.Lock()
         gate = threading.Event()
@@ -334,7 +334,7 @@ class TestProjectStore:
             with results_lock:
                 results.append(db)
 
-        with patch.object(FiligreeDB, "from_filigree_dir", side_effect=slow_open):
+        with patch.object(FiligreeDB, "from_store_dir", side_effect=slow_open):
             t1 = threading.Thread(target=worker)
             t2 = threading.Thread(target=worker)
             t1.start()
@@ -344,7 +344,7 @@ class TestProjectStore:
             t1.join(timeout=5.0)
             t2.join(timeout=5.0)
 
-        assert len(opened) == 1, f"from_filigree_dir called {len(opened)}x, expected 1 (race / leak)"
+        assert len(opened) == 1, f"from_store_dir called {len(opened)}x, expected 1 (race / leak)"
         assert len(results) == 2
         assert results[0] is results[1], "both threads must observe the same cached handle"
         assert project_store._dbs["alpha"] is opened[0]

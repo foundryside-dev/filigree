@@ -18,7 +18,6 @@ import click
 
 from filigree import actor_identity
 from filigree.core import (
-    FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
     ProjectNotInitialisedError,
@@ -199,12 +198,12 @@ def get_db() -> FiligreeDB:
     its own ``SCHEMA_MISMATCH`` code.
     """
     try:
-        project_root, conf_path = find_filigree_anchor()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
         sys.exit(1)
     try:
-        db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
+        db = FiligreeDB.from_anchor(anchor)
         # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
         # session so every runtime insert records verified_actor. Resolution
         # never raises and never blocks; None leaves verified_actor NULL.

@@ -41,10 +41,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from filigree.core import (
     CONF_FILENAME,
-    FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
     find_filigree_conf,
+    resolve_store_dir,
+    store_dir_to_project_root,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
@@ -129,20 +130,17 @@ def _get_filigree_dir() -> Path | None:
 
 
 def _resolve_request_filigree_dir(active_db: FiligreeDB) -> Path:
-    """Return the project metadata directory (``project_root/.filigree``)
-    for the active per-request DB, used to anchor ``_safe_path()``.
+    """Return the project metadata/store directory for the active per-request
+    DB, used to anchor ``_safe_path()``.
 
-    For v2.0 conf-built DBs the ``db`` may be relocated outside ``.filigree/``,
-    so ``db_path.parent`` is the project root, not the metadata dir; using it
-    as the anchor would let ``_safe_path()`` resolve up one level into the
-    project's parent. ``FiligreeDB.project_root`` is the source of truth — both
-    ``from_filigree_dir`` and ``from_conf`` set it. Fall back to
-    ``db_path.parent`` only for legacy direct ``FiligreeDB(...)`` constructions
-    that did not set ``project_root`` (chiefly older tests).
+    For v2.0 conf-built DBs the ``db`` may be relocated outside the store dir,
+    so ``db_path.parent`` is not necessarily the metadata dir; using it as the
+    anchor would let ``_safe_path()`` resolve into the wrong directory.
+    ``FiligreeDB.meta_dir`` is the source of truth — the anchor-aware
+    constructors (``from_anchor`` / ``from_conf`` / ``from_filigree_dir``) set it
+    to the resolved store dir (``.weft/filigree/`` or legacy ``.filigree/``).
     """
-    if active_db.project_root is not None:
-        return active_db.project_root / FILIGREE_DIR_NAME
-    return active_db.db_path.parent
+    return active_db.meta_dir
 
 
 def _refresh_summary() -> None:
@@ -211,7 +209,7 @@ def _safe_path(raw: str) -> Path:
     if filigree_dir is None:
         msg = "Project directory not initialized"
         raise ValueError(msg)
-    return safe_path(raw, filigree_dir.parent)
+    return safe_path(raw, store_dir_to_project_root(filigree_dir))
 
 
 def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
@@ -1137,11 +1135,12 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
 
     When ``conf_path`` is provided, opens the DB declared by ``.filigree.conf``
     via :meth:`FiligreeDB.from_conf` so v2.0 relocated layouts (e.g.
-    ``db: "track.db"``) are honoured. Otherwise opens the legacy
-    ``.filigree/filigree.db`` via :meth:`FiligreeDB.from_filigree_dir`.
-    ``filigree_dir`` always remains the metadata directory
-    (``project_root/.filigree``) and anchors logs / summary / ephemeral PID
-    regardless of where the DB itself lives.
+    ``db: ".weft/filigree/filigree.db"``) are honoured. Otherwise opens the
+    legacy ``.filigree/filigree.db`` via :meth:`FiligreeDB.from_filigree_dir`.
+    ``filigree_dir`` is the resolved machine-owned **store** directory
+    (``.weft/filigree/`` or legacy ``.filigree/``); it anchors logs / summary /
+    ephemeral PID and is threaded into ``from_conf`` as the metadata dir so
+    config / runtime resolution agrees with the DB open.
 
     On a forward schema mismatch the server stays up: ``db`` remains ``None``,
     ``_schema_mismatch`` is set, and every ``call_tool`` short-circuits to a
@@ -1159,7 +1158,11 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
 
     _filigree_dir = filigree_dir
     try:
-        db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
+        db = (
+            FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+            if conf_path is not None
+            else FiligreeDB.from_store_dir(filigree_dir, project_root=store_dir_to_project_root(filigree_dir))
+        )
         # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
         # session so every runtime insert records verified_actor. Resolution
         # never raises and never blocks; None leaves verified_actor NULL.
@@ -1194,7 +1197,7 @@ async def _run(project_path: Path | None) -> None:
         # CLI surface (cli_common.get_db) does and stdio MCP must agree, or
         # a v2.0 conf-relocated project gets two divergent databases.
         conf_path: Path | None = (project_path / CONF_FILENAME) if (project_path / CONF_FILENAME).is_file() else None
-        filigree_dir = project_path / FILIGREE_DIR_NAME
+        filigree_dir = resolve_store_dir(project_path)
         if not filigree_dir.is_dir():
             print(f"Error: {filigree_dir} not found. Run 'filigree init' first.", file=sys.stderr)
             sys.exit(1)
@@ -1207,7 +1210,7 @@ async def _run(project_path: Path | None) -> None:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         project_root = conf_path.parent
-        filigree_dir = project_root / FILIGREE_DIR_NAME
+        filigree_dir = resolve_store_dir(project_root)
 
     _attempt_startup(filigree_dir, conf_path=conf_path)
 

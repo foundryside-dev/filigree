@@ -53,6 +53,9 @@ from filigree.install_support.gitignore import (
 from filigree.install_support.gitignore import (
     has_active_filigree_ignore as _has_active_filigree_ignore,
 )
+from filigree.install_support.gitignore import (
+    has_active_weft_ignore as _has_active_weft_ignore,
+)
 from filigree.install_support.hooks import (
     ENSURE_DASHBOARD_COMMAND,
     SESSION_CONTEXT_COMMAND,
@@ -355,25 +358,33 @@ def _inject_instructions_locked(file_path: Path) -> tuple[bool, str]:
 
 
 def ensure_gitignore(project_root: Path) -> tuple[bool, str]:
-    """Ensure .filigree/ is in .gitignore."""
+    """Ensure the project-root ``.gitignore`` ignores ``.weft/`` and ``.filigree/``.
+
+    ``.weft/`` is the federation store dir for new installs; ``.filigree/`` is
+    the legacy dot-dir (kept so back-compat installs stay ignored). Each rule is
+    added only when not already active, honouring gitignore negation semantics.
+    """
     try:
         gitignore = project_path(project_root, ".gitignore")
     except UnsafeInstallPathError as exc:
         return False, str(exc)
-    filigree_pattern = ".filigree/"
 
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if _has_active_filigree_ignore(content):
-            return True, ".filigree/ already in .gitignore"
-        if not content.endswith("\n"):
-            content += "\n"
-        content += f"\n# Filigree issue tracker\n{filigree_pattern}\n"
-        _atomic_write_text(gitignore, content)
-        return True, f"Added {filigree_pattern} to .gitignore"
-    else:
-        _atomic_write_text(gitignore, f"# Filigree issue tracker\n{filigree_pattern}\n")
-        return True, f"Created .gitignore with {filigree_pattern}"
+    content = gitignore.read_text() if gitignore.exists() else ""
+    additions: list[str] = []
+    if not _has_active_weft_ignore(content):
+        additions.append(".weft/")
+    if not _has_active_filigree_ignore(content):
+        additions.append(".filigree/")
+    if not additions:
+        return True, ".weft/ and .filigree/ already in .gitignore"
+
+    block = "\n# Filigree issue tracker\n" + "".join(f"{p}\n" for p in additions)
+    if content and not content.endswith("\n"):
+        content += "\n"
+    created = not gitignore.exists()
+    _atomic_write_text(gitignore, (content + block).lstrip("\n") if created else content + block)
+    joined = " and ".join(additions)
+    return True, (f"Created .gitignore with {joined}" if created else f"Added {joined} to .gitignore")
 
 
 # A stable substring that marks the nested .filigree/.gitignore as ours, so
@@ -421,6 +432,68 @@ context.md
 """
 
 
+# The shipped nested ignore for the federation store dir. Same durable-vs-
+# ephemeral split as the legacy ``.filigree/`` variant; only the header path
+# differs. filigree owns exactly its ``.weft/filigree/`` subtree (sole writer).
+WEFT_STORE_GITIGNORE = """\
+# .weft/filigree/.gitignore — managed-by: filigree (ephemeral runtime files)
+#
+# By default the project-root .gitignore ignores .weft/, so nothing here is
+# committed. If you remove that root `.weft/` rule to track your tracker as
+# committed payload (a shared team DB, or a demo), this file keeps the
+# *ephemeral* runtime files out of every commit.
+#
+# Durable (committed when this dir is tracked): filigree.db, config.json,
+#   INSTALL_VERSION, scanners/*.toml.  Ephemeral (never committed): below.
+
+# SQLite write-ahead-log sidecars and rollback journals
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Migration backups (e.g. filigree.db.pre-v26-bak)
+*.db.*-bak
+
+# Logs
+*.log
+
+# Per-instance / per-run runtime state
+ephemeral.lock
+ephemeral.pid
+ephemeral.port
+instructions.lock
+instance_id
+
+# Generated project snapshot (regenerated on demand)
+context.md
+"""
+
+
+def _ensure_nested_gitignore(target_dir: Path, body: str, label: str) -> tuple[bool, str]:
+    """Idempotently ship a nested ``.gitignore`` (*body*) into *target_dir*.
+
+    A file already carrying :data:`FILIGREE_DIR_GITIGNORE_MARKER` is left
+    untouched; a user-authored ``.gitignore`` is appended to rather than
+    clobbered.
+    """
+    try:
+        nested = project_path(target_dir, ".gitignore")
+    except UnsafeInstallPathError as exc:
+        return False, str(exc)
+
+    if nested.exists():
+        content = nested.read_text()
+        if FILIGREE_DIR_GITIGNORE_MARKER in content:
+            return True, f"{label} already present"
+        if not content.endswith("\n"):
+            content += "\n"
+        content += "\n" + body
+        _atomic_write_text(nested, content)
+        return True, f"Added filigree ephemeral rules to {label}"
+    _atomic_write_text(nested, body)
+    return True, f"Created {label}"
+
+
 def ensure_filigree_dir_gitignore(filigree_dir: Path) -> tuple[bool, str]:
     """Ship ``.filigree/.gitignore`` so ephemeral runtime files never commit.
 
@@ -430,26 +503,18 @@ def ensure_filigree_dir_gitignore(filigree_dir: Path) -> tuple[bool, str]:
     rollback journals, migration backups, logs, locks/pid/port, the
     per-instance id, and the generated ``context.md`` — but intentionally not
     ``filigree.db`` / ``config.json`` (durable). See filigree-694f777d5c.
-
-    Idempotent: a file already carrying our marker is left untouched; a
-    user-authored ``.gitignore`` is appended to rather than clobbered.
     """
-    try:
-        nested = project_path(filigree_dir, ".gitignore")
-    except UnsafeInstallPathError as exc:
-        return False, str(exc)
+    return _ensure_nested_gitignore(filigree_dir, FILIGREE_DIR_GITIGNORE, ".filigree/.gitignore")
 
-    if nested.exists():
-        content = nested.read_text()
-        if FILIGREE_DIR_GITIGNORE_MARKER in content:
-            return True, ".filigree/.gitignore already present"
-        if not content.endswith("\n"):
-            content += "\n"
-        content += "\n" + FILIGREE_DIR_GITIGNORE
-        _atomic_write_text(nested, content)
-        return True, "Added filigree ephemeral rules to .filigree/.gitignore"
-    _atomic_write_text(nested, FILIGREE_DIR_GITIGNORE)
-    return True, "Created .filigree/.gitignore"
+
+def ensure_weft_store_gitignore(store_dir: Path) -> tuple[bool, str]:
+    """Ship ``.weft/filigree/.gitignore`` — the federation-layout counterpart.
+
+    Same durable-vs-ephemeral contract as :func:`ensure_filigree_dir_gitignore`;
+    closes the suite-wide "every tool ships a complete nested .gitignore for its
+    own dot-dir" standard (filigree-4ed8152630) for the ``.weft/filigree/`` store.
+    """
+    return _ensure_nested_gitignore(store_dir, WEFT_STORE_GITIGNORE, ".weft/filigree/.gitignore")
 
 
 # ---------------------------------------------------------------------------

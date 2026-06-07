@@ -146,7 +146,7 @@ class TestServerRegister:
     def test_register_no_filigree_dir(self, tmp_path: Path, cli_runner: CliRunner) -> None:
         result = cli_runner.invoke(cli, ["server", "register", str(tmp_path)])
         assert result.exit_code == 1
-        assert "No .filigree/" in result.output
+        assert "No filigree store" in result.output
 
     def test_register_with_daemon_reload(self, tmp_path: Path, cli_runner: CliRunner) -> None:
         filigree_dir = tmp_path / ".filigree"

@@ -363,7 +363,7 @@ def test_init_fresh_writes_marker_no_warning(
 
     assert result.exit_code == 0, f"init failed: {result.output}\nstderr:\n{result.stderr}"
 
-    filigree_dir = tmp_path / FILIGREE_DIR_NAME
+    filigree_dir = tmp_path / ".weft" / "filigree"
     assert (filigree_dir / MARKER_NAME).exists(), "INSTALL_VERSION marker not created"
     assert (filigree_dir / MARKER_NAME).read_text() == f"{CURRENT_SCHEMA_VERSION}\n"
     assert read_install_version(filigree_dir) == CURRENT_SCHEMA_VERSION
@@ -392,7 +392,7 @@ def test_init_reinit_with_older_marker_warns_and_bumps(
     bootstrap = runner.invoke(init, [])
     assert bootstrap.exit_code == 0, f"bootstrap init failed: {bootstrap.output}"
 
-    filigree_dir = tmp_path / FILIGREE_DIR_NAME
+    filigree_dir = tmp_path / ".weft" / "filigree"
     older = CURRENT_SCHEMA_VERSION - 1
     # Forcibly age the marker to simulate a previous install at v-1.
     (filigree_dir / MARKER_NAME).write_text(f"{older}\n")

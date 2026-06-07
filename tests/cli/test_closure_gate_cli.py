@@ -14,13 +14,13 @@ from click.testing import CliRunner
 
 from filigree import governance, legis_client
 from filigree.cli import cli
-from filigree.core import FILIGREE_DIR_NAME, FiligreeDB
+from filigree.core import FiligreeDB
 from filigree.legis_client import LegisGateResult, LegisGateStatus
 from tests.cli.conftest import _extract_id
 
 
 def _make_governed(project_root: Path, issue_id: str) -> None:
-    db = FiligreeDB.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
+    db = FiligreeDB.from_project(project_root)
     db.add_entity_association(issue_id, "sei:gov", content_hash="h", actor="legis", signature="sig", signoff_seq=1)
     db.close()
 
@@ -70,7 +70,7 @@ def test_cli_close_ungoverned_does_not_call_gate(cli_in_project: tuple[CliRunner
 
 
 def _status_of(project: Path, issue_id: str) -> str:
-    db = FiligreeDB.from_filigree_dir(project / FILIGREE_DIR_NAME)
+    db = FiligreeDB.from_project(project)
     status = db.get_issue(issue_id).status
     db.close()
     return status

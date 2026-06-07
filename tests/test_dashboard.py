@@ -21,7 +21,16 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, ForeignDatabaseError, write_conf, write_config
+from filigree.core import (
+    CONF_FILENAME,
+    DB_FILENAME,
+    FILIGREE_DIR_NAME,
+    FiligreeAnchor,
+    FiligreeDB,
+    ForeignDatabaseError,
+    write_conf,
+    write_config,
+)
 from filigree.dashboard import (
     IDLE_TIMEOUT_SECONDS,
     ProjectStore,
@@ -207,7 +216,7 @@ class TestMainGlobalReset:
 
     def test_ethereal_main_clears_prior_project_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         filigree_dir = _create_filigree_dir(tmp_path, "proj-a", "a")
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (filigree_dir.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(filigree_dir.parent, None, filigree_dir))
 
         # Simulate lingering server-mode global from a prior in-process run.
         leftover = ProjectStore()
@@ -270,7 +279,7 @@ class TestMainGlobalReset:
 
     def test_main_resets_both_globals_in_finally(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         filigree_dir = _create_filigree_dir(tmp_path, "proj-c", "c")
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (filigree_dir.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(filigree_dir.parent, None, filigree_dir))
 
         dash_module._project_store = ProjectStore()
         dash_module._db = None
@@ -301,7 +310,7 @@ class TestMainGlobalReset:
         def fake_uvicorn_run_a(*args: object, **kwargs: object) -> None:
             captured["after_run_a"] = dict(dash_module._config)
 
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj_a.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj_a.parent, None, proj_a))
         monkeypatch.setattr("uvicorn.run", fake_uvicorn_run_a)
         monkeypatch.setattr("filigree.dashboard.webbrowser.open", lambda *a, **kw: None)
 
@@ -315,7 +324,7 @@ class TestMainGlobalReset:
         def fake_uvicorn_run_b(*args: object, **kwargs: object) -> None:
             captured["after_run_b"] = dict(dash_module._config)
 
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj_b.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj_b.parent, None, proj_b))
         monkeypatch.setattr("uvicorn.run", fake_uvicorn_run_b)
 
         dash_module.main(port=9999, no_browser=True, server_mode=False)
@@ -327,7 +336,7 @@ class TestMainGlobalReset:
         """filigree-154a23794c: finally block must clear _config too."""
         proj = _create_filigree_dir(tmp_path, "proj-fin", "fin")
         write_config(proj, {"prefix": "fin", "version": 1, "name": "Finalize"})
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj.parent, None, proj))
         monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
         monkeypatch.setattr("filigree.dashboard.webbrowser.open", lambda *a, **kw: None)
 

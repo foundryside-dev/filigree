@@ -413,7 +413,7 @@ def register_file_cmd(
 
     # Validate the path before opening the DB: reject absolute paths and traversals.
     try:
-        project_root, _ = find_filigree_anchor()
+        project_root = find_filigree_anchor().project_root
     except Exception:
         # Let get_db() surface the proper error below.
         project_root = None

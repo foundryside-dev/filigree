@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from filigree.core import FILIGREE_DIR_NAME, read_config
+from filigree.core import read_config, resolve_store_dir
 from filigree.install_support.safe_paths import (
     UnsafeInstallPathError,
     project_path,
@@ -53,11 +53,11 @@ def _ensure_minted_federation_token(project_root: Path) -> str:
     """Return a persisted federation token, minting + storing one if absent.
 
     Idempotent: re-running install reuses the recorded token rather than churning
-    a new value. Stored under the (gitignored) ``.filigree/`` dir at 0600. This is
-    deconfliction plumbing, not a security secret — file permissions are the only
-    boundary (README security note); do not add hardening.
+    a new value. Stored under the (gitignored) machine-owned store dir at 0600.
+    This is deconfliction plumbing, not a security secret — file permissions are
+    the only boundary (README security note); do not add hardening.
     """
-    token_file = project_root / FILIGREE_DIR_NAME / "federation_token"
+    token_file = resolve_store_dir(project_root) / "federation_token"
     try:
         existing = token_file.read_text().strip()
         if existing:
@@ -100,7 +100,7 @@ def _negotiate_federation_token_message(project_root: Path) -> str:
         "you export it (filigree can't set the agent's environment). Run:\n"
         f"    export {WEFT_FEDERATION_ENV_VAR}={token}\n"
         f"  (add it to your shell profile and restart the daemon; value recorded in "
-        f"{FILIGREE_DIR_NAME}/federation_token)."
+        f"{resolve_store_dir(project_root).name}/federation_token)."
     )
 
 
@@ -162,7 +162,7 @@ def _codex_server_mode_url(project_root: Path, port: int) -> str:
     """Build the streamable-HTTP URL for a project-keyed daemon route."""
     project_key = "filigree"
     try:
-        config = read_config(project_root / FILIGREE_DIR_NAME)
+        config = read_config(resolve_store_dir(project_root))
         prefix = config.get("prefix")
         if isinstance(prefix, str) and prefix.strip():
             project_key = prefix.strip()

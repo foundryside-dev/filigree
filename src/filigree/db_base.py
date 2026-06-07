@@ -283,6 +283,11 @@ class DBMixinProtocol(Protocol):
     # Project root set by from_filigree_dir / from_conf.  ``None`` for legacy
     # direct-path construction — consumers that need it must fall back.
     project_root: Path | None
+    # Machine-owned store/metadata dir (``.weft/filigree/`` or legacy
+    # ``.filigree/``), set by the anchor-aware constructors; defaults to
+    # ``db_path.parent`` for bare construction. Single source of truth for
+    # config.json / runtime-file location, independent of a relocated ``db``.
+    meta_dir: Path
     prefix: str
     registry: RegistryProtocol
     # ADR-014 — always populated by ``FiligreeDB.__init__`` (defaults to

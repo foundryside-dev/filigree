@@ -17,9 +17,10 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import tomllib
 import uuid as _uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
@@ -121,6 +122,17 @@ DB_FILENAME = "filigree.db"
 CONFIG_FILENAME = "config.json"
 CONF_FILENAME = ".filigree.conf"
 SUMMARY_FILENAME = "context.md"
+
+# WEFT federation store convention (filigree-37e3f26145). The machine-owned
+# store moves from ``.filigree/`` to ``.weft/filigree/``. ``.weft/`` is the
+# shared federation dir (co-owned by sibling members); filigree owns exactly
+# its ``.weft/filigree/`` subtree and is its sole writer. ``.filigree/``
+# remains the frozen legacy layout (kept readable for back-compat).
+WEFT_DIR_NAME = ".weft"
+WEFT_MEMBER_SUBDIR = "filigree"
+WEFT_TOML_FILENAME = "weft.toml"
+# The store dir for a relative ``store_dir`` override defaults here.
+LEGACY_MOVED_BREADCRUMB = "MOVED"
 
 # Schema version for .filigree.conf — bump if the file format changes incompatibly.
 CONF_VERSION = 1
@@ -307,11 +319,16 @@ def _resolve_to_main_worktree(start: Path) -> Path:
         git_path = parent / ".git"
         conf_path = parent / CONF_FILENAME
         legacy_dir = parent / FILIGREE_DIR_NAME
+        weft_store = parent / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
         has_conf = conf_path.is_file()
         has_legacy_dir = legacy_dir.is_dir()
-        if has_conf or has_legacy_dir:
+        has_weft_store = weft_store.is_dir()
+        if has_conf or has_weft_store or has_legacy_dir:
             main_worktree = _main_worktree_from_git_path(git_path) if git_path.exists() else None
-            if main_worktree is not None and not _has_local_filigree_config(legacy_dir):
+            # A worktree is its own project only when it carries local config
+            # metadata (in either the federation store or the legacy dir).
+            has_local = _has_local_filigree_config(weft_store) or _has_local_filigree_config(legacy_dir)
+            if main_worktree is not None and not has_local:
                 return main_worktree
             return start
         if not git_path.exists():
@@ -413,6 +430,251 @@ def _classify_git_entry(git_path: Path) -> str:
     return "gitdir_file"
 
 
+def read_weft_filigree_table(project_root: Path) -> dict[str, Any]:
+    """Read the operator-authored ``[filigree]`` table from ``project_root/weft.toml``.
+
+    Mirrors legis' ``_weft_legis_config`` (the federation reference): returns an
+    empty dict when ``weft.toml`` is absent, carries no ``[filigree]`` table, or
+    cannot be parsed. ``weft.toml`` is **enrich-only, never load-bearing** — a
+    missing or malformed file must still boot on built-in defaults (convention
+    C-9c). This function is strictly **read-only**: filigree never writes
+    ``weft.toml`` (it is operator-authored / written only by ``weft init``).
+
+    Reads only from *project_root* — no walk-up. Discovery has already settled
+    the project root; an independent walk would constitute a second anchor.
+    """
+    path = project_root / WEFT_TOML_FILENAME
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # Surface the misconfiguration for diagnosis, but never hard-fail: a
+        # fat-fingered weft.toml (bad TOML syntax OR non-UTF-8 bytes — tomllib
+        # decodes UTF-8 internally) must not stop filigree booting (C-9c).
+        logger.warning("weft.toml present but unreadable at %s; using built-in defaults", path)
+        return {}
+    table = data.get(WEFT_MEMBER_SUBDIR)
+    if not isinstance(table, dict):
+        return {}
+    return table
+
+
+def resolve_store_dir(project_root: Path) -> Path:
+    """Resolve the machine-owned store dir for *project_root* (single source of truth).
+
+    Resolution order (highest precedence first):
+      1. ``weft.toml`` ``[filigree].store_dir`` operator override (relative paths
+         resolve against *project_root*, absolute paths are honoured — legis
+         parity). A non-string / empty value is ignored.
+      2. ``.weft/filigree/`` if it already exists (the federation default).
+      3. legacy ``.filigree/`` (back-compat; also the bare fallback that a fresh
+         install's default ``db`` literal points beside before the dir exists).
+
+    Pure read — never writes, never raises. ``find_filigree_anchor`` calls this
+    from **both** the conf and confless branches, so
+    ``anchor.store_dir == resolve_store_dir(anchor.project_root)`` by
+    construction — the no-split-brain guarantee.
+    """
+    override = read_weft_filigree_table(project_root).get("store_dir")
+    if isinstance(override, str) and override:
+        candidate = Path(override)
+        # Narrow to project-relative, under-root paths. filigree threads the
+        # store dir through the .filigree.conf ``db`` field, whose trust boundary
+        # already forbids absolute / escaping paths — so an absolute or
+        # ``..``-escaping store_dir cannot be represented consistently and is
+        # ignored (warn + fall back to the default), never honoured half-way.
+        if candidate.is_absolute():
+            logger.warning(
+                "weft.toml [filigree].store_dir is absolute (%s); ignoring (must be project-relative) and using the default store.",
+                override,
+            )
+        else:
+            resolved = (project_root / candidate).resolve()
+            try:
+                resolved.relative_to(project_root.resolve())
+            except ValueError:
+                logger.warning("weft.toml [filigree].store_dir %r escapes the project root; ignoring and using the default store.", override)
+            else:
+                return project_root / candidate
+    weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    if weft_store.is_dir():
+        return weft_store
+    legacy = project_root / FILIGREE_DIR_NAME
+    if legacy.is_dir():
+        return legacy
+    # Neither layout materialised yet (e.g. a fresh project_root): the canonical
+    # default is the federation store, where a new install will create it.
+    return weft_store
+
+
+class StoreMigrationBusyError(RuntimeError):
+    """A live writer holds the DB, so migration cannot safely checkpoint it."""
+
+
+def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
+    """Checkpoint *src_db*'s WAL and COPY it to *dest_db*, preserving all data.
+
+    A normal ``close()`` does **not** truncate the WAL, so committed pages can
+    live in the ``-wal`` sidecar; a copy of only the main ``.db`` would orphan
+    them. Checkpoint with ``TRUNCATE`` to fold the WAL fully into the main file
+    first, then byte-copy (``shutil.copy2`` — cross-device safe, and preserves
+    the file header including the FILG ``application_id``).
+
+    We **copy, not move**: the legacy DB stays in place and valid until the
+    caller rewrites the conf to point at the destination, so a crash mid-
+    migration never leaves a dangling conf nor an empty re-stamped DB (the
+    migration is crash-convergent — a re-run resumes).
+
+    Raises :class:`StoreMigrationBusyError` when another connection holds a
+    write lock: ``PRAGMA wal_checkpoint(TRUNCATE)`` returns ``(1, …)`` (busy)
+    instead of ``(0, …)`` when it cannot fully checkpoint, so we detect that and
+    abort rather than copy a DB with un-folded WAL pages.
+    """
+    conn = sqlite3.connect(str(src_db), timeout=5.0)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    finally:
+        conn.close()
+    # row == (busy, log_frames, checkpointed_frames); busy != 0 means a writer
+    # blocked a full checkpoint. For a non-WAL DB the pragma returns (0, -1, -1).
+    if row is not None and row[0] != 0:
+        msg = f"Cannot migrate {src_db}: another process holds the database. Close other filigree sessions and re-run."
+        raise StoreMigrationBusyError(msg)
+    dest_db.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src_db), str(dest_db))
+
+
+def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
+    """Migrate a legacy ``.filigree/`` store forward to ``.weft/filigree/``.
+
+    **Explicit only** — call from ``filigree init`` / ``install``, never from
+    passive discovery (discovery must stay write-free for read-only mounts).
+
+    Returns ``(store_dir, migrated)``. ``migrated`` is ``True`` only when a
+    vanilla legacy install (DB at ``.filigree/filigree.db``) was actually copied
+    forward this call. No-ops (returning the resolved store dir,
+    ``migrated=False``) when:
+      * an operator ``weft.toml`` ``[filigree].store_dir`` override is set — the
+        operator pins a custom store; we never auto-migrate over their choice
+        (and the override target may be absolute / outside the project root),
+      * the migration already completed (idempotent re-run), or
+      * there is no legacy install, or
+      * the operator relocated the DB outside ``.filigree/`` via the conf's
+        ``db`` field — a custom layout we must not disturb.
+
+    **Crash-convergent.** We COPY the DB (preserving FILG ``application_id``),
+    then rewrite the conf, then remove the legacy DB. The legacy DB stays valid
+    until the conf points at a valid destination, so a crash at any step leaves
+    a consistent state that the next explicit run resumes. Each step is
+    individually idempotent (guarded on its own completion), so the guard never
+    keys on a mere first side effect.
+    """
+    weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    legacy_dir = project_root / FILIGREE_DIR_NAME
+    conf_path = project_root / CONF_FILENAME
+    weft_db = weft_store / DB_FILENAME
+    legacy_db = legacy_dir / DB_FILENAME
+
+    # Operator override pins a custom store — never auto-migrate over it.
+    override = read_weft_filigree_table(project_root).get("store_dir")
+    if isinstance(override, str) and override:
+        return resolve_store_dir(project_root), False
+
+    if not legacy_dir.is_dir():
+        return resolve_store_dir(project_root), False
+
+    def _conf_db() -> Path | None:
+        if not conf_path.is_file():
+            return None
+        try:
+            db_rel = str(read_conf(conf_path)["db"])
+            return (conf_path.parent / db_rel).resolve()
+        except (OSError, ValueError):
+            return None
+
+    conf_db = _conf_db()
+    # Completed already (conf points at the weft DB and it exists) → idempotent.
+    if weft_db.is_file() and conf_db == weft_db.resolve():
+        return weft_store, False
+
+    # Only migrate the vanilla layout (DB inside .filigree/, or a half-finished
+    # prior run whose legacy DB is already gone). An operator who relocated the
+    # DB elsewhere via the conf keeps their custom layout untouched.
+    current_db = conf_db if conf_db is not None else legacy_db.resolve()
+    if current_db not in {legacy_db.resolve(), weft_db.resolve()}:
+        return resolve_store_dir(project_root), False
+    if not legacy_db.is_file() and not weft_db.is_file():
+        # Nothing to carry forward (e.g. conf with no DB yet) — leave as-is.
+        return resolve_store_dir(project_root), False
+
+    weft_store.mkdir(parents=True, exist_ok=True)
+    # 1. Copy the DB forward if not already there (legacy DB stays valid).
+    if legacy_db.is_file() and not weft_db.is_file():
+        _checkpoint_and_copy_sqlite(legacy_db, weft_db)
+    # 2. Copy durable + runtime metadata beside the DB. config.json must follow
+    #    so the enabled_packs fallback resolves; federation_token must follow so
+    #    sibling continuity survives. Idempotent (skip if already present).
+    for name in (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token", "scanners", "templates"):
+        src = legacy_dir / name
+        dest = weft_store / name
+        if src.exists() and not dest.exists():
+            if src.is_dir():
+                shutil.copytree(str(src), str(dest))
+            else:
+                shutil.copy2(str(src), str(dest))
+    # 3. Rewrite the conf to point at the destination — only now that a valid DB
+    #    exists there. (Idempotent: skip if it already points at the weft DB.)
+    new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
+    if conf_path.is_file():
+        conf_data = read_conf(conf_path)
+        if conf_data.get("db") != new_db_rel:
+            conf_data["db"] = new_db_rel
+            write_conf(conf_path, conf_data)
+    # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
+    #    a stale second database. Done last: until here the legacy DB was the
+    #    live one. The rest of the legacy dir is left as an auditable husk.
+    for suffix in ("", "-wal", "-shm"):
+        stale = legacy_dir / (DB_FILENAME + suffix)
+        if stale.is_file():
+            stale.unlink()
+    # Auditable, non-destructive breadcrumb — never delete the legacy dir.
+    (legacy_dir / LEGACY_MOVED_BREADCRUMB).write_text(
+        f"This store was migrated to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/.\n"
+        f"The legacy {FILIGREE_DIR_NAME}/ directory is intentionally left in place.\n"
+    )
+    return weft_store, True
+
+
+def store_dir_to_project_root(store_dir: Path) -> Path:
+    """Return the project root containing a resolved store dir, layout-aware.
+
+    ``.weft/filigree/`` sits two segments below the project root; legacy
+    ``.filigree/`` (and any other single-segment store dir) sits one. Blindly
+    using ``store_dir.parent`` points a federation-layout store at ``.weft/``
+    instead of the project root — the recurring two-segment footgun.
+    """
+    if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
+        return store_dir.parent.parent
+    return store_dir.parent
+
+
+class FiligreeAnchor(NamedTuple):
+    """The resolved project anchor: where the project is and where its store lives.
+
+    ``conf_path`` is the ``.filigree.conf`` when one exists, else ``None`` for a
+    dir-only (confless) anchor. ``store_dir`` is the resolved machine-owned store
+    directory (``resolve_store_dir(project_root)``) — the single source of truth
+    for config.json / runtime metadata, independent of where a conf's ``db``
+    field relocates the database.
+    """
+
+    project_root: Path
+    conf_path: Path | None
+    store_dir: Path
+
+
 def find_filigree_conf(start: Path | None = None) -> Path:
     """Walk up from *start* (default cwd) looking for ``.filigree.conf``.
 
@@ -455,13 +717,15 @@ def find_filigree_conf(start: Path | None = None) -> Path:
     raise ProjectNotInitialisedError(msg)
 
 
-def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
-    """Walk up from *start* for either a v2.0 conf or a legacy ``.filigree/`` dir.
+def find_filigree_anchor(start: Path | None = None) -> FiligreeAnchor:
+    """Walk up from *start* for a conf, a ``.weft/filigree/`` store, or a legacy dir.
 
-    Returns a ``(project_root, conf_path)`` pair. ``conf_path`` is the path
-    to the resolved ``.filigree.conf`` file when one exists, or ``None`` for a
-    legacy install (``.filigree/`` present, no conf yet). The walk is
-    closer-first: a child anchor wins over an ancestor regardless of type.
+    Returns a :class:`FiligreeAnchor` ``(project_root, conf_path, store_dir)``.
+    ``conf_path`` is the resolved ``.filigree.conf`` when one exists, or ``None``
+    for a dir-only install. ``store_dir`` is ``resolve_store_dir(project_root)``
+    — the resolved machine-owned store directory. The walk is closer-first: a
+    child anchor wins over an ancestor regardless of type. Within a directory,
+    precedence is conf > ``.weft/filigree/`` > legacy ``.filigree/``.
 
     Pure read — never writes. Use this when discovery must work on read-only
     mounts (inspection commands, ``filigree doctor``, and explicit
@@ -491,44 +755,48 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
         if conf.is_file():
             if git_boundary is not None:
                 raise ForeignDatabaseError(cwd=orig, found_anchor=conf, git_boundary=git_boundary)
-            return parent, conf
+            return FiligreeAnchor(parent, conf, resolve_store_dir(parent))
+        weft_store = parent / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        if weft_store.is_dir():
+            if git_boundary is not None:
+                raise ForeignDatabaseError(cwd=orig, found_anchor=weft_store, git_boundary=git_boundary)
+            return FiligreeAnchor(parent, None, resolve_store_dir(parent))
         legacy_dir = parent / FILIGREE_DIR_NAME
         if legacy_dir.is_dir():
             if git_boundary is not None:
                 raise ForeignDatabaseError(cwd=orig, found_anchor=legacy_dir, git_boundary=git_boundary)
-            return parent, None
+            return FiligreeAnchor(parent, None, resolve_store_dir(parent))
         if git_boundary is None and (parent / ".git").exists():
             git_boundary = parent
     msg = (
-        f"No {CONF_FILENAME} or {FILIGREE_DIR_NAME}/ found in {orig} or any parent directory. "
+        f"No {CONF_FILENAME}, {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ or {FILIGREE_DIR_NAME}/ "
+        f"found in {orig} or any parent directory. "
         f"Run `filigree init` here to create one, or `filigree doctor` to diagnose."
     )
     raise ProjectNotInitialisedError(msg)
 
 
 def find_filigree_root(start: Path | None = None) -> Path:
-    """Return the project's ``.filigree/`` directory (back-compat helper).
+    """Return the project's machine-owned **store** directory (metadata dir).
 
-    Locates the project via :func:`find_filigree_conf` (the v2.0 anchor) and
-    returns the ``.filigree/`` directory next to that conf. The contract is
-    "the literal ``.filigree/`` directory" — every caller in this codebase
-    concatenates ``SUMMARY_FILENAME``, ``ephemeral.pid``, or ``DB_FILENAME``
-    onto the result, or does ``.parent`` to derive the project root, so the
-    return value must point at ``conf.parent / .filigree``, regardless of any
-    custom ``db`` location declared in the conf.
+    Resolves the anchor via :func:`find_filigree_anchor` and returns its
+    ``store_dir`` — ``.weft/filigree/`` for federation-layout installs, legacy
+    ``.filigree/`` for back-compat installs, or an operator ``store_dir``
+    override. Every caller concatenates ``SUMMARY_FILENAME``, ``ephemeral.pid``,
+    ``config.json``, ``scanners/`` etc. onto the result; under the WEFT store
+    consolidation those runtime files live in the resolved store dir, so
+    returning ``store_dir`` (not the literal ``.filigree/``) keeps them in one
+    place regardless of layout.
 
-    The conf's ``db`` field can still relocate the database itself; callers
-    that need the actual DB path should use :meth:`FiligreeDB.from_conf`.
+    The store dir is resolved **independently** of any custom ``db`` location a
+    conf declares (the conf's ``db`` may relocate only the database file).
+    Callers that need the actual DB path should use :meth:`FiligreeDB.from_conf`
+    / :meth:`FiligreeDB.from_anchor`.
 
     Resolves through :func:`find_filigree_anchor` so legacy installs (which
     have no conf yet) are still discoverable without writing.
-
-    New code should prefer :func:`find_filigree_anchor` plus
-    :meth:`FiligreeDB.from_conf` / :meth:`FiligreeDB.from_filigree_dir` over
-    this helper.
     """
-    project_root, _conf_path = find_filigree_anchor(start)
-    return project_root / FILIGREE_DIR_NAME
+    return find_filigree_anchor(start).store_dir
 
 
 def read_conf(conf_path: Path) -> dict[str, Any]:
@@ -1024,6 +1292,7 @@ class FiligreeDB(
         template_registry: TemplateRegistry | None = None,
         check_same_thread: bool = True,
         project_root: str | Path | None = None,
+        meta_dir: str | Path | None = None,
         registry: RegistryProtocol | None = None,
         registry_backend: RegistryBackend = "local",
         loomweave_config: LoomweaveConfig | None = None,
@@ -1043,8 +1312,21 @@ class FiligreeDB(
             self.project_root: Path | None = Path(project_root)
         elif self.db_path.parent.name == FILIGREE_DIR_NAME:
             self.project_root = self.db_path.parent.parent
+        elif self.db_path.parent.name == WEFT_MEMBER_SUBDIR and self.db_path.parent.parent.name == WEFT_DIR_NAME:
+            # ``.weft/filigree/filigree.db`` → project root is two dirs up from
+            # the store dir. The federation-layout analogue of the legacy
+            # ``.filigree/`` auto-derive above.
+            self.project_root = self.db_path.parent.parent.parent
         else:
             self.project_root = None
+        # ``meta_dir`` is the machine-owned store/metadata directory (config.json,
+        # scanners/, ephemeral.pid, context.md, templates/). The anchor-aware
+        # constructors (``from_anchor`` / ``from_conf`` / ``from_filigree_dir``)
+        # pass the resolved ``store_dir`` explicitly so a conf-relocated DB still
+        # points metadata at the store dir, not at ``db_path.parent``. The bare
+        # fallback (``db_path.parent``) only fires for direct ``FiligreeDB(...)``
+        # construction in tests / fresh init, where the two coincide.
+        self.meta_dir: Path = Path(meta_dir) if meta_dir is not None else self.db_path.parent
         if enabled_packs is not None and isinstance(enabled_packs, str):
             msg = f"enabled_packs must be a list of strings, not a bare string: {enabled_packs!r}"
             raise TypeError(msg)
@@ -1301,39 +1583,45 @@ class FiligreeDB(
         )
 
     @classmethod
-    def from_filigree_dir(
+    def from_store_dir(
         cls,
-        filigree_dir: Path,
+        store_dir: Path,
         *,
+        project_root: Path,
         check_same_thread: bool = True,
         allow_local_fallback_override: bool | None = None,
     ) -> FiligreeDB:
-        """Create a FiligreeDB from an existing ``.filigree/`` directory.
+        """Create a FiligreeDB from a confless store directory + explicit project root.
+
+        The generalised opener for a dir-only (confless) anchor — legacy
+        ``.filigree/`` or federation ``.weft/filigree/``. ``store_dir`` is where
+        ``config.json`` and ``filigree.db`` live; ``project_root`` is passed
+        explicitly (NOT inferred from ``store_dir.parent``, which is wrong for
+        ``.weft/filigree/`` — two segments deep).
 
         When ``config.json`` is missing or omits the ``prefix`` key, fall back
-        to the project directory's own name rather than the hardcoded
-        ``"filigree"`` default. This mirrors what ``filigree init`` writes
-        (prefix defaults to ``cwd.name``) and prevents a legacy install from
-        silently opening with the wrong identity — every write to its own
-        pre-existing issues would otherwise raise ``WrongProjectError``.
+        to ``project_root``'s own name rather than the hardcoded ``"filigree"``
+        default. This mirrors what ``filigree init`` writes (prefix defaults to
+        ``cwd.name``) and prevents a confless install from silently opening with
+        the wrong identity.
 
         ``allow_local_fallback_override`` is the dashboard / CLI escape hatch
         for ADR-014 §7: an operator passing ``--allow-local-fallback`` at
         startup wants to override whatever ``allow_local_fallback`` is in the
-        project's ``.filigree/config.json``, so the capability probe at
-        ``__init__`` time downgrades to a WARN instead of aborting when
-        Loomweave is offline.
+        project's ``config.json``, so the capability probe at ``__init__`` time
+        downgrades to a WARN instead of aborting when Loomweave is offline.
         """
-        config = read_config(filigree_dir)
-        configured_prefix = _raw_config_prefix(filigree_dir / CONFIG_FILENAME)
-        prefix = configured_prefix if configured_prefix is not None else (filigree_dir.parent.name or "filigree")
+        config = read_config(store_dir)
+        configured_prefix = _raw_config_prefix(store_dir / CONFIG_FILENAME)
+        prefix = configured_prefix if configured_prefix is not None else (project_root.name or "filigree")
         loomweave_config = _apply_allow_local_fallback_override(config.get("loomweave"), allow_local_fallback_override)
         db = cls(
-            filigree_dir / DB_FILENAME,
+            store_dir / DB_FILENAME,
             prefix=prefix,
             enabled_packs=config.get("enabled_packs"),
             check_same_thread=check_same_thread,
-            project_root=filigree_dir.resolve().parent,
+            project_root=project_root.resolve(),
+            meta_dir=store_dir,
             registry_backend=config.get("registry_backend", "local"),
             loomweave_config=loomweave_config,
         )
@@ -1348,31 +1636,60 @@ class FiligreeDB(
             try:
                 db.close()
             except Exception:
-                logger.error("Failed to close database after from_filigree_dir initialize() failure", exc_info=True)
+                logger.error("Failed to close database after from_store_dir initialize() failure", exc_info=True)
             raise
         return db
+
+    @classmethod
+    def from_filigree_dir(
+        cls,
+        filigree_dir: Path,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
+        """Create a FiligreeDB from an existing legacy ``.filigree/`` directory.
+
+        Thin back-compat wrapper over :meth:`from_store_dir`: the legacy layout
+        always has ``project_root == filigree_dir.parent``. Preserved verbatim so
+        existing callers and tests keep working.
+        """
+        return cls.from_store_dir(
+            filigree_dir,
+            project_root=filigree_dir.resolve().parent,
+            check_same_thread=check_same_thread,
+            allow_local_fallback_override=allow_local_fallback_override,
+        )
 
     @classmethod
     def from_conf(
         cls,
         conf_path: Path,
         *,
+        store_dir: Path | None = None,
         check_same_thread: bool = True,
         allow_local_fallback_override: bool | None = None,
     ) -> FiligreeDB:
         """Create a FiligreeDB from a ``.filigree.conf`` anchor file (v2.0).
 
-        Resolves the DB path relative to the conf file's directory.
+        Resolves the DB path relative to the conf file's directory (the conf's
+        ``db`` field may relocate the database anywhere project-relative — the
+        fg-da8d50 fix). ``store_dir`` is the resolved machine-owned metadata
+        directory (``config.json``, runtime files); when omitted it is resolved
+        via :func:`resolve_store_dir` so the ``enabled_packs`` fallback reads
+        config from the right place (``.weft/filigree/`` or legacy ``.filigree/``),
+        **independently** of where ``db`` points.
 
-        ``allow_local_fallback_override`` — see :meth:`from_filigree_dir`.
+        ``allow_local_fallback_override`` — see :meth:`from_store_dir`.
         """
         data = read_conf(conf_path)
         db_path = (conf_path.parent / data["db"]).resolve()
+        resolved_store_dir = store_dir if store_dir is not None else resolve_store_dir(conf_path.resolve().parent)
         prefix: str = data["prefix"]
         enabled_packs = data.get("enabled_packs")
         enabled_packs_from_project_config = False
         if enabled_packs is None:
-            config = read_config(conf_path.parent / FILIGREE_DIR_NAME)
+            config = read_config(resolved_store_dir)
             enabled_packs = config.get("enabled_packs")
             enabled_packs_from_project_config = enabled_packs is not None
         loomweave_config = _apply_allow_local_fallback_override(data.get("loomweave"), allow_local_fallback_override)
@@ -1382,6 +1699,7 @@ class FiligreeDB(
             enabled_packs=enabled_packs,
             check_same_thread=check_same_thread,
             project_root=conf_path.resolve().parent,
+            meta_dir=resolved_store_dir,
             registry_backend=cast("RegistryBackend", data.get("registry_backend", "local")),
             loomweave_config=loomweave_config,
         )
@@ -1398,18 +1716,44 @@ class FiligreeDB(
         return db
 
     @classmethod
+    def from_anchor(
+        cls,
+        anchor: FiligreeAnchor,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
+        """Create a FiligreeDB from a resolved :class:`FiligreeAnchor`.
+
+        The single open entry point for all runtime surfaces (CLI, dashboard,
+        MCP, hooks). Reuses :meth:`from_conf` when a conf exists, else
+        :meth:`from_store_dir` — both threaded with the anchor's resolved
+        ``store_dir`` so every surface resolves to the same metadata dir (no
+        split-brain).
+        """
+        if anchor.conf_path is not None:
+            return cls.from_conf(
+                anchor.conf_path,
+                store_dir=anchor.store_dir,
+                check_same_thread=check_same_thread,
+                allow_local_fallback_override=allow_local_fallback_override,
+            )
+        return cls.from_store_dir(
+            anchor.store_dir,
+            project_root=anchor.project_root,
+            check_same_thread=check_same_thread,
+            allow_local_fallback_override=allow_local_fallback_override,
+        )
+
+    @classmethod
     def from_project(cls, project_path: Path | None = None) -> FiligreeDB:
         """Create a FiligreeDB by discovering the project anchor from *project_path* (or cwd).
 
         Walks up via :func:`find_filigree_anchor` so legacy installs (a bare
-        ``.filigree/`` directory with no conf yet) still open without requiring
-        write access during discovery. Returns the v2.0 conf-based DB if a
-        conf is present, otherwise falls back to ``from_filigree_dir``.
+        dir with no conf yet) still open without requiring write access during
+        discovery, then opens through the single :meth:`from_anchor` entry point.
         """
-        project_root, conf_path = find_filigree_anchor(project_path)
-        if conf_path is not None:
-            return cls.from_conf(conf_path)
-        return cls.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
+        return cls.from_anchor(find_filigree_anchor(project_path))
 
     def __enter__(self) -> FiligreeDB:
         return self

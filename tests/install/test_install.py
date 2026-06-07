@@ -440,10 +440,27 @@ class TestEnsureGitignore:
 
     def test_already_present(self, tmp_path: Path) -> None:
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".filigree/\n")
+        gitignore.write_text(".weft/\n.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
+
+    def test_weft_store_ignored_when_only_filigree_present(self, tmp_path: Path) -> None:
+        """A legacy-only ``.filigree/`` gitignore gains the ``.weft/`` rule too."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text(".filigree/\n")
+        ok, msg = ensure_gitignore(tmp_path)
+        assert ok
+        content = gitignore.read_text()
+        assert ".weft/" in content
+        assert "Added .weft/" in msg
+
+    def test_creates_both_rules_on_fresh_gitignore(self, tmp_path: Path) -> None:
+        ok, _msg = ensure_gitignore(tmp_path)
+        assert ok
+        content = (tmp_path / ".gitignore").read_text()
+        assert ".weft/" in content
+        assert ".filigree/" in content
 
     def test_commented_pattern_not_treated_as_ignored(self, tmp_path: Path) -> None:
         """A `#.filigree/` comment must not count as an active ignore rule."""
@@ -478,7 +495,7 @@ class TestEnsureGitignore:
     def test_root_anchored_pattern_accepted(self, tmp_path: Path) -> None:
         """`/.filigree/` is an anchored ignore rule — must be recognised as already present."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("/.filigree/\n")
+        gitignore.write_text(".weft/\n/.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
@@ -486,7 +503,7 @@ class TestEnsureGitignore:
     def test_bare_name_without_trailing_slash_accepted(self, tmp_path: Path) -> None:
         """`.filigree` (no trailing slash) matches the directory — must be recognised."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".filigree\n")
+        gitignore.write_text(".weft/\n.filigree\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
@@ -510,7 +527,7 @@ class TestEnsureGitignore:
     def test_negation_then_reignore_counts_as_ignored(self, tmp_path: Path) -> None:
         """`!.filigree/` followed by `.filigree/` re-ignores — last rule wins."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("!.filigree/\n.filigree/\n")
+        gitignore.write_text(".weft/\n!.filigree/\n.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg

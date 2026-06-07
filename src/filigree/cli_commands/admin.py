@@ -20,11 +20,15 @@ from filigree.core import (
     DB_FILENAME,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
     FiligreeDB,
     ProjectConfig,
     ProjectNotInitialisedError,
-    find_filigree_root,
+    StoreMigrationBusyError,
+    find_filigree_anchor,
     get_mode,
+    migrate_store_to_weft,
     read_conf,
     read_config,
     read_schema_version,
@@ -66,21 +70,39 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
     help="Installation mode (default: ethereal)",
 )
 def init(prefix: str | None, name: str | None, mode: str | None) -> None:
-    """Initialize .filigree/ in the current directory."""
+    """Initialize filigree in the current directory (store at .weft/filigree/)."""
     cwd = Path.cwd()
-    filigree_dir = cwd / FILIGREE_DIR_NAME
+    conf_path = cwd / CONF_FILENAME
+    legacy_dir = cwd / FILIGREE_DIR_NAME
+    weft_store = cwd / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
 
-    if filigree_dir.exists():
-        click.echo(f"{FILIGREE_DIR_NAME}/ already exists in {cwd}")
-        previous_marker = read_install_version(filigree_dir)
-        # Still ensure DB is initialized and migrated
-        config = _read_project_config_or_exit(filigree_dir)
-        # filigree-fa6309d551: route DB open through the v2.0 anchor-aware
+    from filigree.install import ensure_filigree_dir_gitignore, ensure_weft_store_gitignore
+
+    def _store_gitignore(store: Path) -> None:
+        """Ship the nested .gitignore matching the resolved store layout."""
+        if store == weft_store:
+            ensure_weft_store_gitignore(store)
+        else:
+            ensure_filigree_dir_gitignore(store)
+
+    already_installed = conf_path.is_file() or weft_store.is_dir() or legacy_dir.is_dir()
+    if already_installed:
+        # Migrate a legacy .filigree/ store forward to .weft/filigree/ — this is
+        # the ONE explicit place migration happens (never on passive discovery).
+        try:
+            store_dir, migrated = migrate_store_to_weft(cwd)
+        except StoreMigrationBusyError as exc:
+            # Another process holds the DB — the legacy layout is left intact.
+            click.echo(str(exc), err=True)
+            sys.exit(1)
+        if migrated:
+            click.echo(f"  Migrated store to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ (legacy {FILIGREE_DIR_NAME}/ left in place)")
+        else:
+            click.echo(f"filigree already initialized in {cwd} (store: {store_dir})")
+        previous_marker = read_install_version(store_dir)
+        config = _read_project_config_or_exit(store_dir)
+        # filigree-fa6309d551: route DB open through the anchor-aware
         # constructors so a custom .filigree.conf `db` path is honoured.
-        # Without this, init silently migrates the legacy
-        # .filigree/filigree.db while the project's actual DB (declared in
-        # the conf) stays un-migrated.
-        conf_path = cwd / CONF_FILENAME
         if conf_path.is_file():
             try:
                 existing_conf = read_conf(conf_path)
@@ -89,7 +111,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
                 click.echo(f"Cannot read {conf_path}: {exc}", err=True)
                 sys.exit(1)
         else:
-            db_path = filigree_dir / DB_FILENAME
+            db_path = store_dir / DB_FILENAME
         # Read pre-init schema version directly so we can detect upgrades —
         # the from_* constructors call initialize() internally, which would
         # mask the old version.
@@ -101,7 +123,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             finally:
                 raw_conn.close()
         try:
-            db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
+            db = FiligreeDB.from_anchor(find_filigree_anchor(cwd))
         except SchemaVersionMismatchError as exc:
             # The DB was written by a newer filigree; this older binary
             # cannot safely touch it. Emit the same guidance text and
@@ -120,38 +142,37 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             db.close()
         if old_version is not None and new_version > old_version:
             click.echo(f"  Schema upgraded v{old_version} → v{new_version}")
-        (filigree_dir / "scanners").mkdir(exist_ok=True)
-        from filigree.install import ensure_filigree_dir_gitignore
-
-        ensure_filigree_dir_gitignore(filigree_dir)
-        # filigree-f22fc98687: backfill the v2.0 anchor on legacy installs
-        # where the existing-project branch was reached without a conf. Do
-        # not overwrite an existing custom anchor.
+        (store_dir / "scanners").mkdir(exist_ok=True)
+        _store_gitignore(store_dir)
+        # filigree-f22fc98687: backfill the anchor on legacy installs where the
+        # existing-project branch was reached without a conf. Do not overwrite
+        # an existing custom anchor.
         if not conf_path.exists():
             project_name = config.get("name") or cwd.name
+            rel_db = store_dir.relative_to(cwd) / DB_FILENAME
             backfill_conf: dict[str, object] = {
                 "version": CONF_VERSION,
                 "project_name": project_name,
                 "prefix": opened_prefix,
-                "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}",
+                "db": rel_db.as_posix(),
             }
             conf_mode = config.get("mode")
             if conf_mode and conf_mode != "ethereal":
                 backfill_conf["mode"] = conf_mode
             write_conf(conf_path, backfill_conf)
-            click.echo(f"  Backfilled v2.0 anchor: {conf_path}")
+            click.echo(f"  Backfilled anchor: {conf_path}")
         # Cross-tool skew warning: if a previous marker recorded an older
         # schema, other tools / sessions pinned to that version will now
         # report SCHEMA_MISMATCH against this DB.
         if previous_marker is not None and previous_marker < CURRENT_SCHEMA_VERSION:
             click.echo(
-                f"Note: this project's previous .filigree/ used schema v{previous_marker}; "
+                f"Note: this project's previous store used schema v{previous_marker}; "
                 f"the new DB is at v{CURRENT_SCHEMA_VERSION}. Other tools or sessions "
                 f"pinned to filigree v{previous_marker} will report SCHEMA_MISMATCH against "
                 f"this DB.",
                 err=True,
             )
-        write_install_version(filigree_dir, CURRENT_SCHEMA_VERSION)
+        write_install_version(store_dir, CURRENT_SCHEMA_VERSION)
         # Update name/mode if explicitly provided
         updated = False
         if name is not None:
@@ -163,50 +184,50 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             updated = True
             click.echo(f"  Mode: {mode}")
         if updated:
-            write_config(filigree_dir, config)
+            write_config(store_dir, config)
         return
 
     prefix = prefix or cwd.name
     name = name or cwd.name
     mode = mode or "ethereal"
-    filigree_dir.mkdir()
-    (filigree_dir / "scanners").mkdir()
+    store_dir = weft_store
+    store_dir.mkdir(parents=True)
+    (store_dir / "scanners").mkdir()
 
-    from filigree.install import ensure_filigree_dir_gitignore
-
-    ensure_filigree_dir_gitignore(filigree_dir)
+    ensure_weft_store_gitignore(store_dir)
 
     config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
-    write_config(filigree_dir, config)
+    write_config(store_dir, config)
 
-    # v2.0: also write the .filigree.conf anchor — this is the file agents
-    # walk up looking for, the authoritative declaration that "this folder and
-    # its subtree belong to this filigree project".
+    # Write the .filigree.conf anchor at the project root — this is the file
+    # agents walk up looking for, the authoritative declaration that "this
+    # folder and its subtree belong to this filigree project". Its `db` field
+    # points at the federation store.
     conf_data: dict[str, object] = {
         "version": CONF_VERSION,
         "project_name": name,
         "prefix": prefix,
-        "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}",
+        "db": f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}",
     }
     if mode and mode != "ethereal":
         conf_data["mode"] = mode
     write_conf(cwd / CONF_FILENAME, conf_data)
 
-    db = FiligreeDB(filigree_dir / DB_FILENAME, prefix=prefix)
+    db = FiligreeDB(store_dir / DB_FILENAME, prefix=prefix, project_root=cwd, meta_dir=store_dir)
     db.initialize()
-    write_summary(db, filigree_dir / SUMMARY_FILENAME)
+    write_summary(db, store_dir / SUMMARY_FILENAME)
     db.close()
 
     # Record the schema version this project was last initialized at — used
     # by future `init` runs to warn about cross-tool schema skew.
-    write_install_version(filigree_dir, CURRENT_SCHEMA_VERSION)
+    write_install_version(store_dir, CURRENT_SCHEMA_VERSION)
 
-    click.echo(f"Initialized {FILIGREE_DIR_NAME}/ in {cwd}")
+    click.echo(f"Initialized filigree store at {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ in {cwd}")
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
-    click.echo(f"  Database: {filigree_dir / DB_FILENAME}")
+    click.echo(f"  Database: {store_dir / DB_FILENAME}")
     click.echo(f"  Anchor: {cwd / CONF_FILENAME}")
-    click.echo(f"  Scanners: {filigree_dir / 'scanners'}/ (add .toml files to register scanners)")
+    click.echo(f"  Scanners: {store_dir / 'scanners'}/ (add .toml files to register scanners)")
     click.echo("\nNext: filigree install")
 
 
@@ -253,6 +274,7 @@ def install(
     from filigree.install import (
         ensure_filigree_dir_gitignore,
         ensure_gitignore,
+        ensure_weft_store_gitignore,
         inject_instructions,
         install_claude_code_hooks,
         install_claude_code_mcp,
@@ -262,13 +284,16 @@ def install(
     )
 
     try:
-        filigree_dir = find_filigree_root()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         # filigree-dad647cf35: catch the rich subclass before the generic
         # FileNotFoundError so ForeignDatabaseError's git-boundary remediation
         # message reaches the user instead of "No .filigree/ found".
         click.echo(str(exc), err=True)
         sys.exit(1)
+    filigree_dir = anchor.store_dir
+    weft_store = anchor.project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    ensure_store_gitignore = ensure_weft_store_gitignore if filigree_dir == weft_store else ensure_filigree_dir_gitignore
 
     # Update mode in config if explicitly provided
     if mode is not None:
@@ -286,7 +311,7 @@ def install(
     if mode is None:
         mode = "ethereal"
 
-    project_root = filigree_dir.parent
+    project_root = anchor.project_root
     install_all = not any([claude_code, codex, claude_md, agents_md, gitignore, hooks_only, skills_only, codex_skills_only])
 
     results: list[tuple[str, bool, str]] = []
@@ -327,8 +352,8 @@ def install(
         ),
         (
             install_all or gitignore,
-            ".filigree/.gitignore",
-            lambda: ensure_filigree_dir_gitignore(filigree_dir),
+            f"{filigree_dir.name}/.gitignore",
+            lambda: ensure_store_gitignore(filigree_dir),
         ),
         (
             install_all or hooks_only,
@@ -464,13 +489,14 @@ def _apply_doctor_fixes(
     )
 
     try:
-        filigree_dir = find_filigree_root()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         if emit is not None:
             click.echo(str(exc), err=True)
         raise click.ClickException(str(exc)) from exc
 
-    project_root = filigree_dir.parent
+    filigree_dir = anchor.store_dir
+    project_root = anchor.project_root
     try:
         mode = get_mode(filigree_dir)
     except ValueError as exc:
@@ -563,7 +589,11 @@ def _apply_doctor_fixes(
                 # failure then surfaces as "Cannot fix context.md" and the loop
                 # continues rather than aborting the whole doctor run.
                 conf_path = project_root / CONF_FILENAME
-                db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
+                db = (
+                    FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+                    if conf_path.is_file()
+                    else FiligreeDB.from_store_dir(filigree_dir, project_root=project_root)
+                )
                 try:
                     write_summary(db, filigree_dir / SUMMARY_FILENAME)
                 finally:

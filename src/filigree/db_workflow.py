@@ -25,8 +25,6 @@ from filigree.types.workflow import (
 if TYPE_CHECKING:
     from filigree.templates import FieldSchema, TemplateRegistry, TransitionOption, ValidationResult
 
-_FILIGREE_DIR_NAME = ".filigree"
-
 
 def _is_priority_like_label(label: str) -> bool:
     casefolded = label.casefold()
@@ -81,10 +79,13 @@ class WorkflowMixin(DBMixinProtocol):
     _template_registry: TemplateRegistry | None  # narrowing needed by templates property
 
     def _filigree_metadata_dir(self) -> Path:
-        """Return the project metadata directory even when the DB is relocated."""
-        if self.project_root is not None:
-            return self.project_root / _FILIGREE_DIR_NAME
-        return self.db_path.parent
+        """Return the project metadata/store directory even when the DB is relocated.
+
+        Resolves to the store dir the DB was opened from (``.weft/filigree/`` or
+        legacy ``.filigree/``), set by the anchor-aware constructors. Falls back
+        to ``db_path.parent`` for bare ``FiligreeDB(...)`` constructions.
+        """
+        return self.meta_dir
 
     @property
     def templates(self) -> TemplateRegistry:

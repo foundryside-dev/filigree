@@ -13,6 +13,68 @@ from filigree.cli import cli
 from tests.cli.conftest import _extract_id
 
 
+class TestWeftStoreInit:
+    """WEFT store consolidation (filigree-37e3f26145): init creates the
+    federation .weft/filigree/ store, never writes weft.toml, and runs with
+    no weft.toml present (deletion test)."""
+
+    def test_init_creates_weft_store_layout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        store = tmp_path / ".weft" / "filigree"
+        assert (store / "filigree.db").is_file()
+        assert (store / "config.json").is_file()
+        assert (store / ".gitignore").is_file()
+        assert "managed-by: filigree" in (store / ".gitignore").read_text()
+        # legacy dir is NOT created for fresh installs
+        assert not (tmp_path / ".filigree").exists()
+        # conf anchor at root points at the federation store
+        conf = json.loads((tmp_path / ".filigree.conf").read_text())
+        assert conf["db"] == ".weft/filigree/filigree.db"
+
+    def test_init_never_writes_weft_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        assert not (tmp_path / "weft.toml").exists()
+
+    def test_install_never_writes_weft_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        cli_runner.invoke(cli, ["install", "--gitignore"])
+        assert not (tmp_path / "weft.toml").exists()
+
+    def test_init_and_run_with_no_weft_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """Deletion test: install and operate with no weft.toml present."""
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init", "--prefix", "p"])
+        assert not (tmp_path / "weft.toml").exists()
+        created = cli_runner.invoke(cli, ["create", "hello", "--json"])
+        assert created.exit_code == 0, created.output
+        listed = cli_runner.invoke(cli, ["ready", "--json"])
+        assert listed.exit_code == 0, listed.output
+
+    def test_store_dir_overlay_relocates_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """An operator weft.toml [filigree].store_dir relocates the store the
+        CLI opens — top precedence, the resolution-order contract."""
+        monkeypatch.chdir(tmp_path)
+        # Operator pre-declares a custom store dir, then inits into it by
+        # creating the dir + config there and pointing the conf at it.
+        custom = tmp_path / "var" / "fgstore"
+        custom.mkdir(parents=True)
+        (tmp_path / "weft.toml").write_text('[filigree]\nstore_dir = "var/fgstore"\n')
+        from filigree.core import FiligreeDB, write_conf, write_config
+
+        write_config(custom, {"prefix": "ov", "version": 1})
+        FiligreeDB(custom / "filigree.db", prefix="ov", project_root=tmp_path, meta_dir=custom).initialize()
+        write_conf(tmp_path / ".filigree.conf", {"version": 1, "project_name": "ov", "prefix": "ov", "db": "var/fgstore/filigree.db"})
+
+        result = cli_runner.invoke(cli, ["create", "via overlay", "--json"])
+        assert result.exit_code == 0, result.output
+        # The issue landed in the overlay-relocated DB, not a default store.
+        assert not (tmp_path / ".weft" / "filigree").exists()
+
+
 class TestOnboardingBreadcrumbs:
     def test_init_shows_next(self, tmp_path: Path, cli_runner: CliRunner) -> None:
         original = os.getcwd()
@@ -29,7 +91,7 @@ class TestOnboardingBreadcrumbs:
         try:
             result = cli_runner.invoke(cli, ["init"])
             assert result.exit_code == 0
-            assert (tmp_path / ".filigree" / "scanners").is_dir()
+            assert (tmp_path / ".weft" / "filigree" / "scanners").is_dir()
         finally:
             os.chdir(original)
 
@@ -48,7 +110,7 @@ class TestNestedGitignoreWiring:
         try:
             result = cli_runner.invoke(cli, ["init"])
             assert result.exit_code == 0
-            nested = tmp_path / ".filigree" / ".gitignore"
+            nested = tmp_path / ".weft" / "filigree" / ".gitignore"
             assert nested.exists()
             body = nested.read_text()
             assert "managed-by: filigree" in body
@@ -62,7 +124,7 @@ class TestNestedGitignoreWiring:
         try:
             cli_runner.invoke(cli, ["init"])
             # Simulate a project created before the fix.
-            nested = tmp_path / ".filigree" / ".gitignore"
+            nested = tmp_path / ".weft" / "filigree" / ".gitignore"
             nested.unlink(missing_ok=True)
             result = cli_runner.invoke(cli, ["install", "--gitignore"])
             assert result.exit_code == 0
@@ -642,7 +704,7 @@ class TestDoctorCli:
         """
         runner, project_root = cli_in_project
 
-        from filigree.core import FILIGREE_DIR_NAME, SUMMARY_FILENAME
+        from filigree.core import SUMMARY_FILENAME
         from filigree.install import FILIGREE_INSTRUCTIONS_MARKER
         from filigree.install_support.doctor import CheckResult
 
@@ -656,7 +718,9 @@ class TestDoctorCli:
         )
 
         # context.md missing to start; instruction files absent.
-        summary_path = project_root / FILIGREE_DIR_NAME / SUMMARY_FILENAME
+        from filigree.core import find_filigree_anchor
+
+        summary_path = find_filigree_anchor(project_root).store_dir / SUMMARY_FILENAME
         summary_path.unlink(missing_ok=True)
 
         result = runner.invoke(cli, ["doctor", "--fix", "--json"])
@@ -781,7 +845,7 @@ class TestDoctorFixServerRegistry:
 
         self._patch_server_config(project, monkeypatch)
         gone = str(project / "ghost" / ".filigree")
-        alive = str(project / ".filigree")
+        alive = str(project / ".weft" / "filigree")
         write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}, alive: {"prefix": "test"}}))
 
         monkeypatch.setattr(
@@ -860,14 +924,14 @@ class TestDoctorFixServerRegistry:
 
         # Put the project into server mode so the real run_doctor exercises
         # _doctor_server_checks.
-        config_path = project / ".filigree" / "config.json"
-        config = read_config(project / ".filigree")
+        config_path = project / ".weft" / "filigree" / "config.json"
+        config = read_config(project / ".weft" / "filigree")
         config["mode"] = "server"
         config_path.write_text(json.dumps(config))
 
         self._patch_server_config(project, monkeypatch)
         gone = str(project / "ghost" / ".filigree")
-        alive = str(project / ".filigree")
+        alive = str(project / ".weft" / "filigree")
         write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "ghost"}, alive: {"prefix": "test"}}))
 
         first = runner.invoke(cli, ["doctor", "--fix"])
@@ -1026,21 +1090,21 @@ class TestInitMode:
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init"])
         assert result.exit_code == 0
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "ethereal"
 
     def test_init_with_server_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init", "--mode", "server"])
         assert result.exit_code == 0
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "server"
 
     def test_init_with_explicit_ethereal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init", "--mode", "ethereal"])
         assert result.exit_code == 0
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "ethereal"
 
     def test_init_invalid_mode_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -1054,7 +1118,7 @@ class TestInitMode:
         cli_runner.invoke(cli, ["init"])
         result = cli_runner.invoke(cli, ["init", "--mode", "server"])
         assert result.exit_code == 0
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "server"
 
     def test_init_existing_project_updates_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -1063,21 +1127,32 @@ class TestInitMode:
         cli_runner.invoke(cli, ["init"])
         result = cli_runner.invoke(cli, ["init", "--name", "My Project"])
         assert result.exit_code == 0
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["name"] == "My Project"
 
     def test_init_invalid_mode_no_directory_created(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init", "--mode", "bogus"])
         assert result.exit_code != 0
+        assert not (tmp_path / ".weft").exists()
         assert not (tmp_path / ".filigree").exists()
+
+
+def _store_db_path(tmp_path: Path) -> Path:
+    """Resolve the active DB path for a project, layout-agnostic (.weft or legacy)."""
+    from filigree.core import DB_FILENAME, find_filigree_anchor, read_conf
+
+    anchor = find_filigree_anchor(tmp_path)
+    if anchor.conf_path is not None:
+        return (anchor.conf_path.parent / read_conf(anchor.conf_path)["db"]).resolve()
+    return anchor.store_dir / DB_FILENAME
 
 
 def _downgrade_db(tmp_path: Path, target_version: int = 1) -> None:
     """Rewrite the user_version pragma to simulate an outdated schema."""
     import sqlite3
 
-    db_path = tmp_path / ".filigree" / "filigree.db"
+    db_path = _store_db_path(tmp_path)
     conn = sqlite3.connect(str(db_path))
     conn.execute(f"PRAGMA user_version = {target_version}")
     conn.commit()
@@ -1140,9 +1215,10 @@ class TestInitConfBackfill:
         monkeypatch.chdir(tmp_path)
         cli_runner.invoke(cli, ["init"])
 
-        # User customised the conf — re-init must not clobber it.
+        # User customised the conf — re-init must not clobber it. The db field
+        # must point at the real (federation-layout) store so re-init can open it.
         conf = tmp_path / ".filigree.conf"
-        custom = {"version": 1, "project_name": "custom", "prefix": "custom", "db": ".filigree/filigree.db"}
+        custom = {"version": 1, "project_name": "custom", "prefix": "custom", "db": ".weft/filigree/filigree.db"}
         conf.write_text(json.dumps(custom))
 
         result = cli_runner.invoke(cli, ["init"])
@@ -1164,7 +1240,7 @@ class TestInitSchemaMigration:
 
         result = cli_runner.invoke(cli, ["init"])
         assert result.exit_code == 0
-        assert "already exists" in result.output
+        assert "already initialized" in result.output
         assert "Schema upgraded v1" in result.output
 
     def test_init_existing_no_upgrade_message_when_current(
@@ -1176,7 +1252,7 @@ class TestInitSchemaMigration:
 
         result = cli_runner.invoke(cli, ["init"])
         assert result.exit_code == 0
-        assert "already exists" in result.output
+        assert "already initialized" in result.output
         assert "Schema upgraded" not in result.output
 
 
@@ -1193,8 +1269,8 @@ class TestDoctorFixHonoursConfDbPath:
         cli_runner.invoke(cli, ["init"])
 
         # Move the DB to a custom location and update the conf to point at it.
-        # This mirrors a v2.0 install where users relocate the DB out of .filigree/.
-        legacy_db = tmp_path / ".filigree" / "filigree.db"
+        # This mirrors an install where users relocate the DB out of the store dir.
+        legacy_db = _store_db_path(tmp_path)
         custom_db = tmp_path / "custom-data.db"
         shutil.move(str(legacy_db), str(custom_db))
 
@@ -1249,7 +1325,7 @@ class TestDoctorFixSchema:
         assert result.exit_code == 1
         assert "Schema version: v1" in result.output
         assert "Schema upgraded v1" not in result.output
-        conn = sqlite3.connect(str(tmp_path / ".filigree" / "filigree.db"))
+        conn = sqlite3.connect(str(_store_db_path(tmp_path)))
         try:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
         finally:
@@ -1290,7 +1366,7 @@ class TestInstallMode:
         cli_runner.invoke(cli, ["init"])
         result = cli_runner.invoke(cli, ["install", "--mode", "server"])
         assert result.exit_code == 0, f"install failed:\n{result.output}\nexc={result.exception}"
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "server"
 
     def test_install_preserves_existing_mode_when_no_flag(
@@ -1305,14 +1381,14 @@ class TestInstallMode:
         cli_runner.invoke(cli, ["init", "--mode", "server"])
         result = cli_runner.invoke(cli, ["install"])
         assert result.exit_code == 0, f"install failed:\n{result.output}\nexc={result.exception}"
-        config = json.loads((tmp_path / ".filigree" / "config.json").read_text())
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "server"
 
 
 class TestAdminProjectConfigValidation:
     @staticmethod
     def _write_invalid_loomweave_config(project_root: Path) -> None:
-        config_path = project_root / ".filigree" / "config.json"
+        config_path = project_root / ".weft" / "filigree" / "config.json"
         config_path.write_text(
             json.dumps(
                 {
@@ -1436,7 +1512,7 @@ class TestInstallModeIntegration:
         assert result.exit_code == 0
 
         mcp = json.loads((tmp_path / ".mcp.json").read_text())
-        prefix = json.loads((tmp_path / ".filigree" / "config.json").read_text())["prefix"]
+        prefix = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())["prefix"]
         assert mcp["mcpServers"]["filigree"]["type"] == "streamable-http"
         assert mcp["mcpServers"]["filigree"]["url"] == f"http://localhost:9911/mcp/?project={prefix}"
 
@@ -1831,7 +1907,7 @@ class TestInstallForeignDatabaseMessage:
     def test_install_surfaces_foreign_database_message(
         self, tmp_path: Path, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("filigree.cli_commands.admin.find_filigree_root", self._raise_foreign(tmp_path))
+        monkeypatch.setattr("filigree.cli_commands.admin.find_filigree_anchor", self._raise_foreign(tmp_path))
         original = os.getcwd()
         os.chdir(str(tmp_path))
         try:
@@ -1853,7 +1929,7 @@ class TestInstallForeignDatabaseMessage:
             "filigree.install.run_doctor",
             lambda: [CheckResult(name="config.json", passed=False, message="stub", fix_hint="run init")],
         )
-        monkeypatch.setattr("filigree.cli_commands.admin.find_filigree_root", self._raise_foreign(tmp_path))
+        monkeypatch.setattr("filigree.cli_commands.admin.find_filigree_anchor", self._raise_foreign(tmp_path))
 
         result = cli_runner.invoke(cli, ["doctor", "--fix"])
         assert result.exit_code == 1
