@@ -1,0 +1,6 @@
+[scanner]
+name = "claude-code"
+description = "Per-file bug hunt using Claude Code CLI"
+command = "python"
+args = ["scripts/claude_bug_hunt.py", "--root", "{project_root}", "--file", "{file}", "--max-files", "1", "--api-url", "{api_url}", "--scan-run-id", "{scan_run_id}"]
+file_types = ["py"]

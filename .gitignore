@@ -37,6 +37,14 @@ node_modules/
 !.filigree/.gitkeep
 .filigree.old/
 
+# Weft store (3.0 federation layout) — machine-owned local state; track only
+# the shareable scanner configs, mirroring the legacy .filigree/ convention.
+# The live DB is already covered by the global *.db / *.db-wal / *.db-shm rules.
+.weft/filigree/*
+!.weft/filigree/scanners/
+.weft/filigree/scanners/*
+!.weft/filigree/scanners/*.toml
+
 # Agent / tooling config (machine- or user-local)
 .claude/
 .codex/
