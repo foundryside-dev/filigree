@@ -106,16 +106,45 @@ class TestResolveStoreDir:
         _weft_store(tmp_path).mkdir(parents=True)  # empty weft dir, no DB inside
         assert resolve_store_dir(tmp_path) == legacy
 
-    def test_weft_dir_with_db_still_wins_over_legacy_husk(self, tmp_path: Path) -> None:
-        # The committed / mid-commit state: once weft holds the DB it is canonical
-        # and wins even with a lingering legacy husk that also has a DB.
+    def test_committed_conf_weft_db_wins_over_legacy_husk(self, tmp_path: Path) -> None:
+        # COMMITTED state for a CONF install: a .filigree.conf marker exists, so
+        # the conf-presence discriminator collapses the guard to the original
+        # DB-presence tie-break — once weft holds the DB it is canonical and wins
+        # even with a lingering legacy husk that also has a DB. The guard keys on
+        # the conf MARKER's presence, never on the conf's ``db`` contents.
         legacy = tmp_path / FILIGREE_DIR_NAME
         legacy.mkdir()
         (legacy / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
         store = _weft_store(tmp_path)
         store.mkdir(parents=True)
         (store / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
+        # The conf marker that distinguishes a committed install from a confless
+        # mid-migration window. Its db field points at weft for realism, but the
+        # guard never reads it — presence alone collapses to the old tie-break.
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {
+                "version": 1,
+                "project_name": "proj",
+                "prefix": "proj",
+                "db": f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}",
+            },
+        )
         assert resolve_store_dir(tmp_path) == store
+
+    def test_confless_both_dbs_window_keeps_legacy_canonical(self, tmp_path: Path) -> None:
+        # MID-MIGRATION window for a CONFLESS install: both DBs present, NO
+        # .filigree.conf marker. Legacy stays canonical until migrate deletes it
+        # (the de-facto commit point for confless), so a confless writer routes to
+        # legacy and is never clobbered. This is the discriminator case for the
+        # data-loss bug (filigree-6f4b6dcd78).
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        (legacy / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        (store / DB_FILENAME).write_bytes(b"SQLite format 3\x00")
+        assert resolve_store_dir(tmp_path) == legacy
 
 
 class TestReadWeftFiligreeTable:
@@ -422,6 +451,57 @@ class TestMigrateStoreToWeft:
         db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
         try:
             assert db2.get_issue(weft_only.id) is not None
+        finally:
+            db2.close()
+
+    def test_confless_both_dbs_window_preserves_writer_data(self, tmp_path: Path) -> None:
+        """Data-loss regression (filigree-6f4b6dcd78): a CONFLESS install in the
+        both-DBs window must not lose a writer's data through migration.
+
+        Stage the post-crash state directly (no crash injection): a legacy
+        ``.filigree/`` DB AND a stale ``.weft/filigree/`` DB both present, with
+        NO ``.filigree.conf`` marker. For a confless install the legacy delete in
+        :func:`migrate_store_to_weft` is the de-facto commit point, so legacy
+        stays canonical until then — :func:`resolve_store_dir` must route a
+        confless writer to LEGACY during this window.
+
+        A writer opens whatever ``resolve_store_dir`` picks (the function under
+        test) and records a sentinel. Pre-fix, resolve returns weft, the sentinel
+        lands in weft, and migrate's unconditional re-copy clobbers weft from the
+        stale legacy DB (sentinel lost). Post-fix, resolve returns legacy, the
+        sentinel lands in legacy, and migrate copies it forward — it survives.
+        """
+        # Confless legacy install: config (for the prefix) + DB, but NO conf.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        write_config(legacy, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        legacy_db = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        legacy_db.initialize()
+        legacy_db.close()
+        # A stale weft DB also present (left by an interrupted migration). Its
+        # mere presence is what makes the buggy resolver pick weft.
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        write_config(store, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        stale_weft_db = FiligreeDB(store / DB_FILENAME, prefix="proj")
+        stale_weft_db.initialize()
+        stale_weft_db.close()
+
+        # A confless writer opens WHATEVER resolve_store_dir picks — the bug's
+        # actual open-time path. Correct resolution routes it to legacy.
+        db = FiligreeDB.from_filigree_dir(resolve_store_dir(tmp_path))
+        try:
+            sentinel = db.create_issue("confless window sentinel", type="task")
+        finally:
+            db.close()
+
+        migrate_store_to_weft(tmp_path)
+
+        # Post-migration the legacy DB is gone, so resolve returns weft. The
+        # sentinel must have survived the migration into the canonical store.
+        db2 = FiligreeDB.from_filigree_dir(resolve_store_dir(tmp_path))
+        try:
+            assert db2.get_issue(sentinel.id) is not None
         finally:
             db2.close()
 

@@ -504,11 +504,17 @@ def resolve_store_dir(project_root: Path) -> Path:
          store dir through the ``.filigree.conf`` ``db`` field, whose trust
          boundary forbids absolute / escaping paths, so such a value cannot be
          represented consistently and is never honoured half-way.
-      2. ``.weft/filigree/`` if it exists — UNLESS it is an empty husk (no DB)
-         while legacy ``.filigree/`` still holds the DB. The choice keys on DB
-         *presence*, not bare dir existence: an aborted migration can leave an
+      2. ``.weft/filigree/`` if it exists — UNLESS legacy ``.filigree/`` is still
+         canonical. Legacy stays canonical when it holds the DB and either
+         (a) weft is an empty husk (no DB) — an aborted migration can leave an
          empty ``.weft/filigree/`` behind, and selecting it would let a confless
-         open stamp a fresh empty DB over the live legacy data (data loss).
+         open stamp a fresh empty DB over the live legacy data (data loss); or
+         (b) the install is CONFLESS (no ``.filigree.conf``) — for a confless
+         install migration's legacy-DB delete is the de-facto commit point, so
+         legacy stays canonical (writes flow there) until that delete, even once
+         a weft DB exists. A CONF install's ``.filigree.conf`` ``db`` field is
+         its commit marker, so the conf-present path keeps the plain DB-presence
+         tie-break and is unchanged (filigree-6f4b6dcd78).
       3. legacy ``.filigree/`` (back-compat; also the bare fallback that a fresh
          install's default ``db`` literal points beside before the dir exists).
 
@@ -543,17 +549,27 @@ def resolve_store_dir(project_root: Path) -> Path:
                 return project_root / candidate
     weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
     legacy = project_root / FILIGREE_DIR_NAME
-    # Prefer the federation store — but NOT when it is an empty husk while legacy
-    # still holds the DB. A busy- or copy-aborted migration can leave an empty
-    # ``.weft/filigree/`` behind (the dir is created before the abortable copy);
-    # selecting it on bare directory existence would let a confless open stamp a
-    # fresh empty DB there and orphan the real data in legacy (data loss). So key
-    # the choice on DB *presence*, not dir existence: weft wins unless it lacks a
-    # DB that legacy still has. A genuinely fresh weft install (config.json, DB
-    # not yet stamped, no legacy) is unaffected — its legacy_db guard is False.
+    # Prefer the federation store — but NOT while legacy is still canonical. The
+    # choice keys on DB *presence*, not bare dir existence (a busy- or copy-
+    # aborted migration can leave an empty ``.weft/filigree/`` behind, the dir
+    # being created before the abortable copy). Two cases keep legacy canonical;
+    # see the keep_legacy comment below. A genuinely fresh weft install
+    # (config.json, DB not yet stamped, no legacy) is unaffected — its
+    # legacy_db guard is False.
     weft_db_present = (weft_store / DB_FILENAME).is_file()
     legacy_db_present = (legacy / DB_FILENAME).is_file()
-    if weft_store.is_dir() and not (legacy_db_present and not weft_db_present):
+    # For a CONFLESS install there is no .filigree.conf to mark the migration
+    # commit point, so migrate_store_to_weft's legacy-DB delete (step 4) is the
+    # de-facto commit. Until that delete, legacy stays canonical: a confless
+    # writer must keep routing to legacy even once a weft DB exists, otherwise a
+    # write lands in weft and migrate's unconditional re-copy clobbers it from
+    # the still-canonical legacy DB (data loss — filigree-6f4b6dcd78). A CONF
+    # install's .filigree.conf ``db`` field is its commit marker, so when the
+    # conf is present keep_legacy collapses to the original DB-presence tie-break
+    # (legacy_db_present and not weft_db_present) — conf installs are unchanged.
+    conf_present = (project_root / CONF_FILENAME).is_file()
+    keep_legacy = legacy_db_present and (not weft_db_present or not conf_present)
+    if weft_store.is_dir() and not keep_legacy:
         return weft_store
     if legacy.is_dir():
         return legacy
