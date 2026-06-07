@@ -26,7 +26,7 @@ from pathlib import Path
 
 import portalocker
 
-from filigree.core import FILIGREE_DIR_NAME
+from filigree.core import resolve_store_dir
 
 # ---------------------------------------------------------------------------
 # Re-exports from install_support subpackage
@@ -239,22 +239,30 @@ def _instruction_write_lock(file_path: Path) -> Iterator[None]:
     repo, or a hook racing a manual ``filigree install`` — can interleave that
     read-modify-write and clobber each other's work (filigree-04bad2a2bf).
 
-    The lock lives in ``.filigree/`` (already gitignored, the home of
-    ``ephemeral.lock``/``server.lock``) and is taken with a *blocking*
+    The lock lives in the resolved machine store dir (already gitignored, the
+    home of ``ephemeral.lock``) — ``.weft/filigree/`` on a 3.0 install, the
+    legacy ``.filigree/`` on a pre-migration project. It MUST follow
+    ``resolve_store_dir``, not a hardcoded ``.filigree/``: a fresh 3.0 init
+    creates only ``.weft/filigree/``, so hardcoding the legacy name left every
+    SessionStart on a normal 3.0 project racing unlocked
+    (filigree-04bad2a2bf regression). ``resolve_store_dir``'s single precedence
+    chain also guarantees every racing process picks the *same* lock dir even
+    when both layouts are present (a migrated project keeps the legacy husk) —
+    the mutual-exclusion invariant. The lock is taken with a *blocking*
     exclusive flock: correctness requires waiting for the other writer, not
     skipping. ``flock`` is released automatically on fd close or process death,
     so a crashed holder cannot wedge the lock.
 
-    Best-effort: when ``.filigree/`` is absent (a bare file with no initialised
-    project, as in unit tests) there is no shared project to race over, so
-    proceed unlocked rather than fabricate the directory.
+    Best-effort: when the store dir doesn't exist yet (a bare file with no
+    initialised project, as in unit tests) there is no shared project to race
+    over, so proceed unlocked rather than fabricate the directory.
     """
-    filigree_dir = file_path.parent / FILIGREE_DIR_NAME
-    if not filigree_dir.is_dir():
+    store_dir = resolve_store_dir(file_path.parent)
+    if not store_dir.is_dir():
         yield
         return
 
-    lock_path = filigree_dir / "instructions.lock"
+    lock_path = store_dir / "instructions.lock"
     try:
         lock_fd = open(lock_path, "w")  # noqa: SIM115 — held for the with-block
     except OSError as exc:

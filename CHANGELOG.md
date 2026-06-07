@@ -143,6 +143,19 @@ checklist is complete and a coordinated consumer-migration window is published.
   shared project to race over, so the write proceeds unlocked. The nested
   `.filigree/.gitignore` now lists `instructions.lock`.
 
+- **Instruction-write lock now follows the resolved store dir (regression in the
+  3.0 store consolidation; filigree-04bad2a2bf).** The cross-process lock above
+  keyed its directory on a hardcoded `.filigree/`, but 3.0 moved the machine
+  store to `.weft/filigree/` — a fresh `filigree init` creates no `.filigree/`
+  at all, so the lock was silently bypassed on every SessionStart of a normally
+  initialised 3.0 project (only legacy-migrated projects, which keep a
+  `.filigree/` husk, accidentally still locked). The lock now resolves its
+  directory via `resolve_store_dir`, whose single precedence chain both finds
+  the real store (`.weft/filigree/`) and guarantees every racing process picks
+  the *same* lock location when both layouts are present — restoring mutual
+  exclusion. `ephemeral.lock` already resolved correctly; `server.lock` is
+  home-dir scoped and unaffected.
+
 - **`doctor --fix` repairs instruction files and `context.md` again
   (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the
   generated `context.md` back into its fixable set: instruction files via the
@@ -176,6 +189,19 @@ checklist is complete and a coordinated consumer-migration window is published.
   NULL`; `export`/`import` round-trips it. Detects *content* drift, not *identity*
   drift (the v26 rebrand's `entity_id` rewrite is resolved by Legis on the gate
   call).
+
+- **Cascade batch's Legis-down short-circuit no longer over-blocks ungoverned
+  issues.** When an earlier governed issue in a `close_resolved_findings` batch
+  proved Legis unreachable, the short-circuit handed every remaining candidate a
+  synthetic `UNAVAILABLE` *without* re-running the gate's cheap local checks — so
+  an **ungoverned** issue (which never touches Legis, DECISION 1A) appearing later
+  in the same unordered batch was wrongly deferred and tagged with a spurious
+  "governed issue … unreachable" reconciliation-debt comment. The suppression is
+  now threaded into `evaluate_closure_gate` (`legis_known_down`) and applied only
+  at the point a network call would happen — after the ungoverned/governance-off/
+  `STALE` short-circuits — so ungoverned issues still PROCEED and close while a
+  down/slow Legis is still bounded to one timeout per batch. No governance bypass:
+  a governed, non-stale issue still fails closed as `UNAVAILABLE`.
 
 - **`filigree init`/`install` now ship a nested `.filigree/.gitignore`.** A project
   that tracks its `.filigree/` dir as committed payload (a shared team issue DB, or a

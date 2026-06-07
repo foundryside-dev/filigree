@@ -98,7 +98,7 @@ def _signed_row_is_stale(row: Any) -> bool:
     return bool(signed != row.get("content_hash_at_attach"))
 
 
-def evaluate_closure_gate(db: _AssocReader, issue_id: str) -> GateDecision:
+def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: bool = False) -> GateDecision:
     """Decide whether *issue_id* may be closed.
 
     Short-circuits to ``PROCEED`` when governance is off, and again for
@@ -108,6 +108,15 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str) -> GateDecision:
     network call: Filigree cannot treat a sign-off over old content as covering
     new content, and the issue-id-only gate call cannot convey the drift to
     Legis — only a fresh Legis sign-off (a signed write) clears it (v27).
+
+    ``legis_known_down`` lets a batch caller suppress the per-issue Legis
+    round-trip once an earlier issue in the same sweep already proved Legis
+    unreachable (bounding a down/slow Legis to one timeout per batch). It is
+    applied **only** at the point a network call would otherwise happen — after
+    the governance-off, ungoverned, and stale short-circuits — so an ungoverned
+    or governance-off issue later in the batch still PROCEEDs and a stale one
+    still reports ``STALE``. A governed, non-stale issue fails closed as
+    ``UNAVAILABLE`` (DECISION 2) with no further network call.
     """
     if not legis_client.is_configured():
         return _PROCEED
@@ -122,6 +131,11 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str) -> GateDecision:
         # Fail closed locally — do NOT consult Legis (it is asked only issue_id
         # and would answer for the stale snapshot it last saw).
         return GateDecision(GateOutcome.STALE, "entity content drifted since the Legis sign-off; awaiting re-sign")
+    if legis_known_down:
+        # A governed, non-stale issue needs a Legis round-trip, but a prior issue
+        # in this batch already proved Legis unreachable — fail closed without
+        # re-incurring the timeout (DECISION 2).
+        return GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
     return _map_result(check_closure_gate(str(issue_id)))
 
 

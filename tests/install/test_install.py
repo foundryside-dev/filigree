@@ -20,6 +20,8 @@ from filigree.core import (
     DB_FILENAME,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
     FiligreeDB,
     find_filigree_command,
 )
@@ -190,7 +192,48 @@ class TestInstructionWriteLock:
         assert not (flags & portalocker.LOCK_NB)
         assert (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
 
-    def test_proceeds_unlocked_without_filigree_dir(self, tmp_path: Path) -> None:
+    def test_locks_under_weft_store_on_fresh_3_0_project(self, tmp_path: Path) -> None:
+        """3.0 fresh layout: only ``.weft/filigree/`` exists, no ``.filigree/``.
+
+        The lock must follow the resolved store dir, not a hardcoded
+        ``.filigree/`` — otherwise the read-modify-write proceeds unlocked on
+        every SessionStart of a normally-initialised 3.0 project
+        (filigree-04bad2a2bf regression).
+        """
+        weft_store = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        weft_store.mkdir(parents=True)
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        mock_lock.assert_called_once()
+        # The real artifact lands in the weft store, and no legacy husk is forged.
+        assert (weft_store / "instructions.lock").exists()
+        assert not (tmp_path / FILIGREE_DIR_NAME).exists()
+
+    def test_locks_under_weft_store_when_both_layouts_present(self, tmp_path: Path) -> None:
+        """Migrated project: ``migrate_store_to_weft`` leaves the legacy
+        ``.filigree/`` husk in place beside the new ``.weft/filigree/``.
+
+        Mutual exclusion requires ONE deterministic lock location per project
+        across all racing processes. resolve_store_dir's precedence puts the
+        weft store ahead of the legacy dir, so the lock must land there — a
+        naive "lock whichever dir exists" would let two processes split between
+        ``.filigree/`` and ``.weft/filigree/`` and silently lose exclusion.
+        """
+        weft_store = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        weft_store.mkdir(parents=True)
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()  # legacy husk left by migration
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        mock_lock.assert_called_once()
+        assert (weft_store / "instructions.lock").exists()
+        assert not (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
+
+    def test_proceeds_unlocked_without_any_store_dir(self, tmp_path: Path) -> None:
         target = tmp_path / "CLAUDE.md"
         with patch("filigree.install.portalocker.lock") as mock_lock:
             ok, _msg = inject_instructions(target)

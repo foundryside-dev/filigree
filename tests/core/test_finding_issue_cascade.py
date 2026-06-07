@@ -240,6 +240,42 @@ class TestBatchShortCircuit:
         assert _is_done(db, issue_a)
         assert not _is_done(db, blocked_id)
 
+    def test_batch_legis_down_does_not_block_later_ungoverned_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A governed issue proving Legis down must NOT block a later UNGOVERNED
+        issue in the same (unordered) batch. Ungoverned closes never touch Legis
+        (DECISION 1A), so they must always PROCEED even after the legis-down
+        short-circuit trips.
+
+        Regression: the short-circuit handed every remaining candidate a
+        synthetic UNAVAILABLE *without* the cheap local governed-ness read, so an
+        ungoverned issue appearing after a governed-down one was wrongly deferred
+        and tagged with spurious "governed issue … unreachable" debt.
+        """
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        called: list[str] = []
+
+        def _gate(issue_id: str) -> LegisGateResult:
+            called.append(issue_id)
+            return LegisGateResult(LegisGateStatus.UNREACHABLE, reason="timeout")
+
+        monkeypatch.setattr(governance, "check_closure_gate", _gate)
+
+        # Governed-down candidate FIRST so legis_down is already set when the
+        # ungoverned candidate is processed — the only ordering that exercises
+        # the bug (ungoverned-first was never short-circuited).
+        f_gov, gov_id = _resolved_finding_linked_to_issue(db, "fp-gd-gov")
+        _govern(db, gov_id, entity="ent-gd")
+        f_ung, ung_id = _resolved_finding_linked_to_issue(db, "fp-gd-ung")  # ungoverned
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings([(f_gov, gov_id), (f_ung, ung_id)], warnings=[])
+
+        assert closed == [ung_id]  # ungoverned still closes
+        assert not _is_done(db, gov_id)  # governed-down defers
+        assert _is_done(db, ung_id)
+        assert _debt_count(db, gov_id) == 1  # governed-down → debt
+        assert _debt_count(db, ung_id) == 0  # ungoverned → NO spurious debt
+        assert called == [gov_id]  # only the governed issue ever hit Legis
+
 
 class TestListReconciliationDebt:
     """Task 4: deferred-close debt is actionable — a cross-issue read surface

@@ -109,24 +109,27 @@ class FindingIssueCascadeService:
         """Gate-and-close a batch of ``(finding_id, issue_id)``; return the ids
         that closed.
 
-        Short-circuits the Legis gate after the first ``UNAVAILABLE`` verdict so
-        a down/slow Legis costs at most one timeout per batch — the remainder
-        defer to reconciliation debt without a further network call.
-        ``INTEGRITY_FAILURE`` is a per-issue ledger-tamper verdict, not a
-        connectivity problem, so it is deliberately NOT short-circuited.
+        Suppresses the per-issue Legis *network call* after the first
+        ``UNAVAILABLE`` verdict so a down/slow Legis costs at most one timeout
+        per batch. The suppression is threaded into ``evaluate_closure_gate``
+        (``legis_known_down``) rather than fabricated here, so the gate's cheap
+        local checks still run for every candidate: an ungoverned or
+        governance-off issue later in the batch still PROCEEDs (DECISION 1A —
+        ungoverned closes never touch Legis), and a stale binding still reports
+        ``STALE``. Only a governed, non-stale issue fails closed as
+        ``UNAVAILABLE`` without a further network call. ``INTEGRITY_FAILURE`` is
+        a per-issue ledger-tamper verdict, not a connectivity problem, so it
+        never sets ``legis_down``.
         """
         from filigree import governance
-        from filigree.governance import GateDecision, GateOutcome
+        from filigree.governance import GateOutcome
 
         closed: list[str] = []
         legis_down = False
         for finding_id, issue_id in candidates:
-            if legis_down:
-                decision: GateDecision = GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
-            else:
-                decision = governance.evaluate_closure_gate(self.store, issue_id)
-                if decision.outcome is GateOutcome.UNAVAILABLE:
-                    legis_down = True
+            decision = governance.evaluate_closure_gate(self.store, issue_id, legis_known_down=legis_down)
+            if decision.outcome is GateOutcome.UNAVAILABLE:
+                legis_down = True
             if self._apply_close_decision(finding_id, issue_id, decision, warnings=warnings):
                 closed.append(issue_id)
         return closed
