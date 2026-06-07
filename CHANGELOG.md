@@ -39,6 +39,30 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Fixed
 
+- **Session-context surfaces un-bridged analyzer findings (F2).** A new
+  `ANALYZER FINDINGS: N not yet bridged to the tracker (M actionable, K
+  baselined/suppressed)` line in `filigree session-context` (CLI + MCP) so an
+  agent's orientation no longer silently reads "nothing to do" while
+  un-promoted findings sit in `scan_findings`. Honest-empty: omitted at 0; the
+  actionable/suppressed split uses the wardline `suppression_state`.
+- **Aggregate/container types are never offered as startable work (F3).**
+  `release`, `epic`, `milestone`, and `phase` carry a declarative `container`
+  type-schema flag; `work_ready` reports them `startable=false` ("complete child
+  issues") and `start_next_work` skips them, so the picker no longer hands an
+  agent a release/epic container as if it were a unit of work. Manual
+  transitions are unaffected.
+- **Confless store-migration re-run is idempotent.** A completed confless
+  migration (legacy DB carried forward + removed, no `.filigree.conf`) no longer
+  falls through to a needless re-copy or a spurious `StoreMigrationBusyError`
+  when a daemon is live — `migrate_store_to_weft` short-circuits on the
+  confless-completion state before the daemon-liveness probe.
+- **`read_token_file` honours its "unreadable → empty" contract for corrupt
+  files.** A non-UTF-8 federation-token file raised `UnicodeDecodeError` (a
+  `ValueError`, not `OSError`) — now caught (with a warning) so it fails closed
+  to "no token" instead of crashing server-mode auth / daemon boot / `doctor`.
+- **`force` is now declared on the `promote_finding` /
+  `promote_finding_and_attach_entity` input TypedDicts**, restoring schema↔type
+  agreement for the suppression-override added earlier in this cycle.
 - **Server-mode federation now scopes to the caller; ambiguous writes fail
   closed (weft-7a399b8124 / weft-23574069a1).** In `--server-mode` (one daemon,
   many projects) an *unscoped* federation request (bare `/api/weft/*` or a living
