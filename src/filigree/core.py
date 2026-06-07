@@ -512,6 +512,30 @@ def resolve_store_dir(project_root: Path) -> Path:
     return weft_store
 
 
+def _is_intact_sqlite(path: Path) -> bool:
+    """True iff *path* is a readable, structurally intact SQLite database.
+
+    Opened read-only + ``immutable=1`` so the probe never spawns ``-wal``/
+    ``-shm`` sidecars beside the file (a plain connect to a WAL-mode DB would,
+    and the atomic publish only replaces the main file). A truncated or
+    non-database file fails to open or fails ``quick_check`` → ``False``. Used to
+    gate the migration copy on *completion* rather than mere existence, so a
+    partial DB left at the destination by an interrupted copy is re-copied from
+    the still-valid source rather than published as-is.
+    """
+    if not path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return False
+    return bool(row is not None and row[0] == "ok")
+
+
 class StoreMigrationBusyError(RuntimeError):
     """A live writer holds the DB, so migration cannot safely checkpoint it."""
 
@@ -530,6 +554,15 @@ def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
     migration never leaves a dangling conf nor an empty re-stamped DB (the
     migration is crash-convergent — a re-run resumes).
 
+    The copy is **atomic at the destination**: it stages to a unique temp file
+    in the dest dir and publishes with ``os.replace`` (mirroring
+    :func:`write_atomic`). ``dest_db`` therefore only ever appears as a *complete*
+    file — a crash (SIGKILL/power loss) during the byte copy leaves only the
+    temp, which is cleaned up, never a truncated DB at the final path that a
+    re-run's existence guard would mistake for a finished copy. ``copy2`` to a
+    temp in the dest dir keeps the byte copy cross-device safe while ``os.replace``
+    stays a same-filesystem (atomic) rename.
+
     Raises :class:`StoreMigrationBusyError` when another connection holds a
     write lock: ``PRAGMA wal_checkpoint(TRUNCATE)`` returns ``(1, …)`` (busy)
     instead of ``(0, …)`` when it cannot fully checkpoint, so we detect that and
@@ -546,7 +579,16 @@ def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
         msg = f"Cannot migrate {src_db}: another process holds the database. Close other filigree sessions and re-run."
         raise StoreMigrationBusyError(msg)
     dest_db.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(src_db), str(dest_db))
+    fd, tmp_name = tempfile.mkstemp(dir=dest_db.parent, prefix=dest_db.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(str(src_db), str(tmp))
+        os.replace(tmp, dest_db)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
@@ -613,8 +655,11 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         return resolve_store_dir(project_root), False
 
     weft_store.mkdir(parents=True, exist_ok=True)
-    # 1. Copy the DB forward if not already there (legacy DB stays valid).
-    if legacy_db.is_file() and not weft_db.is_file():
+    # 1. Copy the DB forward unless a *complete* copy is already there. Guarding
+    #    on intactness (not mere existence) is what makes the step crash-
+    #    convergent: a truncated DB left at the destination by an interrupted
+    #    copy is re-copied from the still-valid legacy DB, never published as-is.
+    if legacy_db.is_file() and not _is_intact_sqlite(weft_db):
         _checkpoint_and_copy_sqlite(legacy_db, weft_db)
     # 2. Copy durable + runtime metadata beside the DB. config.json must follow
     #    so the enabled_packs fallback resolves; federation_token must follow so

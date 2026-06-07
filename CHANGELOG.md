@@ -156,6 +156,19 @@ checklist is complete and a coordinated consumer-migration window is published.
   exclusion. `ephemeral.lock` already resolved correctly; `server.lock` is
   home-dir scoped and unaffected.
 
+- **Store migration copies the DB atomically and gates re-copy on intactness
+  (filigree-37e3f26145).** `migrate_store_to_weft`'s `.filigree/ → .weft/filigree/`
+  DB copy went straight to its final path via `shutil.copy2`, and the step-1
+  guard keyed on file *existence* (`not weft_db.is_file()`). A crash mid-copy
+  (SIGKILL/power loss) therefore left a truncated DB at the destination that a
+  re-run mistook for a finished copy: it repointed the conf at the corrupt file
+  and deleted the still-valid legacy DB — silent total loss of the issue
+  database, contradicting the function's documented crash-convergence. The copy
+  now stages to a temp file in the dest dir and publishes with an atomic
+  `os.replace` (so the destination only ever appears complete), and the guard
+  now re-copies unless a *structurally intact* DB is already present (a read-only
+  `quick_check` probe), keying on completion rather than a first side effect.
+
 - **`doctor --fix` repairs instruction files and `context.md` again
   (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the
   generated `context.md` back into its fixable set: instruction files via the

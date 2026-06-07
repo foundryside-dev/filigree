@@ -14,6 +14,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
@@ -245,6 +247,72 @@ class TestMigrateStoreToWeft:
         assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
         assert not (legacy / DB_FILENAME).exists()
         assert (store / DB_FILENAME).is_file()
+
+    def test_crash_during_copy_leaves_no_partial_and_re_run_recovers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A hard crash mid-copy must NOT leave a partial DB at the final path.
+
+        The copy stages to a temp file in the dest dir and publishes with an
+        atomic ``os.replace``, so the destination only ever appears as a
+        complete file. A re-run then completes the migration with data intact.
+        """
+        legacy = _make_legacy_install(tmp_path)
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            created = db.create_issue("seed", type="task")
+        finally:
+            db.close()
+
+        def _boom(src: str, dst: str, *a: object, **k: object) -> None:
+            # Simulate power loss mid-copy: a partial file then a crash.
+            Path(dst).write_bytes(b"\x00" * 50)
+            raise OSError("simulated crash mid-copy")
+
+        monkeypatch.setattr("filigree.core.shutil.copy2", _boom)
+        with pytest.raises(OSError, match="simulated crash mid-copy"):
+            migrate_store_to_weft(tmp_path)
+
+        # No partial published at the final path; legacy DB + conf untouched.
+        assert not (_weft_store(tmp_path) / DB_FILENAME).exists()
+        assert (legacy / DB_FILENAME).is_file()
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+
+        # Re-run with copy restored → migration completes, seeded data survives.
+        monkeypatch.undo()
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(created.id) is not None
+        finally:
+            db2.close()
+
+    def test_migration_re_copies_a_corrupt_partial_weft_db(self, tmp_path: Path) -> None:
+        """Crash-convergence keys on *completion*, not existence: a truncated
+        weft DB already sitting at the destination (left by an interrupted copy)
+        must be re-copied from the still-valid legacy DB on re-run — never
+        published as-is with the legacy original then deleted (total data loss).
+        """
+        legacy = _make_legacy_install(tmp_path)
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            created = db.create_issue("seed", type="task")
+        finally:
+            db.close()
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        # A truncated, unreadable DB already at the destination path.
+        legacy_bytes = (legacy / DB_FILENAME).read_bytes()
+        (store / DB_FILENAME).write_bytes(legacy_bytes[: len(legacy_bytes) // 2])
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        # The published weft DB is intact and the seeded issue survived.
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(created.id) is not None
+        finally:
+            db2.close()
 
     def test_does_not_migrate_operator_relocated_db(self, tmp_path: Path) -> None:
         # Operator put the db outside .filigree/ (fg-da8d50 custom layout) and

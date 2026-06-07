@@ -425,6 +425,9 @@ FILIGREE_DIR_GITIGNORE = """\
 # Migration backups (e.g. filigree.db.pre-v26-bak)
 *.db.*-bak
 
+# Atomic-write staging temps (write_atomic / store-migration copy)
+*.tmp
+
 # Logs
 *.log
 
@@ -461,6 +464,9 @@ WEFT_STORE_GITIGNORE = """\
 
 # Migration backups (e.g. filigree.db.pre-v26-bak)
 *.db.*-bak
+
+# Atomic-write staging temps (write_atomic / store-migration copy)
+*.tmp
 
 # Logs
 *.log
