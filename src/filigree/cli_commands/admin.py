@@ -467,14 +467,16 @@ def _remove_stale_doctor_pointer(path: Path) -> tuple[bool, str]:
 
 
 def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
-    """Embed the literal server federation token into the .mcp.json filigree header.
+    """Embed this project's literal federation token into the .mcp.json filigree header.
 
-    The header historically referenced ``${WEFT_FEDERATION_TOKEN}`` (or a deprecated
-    alias), which 401s unless the operator exports it in every client shell. The
-    token is loopback deconfliction plumbing, not a secret, so ``doctor --fix`` now
-    writes the literal value the server daemon validates against (the token minted
-    in ``SERVER_CONFIG_DIR``), eliminating the export. Idempotent: a no-op when the
-    header already carries that literal.
+    The header historically referenced ``${WEFT_FEDERATION_TOKEN}`` (which 401s
+    unless exported in every client shell) or, in earlier server-mode installs,
+    the daemon's home-store token. The server-mode MCP URL is project-scoped
+    (``/mcp/?project={key}``), and the daemon validates a scoped request against
+    THAT project's own token — not the home store (filigree-23574069a1). So
+    ``doctor --fix`` writes the literal token minted in this project's store dir,
+    eliminating both the export and the home-token mismatch. Idempotent: a no-op
+    when the header already carries that literal.
     """
     mcp_path = project_root / ".mcp.json"
     try:
@@ -487,9 +489,8 @@ def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
         return False, "filigree Authorization header is not a string"
 
     from filigree.federation_token import mint_token_file
-    from filigree.server import SERVER_CONFIG_DIR
 
-    new_auth = f"Bearer {mint_token_file(SERVER_CONFIG_DIR)}"
+    new_auth = f"Bearer {mint_token_file(resolve_store_dir(project_root))}"
     if new_auth == auth:
         return False, "filigree Authorization header already carries the literal federation token"
 
@@ -574,7 +575,7 @@ def _apply_doctor_fixes(
         # take precedence over the generic reinstall path, which would rewrite the
         # whole entry (URL/port) and falsely report "fixed" when the real blocker is
         # an unset env var that filigree cannot write.
-        if r.code == "mcp_token_unresolved":
+        if r.code in ("mcp_token_unresolved", "federation_token_mcp_home_token"):
             ok, msg = _fix_mcp_token_reference(project_root)
             if emit is not None:
                 emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")

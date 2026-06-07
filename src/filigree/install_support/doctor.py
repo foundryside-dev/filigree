@@ -29,6 +29,7 @@ from filigree.core import (
     find_filigree_anchor,
     read_conf,
     read_schema_version,
+    resolve_store_dir,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support import (
@@ -101,6 +102,7 @@ _CHECK_ID_BY_NAME = {
     "Ephemeral PID": "dashboard.port",
     "Ephemeral port": "dashboard.port",
     "Server daemon": "dashboard.port",
+    "Federation token scope": "federation.token_scope",
     "API routes": "api.availability",
     "Auth config": "auth.config",
     "Scan results routes": "scanner.results",
@@ -589,6 +591,84 @@ def _doctor_server_checks(filigree_dir: Path) -> list[CheckResult]:
                 )
             )
 
+    return results
+
+
+def _doctor_federation_token_checks(project_root: Path, mode: str) -> list[CheckResult]:
+    """Federation-token scoping checks for a multi-store server daemon.
+
+    Per-project scoped auth (filigree-23574069a1) validates a project-scoped
+    request against THAT project's own federation token (or an operator
+    ``WEFT_FEDERATION_TOKEN`` env pin) — not the daemon's home-store token. Two
+    deconfliction/availability gaps follow; both are functional, not security:
+
+    1. A project ``.mcp.json`` that still embeds a literal token the daemon won't
+       accept for this project (e.g. the old home-store token) — its scoped
+       ``/mcp/?project=`` route 401s. Repairable via ``doctor --fix``.
+    2. Tokens diverge across the home store and the project stores with no env
+       pin set, so each client must present its own project token (advisory).
+
+    Returns ``[]`` outside server mode (single store → no divergence possible).
+    """
+    from filigree.federation_token import read_env_token, read_token_file
+    from filigree.server import SERVER_CONFIG_DIR, read_server_config
+
+    if mode != "server":
+        return []
+
+    results: list[CheckResult] = []
+    env_pin, _ = read_env_token()
+    home_token = read_token_file(SERVER_CONFIG_DIR)
+    project_token = read_token_file(resolve_store_dir(project_root))
+
+    # (1) This project's .mcp.json carries a literal bearer the daemon will reject
+    # for its scoped route (neither this project's token nor the env pin).
+    auth: object = None
+    try:
+        data = json.loads((project_root / ".mcp.json").read_text())
+        auth = data["mcpServers"]["filigree"]["headers"]["Authorization"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        auth = None
+    if isinstance(auth, str) and "${" not in auth:
+        match = re.match(r"(?i)bearer\s+(\S+)", auth.strip())
+        embedded = match.group(1) if match else ""
+        valid = {t for t in (env_pin, project_token) if t}
+        if embedded and valid and embedded not in valid:
+            results.append(
+                CheckResult(
+                    "Claude Code MCP",
+                    False,
+                    ".mcp.json embeds a federation token the daemon rejects for this project's scoped /mcp route "
+                    "(neither this project's token nor a WEFT_FEDERATION_TOKEN pin) — the client will 401",
+                    fix_hint="Run `filigree doctor --fix` to embed this project's federation token in .mcp.json.",
+                    code="federation_token_mcp_home_token",
+                )
+            )
+
+    # (2) Multi-store divergence advisory (no operator env pin to unify).
+    if not env_pin:
+        config = read_server_config()
+        if len(config.projects) >= 2:
+            tokens = {read_token_file(Path(path_str)) for path_str in config.projects}
+            tokens.discard("")
+            if home_token:
+                tokens.add(home_token)
+            if len(tokens) > 1:
+                results.append(
+                    CheckResult(
+                        "Federation token scope",
+                        False,
+                        f"{len(tokens)} distinct federation tokens across the daemon home store and "
+                        f"{len(config.projects)} project store(s); with no WEFT_FEDERATION_TOKEN pin, "
+                        "each project-scoped client must present its own project token.",
+                        fix_hint=(
+                            "Optional: set WEFT_FEDERATION_TOKEN on the daemon as an operator pin accepted across all "
+                            "projects; otherwise each project's client must use that project's token "
+                            "(`filigree doctor --fix` repoints .mcp.json)."
+                        ),
+                        code="federation_token_divergence",
+                    )
+                )
     return results
 
 
@@ -1211,6 +1291,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         results.extend(_doctor_ethereal_checks(filigree_dir))
     elif mode == "server":
         results.extend(_doctor_server_checks(filigree_dir))
+
+    # 12b. Federation token scope divergence (server-mode, multi-store).
+    results.extend(_doctor_federation_token_checks(project_root, mode))
 
     # 13. Check dashboard/API route registration without mutating records.
     results.extend(_doctor_dashboard_contract_checks())

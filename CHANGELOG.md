@@ -37,6 +37,29 @@ checklist is complete and a coordinated consumer-migration window is published.
   `CLARION_OUT_OF_SYNC`) and the `loom://` URI scheme are intentionally NOT
   renamed in 3.0.0 (the hub has not locked them; tracked as residuals).
 
+### Fixed
+
+- **Server-mode federation now scopes to the caller; ambiguous writes fail
+  closed (weft-7a399b8124 / weft-23574069a1).** In `--server-mode` (one daemon,
+  many projects) an *unscoped* federation request (bare `/api/weft/*` or a living
+  alias) silently fell back to the daemon's default project, contaminating it
+  with another project's writes. Two fixes, one root cause:
+  - **Routing.** The whole federation API now honours an explicit scope — the
+    `/api/p/{project_key}/…` path *or* a `?project={key}` query (uniform with how
+    `/mcp` is scoped) — and an **unscoped write fails closed with 400** instead of
+    a silent home-project write. Unscoped reads stay lenient. Every federation
+    response carries an `X-Filigree-Project` header naming the project it resolved
+    to, so a misroute cannot read as success.
+  - **Token auth.** A project-scoped request is validated against **that
+    project's** federation token (or an operator `WEFT_FEDERATION_TOKEN` env pin),
+    no longer only against the daemon's home-store token — so a project presenting
+    its own token no longer 401s. Server-mode `filigree install` and `doctor
+    --fix` now embed the **project's** token in `.mcp.json` (not the home token);
+    existing installs re-heal via `filigree doctor --fix`, which also reports a
+    `.mcp.json` carrying a token the daemon will reject for its scoped route and
+    flags multi-store token divergence when no env pin is set. Deconfliction /
+    data-integrity + availability — not a security change.
+
 ### Added
 
 - **`WEFT_FEDERATION_TOKEN` canonical inbound federation bearer + token

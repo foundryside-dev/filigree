@@ -7,13 +7,14 @@ Issue: filigree-30cd35bcb9 (option b — loom routes honour the bearer token).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.dashboard import create_app
+from filigree.dashboard import ProjectStore, create_app
 from filigree.dashboard_auth import _token_matches, is_loom_scoped_path
 from tests.conftest import PopulatedDB
 
@@ -321,6 +322,102 @@ class TestLoomAuthEnforcement:
             resp = await c.get("/api/weft/issues")
         assert resp.status_code == 200  # open: a blank token gates nothing
         assert any("FILIGREE_API_TOKEN is set but empty" in r.message for r in caplog.records)
+
+
+@pytest.fixture
+def scoped_auth_app(project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], FastAPI]]:
+    """Server-mode app with a home/daemon token + per-project federation tokens.
+
+    Exercises strict scope-aware auth (weft-23574069a1): a project-scoped request
+    authenticates against THAT project's own token (``tok-<key>``) — not the
+    daemon home-store token (``home-daemon-token``). The ``project_store`` fixture
+    (alpha, bravo) patches ``SERVER_CONFIG_DIR`` to a temp dir.
+    """
+    import filigree.server as server_mod
+
+    for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+        monkeypatch.delenv(v, raising=False)
+
+    (server_mod.SERVER_CONFIG_DIR / "federation_token").write_text("home-daemon-token\n")
+    for proj in project_store.list_projects():
+        (Path(proj["path"]) / "federation_token").write_text(f"tok-{proj['key']}\n")
+
+    def _make() -> FastAPI:
+        dash_module._project_store = project_store
+        return create_app(server_mode=True)
+
+    yield _make
+    dash_module._project_store = None
+
+
+class TestServerModeScopedAuth:
+    """Strict per-project scoped auth: the scoped project's token OR a tier-1 env
+    pin — never the daemon home-store token on a scoped request."""
+
+    async def test_scoped_request_accepts_own_project_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.get("/api/p/bravo/weft/issues", headers={"Authorization": "Bearer tok-bravo"})
+        assert resp.status_code == 200, resp.text
+
+    async def test_scoped_request_rejects_other_project_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.get("/api/p/bravo/weft/issues", headers={"Authorization": "Bearer tok-alpha"})
+        assert resp.status_code == 401
+
+    async def test_scoped_request_rejects_home_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        """The daemon home-store token is NOT a valid credential for a scoped route."""
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.get("/api/p/bravo/weft/issues", headers={"Authorization": "Bearer home-daemon-token"})
+        assert resp.status_code == 401
+
+    async def test_query_scope_accepts_project_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.get("/api/weft/issues?project=alpha", headers={"Authorization": "Bearer tok-alpha"})
+        assert resp.status_code == 200, resp.text
+
+    async def test_unscoped_read_accepts_daemon_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        """An unscoped read still authenticates against the daemon token (lenient)."""
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.get("/api/weft/issues", headers={"Authorization": "Bearer home-daemon-token"})
+        assert resp.status_code == 200, resp.text
+
+    async def test_unscoped_write_fails_closed_even_with_token(self, scoped_auth_app: Callable[[], FastAPI]) -> None:
+        """A federation write with no scope is rejected as ambiguous (400) — never a
+        silent home write — regardless of a valid daemon token."""
+        app = scoped_auth_app()
+        async with _client(app) as c:
+            resp = await c.post(
+                "/api/weft/scan-results",
+                headers={"Authorization": "Bearer home-daemon-token"},
+                json={"scan_source": "wardline", "findings": []},
+            )
+        assert resp.status_code == 400, resp.text
+
+    async def test_env_pin_accepted_across_scopes(self, project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tier-1 WEFT_FEDERATION_TOKEN env pin authenticates any project scope,
+        and the per-project token still works alongside it."""
+        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "operator-pin")
+        for proj in project_store.list_projects():
+            (Path(proj["path"]) / "federation_token").write_text(f"tok-{proj['key']}\n")
+        dash_module._project_store = project_store
+        try:
+            app = create_app(server_mode=True)
+            async with _client(app) as c:
+                pin_alpha = await c.get("/api/p/alpha/weft/issues", headers={"Authorization": "Bearer operator-pin"})
+                pin_bravo = await c.get("/api/p/bravo/weft/issues", headers={"Authorization": "Bearer operator-pin"})
+                own_token = await c.get("/api/p/bravo/weft/issues", headers={"Authorization": "Bearer tok-bravo"})
+        finally:
+            dash_module._project_store = None
+        assert pin_alpha.status_code == 200
+        assert pin_bravo.status_code == 200
+        assert own_token.status_code == 200
 
 
 class TestLoomAuthScopeBoundary:

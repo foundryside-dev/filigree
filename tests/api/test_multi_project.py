@@ -617,6 +617,57 @@ class TestMultiProjectRouting:
         assert body["code"] != ErrorCode.INTERNAL
 
 
+_SCAN_BODY = {
+    "scan_source": "wardline",
+    "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "line_start": 10}],
+}
+
+
+class TestServerModeFederationWriteScope:
+    """weft-7a399b8124: a federation write must resolve to the CALLER's project;
+    an unscoped write fails closed instead of silently hitting the home project.
+    """
+
+    async def test_unscoped_federation_write_fails_closed(self, multi_client: AsyncClient) -> None:
+        """POST /api/weft/scan-results with no project scope → 400, not a home write."""
+        resp = await multi_client.post("/api/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == ErrorCode.VALIDATION
+        assert "scope to a project" in body["error"]
+
+    async def test_unscoped_living_alias_write_fails_closed(self, multi_client: AsyncClient) -> None:
+        """The living-surface alias POST /api/scan-results also fails closed."""
+        resp = await multi_client.post("/api/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_path_scoped_write_lands_in_that_project_only(self, multi_client: AsyncClient) -> None:
+        """A path-scoped write creates findings in the named project, names it in
+        the response header, and does NOT touch the other project."""
+        resp = await multi_client.post("/api/p/bravo/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "bravo"
+
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        assert len(bravo.json()["items"]) == 1
+        assert alpha.json()["items"] == []  # untouched — no contamination
+
+    async def test_query_scoped_write_routes_like_path(self, multi_client: AsyncClient) -> None:
+        """?project= scopes the federation API uniformly with /mcp."""
+        resp = await multi_client.post("/api/weft/scan-results?project=alpha", json=_SCAN_BODY)
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        alpha = await multi_client.get("/api/weft/findings?project=alpha")
+        assert len(alpha.json()["items"]) == 1
+
+    async def test_unscoped_read_stays_lenient(self, multi_client: AsyncClient) -> None:
+        """Reads keep the default-project fallback — only writes fail closed."""
+        resp = await multi_client.get("/api/weft/issues")
+        assert resp.status_code == 200, resp.text
+
+
 class TestServerModeCrossProjectReadBlocking:
     """2.1.0 §1.3: in multi-project server mode, read endpoints reject
     foreign-prefix IDs at the route boundary with 404/safe_message.

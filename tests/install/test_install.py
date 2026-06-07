@@ -2667,18 +2667,26 @@ class TestInstallMcpServerMode:
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
 
-    def test_server_mode_embeds_literal_token(self, tmp_path: Path) -> None:
-        """Server-mode install embeds the LITERAL server federation token in the
-        header — no ${ENV} indirection, no export. The value matches the token the
-        server daemon validates against (SERVER_CONFIG_DIR/federation_token)."""
+    def test_server_mode_embeds_literal_project_token(self, tmp_path: Path) -> None:
+        """Server-mode install embeds the LITERAL *project* federation token in the
+        header — no ${ENV} indirection, no export. The URL is project-scoped
+        (/mcp/?project=) and the daemon validates a scoped request against THAT
+        project's token (weft-23574069a1), so the embedded value must be the
+        project store-dir token — NOT the daemon home-store token."""
+        from filigree.core import resolve_store_dir
+
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
             ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
-        token = (tmp_path / "_srvcfg" / "federation_token").read_text().strip()
-        assert token
+        project_token = (resolve_store_dir(tmp_path) / "federation_token").read_text().strip()
+        assert project_token
         auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
-        assert auth == f"Bearer {token}"
+        assert auth == f"Bearer {project_token}"
         assert "${" not in auth  # literal, not an env-var reference
+        # It must NOT be the daemon home-store token (the pre-fix behaviour).
+        home_token_file = tmp_path / "_srvcfg" / "federation_token"
+        if home_token_file.exists():
+            assert project_token != home_token_file.read_text().strip()
 
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path

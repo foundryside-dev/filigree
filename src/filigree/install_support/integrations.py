@@ -298,16 +298,16 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     except UnsafeInstallPathError as exc:
         return False, str(exc)
 
-    # Embed the LITERAL server-global federation token (not a ${ENV} reference).
-    # The URL points at the shared server daemon, which validates against the
-    # token minted in SERVER_CONFIG_DIR; mint_token_file reads it (or pre-seeds it
-    # so the daemon reuses the same value on first serve). Writing the literal
-    # value means the client works with zero export — the token is loopback
-    # deconfliction plumbing, not a secret.
+    # Embed the LITERAL per-project federation token (not a ${ENV} reference).
+    # The URL is project-scoped (``/mcp/?project={key}``), and the server daemon
+    # validates a scoped request against THAT project's own token — not the
+    # daemon's home-store token (filigree-23574069a1). So embed the token minted
+    # in this project's store dir; mint_token_file reads the existing value (the
+    # daemon reuses it on serve). Writing the literal means the client works with
+    # zero export — the token is loopback deconfliction plumbing, not a secret.
     from filigree.federation_token import mint_token_file
-    from filigree.server import SERVER_CONFIG_DIR
 
-    token = mint_token_file(SERVER_CONFIG_DIR)
+    token = mint_token_file(resolve_store_dir(project_root))
     mcp_config["mcpServers"]["filigree"] = {
         "type": "streamable-http",
         "url": _codex_server_mode_url(project_root, port),

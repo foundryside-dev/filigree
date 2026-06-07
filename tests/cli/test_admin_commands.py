@@ -2052,8 +2052,10 @@ class TestMetricsDaysValidation:
 
 
 class TestFixMcpTokenReference:
-    """doctor --fix embeds the literal server federation token in the .mcp.json
-    header (deconfliction plumbing, not a secret), so the client needs no export."""
+    """doctor --fix embeds the literal *project* federation token in the .mcp.json
+    header (deconfliction plumbing, not a secret) — the server-mode /mcp route is
+    project-scoped, so the daemon validates against the project's own token, not
+    the home store (weft-23574069a1)."""
 
     @pytest.fixture(autouse=True)
     def _isolate_server_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2076,22 +2078,28 @@ class TestFixMcpTokenReference:
             )
         )
 
-    def test_embeds_literal_token(self, tmp_path: Path) -> None:
+    def test_embeds_literal_project_token(self, tmp_path: Path) -> None:
         from filigree.cli_commands.admin import _fix_mcp_token_reference
+        from filigree.core import resolve_store_dir
 
         self._write_mcp(tmp_path, "Bearer ${WEFT_FEDERATION_TOKEN}")
         ok, _msg = _fix_mcp_token_reference(tmp_path)
         assert ok is True
-        token = (tmp_path / "_srvcfg" / "federation_token").read_text().strip()
+        token = (resolve_store_dir(tmp_path) / "federation_token").read_text().strip()
         auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
         assert auth == f"Bearer {token}"
         assert "${" not in auth
+        # NOT the daemon home-store token (the pre-fix behaviour).
+        home = tmp_path / "_srvcfg" / "federation_token"
+        if home.exists():
+            assert token != home.read_text().strip()
 
     def test_idempotent_when_already_literal(self, tmp_path: Path) -> None:
         from filigree.cli_commands.admin import _fix_mcp_token_reference
+        from filigree.core import resolve_store_dir
         from filigree.federation_token import mint_token_file
 
-        token = mint_token_file(tmp_path / "_srvcfg")
+        token = mint_token_file(resolve_store_dir(tmp_path))
         self._write_mcp(tmp_path, f"Bearer {token}")
         ok, msg = _fix_mcp_token_reference(tmp_path)
         assert ok is False

@@ -514,6 +514,17 @@ class ProjectStore:
                 return ""
             return next(iter(self._projects))
 
+    def store_dir_for(self, key: str) -> Path | None:
+        """Return the registered store dir for *key*, or ``None`` if unknown.
+
+        The federation token for a project lives in this dir; the auth
+        middleware reads it to validate a project-scoped request against that
+        project's own token (filigree-7a399b8124 / -23574069a1).
+        """
+        with self._lock:
+            info = self._projects.get(key)
+            return Path(info["path"]) if info is not None else None
+
 
 _project_store: ProjectStore | None = None
 
@@ -768,8 +779,30 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     app.state.auth_scope = _dashboard_auth_scope(federation_enabled=bool(_api_token), token_env=_api_token_env)
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
+        from filigree.federation_token import FEDERATION_TOKEN_ENV_VARS, read_token_file
 
-        app.add_middleware(build_auth_middleware(_api_token))
+        # Tier-1 operator pin: the daemon token counts as a cross-project pin only
+        # when it was resolved from the environment, not from the home-store file.
+        # A home-store file token is NOT a valid credential for a project-scoped
+        # request (filigree-23574069a1) — only that project's own token or an env
+        # pin is.
+        _env_pin = _api_token if _api_token_env in FEDERATION_TOKEN_ENV_VARS else ""
+
+        _resolver: Callable[[str], str] | None = None
+        if server_mode:
+
+            def _resolve_project_token(key: str) -> str:
+                store = dashboard_state.project_store
+                if store is None:
+                    return ""
+                store_dir = store.store_dir_for(key)
+                return read_token_file(store_dir) if store_dir is not None else ""
+
+            _resolver = _resolve_project_token
+
+        app.add_middleware(
+            build_auth_middleware(_api_token, env_pin=_env_pin, project_token_resolver=_resolver),
+        )
         logger.info(
             "federation bearer auth enabled via %s; dashboard UI and classic API routes remain open",
             _api_token_env,
@@ -794,21 +827,50 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         app.include_router(router, prefix="/api/p/{project_key}")
         app.include_router(router, prefix="/api")
 
-        # Middleware: extract project_key from path and set ContextVar
+        # Middleware: resolve the project scope (path /api/p/{key}/… OR a
+        # ?project= query on a federation path) and set the ContextVar that
+        # _get_db and _require_federation_scope read. Honoring ?project= for the
+        # whole federation API makes /api/weft/… scope the same way /mcp does.
         from starlette.middleware.base import BaseHTTPMiddleware
+
+        from filigree.dashboard_auth import extract_federation_scope, is_loom_scoped_path
+        from filigree.dashboard_routes.common import _error_response
+        from filigree.types.api import ErrorCode
 
         class ProjectMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
                 path = request.url.path
-                # Match /api/p/{key}/… — extract the key segment
-                if path.startswith("/api/p/"):
-                    parts = path.split("/", 5)  # ['', 'api', 'p', key, ...]
-                    if len(parts) >= 4 and parts[3]:
-                        token = dashboard_state.current_project_key.set(parts[3])
-                        try:
-                            return await call_next(request)
-                        finally:
-                            dashboard_state.current_project_key.reset(token)
+                key = extract_federation_scope(path, request.query_params.get("project"))
+                if key is not None:
+                    token = dashboard_state.current_project_key.set(key)
+                    try:
+                        response = await call_next(request)
+                        # Name the project a federation request actually resolved
+                        # to, so a misroute (client scoped the wrong key) cannot
+                        # read as success. An unknown key 404s in _get_db before
+                        # any write, so a 2xx here means key == the written
+                        # project's prefix. Skip /mcp — its streaming transport
+                        # owns its own response headers.
+                        if is_loom_scoped_path(path) and not (path == "/mcp" or path.startswith("/mcp/")):
+                            response.headers["X-Filigree-Project"] = key
+                        return response
+                    finally:
+                        dashboard_state.current_project_key.reset(token)
+                # Unscoped. A federation WRITE must not silently fall back to the
+                # daemon's default project (the filigree-7a399b8124 contamination):
+                # fail closed. Reads stay lenient (keep the default-project
+                # fallback). /mcp is excluded — it carries protocol messages and
+                # self-scopes via ?project= at the transport.
+                if (
+                    request.method not in ("GET", "HEAD", "OPTIONS")
+                    and is_loom_scoped_path(path)
+                    and not (path == "/mcp" or path.startswith("/mcp/"))
+                ):
+                    return _error_response(
+                        "Ambiguous federation write in server mode: scope to a project — use POST /api/p/{project_key}/weft/… or add ?project={key}.",
+                        ErrorCode.VALIDATION,
+                        400,
+                    )
                 return await call_next(request)
 
         app.add_middleware(ProjectMiddleware)
