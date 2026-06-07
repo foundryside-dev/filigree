@@ -430,15 +430,27 @@ def _classify_git_entry(git_path: Path) -> str:
     return "gitdir_file"
 
 
-def read_weft_filigree_table(project_root: Path) -> dict[str, Any]:
-    """Read the operator-authored ``[filigree]`` table from ``project_root/weft.toml``.
+class WeftConfigUnreadableError(RuntimeError):
+    """``weft.toml`` is present but cannot be parsed (bad TOML / non-UTF-8 / I/O error).
 
-    Mirrors legis' ``_weft_legis_config`` (the federation reference): returns an
-    empty dict when ``weft.toml`` is absent, carries no ``[filigree]`` table, or
-    cannot be parsed. ``weft.toml`` is **enrich-only, never load-bearing** — a
-    missing or malformed file must still boot on built-in defaults (convention
-    C-9c). This function is strictly **read-only**: filigree never writes
-    ``weft.toml`` (it is operator-authored / written only by ``weft init``).
+    Passive, read-only paths (discovery, ``resolve_store_dir``) swallow this and
+    boot on built-in defaults (C-9c). The **mutating** init/install path must
+    NOT: an unreadable config may hide an operator ``[filigree].store_dir`` pin,
+    and treating "broken" as "absent" there would skip the don't-auto-migrate
+    guard and relocate the store somewhere the operator never chose. So the write
+    path raises this and refuses rather than guessing.
+    """
+
+
+def _load_weft_filigree_table(project_root: Path) -> dict[str, Any] | None:
+    """Strict reader for the ``[filigree]`` table in ``project_root/weft.toml``.
+
+    Returns the table dict, ``{}`` when the file exists but has no (or a non-dict)
+    ``[filigree]`` table, or ``None`` when the file is **absent**. Raises
+    :class:`WeftConfigUnreadableError` when the file is **present but unreadable**
+    (TOML syntax error, non-UTF-8 bytes — tomllib decodes UTF-8 internally — or an
+    OS read error). This is the primitive that distinguishes "absent" from
+    "broken"; callers choose whether to tolerate the latter.
 
     Reads only from *project_root* — no walk-up. Discovery has already settled
     the project root; an independent walk would constitute a second anchor.
@@ -448,26 +460,50 @@ def read_weft_filigree_table(project_root: Path) -> dict[str, Any]:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
     except FileNotFoundError:
-        return {}
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        # Surface the misconfiguration for diagnosis, but never hard-fail: a
-        # fat-fingered weft.toml (bad TOML syntax OR non-UTF-8 bytes — tomllib
-        # decodes UTF-8 internally) must not stop filigree booting (C-9c).
-        logger.warning("weft.toml present but unreadable at %s; using built-in defaults", path)
-        return {}
+        return None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        msg = f"weft.toml present but unreadable at {path}: {exc}"
+        raise WeftConfigUnreadableError(msg) from exc
     table = data.get(WEFT_MEMBER_SUBDIR)
     if not isinstance(table, dict):
         return {}
     return table
 
 
+def read_weft_filigree_table(project_root: Path) -> dict[str, Any]:
+    """Lenient read of the operator-authored ``[filigree]`` table from ``weft.toml``.
+
+    Mirrors legis' ``_weft_legis_config`` (the federation reference): returns an
+    empty dict when ``weft.toml`` is absent, carries no ``[filigree]`` table, or
+    cannot be parsed. ``weft.toml`` is **enrich-only, never load-bearing** — a
+    missing or malformed file must still boot on built-in defaults (convention
+    C-9c). This function is strictly **read-only**: filigree never writes
+    ``weft.toml`` (it is operator-authored / written only by ``weft init``).
+
+    Boot-on-defaults is right for **passive discovery**; the mutating init path
+    must instead distinguish absent from broken via :func:`_load_weft_filigree_table`
+    (it raises on unreadable) so it never auto-migrates over a config it can't read.
+    """
+    try:
+        table = _load_weft_filigree_table(project_root)
+    except WeftConfigUnreadableError as exc:
+        # Surface for diagnosis, but never hard-fail on a read-only/discovery path.
+        logger.warning("%s; using built-in defaults", exc)
+        return {}
+    return table if table is not None else {}
+
+
 def resolve_store_dir(project_root: Path) -> Path:
     """Resolve the machine-owned store dir for *project_root* (single source of truth).
 
     Resolution order (highest precedence first):
-      1. ``weft.toml`` ``[filigree].store_dir`` operator override (relative paths
-         resolve against *project_root*, absolute paths are honoured — legis
-         parity). A non-string / empty value is ignored.
+      1. ``weft.toml`` ``[filigree].store_dir`` operator override. Only a
+         **project-relative, under-root** path is honoured (resolved against
+         *project_root*). An absolute path, a ``..``-escaping path, a non-string,
+         or an empty value is ignored (warn + fall back): filigree threads the
+         store dir through the ``.filigree.conf`` ``db`` field, whose trust
+         boundary forbids absolute / escaping paths, so such a value cannot be
+         represented consistently and is never honoured half-way.
       2. ``.weft/filigree/`` if it already exists (the federation default).
       3. legacy ``.filigree/`` (back-compat; also the bare fallback that a fresh
          install's default ``db`` literal points beside before the dir exists).
@@ -579,7 +615,8 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     ``migrated=False``) when:
       * an operator ``weft.toml`` ``[filigree].store_dir`` override is set — the
         operator pins a custom store; we never auto-migrate over their choice
-        (and the override target may be absolute / outside the project root),
+        (the override is a project-relative under-root path; absolute / escaping
+        values are ignored by :func:`resolve_store_dir`, not honoured here),
       * the migration already completed (idempotent re-run), or
       * there is no legacy install, or
       * the operator relocated the DB outside ``.filigree/`` via the conf's
@@ -601,8 +638,12 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     weft_db = weft_store / DB_FILENAME
     legacy_db = legacy_dir / DB_FILENAME
 
-    # Operator override pins a custom store — never auto-migrate over it.
-    override = read_weft_filigree_table(project_root).get("store_dir")
+    # Operator override pins a custom store — never auto-migrate over it. Read
+    # weft.toml STRICTLY here (unlike passive discovery): a present-but-unreadable
+    # config might hide a ``store_dir`` pin, so conflating "broken" with "absent"
+    # would skip this guard and relocate the store the operator never chose. Refuse
+    # — raise before any filesystem mutation — rather than guess (I1).
+    override = (_load_weft_filigree_table(project_root) or {}).get("store_dir")
     if isinstance(override, str) and override:
         return resolve_store_dir(project_root), False
 
@@ -678,19 +719,6 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         f"The legacy {FILIGREE_DIR_NAME}/ directory is intentionally left in place.\n"
     )
     return weft_store, True
-
-
-def store_dir_to_project_root(store_dir: Path) -> Path:
-    """Return the project root containing a resolved store dir, layout-aware.
-
-    ``.weft/filigree/`` sits two segments below the project root; legacy
-    ``.filigree/`` (and any other single-segment store dir) sits one. Blindly
-    using ``store_dir.parent`` points a federation-layout store at ``.weft/``
-    instead of the project root — the recurring two-segment footgun.
-    """
-    if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
-        return store_dir.parent.parent
-    return store_dir.parent
 
 
 class FiligreeAnchor(NamedTuple):

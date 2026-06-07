@@ -26,6 +26,8 @@ from filigree.core import (
     WEFT_DIR_NAME,
     WEFT_MEMBER_SUBDIR,
     FiligreeDB,
+    StoreMigrationBusyError,
+    WeftConfigUnreadableError,
     find_filigree_anchor,
     migrate_store_to_weft,
     read_conf,
@@ -400,6 +402,34 @@ class TestMigrateStoreToWeft:
         finally:
             db2.close()
 
+    def test_malformed_weft_toml_refuses_migration_leaving_legacy_intact(self, tmp_path: Path) -> None:
+        """A present-but-unparseable weft.toml on the mutating init/migrate path
+        must NOT be conflated with 'absent'. Conflation skips the operator-pinned
+        ``store_dir`` guard (the pin could be hiding in the unreadable bytes) and
+        silently relocates the store. Distinguish broken from absent and refuse:
+        raise rather than auto-migrate over a config we cannot read. Passive
+        discovery (``resolve_store_dir``) still boots on built-in defaults (C-9c)
+        — this stricter rule applies only to the write path.
+        """
+        _make_legacy_install(tmp_path)
+        (tmp_path / "weft.toml").write_text("this is not [valid toml")
+        with pytest.raises(WeftConfigUnreadableError):
+            migrate_store_to_weft(tmp_path)
+        # Refused before any fs mutation: legacy fully intact, no weft store created.
+        assert (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
+        assert not _weft_store(tmp_path).exists()
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+
+    def test_non_utf8_weft_toml_refuses_migration(self, tmp_path: Path) -> None:
+        # tomllib decodes UTF-8 internally; non-UTF-8 bytes raise UnicodeDecodeError
+        # — also "unreadable", so the write path must refuse, not boot on defaults.
+        _make_legacy_install(tmp_path)
+        (tmp_path / "weft.toml").write_bytes(b'[filigree]\nstore_dir = "\xff\xfe bad"\n')
+        with pytest.raises(WeftConfigUnreadableError):
+            migrate_store_to_weft(tmp_path)
+        assert (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
+        assert not _weft_store(tmp_path).exists()
+
     def test_does_not_migrate_operator_relocated_db(self, tmp_path: Path) -> None:
         # Operator put the db outside .filigree/ (fg-da8d50 custom layout) and
         # keeps metadata in .filigree/. Respect that — no forced move.
@@ -418,6 +448,145 @@ class TestMigrateStoreToWeft:
         assert migrated is False
         assert store == legacy
         assert not _weft_store(tmp_path).exists()
+
+
+class TestMigrationWalAndBusy:
+    """I4: the riskiest copy-time invariants — committed-but-in-WAL pages must be
+    folded forward (not orphaned by a main-file-only copy), and a held writer must
+    abort the migration leaving the legacy store fully intact.
+    """
+
+    def test_committed_wal_pages_are_not_orphaned_by_copy(self, tmp_path: Path) -> None:
+        """Committed pages can live in the ``-wal`` sidecar (a normal ``close()``
+        does not truncate it), and ``shutil.copy2`` copies only the main ``.db``.
+        The migration must therefore fold the WAL into the main file (it runs
+        ``wal_checkpoint(TRUNCATE)`` through a real connection) BEFORE copying. The
+        data-loss regression this guards is a refactor that copies the main file
+        without going through SQLite's checkpoint at all (a "just copy the file"
+        simplification) — that orphans WAL-resident commits: green suite, lost
+        data. Force a populated ``-wal`` at copy time and assert the row survives.
+        (Note: dropping only the explicit pragma is masked by SQLite's last-close
+        checkpoint, so the meaningful guard is against bypassing the connection.)
+        """
+        legacy = _make_legacy_install(tmp_path)
+        legacy_db = legacy / DB_FILENAME
+
+        raw = sqlite3.connect(str(legacy_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA journal_mode=WAL")
+            raw.execute("CREATE TABLE wal_probe (id INTEGER PRIMARY KEY, marker TEXT)")
+            # Fold the (empty) table into the main file so only the ROW is stranded.
+            raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            raw.execute("PRAGMA wal_autocheckpoint=0")
+            raw.execute("INSERT INTO wal_probe (marker) VALUES ('in-wal-only')")
+            raw.commit()  # committed — but only into the -wal, not the main file
+            # Snapshot all three files WHILE the row is still only in the -wal.
+            snapshot = {suffix: (legacy / (DB_FILENAME + suffix)).read_bytes() for suffix in ("", "-wal", "-shm")}
+        finally:
+            raw.close()  # close may checkpoint; we restore the stranded-WAL state below
+        assert len(snapshot["-wal"]) > 0  # the -wal genuinely carried committed frames
+        # Restore: main WITHOUT the row, -wal HOLDING it, and no open connection
+        # (so the migration's TRUNCATE checkpoint can complete and fold it forward).
+        for suffix, data in snapshot.items():
+            (legacy / (DB_FILENAME + suffix)).write_bytes(data)
+
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+
+        conn = sqlite3.connect(str(store / DB_FILENAME))
+        try:
+            markers = [r[0] for r in conn.execute("SELECT marker FROM wal_probe").fetchall()]
+        finally:
+            conn.close()
+        assert markers == ["in-wal-only"]  # WAL-resident commit folded forward, not orphaned
+
+    def test_held_writer_aborts_migration_leaving_legacy_intact(self, tmp_path: Path) -> None:
+        """A live writer holding the legacy DB blocks the TRUNCATE checkpoint, so
+        the migration must abort with ``StoreMigrationBusyError`` BEFORE mutating
+        anything — the legacy store and conf stay canonical and a later unblocked
+        run still succeeds with data intact.
+        """
+        legacy = _make_legacy_install(tmp_path)
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            created = db.create_issue("seed before busy", type="task")
+        finally:
+            db.close()
+
+        blocker = sqlite3.connect(str(legacy / DB_FILENAME), isolation_level=None)
+        try:
+            blocker.execute("PRAGMA journal_mode=WAL")
+            blocker.execute("BEGIN IMMEDIATE")  # hold the write lock
+            with pytest.raises(StoreMigrationBusyError):
+                migrate_store_to_weft(tmp_path)
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+        # Aborted before any mutation: legacy DB present, conf untouched, no weft DB
+        # published (the dir may be pre-created, but the copy never completed).
+        assert (legacy / DB_FILENAME).is_file()
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+        assert not (_weft_store(tmp_path) / DB_FILENAME).exists()
+        assert not (legacy / LEGACY_MOVED_BREADCRUMB).exists()  # no breadcrumb on abort
+
+        # With the writer gone, a re-run completes and the seeded data survives.
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(created.id) is not None
+        finally:
+            db2.close()
+
+
+class TestDeepStoreDirOverrideProjectRoot:
+    """I2: project_root must be correct for an arbitrary-depth store_dir override.
+
+    Reverse-deriving the project root from the store dir by stripping a fixed
+    number of segments (the deleted ``store_dir_to_project_root`` / ``.parent``)
+    is wrong for a multi-segment override; the canonical anchor walk (which reads
+    weft.toml) recovers it. The recovered root feeds safe_path containment, the
+    scanner path boundary, and confless DB opens — getting it wrong was a
+    cross-surface split-brain.
+    """
+
+    def _make_deep_override_install(self, root: Path, rel: str = "data/store/fg") -> Path:
+        (root / "weft.toml").write_text(f'[filigree]\nstore_dir = "{rel}"\n')
+        store = root / Path(rel)
+        store.mkdir(parents=True)
+        write_config(store, {"prefix": "p", "version": 1})
+        write_conf(
+            root / CONF_FILENAME,
+            {"version": 1, "project_name": "p", "prefix": "p", "db": f"{rel}/{DB_FILENAME}"},
+        )
+        return store
+
+    def test_anchor_from_root_recovers_deep_override(self, tmp_path: Path) -> None:
+        store = self._make_deep_override_install(tmp_path)
+        anchor = find_filigree_anchor(tmp_path)
+        assert anchor.store_dir == store
+        assert anchor.project_root == tmp_path
+
+    def test_anchor_from_store_dir_recovers_project_root(self, tmp_path: Path) -> None:
+        # The recovery the dashboard registry / CLI / MCP confless fallback use:
+        # walking up from the resolved store dir must land on the project root,
+        # NOT on the store dir's parent (data/store).
+        store = self._make_deep_override_install(tmp_path)
+        anchor = find_filigree_anchor(store)
+        assert anchor.project_root == tmp_path
+        assert store.parent != tmp_path  # the reverse-derivation would have been wrong
+
+    def test_from_anchor_sets_correct_project_root_for_deep_override(self, tmp_path: Path) -> None:
+        store = self._make_deep_override_install(tmp_path)
+        db = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            # project_root is the real root, not store.parent — so safe_path()
+            # containment and scanner-relative paths resolve against the right tree.
+            assert db.project_root == tmp_path
+            assert db.meta_dir == store
+        finally:
+            db.close()
 
 
 class TestFromAnchorConflessWeftStore:

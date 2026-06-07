@@ -86,6 +86,35 @@ class TestWeftStoreInit:
         assert (tmp_path / ".weft" / "filigree" / "filigree.db").is_file()
         assert not (elsewhere / "filigree.db").exists()
 
+    def test_init_refuses_on_unreadable_weft_toml_fresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A present-but-broken weft.toml on the mutating init path must fail fast,
+        not silently boot on defaults (which would ignore a possibly-pinned
+        store_dir). Fresh install branch (I1)."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "weft.toml").write_text("this is not [valid toml")
+        result = cli_runner.invoke(cli, ["init", "--prefix", "p"])
+        assert result.exit_code == 1, result.output
+        assert "weft.toml" in result.output
+        # Nothing created — neither default nor any store.
+        assert not (tmp_path / ".weft").exists()
+        assert not (tmp_path / ".filigree.conf").exists()
+
+    def test_init_refuses_on_unreadable_weft_toml_with_existing_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """With an existing install, a broken weft.toml must block the migration
+        branch too (the store could be pinned elsewhere in the unreadable bytes)."""
+        monkeypatch.chdir(tmp_path)
+        result = cli_runner.invoke(cli, ["init", "--prefix", "p"])
+        assert result.exit_code == 0, result.output
+        # Now corrupt weft.toml and re-run init.
+        (tmp_path / "weft.toml").write_text("\xff not [valid")
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 1, result.output
+        assert "weft.toml" in result.output
+
 
 class TestOnboardingBreadcrumbs:
     def test_init_shows_next(self, tmp_path: Path, cli_runner: CliRunner) -> None:

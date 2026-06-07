@@ -43,9 +43,9 @@ from filigree.core import (
     CONF_FILENAME,
     SUMMARY_FILENAME,
     FiligreeDB,
+    find_filigree_anchor,
     find_filigree_conf,
     resolve_store_dir,
-    store_dir_to_project_root,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
@@ -205,11 +205,14 @@ def _safe_path(raw: str) -> Path:
     """
     from filigree.paths import safe_path
 
-    filigree_dir = _get_filigree_dir()
-    if filigree_dir is None:
+    # Anchor on the active DB's authoritative project_root (set by the anchor-aware
+    # constructors). Reverse-deriving it from the store dir is wrong for a
+    # multi-segment weft.toml store_dir override (I2).
+    active_db = _request_db.get() or db
+    if active_db is None or active_db.project_root is None:
         msg = "Project directory not initialized"
         raise ValueError(msg)
-    return safe_path(raw, store_dir_to_project_root(filigree_dir))
+    return safe_path(raw, active_db.project_root)
 
 
 def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
@@ -1130,7 +1133,7 @@ def create_mcp_app(
 # ---------------------------------------------------------------------------
 
 
-def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
+def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_root: Path | None = None) -> None:
     """Open the project DB, falling back to warm-but-degraded mode on v+1.
 
     When ``conf_path`` is provided, opens the DB declared by ``.filigree.conf``
@@ -1158,11 +1161,15 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
 
     _filigree_dir = filigree_dir
     try:
-        db = (
-            FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
-            if conf_path is not None
-            else FiligreeDB.from_store_dir(filigree_dir, project_root=store_dir_to_project_root(filigree_dir))
-        )
+        if conf_path is not None:
+            db = FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+        else:
+            # Confless open. The project root is NOT recoverable from the store dir
+            # alone for a multi-segment weft.toml store_dir override; prefer the
+            # explicitly threaded root and fall back to the canonical anchor walk
+            # (which reads weft.toml) rather than reverse-deriving (I2).
+            resolved_root = project_root if project_root is not None else find_filigree_anchor(filigree_dir).project_root
+            db = FiligreeDB.from_store_dir(filigree_dir, project_root=resolved_root)
         # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
         # session so every runtime insert records verified_actor. Resolution
         # never raises and never blocks; None leaves verified_actor NULL.
@@ -1197,6 +1204,7 @@ async def _run(project_path: Path | None) -> None:
         # CLI surface (cli_common.get_db) does and stdio MCP must agree, or
         # a v2.0 conf-relocated project gets two divergent databases.
         conf_path: Path | None = (project_path / CONF_FILENAME) if (project_path / CONF_FILENAME).is_file() else None
+        project_root = project_path
         filigree_dir = resolve_store_dir(project_path)
         if not filigree_dir.is_dir():
             print(f"Error: {filigree_dir} not found. Run 'filigree init' first.", file=sys.stderr)
@@ -1212,7 +1220,7 @@ async def _run(project_path: Path | None) -> None:
         project_root = conf_path.parent
         filigree_dir = resolve_store_dir(project_root)
 
-    _attempt_startup(filigree_dir, conf_path=conf_path)
+    _attempt_startup(filigree_dir, conf_path=conf_path, project_root=project_root)
 
     from filigree.logging import setup_logging
 

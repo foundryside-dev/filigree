@@ -16,7 +16,7 @@ from typing import Any
 from mcp.types import TextContent, Tool
 
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
-from filigree.core import VALID_SEVERITIES, store_dir_to_project_root
+from filigree.core import VALID_SEVERITIES
 from filigree.mcp_tools.common import (
     _list_response,
     _parse_args,
@@ -116,6 +116,21 @@ def _validate_scanner_accepts_prompt(cfg: Any, prompt: str) -> ErrorResponse | N
         code=ErrorCode.VALIDATION,
         details={"scanner": cfg.name, "prompt": prompt, "accepts_prompt": False},
     )
+
+
+def _active_project_root() -> Path:
+    """The active DB's authoritative project root for path-relative computations.
+
+    The anchor-aware constructors set ``project_root`` (resolved). It is correct
+    for an arbitrary-depth weft.toml ``store_dir`` override, unlike reverse-deriving
+    it from the store dir by stripping segments (``store_dir.parent`` /
+    ``store_dir_to_project_root``), which assumes a fixed canonical depth (I2).
+    """
+    project_root = get_db().project_root
+    if project_root is None:
+        msg = "active database has no resolved project root"
+        raise ValueError(msg)
+    return project_root
 
 
 def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
@@ -800,13 +815,13 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         if ext and ext not in cfg.file_types:
             file_type_warning = f"Warning: file extension {ext!r} not in scanner's declared file_types {cfg.file_types}. Proceeding anyway."
 
-    canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
+    canonical_path = str(target.relative_to(_active_project_root()))
 
     try:
         file_record = tracker.register_file(canonical_path)
     except (RegistryResolutionError, RegistryUnavailableError) as exc:
         return _registry_error_text(exc, action="triggering scan")
-    project_root = store_dir_to_project_root(filigree_dir)
+    project_root = _active_project_root()
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     scan_run_id = f"{scanner_name}-{ts}-{secrets.token_hex(3)}"
 
@@ -876,7 +891,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     proc = spawn_result["proc"]
     scan_log_path = spawn_result["scan_log_path"]
-    log_rel = str(scan_log_path.relative_to(store_dir_to_project_root(filigree_dir)))
+    log_rel = str(scan_log_path.relative_to(_active_project_root()))
 
     # Backfill PID/log onto the reservation and transition to running.
     try:
@@ -1049,7 +1064,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         if not target.is_file():
             skipped.append({"file_path": fp, "reason": "File not found"})
             continue
-        cp = str(target.relative_to(filigree_dir.resolve().parent))
+        cp = str(target.relative_to(_active_project_root()))
         if cp in seen_canonical:
             skipped.append({"file_path": fp, "reason": "duplicate"})
             continue
@@ -1086,7 +1101,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             return _registry_error_text(exc, action="triggering batch scan")
         file_ids.append(file_record.id)
 
-    project_root = store_dir_to_project_root(filigree_dir)
+    project_root = _active_project_root()
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     # batch_id is a caller-facing correlation string; each file also gets its
     # own scan_run_id so per-file lifecycles (PID, log, completion) don't
@@ -1203,7 +1218,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         spawn_result = entry["spawn_result"]
         proc = spawn_result["proc"]
         scan_log_path = spawn_result["scan_log_path"]
-        log_rel = str(scan_log_path.relative_to(store_dir_to_project_root(filigree_dir)))
+        log_rel = str(scan_log_path.relative_to(_active_project_root()))
         try:
             tracker.set_scan_run_spawn_info(entry["scan_run_id"], pid=proc.pid, log_path=log_rel)
             tracker.update_scan_run_status(entry["scan_run_id"], "running")
@@ -1375,8 +1390,8 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
     if prompt_support_err is not None:
         return _text(prompt_support_err)
 
-    canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
-    project_root = store_dir_to_project_root(filigree_dir)
+    canonical_path = str(target.relative_to(_active_project_root()))
+    project_root = _active_project_root()
     api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir)
     if api_resolution_err is not None:
         return _text(api_resolution_err)

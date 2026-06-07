@@ -167,6 +167,53 @@ def test_governed_legacy_null_snapshot_reads_fresh(monkeypatch: pytest.MonkeyPat
     assert decision.outcome is GateOutcome.PROCEED
 
 
+# --- legis_known_down batch short-circuit ordering (I4c) ----------------------
+# ``legis_known_down`` suppresses the per-issue Legis round-trip once an earlier
+# issue in a batch proved Legis unreachable. It must apply ONLY where a network
+# call would otherwise happen — AFTER the governance-off, ungoverned, and STALE
+# short-circuits. The STALE-before-known_down ordering is load-bearing: hoisting
+# the known_down short-circuit above the stale check would mask tamper (a drifted
+# sign-off) as a transient retry, turning a fail-closed STALE into a recoverable
+# UNAVAILABLE. These pin that ordering against such a refactor.
+
+
+def test_governed_stale_with_legis_known_down_still_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    db = _FakeDB(_stale_governed_rows())
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    # Even with Legis already known down in this batch, a drifted sign-off must
+    # fail closed as STALE — NOT be downgraded to a transient UNAVAILABLE.
+    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
+    assert decision.outcome is GateOutcome.STALE
+    assert spy == []  # no network call either way
+
+
+def test_governed_nonstale_with_legis_known_down_is_unavailable_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The complement: a fresh governed issue with Legis known down fails closed as
+    # UNAVAILABLE and skips the round-trip. Proves known_down is honoured at all,
+    # so the STALE test above isn't passing merely because known_down is ignored.
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    db = _FakeDB(_governed_rows())
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
+    assert decision.outcome is GateOutcome.UNAVAILABLE
+    assert spy == []  # round-trip suppressed by the batch-level known-down flag
+
+
+def test_ungoverned_with_legis_known_down_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An ungoverned issue never touches Legis, so the known-down flag must not
+    # defer it (gate-level analogue of the batch cascade regression test).
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    db = _FakeDB(_ungoverned_rows())
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
+    assert decision.outcome is GateOutcome.PROCEED
+    assert spy == []
+
+
 def test_any_stale_signed_association_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """An issue with one fresh + one stale signed association fails closed:
     a drifted sign-off on any governed binding compromises the close."""

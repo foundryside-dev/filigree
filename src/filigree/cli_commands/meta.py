@@ -281,7 +281,7 @@ def mcp_status(as_json: bool) -> None:
         _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
         sys.exit(1)
 
-    _attempt_startup(anchor.store_dir, conf_path=anchor.conf_path)
+    _attempt_startup(anchor.store_dir, conf_path=anchor.conf_path, project_root=anchor.project_root)
     payload = get_mcp_status_payload()
 
     if as_json:

@@ -26,6 +26,8 @@ from filigree.core import (
     DB_FILENAME,
     WEFT_DIR_NAME,
     WEFT_MEMBER_SUBDIR,
+    ProjectNotInitialisedError,
+    find_filigree_anchor,
     read_conf,
     read_config,
     write_atomic,
@@ -64,15 +66,22 @@ class ServerConfig:
 
 
 def _project_root_from_store_dir(store_dir: Path) -> Path:
-    """Return the project root for a registered store dir, layout-aware.
+    """Return the project root for a registered store dir via the canonical anchor.
 
-    ``.weft/filigree/`` is two segments below the project root; legacy
-    ``.filigree/`` is one. Using ``store_dir.parent`` blindly would point a
-    federation-layout store's conf lookup at ``.weft/`` instead of the root.
+    The project root is NOT recoverable from the store dir alone for an
+    arbitrary-depth weft.toml ``store_dir`` override; stripping a fixed number of
+    segments (the old ``.weft/filigree`` 2-seg / legacy 1-seg special-case) gives
+    the wrong root. Resolve through :func:`find_filigree_anchor`, which reads
+    weft.toml (I2). Fall back to the segment heuristic only when no anchor can be
+    discovered (e.g. a registered dir whose anchor was removed) so a schema-version
+    probe stays best-effort rather than raising during registration/listing.
     """
-    if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
-        return store_dir.parent.parent
-    return store_dir.parent
+    try:
+        return find_filigree_anchor(store_dir).project_root
+    except ProjectNotInitialisedError:
+        if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
+            return store_dir.parent.parent
+        return store_dir.parent
 
 
 def _project_db_path(filigree_dir: Path) -> Path:

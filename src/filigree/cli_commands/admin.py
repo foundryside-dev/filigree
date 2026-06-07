@@ -26,6 +26,8 @@ from filigree.core import (
     ProjectConfig,
     ProjectNotInitialisedError,
     StoreMigrationBusyError,
+    WeftConfigUnreadableError,
+    _load_weft_filigree_table,
     find_filigree_anchor,
     get_mode,
     migrate_store_to_weft,
@@ -73,6 +75,16 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
 def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     """Initialize filigree in the current directory (store at .weft/filigree/)."""
     cwd = Path.cwd()
+    # The mutating init/install path must NOT boot on defaults over an unreadable
+    # weft.toml — C-9c (boot-on-defaults) is for passive discovery only. A broken
+    # config may hide an operator [filigree].store_dir pin; silently ignoring it
+    # would create/relocate the store somewhere the operator never chose (I1). Fail
+    # fast and uniformly here, before either the fresh-install or migration branch.
+    try:
+        _load_weft_filigree_table(cwd)
+    except WeftConfigUnreadableError as exc:
+        click.echo(f"{exc}\nFix or remove weft.toml, then re-run `filigree init`.", err=True)
+        sys.exit(1)
     conf_path = cwd / CONF_FILENAME
     legacy_dir = cwd / FILIGREE_DIR_NAME
     weft_store = cwd / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR

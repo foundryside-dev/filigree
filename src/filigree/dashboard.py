@@ -53,7 +53,6 @@ from filigree.core import (
     ProjectNotInitialisedError,
     find_filigree_anchor,
     read_config,
-    store_dir_to_project_root,
 )
 
 # Re-export so test imports continue to work.
@@ -202,11 +201,13 @@ def _open_db_for_filigree_dir(
     config disables fallback would fail to construct against an offline
     Loomweave even though the operator just asked for fallback at startup.
     """
-    # *filigree_dir* is a resolved store dir (legacy ``.filigree/`` or
-    # federation ``.weft/filigree/``). The conf anchor sits at the PROJECT ROOT,
-    # which is two segments up for the federation layout — derive it layout-aware
-    # rather than via a naive ``.parent`` (which would look in ``.weft/``).
-    project_root = store_dir_to_project_root(filigree_dir)
+    # *filigree_dir* is a resolved store dir (legacy ``.filigree/``, federation
+    # ``.weft/filigree/``, or an arbitrary-depth weft.toml ``store_dir`` override).
+    # The conf anchor sits at the PROJECT ROOT, which is NOT recoverable from the
+    # store dir alone for a multi-segment override — reverse-deriving by stripping
+    # segments yields the wrong root. Resolve through the canonical anchor walk
+    # (which reads weft.toml) so the project root is correct for every layout (I2).
+    project_root = find_filigree_anchor(filigree_dir).project_root
     conf_path = project_root / CONF_FILENAME
     if conf_path.is_file():
         return FiligreeDB.from_conf(
