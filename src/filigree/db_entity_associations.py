@@ -71,6 +71,21 @@ class EntityAssociationRow(TypedDict):
     signed_content_hash: ContentHash | None
 
 
+class GovernedAssociationRemovalError(ValueError):
+    """Refused: a caller tried to delete a Legis-signed (governed) binding.
+
+    Removing the only signed association of a governed issue is a non-Legis
+    governed->ungoverned downgrade — the closure gate (governance.py DECISION
+    1A: governed = >=1 non-null ``signature``) then short-circuits to PROCEED
+    with no Legis call. This is the removal-vector twin of the v27 write-clobber
+    fix, refused structurally at the data layer.
+
+    A ``ValueError`` subclass so the existing untrusted-surface handlers (the
+    MCP and HTTP entity-association remove routes both ``except ValueError``)
+    render it as a refusal without bespoke wiring.
+    """
+
+
 def _normalise_optional_entity_kind(entity_kind: str | None) -> str:
     if entity_kind is None:
         return ""
@@ -299,13 +314,45 @@ class EntityAssociationsMixin(DBMixinProtocol):
     ) -> bool:
         """Remove the association identified by the composite key.
 
+        Refuses to delete a Legis-signed (governed) binding: removing the signed
+        row is a governed->ungoverned downgrade that would let the closure gate
+        (governance.py DECISION 1A: governed = >=1 non-null ``signature``) wave a
+        governed close through with no Legis call — the removal-vector twin of the
+        v27 write-clobber fix. No agent surface can sign (only Legis holds the HMAC
+        key) and Filigree cannot verify a wire-supplied signature, so there is no
+        safe signatureless removal of a signed row; a genuine privileged detach
+        goes through an explicit admin path (``issue_delete``'s ``ON DELETE
+        CASCADE`` / the owner-gated ``sei-backfill`` merge), never this method.
+
         Returns:
             ``True`` if a row was deleted, ``False`` if the association
             did not exist (idempotent — no-op on missing).
+
+        Raises:
+            GovernedAssociationRemovalError: the target row carries a Legis
+                ``signature`` (the issue is governed by it).
         """
         issue_id = make_issue_id(issue_id)
         entity_id = make_loomweave_entity_id(entity_id)
         self._check_id_prefix(issue_id)
+        # Governed-binding guard. Mirror the gate's own predicate exactly
+        # (``signature is not None``, governance.py:127) so refuse-on-remove and
+        # governed-on-close can never disagree; a blank signature is already
+        # NULL-normalised on write, so the column is strictly {real-signature |
+        # NULL}. Keyed on the durable signature, NOT on whether Legis is currently
+        # configured: unsetting LEGIS_URL must not become a way to delete the
+        # sign-off. Read-only, before any mutation, so the refusal rolls back clean.
+        existing = self.conn.execute(
+            "SELECT signature FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
+            (issue_id, entity_id),
+        ).fetchone()
+        if existing is not None and existing["signature"] is not None:
+            msg = (
+                f"Cannot remove the Legis-signed (governed) association {entity_id} from {issue_id}: "
+                "deleting a signed binding would silently downgrade the issue to ungoverned. "
+                "Only Legis can sign or release a governed binding."
+            )
+            raise GovernedAssociationRemovalError(msg)
         cursor = self.conn.execute(
             "DELETE FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
             (issue_id, entity_id),
