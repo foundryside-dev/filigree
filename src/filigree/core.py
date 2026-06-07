@@ -778,6 +778,17 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # Completed already (conf points at the weft DB and it exists) → idempotent.
     if weft_db.is_file() and conf_db == weft_db.resolve():
         return weft_store, False
+    # Confless completion: a confless project has no conf to point at the weft DB,
+    # so the check above can never fire for it (conf_db is None). When its legacy
+    # DB is already gone and the weft DB exists, migration has fully completed —
+    # re-running must be an idempotent no-op. Without this the confless path falls
+    # through to a needless re-copy (migrated=True) or, with a live daemon, a
+    # spurious StoreMigrationBusyError despite nothing being left to migrate. This
+    # stays confless-SPECIFIC: a confful crash-mid-rename (conf_db points at the
+    # now-deleted legacy DB, weft present) keeps conf_db non-None and must still
+    # fall through below to rewrite the conf.
+    if conf_db is None and weft_db.is_file() and not legacy_db.is_file():
+        return weft_store, False
 
     # Only migrate the vanilla layout (DB inside .filigree/, or a half-finished
     # prior run whose legacy DB is already gone). An operator who relocated the

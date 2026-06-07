@@ -302,6 +302,56 @@ class TestMigrateStoreToWeft:
         assert not (legacy / DB_FILENAME).exists()
         assert (store / DB_FILENAME).is_file()
 
+    def test_completed_confless_migration_rerun_is_idempotent(self, tmp_path: Path) -> None:
+        """A confless project (no .filigree.conf) has no conf to point at the weft
+        DB, so the confful idempotency short-circuit can never fire for it. After
+        its migration completes (legacy DB gone, weft DB present), a re-run must be
+        an idempotent no-op — NOT a needless re-copy reporting migrated=True.
+        """
+        # Confless legacy install: .filigree/ with config + db, but NO .filigree.conf.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        write_config(legacy, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        db = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        db.initialize()
+        db.close()
+        assert not (tmp_path / CONF_FILENAME).exists()  # confless
+
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        assert (store / DB_FILENAME).is_file()
+        assert not (legacy / DB_FILENAME).exists()  # completed: legacy DB carried forward + removed
+        assert not (tmp_path / CONF_FILENAME).exists()  # still confless — no conf created
+
+        # Re-run a completed confless migration: idempotent no-op.
+        store2, migrated2 = migrate_store_to_weft(tmp_path)
+        assert migrated2 is False, "completed confless migration must re-run as a no-op"
+        assert store2 == store
+
+    def test_completed_confless_rerun_does_not_false_refuse_on_live_daemon(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The confless-completion short-circuit must return BEFORE the daemon
+        liveness probe — a completed confless migration has nothing left to carry
+        forward, so a live daemon can't orphan a write and must not be refused.
+        """
+        import filigree.core as core_mod
+
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        write_config(legacy, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        db = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        db.initialize()
+        db.close()
+        migrate_store_to_weft(tmp_path)  # complete it
+
+        # Simulate a live daemon: the probe would refuse if reached.
+        def _boom(_root: Path) -> None:
+            raise StoreMigrationBusyError("daemon live")
+
+        monkeypatch.setattr(core_mod, "_refuse_if_daemon_serving", _boom)
+        # Must NOT raise — the completion short-circuit returns before the probe.
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is False
+
     def test_crash_during_copy_leaves_no_partial_and_re_run_recovers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A hard crash mid-copy must NOT leave a partial DB at the final path.
 
