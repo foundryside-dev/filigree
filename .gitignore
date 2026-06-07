@@ -64,3 +64,6 @@ wardline.yaml
 
 # Filigree issue tracker
 .filigree/
+
+# Filigree issue tracker
+.weft/
