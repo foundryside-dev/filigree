@@ -54,25 +54,37 @@ class TestWeftStoreInit:
         listed = cli_runner.invoke(cli, ["ready", "--json"])
         assert listed.exit_code == 0, listed.output
 
-    def test_store_dir_overlay_relocates_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
-        """An operator weft.toml [filigree].store_dir relocates the store the
-        CLI opens — top precedence, the resolution-order contract."""
+    def test_init_honors_store_dir_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """`filigree init` with a weft.toml [filigree].store_dir override must
+        create the store (db AND config) under the override and point the conf
+        there — init and runtime must agree (advisor gap)."""
         monkeypatch.chdir(tmp_path)
-        # Operator pre-declares a custom store dir, then inits into it by
-        # creating the dir + config there and pointing the conf at it.
-        custom = tmp_path / "var" / "fgstore"
-        custom.mkdir(parents=True)
-        (tmp_path / "weft.toml").write_text('[filigree]\nstore_dir = "var/fgstore"\n')
-        from filigree.core import FiligreeDB, write_conf, write_config
-
-        write_config(custom, {"prefix": "ov", "version": 1})
-        FiligreeDB(custom / "filigree.db", prefix="ov", project_root=tmp_path, meta_dir=custom).initialize()
-        write_conf(tmp_path / ".filigree.conf", {"version": 1, "project_name": "ov", "prefix": "ov", "db": "var/fgstore/filigree.db"})
-
-        result = cli_runner.invoke(cli, ["create", "via overlay", "--json"])
+        (tmp_path / "weft.toml").write_text('[filigree]\nstore_dir = "custom/store"\n')
+        result = cli_runner.invoke(cli, ["init", "--prefix", "ov"])
         assert result.exit_code == 0, result.output
-        # The issue landed in the overlay-relocated DB, not a default store.
+        custom = tmp_path / "custom" / "store"
+        # db AND config both live under the override — not split.
+        assert (custom / "filigree.db").is_file()
+        assert (custom / "config.json").is_file()
         assert not (tmp_path / ".weft" / "filigree").exists()
+        conf = json.loads((tmp_path / ".filigree.conf").read_text())
+        assert conf["db"] == "custom/store/filigree.db"
+        # Runtime round-trips against the same store.
+        created = cli_runner.invoke(cli, ["create", "in override", "--json"])
+        assert created.exit_code == 0, created.output
+        listed = cli_runner.invoke(cli, ["ready", "--json"])
+        assert "in override" in listed.output
+
+    def test_init_ignores_absolute_store_dir_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """An absolute store_dir cannot be carried in the project-relative conf
+        db field, so init ignores it and uses the default .weft/filigree/."""
+        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        (tmp_path / "weft.toml").write_text(f'[filigree]\nstore_dir = "{elsewhere}"\n')
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".weft" / "filigree" / "filigree.db").is_file()
+        assert not (elsewhere / "filigree.db").exists()
 
 
 class TestOnboardingBreadcrumbs:

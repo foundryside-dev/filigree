@@ -59,10 +59,19 @@ class TestResolveStoreDir:
         (tmp_path / "weft.toml").write_text('[filigree]\nstore_dir = "var/state/fg"\n')
         assert resolve_store_dir(tmp_path) == tmp_path / "var" / "state" / "fg"
 
-    def test_weft_toml_store_dir_override_absolute(self, tmp_path: Path) -> None:
+    def test_weft_toml_store_dir_override_absolute_is_ignored(self, tmp_path: Path) -> None:
+        # An absolute store_dir cannot be represented in the conf's
+        # project-relative db field, so it is ignored (warn + default), never
+        # honoured half-way (would split db vs metadata).
         elsewhere = tmp_path / "elsewhere"
         (tmp_path / "weft.toml").write_text(f'[filigree]\nstore_dir = "{elsewhere}"\n')
-        assert resolve_store_dir(tmp_path) == elsewhere
+        assert resolve_store_dir(tmp_path) == _weft_store(tmp_path)
+
+    def test_weft_toml_store_dir_override_escaping_is_ignored(self, tmp_path: Path) -> None:
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
+        (tmp_path / "weft.toml").write_text('[filigree]\nstore_dir = "../outside"\n')
+        # Escaping the project root is rejected; falls back to the present layout.
+        assert resolve_store_dir(tmp_path) == tmp_path / FILIGREE_DIR_NAME
 
     def test_malformed_weft_toml_falls_back_to_default_never_raises(self, tmp_path: Path) -> None:
         (tmp_path / "weft.toml").write_text("this is not [valid toml")

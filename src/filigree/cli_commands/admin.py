@@ -32,6 +32,7 @@ from filigree.core import (
     read_conf,
     read_config,
     read_schema_version,
+    resolve_store_dir,
     write_conf,
     write_config,
 )
@@ -80,10 +81,10 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
 
     def _store_gitignore(store: Path) -> None:
         """Ship the nested .gitignore matching the resolved store layout."""
-        if store == weft_store:
-            ensure_weft_store_gitignore(store)
-        else:
+        if store == legacy_dir:
             ensure_filigree_dir_gitignore(store)
+        else:
+            ensure_weft_store_gitignore(store)
 
     already_installed = conf_path.is_file() or weft_store.is_dir() or legacy_dir.is_dir()
     if already_installed:
@@ -190,7 +191,13 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     prefix = prefix or cwd.name
     name = name or cwd.name
     mode = mode or "ethereal"
-    store_dir = weft_store
+    # Honour an operator weft.toml [filigree].store_dir override at creation time
+    # (it is the canonical relocation key) so the store, config, and the conf's
+    # db field all land in the SAME place. resolve_store_dir already narrowed it
+    # to a project-relative, under-root path, so relative_to(cwd) is safe and the
+    # conf can carry it as a project-relative db value.
+    store_dir = resolve_store_dir(cwd)
+    rel_store = store_dir.relative_to(cwd)
     store_dir.mkdir(parents=True)
     (store_dir / "scanners").mkdir()
 
@@ -202,12 +209,12 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     # Write the .filigree.conf anchor at the project root — this is the file
     # agents walk up looking for, the authoritative declaration that "this
     # folder and its subtree belong to this filigree project". Its `db` field
-    # points at the federation store.
+    # points at the resolved store.
     conf_data: dict[str, object] = {
         "version": CONF_VERSION,
         "project_name": name,
         "prefix": prefix,
-        "db": f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}",
+        "db": (rel_store / DB_FILENAME).as_posix(),
     }
     if mode and mode != "ethereal":
         conf_data["mode"] = mode
@@ -222,7 +229,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     # by future `init` runs to warn about cross-tool schema skew.
     write_install_version(store_dir, CURRENT_SCHEMA_VERSION)
 
-    click.echo(f"Initialized filigree store at {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ in {cwd}")
+    click.echo(f"Initialized filigree store at {rel_store.as_posix()}/ in {cwd}")
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
     click.echo(f"  Database: {store_dir / DB_FILENAME}")

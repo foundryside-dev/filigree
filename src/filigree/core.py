@@ -495,7 +495,10 @@ def resolve_store_dir(project_root: Path) -> Path:
             try:
                 resolved.relative_to(project_root.resolve())
             except ValueError:
-                logger.warning("weft.toml [filigree].store_dir %r escapes the project root; ignoring and using the default store.", override)
+                logger.warning(
+                    "weft.toml [filigree].store_dir %r escapes the project root; ignoring and using the default store.",
+                    override,
+                )
             else:
                 return project_root / candidate
     weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
