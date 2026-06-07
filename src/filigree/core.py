@@ -633,6 +633,82 @@ def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
         raise
 
 
+def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
+    """Best-effort: the project's ephemeral dashboard port if one is bound, else ``None``.
+
+    A session-scoped ephemeral dashboard (``filigree dashboard`` without
+    ``--server-mode``) binds the project's deterministic port and holds a
+    ``FiligreeDB`` connection on the legacy store. An *idle* such process holds no
+    DB lock at migration time, so a lock/checkpoint probe cannot see it — we probe
+    its deterministic port instead. The probe is portable (a localhost bind-attempt,
+    no ``lsof``/procfs) and BEST-EFFORT: a bound port is a strong but not certain
+    signal (something unrelated could own it), so it only ever *contributes* a
+    refusal; any error returns ``None`` and never blocks migration.
+    """
+    from filigree import ephemeral
+
+    port = ephemeral.compute_port(project_root / FILIGREE_DIR_NAME)
+    # A *free* (bindable) port means nothing is listening → no ephemeral dashboard.
+    if ephemeral._is_port_free(port):
+        return None
+    return port
+
+
+def _live_filigree_daemon_for_project(project_root: Path) -> int | None:
+    """Return the port of a live filigree daemon serving *project_root*, else ``None``.
+
+    Registry-based detection, NOT lock-based: an idle daemon holds no DB lock but
+    still has an open connection that can commit *after* migration unlinks the
+    legacy DB (orphaning that write). ``BEGIN EXCLUSIVE`` would not see such an idle
+    connection, so we consult the daemon registry + a deterministic port probe:
+      * server-mode (B1): the shared daemon is alive (PID-verified ``daemon_status``)
+        AND ``server.json`` registers a store dir whose project root is *project_root*.
+      * ephemeral (B2): the project's deterministic dashboard port is bound.
+
+    A still-open in-session MCP/stdio connection (B3) cannot be detected from here;
+    that residual is documented in the upgrade notes.
+    """
+    from filigree import server
+
+    project_root = project_root.resolve()
+
+    status = server.daemon_status()
+    if status.running:
+        config = server.read_server_config()
+        for store_key in config.projects:
+            try:
+                key_root = server._project_root_from_store_dir(Path(store_key)).resolve()
+            except (OSError, ValueError):
+                continue
+            if key_root == project_root:
+                return status.port
+
+    return _ephemeral_dashboard_port_if_live(project_root)
+
+
+def _refuse_if_daemon_serving(project_root: Path) -> None:
+    """Raise :class:`StoreMigrationBusyError` when a live filigree daemon serves
+    *project_root* — it holds an open connection on the legacy DB and could commit
+    to it during/after migration, orphaning that write on the about-to-be-unlinked
+    inode (filigree-031f9a413f). BEST-EFFORT: detection that itself fails must never
+    crash migration, so any error is swallowed and migration proceeds.
+    """
+    try:
+        port = _live_filigree_daemon_for_project(project_root)
+    except Exception:
+        # Detection is best-effort; never let it crash migration.
+        logger.debug("Daemon-liveness detection failed for %s; proceeding", project_root, exc_info=True)
+        return
+    if port is not None:
+        msg = (
+            f"Cannot migrate {project_root / FILIGREE_DIR_NAME}: a filigree dashboard/server appears to be "
+            f"running for this project (port {port}). It holds an open connection on the legacy database and "
+            f"could write to it during migration, losing that write. Stop the dashboard/server "
+            f"(`filigree server stop`, or close the ephemeral dashboard) and re-run `filigree init`."
+        )
+        raise StoreMigrationBusyError(msg)
+
+
 def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     """Migrate a legacy ``.filigree/`` store forward to ``.weft/filigree/``.
 
@@ -673,6 +749,15 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # config might hide a ``store_dir`` pin, so conflating "broken" with "absent"
     # would skip this guard and relocate the store the operator never chose. Refuse
     # — raise before any filesystem mutation — rather than guess (I1).
+    #
+    # Override-asymmetry note (#2): ANY non-empty ``store_dir`` is treated as an
+    # operator pin and we no-op here, even when the value is invalid (absolute /
+    # ``..``-escaping). That asymmetry vs :func:`resolve_store_dir` (which *ignores*
+    # an invalid override and falls through) is intentional and harmless: this
+    # no-op mutates nothing, and resolve_store_dir then reads the SAME legacy store
+    # this leaves canonical — so the worst case is a functional surprise (migration
+    # silently skipped on a typo'd pin), never data loss. Declining to migrate is
+    # the safe side of the ambiguity; honouring an invalid pin would be the unsafe one.
     override = (_load_weft_filigree_table(project_root) or {}).get("store_dir")
     if isinstance(override, str) and override:
         return resolve_store_dir(project_root), False
@@ -703,6 +788,16 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     if not legacy_db.is_file() and not weft_db.is_file():
         # Nothing to carry forward (e.g. conf with no DB yet) — leave as-is.
         return resolve_store_dir(project_root), False
+
+    # We have now DECIDED to migrate (legacy present, not idempotent-complete,
+    # vanilla layout). DETECT-AND-REFUSE (registry-based quiesce, B1/B2): a live
+    # daemon holds an open legacy-DB connection that can commit *after* our copy
+    # and *after* our unlink, orphaning that write on the deleted inode. No
+    # copy-time guard can close that — the write has not happened yet at copy time
+    # — so we refuse up front and tell the operator to stop it. Runs BEFORE any
+    # mutation so a refusal never litters a weft husk. Best-effort: detection that
+    # itself fails never blocks migration (filigree-031f9a413f).
+    _refuse_if_daemon_serving(project_root)
 
     # Do NOT pre-create weft_store here: the copy below can abort
     # (StoreMigrationBusyError before any mutation), and an empty .weft/filigree/

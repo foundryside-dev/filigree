@@ -752,3 +752,78 @@ class TestFromAnchorConflessWeftStore:
             assert db.meta_dir == store
         finally:
             db.close()
+
+
+class TestMigrationDaemonQuiesce:
+    """Detect-and-refuse: a live filigree daemon holding the legacy DB open must
+    block migration before any mutation (filigree-031f9a413f). The daemon can be
+    idle through the copy->unlink window and then commit to the orphaned inode, so
+    detection is registry-based (server.json + deterministic port), not lock-based.
+    """
+
+    def test_live_daemon_refuses_before_any_mutation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _make_legacy_install(tmp_path)
+        monkeypatch.setattr("filigree.core._live_filigree_daemon_for_project", lambda _root: 8749)
+        with pytest.raises(StoreMigrationBusyError, match="port 8749"):
+            migrate_store_to_weft(tmp_path)
+        # No mutation: no weft husk, legacy DB + conf left intact.
+        assert not _weft_store(tmp_path).exists()
+        assert (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+
+    def test_no_daemon_proceeds_normally(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _make_legacy_install(tmp_path)
+        monkeypatch.setattr("filigree.core._live_filigree_daemon_for_project", lambda _root: None)
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        assert (store / DB_FILENAME).is_file()
+
+    def test_detection_failure_never_blocks_migration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _make_legacy_install(tmp_path)
+
+        def _boom(_root: Path) -> int | None:
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr("filigree.core._live_filigree_daemon_for_project", _boom)
+        # Best-effort: a detection bug must not crash migration.
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        assert (store / DB_FILENAME).is_file()
+
+    def test_server_registry_match_for_this_project_returns_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree import server
+        from filigree.core import _live_filigree_daemon_for_project
+
+        _make_legacy_install(tmp_path)
+        # Ephemeral probe out of the way — exercise only the server-registry tier.
+        monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
+        monkeypatch.setattr(server, "daemon_status", lambda: server.DaemonStatus(running=True, pid=4321, port=8749, project_count=1))
+        monkeypatch.setattr(
+            server,
+            "read_server_config",
+            lambda: server.ServerConfig(port=8749, projects={str(tmp_path / FILIGREE_DIR_NAME): {"prefix": "proj"}}),
+        )
+        assert _live_filigree_daemon_for_project(tmp_path) == 8749
+
+    def test_server_registry_no_match_for_unrelated_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree import server
+        from filigree.core import _live_filigree_daemon_for_project
+
+        _make_legacy_install(tmp_path)
+        monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
+        monkeypatch.setattr(server, "daemon_status", lambda: server.DaemonStatus(running=True, pid=4321, port=8749, project_count=1))
+        monkeypatch.setattr(
+            server,
+            "read_server_config",
+            lambda: server.ServerConfig(port=8749, projects={"/some/other/project/.filigree": {"prefix": "other"}}),
+        )
+        # No registry match and ephemeral probe stubbed to None → no live daemon.
+        assert _live_filigree_daemon_for_project(tmp_path) is None
+
+    def test_daemon_not_running_skips_registry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree import server
+        from filigree.core import _live_filigree_daemon_for_project
+
+        monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
+        monkeypatch.setattr(server, "daemon_status", lambda: server.DaemonStatus(running=False))
+        assert _live_filigree_daemon_for_project(tmp_path) is None

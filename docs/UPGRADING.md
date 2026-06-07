@@ -3,6 +3,42 @@
 This guide covers version-to-version Filigree upgrades. For Beads import, see
 [MIGRATION.md](MIGRATION.md).
 
+## Upgrading to 3.0.0 (store consolidation)
+
+Filigree 3.0.0 moves the machine-owned store from the legacy `.filigree/`
+directory to the federation convention `.weft/filigree/` (the `.filigree.conf`
+anchor stays). The move happens **only** on an explicit `filigree init` against a
+legacy install — never on passive discovery — and is crash-convergent: it copies
+the database forward, rewrites the conf, then removes the legacy database. A
+re-run resumes a half-finished move.
+
+### Stop ALL writers before upgrading — this is mandatory, not advisory
+
+Because the migration **deletes the legacy database** once it has been copied
+forward, any process still holding the legacy database open can lose writes: a
+write it commits after the copy lands on a file that is about to be unlinked, and
+is never carried into the new store. Before running the `filigree init` that
+performs the migration, stop **every** writer for the project:
+
+- the web dashboard (ephemeral session dashboards and `--server-mode` daemons —
+  `filigree server stop`),
+- any MCP server holding the project open,
+- other CLI/agent sessions.
+
+Filigree defends this automatically where it can: `migrate` **refuses** (with a
+`StoreMigrationBusyError` naming the port) when it detects a registered
+server-mode daemon or a bound ephemeral dashboard for the project, and it holds
+the legacy database's write lock across the copy so an actively-writing process
+is blocked rather than silently dropped. **Known limitation:** an MCP/stdio
+connection opened *in your own session* (for example, the agent session running
+the upgrade) is not registered anywhere and cannot be detected — you must stop it
+yourself. When in doubt, quiesce everything and re-run; the migration is
+idempotent and safe to repeat.
+
+After the migration completes, restart the dashboard / server / MCP processes so
+they reopen against `.weft/filigree/`. A daemon left running from before the move
+keeps writing to its now-stale connection until it is restarted.
+
 ## Upgrading from 2.1.0 to 2.1.1
 
 Filigree 2.1.1 ships database schema `user_version` 21 (2.1.0 ships 20). The
