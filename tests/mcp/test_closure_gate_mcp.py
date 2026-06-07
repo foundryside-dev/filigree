@@ -81,6 +81,56 @@ async def test_mcp_batch_close_reports_blocked(mcp_db: FiligreeDB, monkeypatch: 
     assert gov.id in failed_ids
 
 
+async def test_mcp_batch_close_gate_read_error_fails_closed(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A gate-read error (plain ValueError, NOT WrongProjectError) must fail
+    CLOSED: the governed issue is reported in `failed` and never closed.
+    Regression for the fail-open helper that appended such an issue to ALLOWED."""
+    gov = mcp_db.create_issue("Governed", priority=2)
+    ungov = mcp_db.create_issue("Ungoverned", priority=2)
+    _make_governed(mcp_db, gov.id)
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    real_eval = governance.evaluate_closure_gate
+
+    def _boom(tracker: object, issue_id: str) -> governance.GateDecision:
+        if issue_id == gov.id:
+            raise ValueError("synthetic gate-read failure")
+        return real_eval(tracker, issue_id)
+
+    monkeypatch.setattr(governance, "evaluate_closure_gate", _boom)
+    result = _parse(await call_tool("batch_close", {"issue_ids": [gov.id, ungov.id], "actor": "agent"}))
+    succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
+    failed_ids = {e["id"] for e in result["failed"]}
+    assert gov.id not in succeeded_ids
+    assert gov.id in failed_ids
+    assert next(e for e in result["failed"] if e["id"] == gov.id)["code"] == ErrorCode.VALIDATION
+    assert mcp_db.get_issue(gov.id).status != "closed"
+    assert ungov.id in succeeded_ids  # batch stays alive
+
+
+async def test_mcp_batch_update_gate_read_error_fails_closed(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same fail-closed contract for the batch_update status-change gate."""
+    gov = mcp_db.create_issue("Governed", priority=2)
+    ungov = mcp_db.create_issue("Ungoverned", priority=2)
+    _make_governed(mcp_db, gov.id)
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    real_eval = governance.evaluate_status_change_gate
+
+    def _boom(tracker: object, issue_id: str, requested_status: object) -> governance.GateDecision:
+        if issue_id == gov.id:
+            raise ValueError("synthetic gate-read failure")
+        return real_eval(tracker, issue_id, requested_status)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(governance, "evaluate_status_change_gate", _boom)
+    result = _parse(await call_tool("batch_update", {"issue_ids": [gov.id, ungov.id], "status": "closed", "actor": "agent"}))
+    succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
+    failed_ids = {e["id"] for e in result["failed"]}
+    assert gov.id not in succeeded_ids
+    assert gov.id in failed_ids
+    assert next(e for e in result["failed"] if e["id"] == gov.id)["code"] == ErrorCode.VALIDATION
+    assert mcp_db.get_issue(gov.id).status != "closed"
+    assert ungov.id in succeeded_ids
+
+
 async def test_mcp_batch_foreign_prefix_aborts_under_governance_on(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
     """With governance ON, a foreign-prefix id in the batch still triggers the
     envelope-level WrongProjectError abort (VALIDATION), not an unhandled crash."""

@@ -104,16 +104,25 @@ def _gate_batch_failures(tracker: Any, issue_ids: list[str]) -> tuple[list[str],
     """Partition *issue_ids* into (allowed, gate_failures) per B5 DECISION 3.
 
     Governed issues the gate rejects are reported per-item rather than
-    aborting the batch; errors reading governed-ness are left for
-    ``batch_close`` to classify with its existing per-item handling.
+    aborting the batch.
+
+    Gate-read contract (fail closed): only ``WrongProjectError`` is delegated
+    — left in ``allowed`` so the §0.4 foreign-prefix envelope abort fires from
+    ``batch_close``. Any other ``ValueError``/``KeyError`` is a gate-read
+    failure on a possibly-governed issue; it is reported as a per-item
+    ``BatchFailure`` (VALIDATION) and the issue is NOT routed into the close.
+    This must never let a governed issue close on a gate-read error.
     """
     allowed: list[str] = []
     failures: list[BatchFailure] = []
     for issue_id in issue_ids:
         try:
             decision = governance.evaluate_closure_gate(tracker, issue_id)
-        except (ValueError, KeyError):
-            allowed.append(issue_id)
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_close raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
             continue
         if decision.allowed:
             allowed.append(issue_id)
@@ -131,14 +140,22 @@ def _gate_status_change_failures(tracker: Any, issue_ids: list[str], requested_s
     PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
     changes priority/assignee, or moves issues to a non-done status, gates
     nothing.
+
+    Same gate-read contract (fail closed): only ``WrongProjectError`` delegates
+    to ``batch_update`` (for the §0.4 envelope abort); any other
+    ``ValueError``/``KeyError`` is reported as a per-item ``BatchFailure``
+    (VALIDATION) and the issue is NOT routed into the close.
     """
     allowed: list[str] = []
     failures: list[BatchFailure] = []
     for issue_id in issue_ids:
         try:
             decision = governance.evaluate_status_change_gate(tracker, issue_id, requested_status)
-        except (ValueError, KeyError):
-            allowed.append(issue_id)  # let batch_update classify it
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_update raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
             continue
         if decision.allowed:
             allowed.append(issue_id)

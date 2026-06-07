@@ -92,17 +92,29 @@ def _gate_batch_failures(db: FiligreeDB, issue_ids: list[str]) -> tuple[list[str
 
     A governed issue the gate rejects is pulled out and reported as a per-item
     ``BatchFailure`` (CONFLICT for blocked/unavailable, INTERNAL for integrity
-    failure) instead of aborting the whole batch. Errors reading governed-ness
-    (e.g. WrongProjectError) are left in the list so ``batch_close`` surfaces
-    them with its existing per-item handling.
+    failure) instead of aborting the whole batch.
+
+    Gate-read contract (fail closed): only ``WrongProjectError`` is delegated
+    — it is left in ``allowed`` so the envelope-level §0.4 foreign-prefix abort
+    fires from ``batch_close`` (the foreign-prefix tests assert that top-level
+    VALIDATION abort). Any *other* ``ValueError``/``KeyError`` is a gate-read
+    failure on a possibly-governed issue, so it is reported as a per-item
+    ``BatchFailure`` (VALIDATION) and the issue is NOT routed into the close —
+    mirroring the single-close path, which fails closed. This must never let a
+    governed issue close on a gate-read error.
     """
     allowed: list[str] = []
     failures: list[BatchFailure] = []
     for issue_id in issue_ids:
         try:
             decision = governance.evaluate_closure_gate(db, issue_id)
-        except (ValueError, KeyError):
-            allowed.append(issue_id)  # let batch_close classify it
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_close raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            # Fail closed: a gate-read error must never route a possibly-governed
+            # issue into the close. Report per-item, keep the batch alive.
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
             continue
         if decision.allowed:
             allowed.append(issue_id)
@@ -122,14 +134,22 @@ def _gate_status_change_failures(
     PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
     only changes priority/assignee, or moves issues to a non-done status, gates
     nothing.
+
+    Same gate-read contract (fail closed): only ``WrongProjectError`` delegates
+    to ``batch_update`` (for the §0.4 envelope abort); any other
+    ``ValueError``/``KeyError`` is reported as a per-item ``BatchFailure``
+    (VALIDATION) and the issue is NOT routed into the close.
     """
     allowed: list[str] = []
     failures: list[BatchFailure] = []
     for issue_id in issue_ids:
         try:
             decision = governance.evaluate_status_change_gate(db, issue_id, requested_status)
-        except (ValueError, KeyError):
-            allowed.append(issue_id)  # let batch_update classify it
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_update raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
             continue
         if decision.allowed:
             allowed.append(issue_id)

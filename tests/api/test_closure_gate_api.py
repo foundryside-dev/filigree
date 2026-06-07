@@ -122,6 +122,38 @@ class TestClosureGateBatchClose:
         failed_ids = {e["id"] for e in body["failed"]}
         assert gov in failed_ids
 
+    async def test_batch_gate_read_error_fails_closed_does_not_close_governed(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gate-read error (a plain ValueError that is NOT WrongProjectError)
+        must fail CLOSED: the issue is reported per-item and never routed into
+        the close. Regression for the fail-open helper bug where a gate-read
+        error appended the issue to the ALLOWED list."""
+        gov = dashboard_db.ids["a"]
+        ungov = dashboard_db.ids["b"]
+        _make_governed(dashboard_db, gov)
+        monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+        real_eval = governance.evaluate_closure_gate
+
+        def _boom(db: object, issue_id: str) -> governance.GateDecision:
+            if issue_id == gov:
+                raise ValueError("synthetic gate-read failure")
+            return real_eval(db, issue_id)
+
+        monkeypatch.setattr(governance, "evaluate_closure_gate", _boom)
+        resp = await client.post("/api/batch/close", json={"issue_ids": [gov, ungov], "actor": "x"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        closed_ids = {i["id"] for i in body["closed"]}
+        error_ids = {e["id"] for e in body["errors"]}
+        # fails closed: governed issue NOT closed, reported per-item
+        assert gov not in closed_ids
+        assert gov in error_ids
+        assert next(e for e in body["errors"] if e["id"] == gov)["code"] == ErrorCode.VALIDATION
+        assert dashboard_db.db.get_issue(gov).status != "closed"
+        # the batch stays alive: the ungoverned issue still closes
+        assert ungov in closed_ids
+
     async def test_batch_foreign_prefix_aborts_with_400_under_governance_on(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
