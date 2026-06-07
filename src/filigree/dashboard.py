@@ -861,17 +861,25 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                 # fail closed. Reads stay lenient (keep the default-project
                 # fallback). /mcp is excluded — it carries protocol messages and
                 # self-scopes via ?project= at the transport.
-                if (
-                    request.method not in ("GET", "HEAD", "OPTIONS")
-                    and is_loom_scoped_path(path)
-                    and not (path == "/mcp" or path.startswith("/mcp/"))
-                ):
+                is_federation = is_loom_scoped_path(path) and not (path == "/mcp" or path.startswith("/mcp/"))
+                if request.method not in ("GET", "HEAD", "OPTIONS") and is_federation:
                     return _error_response(
                         "Ambiguous federation write in server mode: scope to a project — use POST /api/p/{project_key}/weft/… or add ?project={key}.",
                         ErrorCode.VALIDATION,
                         400,
                     )
-                return await call_next(request)
+                response = await call_next(request)
+                # C-10(a) honest-seams: an unscoped federation READ silently
+                # resolves to the daemon's default project; echo which project it
+                # actually hit so a defaulted read is not silent about its
+                # destination (uniform with the scoped branch above). Writes never
+                # reach here — they fail closed — so this never masks a misroute.
+                if request.method in ("GET", "HEAD") and is_federation:
+                    store = dashboard_state.project_store
+                    default_key = store.default_key if store is not None else ""
+                    if default_key:
+                        response.headers["X-Filigree-Project"] = default_key
+                return response
 
         app.add_middleware(ProjectMiddleware)
     else:

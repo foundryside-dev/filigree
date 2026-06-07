@@ -629,12 +629,34 @@ class TestServerModeFederationWriteScope:
     """
 
     async def test_unscoped_federation_write_fails_closed(self, multi_client: AsyncClient) -> None:
-        """POST /api/weft/scan-results with no project scope → 400, not a home write."""
+        """POST /api/weft/scan-results with no project scope → 400, not a home write.
+
+        The 400 alone is not enough: the contamination this fix prevents is a
+        silently-landed row, so assert ZERO findings were written to EITHER
+        project (fail-closed means the write never reached any DB).
+        """
         resp = await multi_client.post("/api/weft/scan-results", json=_SCAN_BODY)
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body["code"] == ErrorCode.VALIDATION
         assert "scope to a project" in body["error"]
+
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        assert alpha.json()["items"] == [], "unscoped write must not land in the default project"
+        assert bravo.json()["items"] == [], "unscoped write must not land in any project"
+
+    async def test_scoped_write_unknown_key_404_before_any_write(self, multi_client: AsyncClient) -> None:
+        """Criterion 3: a scoped write to an UNKNOWN project key 404s before any
+        write, so a 2xx is proof the destination resolved to a real project.
+        No row lands in any registered project."""
+        resp = await multi_client.post("/api/p/nosuchproject/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 404, resp.text
+
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        assert alpha.json()["items"] == []
+        assert bravo.json()["items"] == []
 
     async def test_unscoped_living_alias_write_fails_closed(self, multi_client: AsyncClient) -> None:
         """The living-surface alias POST /api/scan-results also fails closed."""
@@ -666,6 +688,15 @@ class TestServerModeFederationWriteScope:
         """Reads keep the default-project fallback — only writes fail closed."""
         resp = await multi_client.get("/api/weft/issues")
         assert resp.status_code == 200, resp.text
+
+    async def test_unscoped_read_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """C-10(a) honest-seams: an unscoped read silently resolves to the
+        default project, so the response must name which project it hit — a
+        defaulted read is not allowed to be silent about its destination."""
+        resp = await multi_client.get("/api/weft/issues")
+        assert resp.status_code == 200, resp.text
+        # alpha is the first-loaded project => the resolved default.
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
 
 
 class TestServerModeCrossProjectReadBlocking:
