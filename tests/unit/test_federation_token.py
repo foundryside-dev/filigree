@@ -58,6 +58,17 @@ class TestReadTokenFile:
         (tmp_path / FEDERATION_TOKEN_FILENAME).write_text("  tok123\n")
         assert read_token_file(tmp_path) == "tok123"
 
+    def test_non_utf8_file_returns_empty_per_contract(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """A corrupt (non-UTF-8) token file must honour the "unreadable -> ''"
+        contract, not raise UnicodeDecodeError. read_text() decodes UTF-8, and a
+        UnicodeDecodeError is a ValueError (not an OSError) — so the catch must
+        cover it. Fails closed (no token => auth off) with a warning, so a corrupt
+        token is not silently mistaken for "auth disabled".
+        """
+        (tmp_path / FEDERATION_TOKEN_FILENAME).write_bytes(b"\xff\xfe\x00bad")
+        assert read_token_file(tmp_path) == ""
+        assert any("federation_token" in r.message or "token" in r.message.lower() for r in caplog.records)
+
 
 class TestMintTokenFile:
     def test_mints_fresh_0600(self, tmp_path: Path) -> None:

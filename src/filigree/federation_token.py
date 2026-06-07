@@ -83,7 +83,17 @@ def read_token_file(store_dir: Path) -> str:
     """
     try:
         return (store_dir / FEDERATION_TOKEN_FILENAME).read_text().strip()
-    except OSError:
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError):
+        # Honour the "unreadable -> ''" contract for a present-but-corrupt file
+        # (UnicodeDecodeError is a ValueError, NOT an OSError — read_text decodes
+        # UTF-8). Warn rather than fail silently: a corrupt token reads as
+        # "auth off", which a bare swallow would hide. Fails closed (no token).
+        logger.warning(
+            "federation_token file in %s is present but unreadable — treating as no token (federation auth NOT enabled from it)",
+            store_dir,
+        )
         return ""
 
 
