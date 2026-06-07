@@ -537,6 +537,125 @@ class TestPromoteFindingTool:
         data = _parse(await call_tool("promote_finding", {"finding_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
+    async def test_promote_suppressed_finding_refused_without_force(self, mcp_db: FiligreeDB) -> None:
+        """weft-171fc22a50: a wardline-suppressed finding is refused (clean
+        VALIDATION coded error, not a 500) — it is an already-accepted defect,
+        not active work. End-to-end through the MCP promote_finding tool."""
+        result = mcp_db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/main.py",
+                    "rule_id": "WLN-001",
+                    "severity": "high",
+                    "message": "tainted sink",
+                    "metadata": {"wardline": {"suppression_state": "baselined"}},
+                }
+            ],
+        )
+        fid = result["new_finding_ids"][0]
+
+        data = _parse(await call_tool("promote_finding", {"finding_id": fid}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "baselined" in data["error"]
+        assert "force=true" in data["error"]
+        # Refused → no issue linked.
+        assert mcp_db.get_finding(fid)["issue_id"] is None
+
+    async def test_promote_suppressed_finding_succeeds_with_force(self, mcp_db: FiligreeDB) -> None:
+        """force=true overrides the suppression guard and records the override
+        as a warning on the result. End-to-end through the MCP tool."""
+        result = mcp_db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/main.py",
+                    "rule_id": "WLN-002",
+                    "severity": "high",
+                    "message": "tainted sink",
+                    "metadata": {"wardline": {"suppression_state": "waived"}},
+                }
+            ],
+        )
+        fid = result["new_finding_ids"][0]
+
+        data = _parse(await call_tool("promote_finding", {"finding_id": fid, "force": True}))
+
+        assert "issue_id" in data
+        assert "code" not in data  # not an error envelope
+        assert mcp_db.get_finding(fid)["issue_id"] == data["issue_id"]
+        warnings = data.get("warnings") or []
+        assert any("force override" in w and "waived" in w for w in warnings)
+
+    async def test_promote_rejects_non_bool_force(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "force": "yes"}))
+
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "force must be a boolean"
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
+    async def test_promote_active_finding_unaffected_by_guard(self, mcp_db: FiligreeDB) -> None:
+        """Regression guard: an active finding (no suppression_state) promotes
+        normally without force."""
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("promote_finding", {"finding_id": ids["sqli"]}))
+
+        assert "issue_id" in data
+        assert "code" not in data
+        assert mcp_db.get_finding(ids["sqli"])["issue_id"] == data["issue_id"]
+
+    async def test_promote_and_attach_suppressed_threads_force(self, mcp_db: FiligreeDB) -> None:
+        """weft-171fc22a50: the attach-entity tool also honours the suppression
+        guard and its force override (the override is recorded as a warning)."""
+        result = mcp_db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/main.py",
+                    "rule_id": "WLN-003",
+                    "severity": "high",
+                    "message": "tainted sink",
+                    "metadata": {"wardline": {"suppression_state": "judged"}},
+                }
+            ],
+        )
+        fid = result["new_finding_ids"][0]
+        args = {
+            "finding_id": fid,
+            "entity_id": "loomweave:eid:attach",
+            "content_hash": "hash-v1",
+        }
+        # Without force: refused as a suppressed defect (clean VALIDATION error).
+        refused = _parse(await call_tool("promote_finding_and_attach_entity", args))
+        assert refused["code"] == ErrorCode.VALIDATION
+        assert "judged" in refused["error"]
+        assert mcp_db.get_finding(fid)["issue_id"] is None
+        # With force: promotes, attaches, and records the override warning.
+        forced = _parse(await call_tool("promote_finding_and_attach_entity", {**args, "force": True}))
+        assert "code" not in forced
+        assert forced["issue_id"]
+        assert forced["association"]["entity_id"] == "loomweave:eid:attach"
+        assert any("force override" in w and "judged" in w for w in (forced.get("warnings") or []))
+
+    async def test_promote_and_attach_rejects_non_bool_force(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(
+            await call_tool(
+                "promote_finding_and_attach_entity",
+                {
+                    "finding_id": ids["obo"],
+                    "entity_id": "loomweave:eid:x",
+                    "content_hash": "h",
+                    "force": "yes",
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "force must be a boolean"
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
 
 class TestDismissFindingTool:
     async def test_dismiss_marks_false_positive(self, mcp_db: FiligreeDB) -> None:

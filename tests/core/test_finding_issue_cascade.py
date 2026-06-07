@@ -347,6 +347,67 @@ class TestPromoteCreatedFlag:
         assert second["issue"].id == first["issue"].id
 
 
+def _ingest_suppressed(db: FiligreeDB, state: str, fingerprint: str = "fp-supp") -> str:
+    """Ingest a wardline finding stamped with a suppression_state and return its id."""
+    db.process_scan_results(
+        scan_source="wardline",
+        findings=[_wln("src/s.py", fingerprint, metadata={"wardline": {"suppression_state": state}})],
+    )
+    finding = db.find_finding_by_fingerprint("wardline", fingerprint)
+    assert finding is not None
+    return finding["id"]
+
+
+class TestPromoteSuppressionGuard:
+    """weft-171fc22a50: refuse-by-default promote of a suppressed finding."""
+
+    def test_metadata_round_trips_via_get_finding(self, db: FiligreeDB) -> None:
+        fid = _ingest_suppressed(db, "baselined")
+        finding = db.get_finding(fid)
+        assert finding["metadata"]["wardline"]["suppression_state"] == "baselined"
+
+    def test_promote_baselined_refused_without_force(self, db: FiligreeDB) -> None:
+        fid = _ingest_suppressed(db, "baselined")
+        with pytest.raises(ValueError, match="baselined") as exc:
+            db.promote_finding_to_issue(fid, actor="t")
+        assert "force=true" in str(exc.value)
+        # Refused → no issue created or linked.
+        assert db.get_finding(fid)["issue_id"] is None
+
+    @pytest.mark.parametrize("state", ["baselined", "waived", "judged"])
+    def test_all_suppression_states_refused(self, db: FiligreeDB, state: str) -> None:
+        fid = _ingest_suppressed(db, state, fingerprint=f"fp-{state}")
+        with pytest.raises(ValueError, match=state):
+            db.promote_finding_to_issue(fid, actor="t")
+
+    def test_promote_with_force_succeeds_and_warns(self, db: FiligreeDB) -> None:
+        fid = _ingest_suppressed(db, "waived")
+        result = db.promote_finding_to_issue(fid, actor="t", force=True)
+        assert result["created"] is True
+        assert db.get_finding(fid)["issue_id"] == result["issue"].id
+        warnings = result.get("warnings") or []
+        assert any("force override" in w and "waived" in w for w in warnings)
+
+    def test_active_finding_promotes_normally(self, db: FiligreeDB) -> None:
+        """Regression guard: a finding with no suppression_state is unaffected."""
+        fid = _ingest(db, "fp-active")
+        result = db.promote_finding_to_issue(fid, actor="t")
+        assert result["created"] is True
+        assert db.get_finding(fid)["issue_id"] == result["issue"].id
+        # No force-override warning on an active promote.
+        assert not any("force override" in w for w in (result.get("warnings") or []))
+
+    def test_promote_and_attach_threads_force(self, db: FiligreeDB) -> None:
+        fid = _ingest_suppressed(db, "judged")
+        # Without force, the composed attach surface refuses too.
+        with pytest.raises(ValueError, match="judged"):
+            db.promote_finding_and_attach_entity(fid, "loomweave:eid:x", "h", actor="t")
+        # With force, it promotes and attaches.
+        result = db.promote_finding_and_attach_entity(fid, "loomweave:eid:x", "h", actor="t", force=True)
+        assert result["created"] is True
+        assert any("force override" in w for w in (result.get("warnings") or []))
+
+
 class TestCloseOnFixed:
     def test_clean_stale_closes_linked_issue(self, db: FiligreeDB) -> None:
         finding_id = _ingest(db)

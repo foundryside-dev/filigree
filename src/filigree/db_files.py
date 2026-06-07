@@ -2310,6 +2310,7 @@ class FilesMixin(DBMixinProtocol):
         priority: int | None = None,
         actor: str = "",
         labels: list[str] | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Promote a finding directly to a tracked issue.
 
@@ -2320,6 +2321,16 @@ class FilesMixin(DBMixinProtocol):
         ``labels`` lets the caller carry session-cluster context onto the
         promoted issue. The ``from-finding`` label is always added in
         addition. Senior-user MCP review run e P2.12.
+
+        Suppression guard (weft-171fc22a50): wardline stamps suppression
+        provenance onto a finding's metadata as
+        ``metadata.wardline.suppression_state`` (``"baselined"`` |
+        ``"waived"`` | ``"judged"``); the key is *absent* for an active
+        finding. A suppressed finding is an already-accepted/suppressed defect,
+        not active work — promoting it would manufacture false work. So we
+        refuse by default (``ValueError`` → a clean VALIDATION coded error at
+        the MCP/HTTP surfaces) and require an explicit ``force=True`` override,
+        which is recorded as a warning on the result.
         """
         actor = _validate_string(actor, "actor")
         labels = _validate_optional_string_list(labels, "labels")
@@ -2328,6 +2339,17 @@ class FilesMixin(DBMixinProtocol):
             priority = self._SEVERITY_TO_PRIORITY.get(finding["severity"], 3)
 
         warnings: list[str] = []
+
+        suppression_state = ((finding.get("metadata") or {}).get("wardline") or {}).get("suppression_state")
+        if suppression_state:
+            if not force:
+                msg = (
+                    f"Finding {finding_id} is {suppression_state} — an accepted/suppressed defect, "
+                    "not active work; promoting it generates false work. Pass force=true to promote anyway."
+                )
+                raise ValueError(msg)
+            warnings.append(f"Promoted {suppression_state} finding {finding_id} via force override.")
+
         linked_issue_id = finding.get("issue_id")
         if linked_issue_id:
             try:
@@ -2414,6 +2436,7 @@ class FilesMixin(DBMixinProtocol):
         actor: str = "",
         labels: list[str] | None = None,
         entity_kind: str | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Promote a finding to an issue and attach an opaque entity binding.
 
@@ -2433,7 +2456,7 @@ class FilesMixin(DBMixinProtocol):
         therefore returns the existing issue with the association now present
         (see ``test_promote_and_attach_retry_converges_after_attach_failure``).
         """
-        result = self.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
+        result = self.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels, force=force)
         issue = result["issue"]
         association = self.add_entity_association(
             make_issue_id(issue.id),

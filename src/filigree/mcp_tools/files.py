@@ -274,6 +274,16 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                     "actor": {"type": "string", "description": "Actor identity"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Promote even when the finding is suppressed (baselined/waived/judged). "
+                            "By default a suppressed finding is refused as an already-accepted defect, "
+                            "not active work. Set force=true to override; the override is recorded as a "
+                            "warning on the result."
+                        ),
+                    },
                 },
                 "required": ["finding_id"],
             },
@@ -304,6 +314,16 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Additional labels to attach to the promoted issue",
                     },
                     "actor": {"type": "string", "description": "Actor identity"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Promote even when the finding is suppressed (baselined/waived/judged). "
+                            "By default a suppressed finding is refused as an already-accepted defect, "
+                            "not active work. Set force=true to override; the override is recorded as a "
+                            "warning on the result."
+                        ),
+                    },
                 },
                 "required": ["finding_id", "entity_id", "content_hash"],
             },
@@ -760,10 +780,16 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     labels = args.get("labels")
     if labels is not None and (not isinstance(labels, list) or not all(isinstance(lbl, str) for lbl in labels)):
         return _text(ErrorResponse(error="labels must be a list of strings", code=ErrorCode.VALIDATION))
+    # Read ``force`` from the raw, untyped ``arguments`` dict rather than the
+    # cast ``args`` so the suppression-override flag plumbs through without
+    # widening the shared ``PromoteFindingArgs`` TypedDict (teammate-owned file).
+    force = arguments.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
 
     tracker = get_db()
     try:
-        result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
+        result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels, force=force)
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
@@ -803,6 +829,12 @@ async def _handle_promote_finding_and_attach_entity(arguments: dict[str, Any]) -
     actor, actor_err = _validate_actor(args.get("actor", "mcp"))
     if actor_err:
         return actor_err
+    # See ``_handle_promote_finding``: read ``force`` from the raw, untyped
+    # ``arguments`` dict so the suppression-override flag plumbs through without
+    # widening the teammate-owned ``PromoteFindingAttachEntityArgs`` TypedDict.
+    force = arguments.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
 
     tracker = get_db()
     try:
@@ -814,6 +846,7 @@ async def _handle_promote_finding_and_attach_entity(arguments: dict[str, Any]) -
             actor=actor,
             labels=labels,
             entity_kind=entity_kind,
+            force=force,
         )
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))

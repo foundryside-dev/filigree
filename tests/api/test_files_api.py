@@ -913,6 +913,94 @@ class TestLoomPromoteFindingAPI:
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
+    async def _ingest_suppressed(self, client: AsyncClient, state: str, fingerprint: str) -> None:
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [
+                    {
+                        "path": "src/s.py",
+                        "rule_id": "WLN-1",
+                        "message": "m",
+                        "severity": "high",
+                        "fingerprint": fingerprint,
+                        "metadata": {"wardline": {"suppression_state": state}},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+
+    async def test_promote_suppressed_refused_400_validation(self, client: AsyncClient) -> None:
+        """weft-171fc22a50: HTTP surface refuses a suppressed finding with a
+        clean VALIDATION 400, not a 500."""
+        await self._ingest_suppressed(client, "baselined", "fp-supp-http")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-supp-http"},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "baselined" in body["error"]
+        assert "force=true" in body["error"]
+
+    async def test_promote_suppressed_force_200_with_warning(self, client: AsyncClient) -> None:
+        await self._ingest_suppressed(client, "waived", "fp-force-http")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-force-http", "force": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["issue_id"]
+        assert any("force override" in w and "waived" in w for w in body.get("warnings", []))
+
+    async def test_promote_non_bool_force_400(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-badforce")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-badforce", "force": "yes"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_promote_and_attach_suppressed_refused_then_forced(self, client: AsyncClient) -> None:
+        """weft-171fc22a50: the promote-and-attach HTTP route also honours the
+        suppression guard and its force override."""
+        await self._ingest_suppressed(client, "judged", "fp-attach-supp")
+        base = {
+            "scan_source": "wardline",
+            "fingerprint": "fp-attach-supp",
+            "entity_id": "loomweave:eid:http",
+            "content_hash": "h1",
+        }
+        refused = await client.post("/api/weft/findings/promote-and-attach", json=base)
+        assert refused.status_code == 400
+        assert refused.json()["code"] == "VALIDATION"
+        assert "judged" in refused.json()["error"]
+        forced = await client.post("/api/weft/findings/promote-and-attach", json={**base, "force": True})
+        assert forced.status_code == 200
+        body = forced.json()
+        assert body["issue_id"]
+        assert any("force override" in w and "judged" in w for w in body.get("warnings", []))
+
+    async def test_promote_and_attach_non_bool_force_400(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-attach-badforce")
+        resp = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-attach-badforce",
+                "entity_id": "loomweave:eid:x",
+                "content_hash": "h",
+                "force": "yes",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
     @pytest.mark.parametrize("bad", ["P9", "Z", "5", "-1"])
     async def test_bad_priority_400(self, client: AsyncClient, bad: str) -> None:
         await self._ingest(client)

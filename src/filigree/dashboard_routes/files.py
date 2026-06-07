@@ -123,6 +123,7 @@ def _promote_finding_on_private_conn(
     priority: int | None,
     labels: list[str] | None,
     actor: str,
+    force: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve ``(scan_source, fingerprint)`` → finding and promote it.
 
@@ -136,7 +137,7 @@ def _promote_finding_on_private_conn(
         if finding is None:
             return None
         try:
-            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor, force=force)
         except KeyError:
             # promote_finding_to_issue re-reads the finding (``get_finding``)
             # before it writes. A concurrent hard-delete in the window between
@@ -151,7 +152,10 @@ def _promote_finding_on_private_conn(
             if worker_db.find_finding_by_fingerprint(scan_source, fingerprint) is None:
                 return None
             raise
-        return {"issue_id": result["issue"].id, "created": result["created"]}
+        response: dict[str, Any] = {"issue_id": result["issue"].id, "created": result["created"]}
+        if result.get("warnings"):
+            response["warnings"] = result["warnings"]
+        return response
 
 
 def _promote_finding_and_attach_on_private_conn(
@@ -165,6 +169,7 @@ def _promote_finding_and_attach_on_private_conn(
     labels: list[str] | None,
     actor: str,
     entity_kind: str | None,
+    force: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve ``(scan_source, fingerprint)`` then promote and attach an entity."""
     with db.borrow_for_worker_thread() as worker_db:
@@ -179,6 +184,7 @@ def _promote_finding_and_attach_on_private_conn(
             labels=labels,
             actor=actor,
             entity_kind=entity_kind,
+            force=force,
         )
         response: dict[str, Any] = {
             "issue_id": result["issue"].id,
@@ -859,8 +865,11 @@ def create_weft_router() -> APIRouter:
         duplicate). Returns 404 when the fingerprint was never ingested under
         ``scan_source``. See the 2026-06-02 promote-by-fingerprint brief.
 
-        Request: ``{scan_source (req), fingerprint (req), priority?, labels?}``.
+        Request: ``{scan_source (req), fingerprint (req), priority?, labels?, force?}``.
         ``priority`` accepts ``"P2"``/``2``; omit to derive from severity.
+        ``force`` (default false) overrides the suppression guard: a finding
+        wardline marked baselined/waived/judged is otherwise refused (VALIDATION
+        400) as an already-accepted defect.
         Response: ``{"issue_id": "<id>", "created": true|false}``.
 
         Concurrency: promote is a WRITE (issue create + finding link), so it
@@ -883,6 +892,9 @@ def create_weft_router() -> APIRouter:
         labels = body.get("labels")
         if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
             return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -895,6 +907,7 @@ def create_weft_router() -> APIRouter:
                 priority=priority,
                 labels=labels,
                 actor=actor,
+                force=force,
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
@@ -946,6 +959,9 @@ def create_weft_router() -> APIRouter:
         labels = body.get("labels")
         if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
             return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -961,6 +977,7 @@ def create_weft_router() -> APIRouter:
                 labels=labels,
                 actor=actor,
                 entity_kind=entity_kind,
+                force=force,
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
