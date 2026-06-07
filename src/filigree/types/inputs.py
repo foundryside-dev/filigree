@@ -710,6 +710,7 @@ class PromoteFindingArgs(TypedDict):
     finding_id: str
     priority: NotRequired[int]
     labels: NotRequired[list[str]]
+    force: NotRequired[bool]
     actor: NotRequired[str]
 
 
@@ -721,6 +722,7 @@ class PromoteFindingAttachEntityArgs(TypedDict):
     labels: NotRequired[list[str]]
     entity_kind: NotRequired[str]
     external_entity_kind: NotRequired[str]
+    force: NotRequired[bool]
     actor: NotRequired[str]
 
 
