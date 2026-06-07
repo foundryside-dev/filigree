@@ -512,30 +512,6 @@ def resolve_store_dir(project_root: Path) -> Path:
     return weft_store
 
 
-def _is_intact_sqlite(path: Path) -> bool:
-    """True iff *path* is a readable, structurally intact SQLite database.
-
-    Opened read-only + ``immutable=1`` so the probe never spawns ``-wal``/
-    ``-shm`` sidecars beside the file (a plain connect to a WAL-mode DB would,
-    and the atomic publish only replaces the main file). A truncated or
-    non-database file fails to open or fails ``quick_check`` → ``False``. Used to
-    gate the migration copy on *completion* rather than mere existence, so a
-    partial DB left at the destination by an interrupted copy is re-copied from
-    the still-valid source rather than published as-is.
-    """
-    if not path.is_file():
-        return False
-    try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
-        try:
-            row = conn.execute("PRAGMA quick_check").fetchone()
-        finally:
-            conn.close()
-    except sqlite3.DatabaseError:
-        return False
-    return bool(row is not None and row[0] == "ok")
-
-
 class StoreMigrationBusyError(RuntimeError):
     """A live writer holds the DB, so migration cannot safely checkpoint it."""
 
@@ -610,11 +586,14 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         ``db`` field — a custom layout we must not disturb.
 
     **Crash-convergent.** We COPY the DB (preserving FILG ``application_id``),
-    then rewrite the conf, then remove the legacy DB. The legacy DB stays valid
-    until the conf points at a valid destination, so a crash at any step leaves
-    a consistent state that the next explicit run resumes. Each step is
-    individually idempotent (guarded on its own completion), so the guard never
-    keys on a mere first side effect.
+    then rewrite the conf, then remove the legacy DB. The conf-pinned legacy DB
+    is canonical until the conf commits to the weft destination, so a crash at
+    any step leaves a consistent state the next explicit run resumes. Because
+    legacy stays canonical until that commit — and may take writes after an
+    interrupted copy — step 1 re-copies it forward *unconditionally* rather than
+    trusting a weft copy that merely looks intact (which could be stale); the
+    atomic publish makes that refresh safe and cheap. The committed case is
+    fenced off by the top guard, so re-copy never fires post-commit.
     """
     weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
     legacy_dir = project_root / FILIGREE_DIR_NAME
@@ -655,11 +634,17 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         return resolve_store_dir(project_root), False
 
     weft_store.mkdir(parents=True, exist_ok=True)
-    # 1. Copy the DB forward unless a *complete* copy is already there. Guarding
-    #    on intactness (not mere existence) is what makes the step crash-
-    #    convergent: a truncated DB left at the destination by an interrupted
-    #    copy is re-copied from the still-valid legacy DB, never published as-is.
-    if legacy_db.is_file() and not _is_intact_sqlite(weft_db):
+    # 1. Copy the DB forward while the legacy DB exists. Re-copy is
+    #    *unconditional* — NOT gated on the destination looking valid. Until the
+    #    conf commits to weft, the conf-pinned legacy DB is canonical and may
+    #    have taken writes since an interrupted copy, so a weft copy that merely
+    #    *looks* intact can be stale; publishing it (then deleting legacy) would
+    #    silently lose those writes. The atomic publish in
+    #    _checkpoint_and_copy_sqlite makes an unconditional refresh safe and
+    #    cheap, and the committed case already short-circuited at the top guard,
+    #    so this never re-copies post-commit. (legacy gone but weft present →
+    #    nothing to copy from; the existing weft DB is the survivor.)
+    if legacy_db.is_file():
         _checkpoint_and_copy_sqlite(legacy_db, weft_db)
     # 2. Copy durable + runtime metadata beside the DB. config.json must follow
     #    so the enabled_packs fallback resolves; federation_token must follow so

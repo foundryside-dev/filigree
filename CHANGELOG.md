@@ -156,18 +156,24 @@ checklist is complete and a coordinated consumer-migration window is published.
   exclusion. `ephemeral.lock` already resolved correctly; `server.lock` is
   home-dir scoped and unaffected.
 
-- **Store migration copies the DB atomically and gates re-copy on intactness
-  (filigree-37e3f26145).** `migrate_store_to_weft`'s `.filigree/ → .weft/filigree/`
-  DB copy went straight to its final path via `shutil.copy2`, and the step-1
-  guard keyed on file *existence* (`not weft_db.is_file()`). A crash mid-copy
-  (SIGKILL/power loss) therefore left a truncated DB at the destination that a
-  re-run mistook for a finished copy: it repointed the conf at the corrupt file
-  and deleted the still-valid legacy DB — silent total loss of the issue
-  database, contradicting the function's documented crash-convergence. The copy
-  now stages to a temp file in the dest dir and publishes with an atomic
-  `os.replace` (so the destination only ever appears complete), and the guard
-  now re-copies unless a *structurally intact* DB is already present (a read-only
-  `quick_check` probe), keying on completion rather than a first side effect.
+- **Store migration copies the DB atomically and re-copies unconditionally while
+  legacy is canonical (filigree-37e3f26145).** `migrate_store_to_weft`'s
+  `.filigree/ → .weft/filigree/` DB copy went straight to its final path via
+  `shutil.copy2`, and the step-1 guard keyed on file *existence*
+  (`not weft_db.is_file()`). A crash mid-copy (SIGKILL/power loss) therefore left
+  a truncated DB at the destination that a re-run mistook for a finished copy: it
+  repointed the conf at the corrupt file and deleted the still-valid legacy DB —
+  silent total loss of the issue database, contradicting the function's
+  documented crash-convergence. The copy now stages to a temp file in the dest
+  dir and publishes with an atomic `os.replace` (so the destination only ever
+  appears complete). Crucially, step 1 re-copies the DB forward
+  *unconditionally* while the legacy DB exists, rather than skipping when the
+  destination merely *looks* valid: the database is conf-pinned, so until the
+  conf commits to the weft destination the legacy DB stays canonical and can take
+  writes after an interrupted copy — an intact-but-*stale* weft snapshot would,
+  if published, silently drop every post-interrupt write. The atomic publish
+  makes the unconditional refresh safe and cheap, and the committed case
+  short-circuits at the top guard so re-copy never fires post-commit.
 
 - **`doctor --fix` repairs instruction files and `context.md` again
   (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the

@@ -287,10 +287,11 @@ class TestMigrateStoreToWeft:
             db2.close()
 
     def test_migration_re_copies_a_corrupt_partial_weft_db(self, tmp_path: Path) -> None:
-        """Crash-convergence keys on *completion*, not existence: a truncated
-        weft DB already sitting at the destination (left by an interrupted copy)
-        must be re-copied from the still-valid legacy DB on re-run — never
-        published as-is with the legacy original then deleted (total data loss).
+        """While legacy is canonical (conf not yet committed to weft), the
+        re-run re-copies it forward unconditionally — so a truncated weft DB
+        already at the destination (left by an interrupted copy) is overwritten
+        from the still-valid legacy DB, never published as-is with the legacy
+        original then deleted (total data loss).
         """
         legacy = _make_legacy_install(tmp_path)
         db = FiligreeDB.from_filigree_dir(legacy)
@@ -311,6 +312,91 @@ class TestMigrateStoreToWeft:
         db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
         try:
             assert db2.get_issue(created.id) is not None
+        finally:
+            db2.close()
+
+    def test_migration_re_copies_stale_weft_preserving_post_interrupt_legacy_writes(self, tmp_path: Path) -> None:
+        """C1 regression: an interrupted copy can leave an *intact-but-stale* weft
+        DB. Because the conf still points at legacy, the live install keeps
+        writing there, so legacy — not the stale weft snapshot — is canonical.
+        The re-run must re-copy legacy forward; publishing the stale weft copy
+        (then deleting legacy) would silently lose every write that landed after
+        the interrupt. Guarding re-copy on weft *validity* missed this: a
+        valid-but-stale copy is not a committed migration.
+        """
+        import shutil
+
+        legacy = _make_legacy_install(tmp_path)
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            before = db.create_issue("before interrupt", type="task")
+        finally:
+            db.close()
+
+        # Simulate the interrupt: an intact weft snapshot exists, but the conf
+        # was never rewritten (still points at legacy). Copy pristine bytes —
+        # never open this staged DB, so it stays a faithful stale snapshot.
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        shutil.copy2(str(legacy / DB_FILENAME), str(store / DB_FILENAME))
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+
+        # The live install keeps writing to the conf-pointed legacy DB after the
+        # interrupt. Write explicitly to legacy (presence-driven resolution would
+        # otherwise be perturbed by the staged weft dir), and close the handle so
+        # the migration's TRUNCATE checkpoint isn't blocked by a live writer.
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            after = db.create_issue("after interrupt", type="task")
+        finally:
+            db.close()
+
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+
+        # Both issues survive in the published weft DB — the post-interrupt write
+        # was NOT lost to a stale-copy publish.
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(before.id) is not None
+            assert db2.get_issue(after.id) is not None
+        finally:
+            db2.close()
+
+    def test_committed_migration_does_not_reclobber_weft_from_lingering_legacy(self, tmp_path: Path) -> None:
+        """Boundary: once the conf commits to weft, weft is canonical. A legacy
+        DB that lingers (or reappears) with divergent data must NOT overwrite the
+        committed weft DB — the top guard short-circuits before the re-copy. This
+        fences the other side of the unconditional re-copy: pre-commit legacy
+        wins, post-commit weft wins.
+        """
+        _make_legacy_install(tmp_path)
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+
+        # Post-commit, weft is the live DB. Add an issue that exists ONLY in weft.
+        db = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            weft_only = db.create_issue("weft-only post-commit", type="task")
+        finally:
+            db.close()
+
+        # A divergent legacy DB reappears at the old path (e.g. a restored backup).
+        # The conf already points at weft, so this must be ignored, not re-copied.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        stale = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        stale.initialize()
+        try:
+            stale.create_issue("stale legacy resurrection", type="task")
+        finally:
+            stale.close()
+
+        _store, migrated2 = migrate_store_to_weft(tmp_path)
+        assert migrated2 is False
+        # The committed weft DB is untouched: its post-commit issue still resolves.
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(weft_only.id) is not None
         finally:
             db2.close()
 
