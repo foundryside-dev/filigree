@@ -515,15 +515,29 @@ class ProjectStore:
             return next(iter(self._projects))
 
     def store_dir_for(self, key: str) -> Path | None:
-        """Return the registered store dir for *key*, or ``None`` if unknown.
+        """Return the CANONICAL store dir for *key* (where its federation token
+        lives), or ``None`` if unknown.
 
-        The federation token for a project lives in this dir; the auth
-        middleware reads it to validate a project-scoped request against that
-        project's own token (filigree-7a399b8124 / -23574069a1).
+        The per-project federation token lives in the *canonical* store dir, which
+        after WEFT consolidation is ``.weft/filigree/`` — NOT necessarily the
+        ``.filigree/`` path registered in ``server.json``. Resolve it through the
+        project anchor exactly as ``get_db`` opens the DB, so the auth middleware
+        reads the token from the same store the DB lives in. Reading the registered
+        legacy path directly silently broke per-project token auth for any project
+        whose token only lives in the consolidated store — the F1 resolver
+        (filigree-23574069a1) predated consolidation (follow-up: weft-…).
         """
         with self._lock:
             info = self._projects.get(key)
-            return Path(info["path"]) if info is not None else None
+        if info is None:
+            return None
+        registered = Path(info["path"])
+        # find_filigree_anchor does filesystem I/O — resolve OUTSIDE the lock.
+        try:
+            return find_filigree_anchor(registered).store_dir
+        except Exception:
+            logger.warning("store_dir_for(%s): anchor resolution failed; using registered path", key, exc_info=True)
+            return registered
 
 
 _project_store: ProjectStore | None = None

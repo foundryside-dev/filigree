@@ -33,6 +33,49 @@ class TestProjectStore:
         with pytest.raises(KeyError):
             project_store.get_db("nonexistent")
 
+    def test_store_dir_for_resolves_canonical_weft_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """store_dir_for must return the CANONICAL store dir (where the federation
+        token lives) — .weft/filigree/ after consolidation — NOT the legacy
+        .filigree/ path registered in server.json. The F1 per-project token
+        resolver reads this dir; if it returns the legacy path, a project whose
+        token only lives in the consolidated store fails auth (the incompleteness
+        behind weft-7a399b8124's strict-auth on a real WEFT-consolidated deploy).
+        It must agree with get_db, which already opens the .weft DB.
+        """
+        import json
+
+        from filigree.core import CONF_FILENAME, write_conf, write_config
+
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        proj = tmp_path / "proj"
+        legacy = proj / ".filigree"  # registered path (no DB here post-migration)
+        legacy.mkdir(parents=True)
+        write_config(legacy, {"prefix": "acme", "version": 1})
+        weft = proj / ".weft" / "filigree"  # canonical store: DB + token live here
+        weft.mkdir(parents=True)
+        db = FiligreeDB(weft / "filigree.db", prefix="acme", check_same_thread=False)
+        db.initialize()
+        db.close()
+        write_conf(
+            proj / CONF_FILENAME,
+            {"version": 1, "project_name": "acme", "prefix": "acme", "db": ".weft/filigree/filigree.db"},
+        )
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {str(legacy): {"prefix": "acme"}}}))
+
+        store = ProjectStore()
+        store.load()
+        try:
+            resolved = store.store_dir_for("acme")
+            assert resolved == weft, f"expected canonical .weft store, got {resolved}"
+            # Must agree with where get_db actually opens the DB.
+            assert store.get_db("acme").db_path.parent == weft
+        finally:
+            store.close_all()
+
     def test_get_db_closes_connection_on_init_failure(self, project_store: ProjectStore) -> None:
         """Bug filigree-6128be: DB connection must be closed if initialize() fails."""
         from unittest.mock import patch
