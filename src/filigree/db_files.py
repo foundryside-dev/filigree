@@ -2327,10 +2327,14 @@ class FilesMixin(DBMixinProtocol):
         ``metadata.wardline.suppression_state`` (``"baselined"`` |
         ``"waived"`` | ``"judged"``); the key is *absent* for an active
         finding. A suppressed finding is an already-accepted/suppressed defect,
-        not active work — promoting it would manufacture false work. So we
-        refuse by default (``ValueError`` → a clean VALIDATION coded error at
-        the MCP/HTTP surfaces) and require an explicit ``force=True`` override,
-        which is recorded as a warning on the result.
+        not active work — creating a *new* issue from it would manufacture false
+        work. So we refuse by default (``ValueError`` → a clean VALIDATION coded
+        error at the MCP/HTTP surfaces) and require an explicit ``force=True``
+        override, which is recorded as a warning on the result. The guard runs
+        *after* the idempotency early-returns, so re-promoting a finding that is
+        already linked to an issue still returns that issue (``created=False``)
+        even if it later acquired a ``suppression_state`` — that path
+        manufactures no new work and so is never blocked.
         """
         actor = _validate_string(actor, "actor")
         labels = _validate_optional_string_list(labels, "labels")
@@ -2340,16 +2344,13 @@ class FilesMixin(DBMixinProtocol):
 
         warnings: list[str] = []
 
-        suppression_state = ((finding.get("metadata") or {}).get("wardline") or {}).get("suppression_state")
-        if suppression_state:
-            if not force:
-                msg = (
-                    f"Finding {finding_id} is {suppression_state} — an accepted/suppressed defect, "
-                    "not active work; promoting it generates false work. Pass force=true to promote anyway."
-                )
-                raise ValueError(msg)
-            warnings.append(f"Promoted {suppression_state} finding {finding_id} via force override.")
-
+        # Idempotency first: re-promoting a finding that already links an issue
+        # returns that existing issue (created=False) and manufactures no new
+        # work, so it must NOT be blocked by the suppression guard below — the
+        # promote-by-fingerprint surfaces are designed to be called repeatedly,
+        # and a finding can acquire a suppression_state on a later rescan after
+        # it was already promoted while active. The guard only protects against
+        # creating a *new* issue from an accepted/suppressed defect.
         linked_issue_id = finding.get("issue_id")
         if linked_issue_id:
             try:
@@ -2372,6 +2373,26 @@ class FilesMixin(DBMixinProtocol):
                 warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id}, but relinking failed")
             warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id} (returning existing)")
             return {"issue": issue, "created": False, "warnings": warnings}
+
+        # Suppression guard (weft-171fc22a50): only reached when we are about to
+        # create a NEW issue. A suppressed finding (baselined/waived/judged) is
+        # an already-accepted defect, not active work — refuse by default and
+        # require an explicit force override (recorded as a warning).
+        # ``metadata.wardline`` is external scanner payload that filigree stores
+        # verbatim without shape-validating nested values, so it may be a
+        # non-dict (off-contract) value. Guard its type: a non-dict/absent
+        # ``wardline`` node falls through to ``None`` (treat-as-active), matching
+        # the "absent => active" contract.
+        wardline_meta = (finding.get("metadata") or {}).get("wardline")
+        suppression_state = wardline_meta.get("suppression_state") if isinstance(wardline_meta, dict) else None
+        if suppression_state:
+            if not force:
+                msg = (
+                    f"Finding {finding_id} is {suppression_state} — an accepted/suppressed defect, "
+                    "not active work; promoting it generates false work. Pass force=true to promote anyway."
+                )
+                raise ValueError(msg)
+            warnings.append(f"Promoted {suppression_state} finding {finding_id} via force override.")
 
         file_path = self._file_path_for_finding(finding["file_id"])
         if not file_path:

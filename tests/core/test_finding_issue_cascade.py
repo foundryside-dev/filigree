@@ -407,6 +407,48 @@ class TestPromoteSuppressionGuard:
         assert result["created"] is True
         assert any("force override" in w for w in (result.get("warnings") or []))
 
+    @pytest.mark.parametrize(
+        "wardline_value",
+        [
+            "baselined",  # truthy str — off-contract scalar
+            ["baselined"],  # truthy list — off-contract sequence
+            42,  # truthy int
+            "",  # falsy str
+            [],  # falsy list
+        ],
+    )
+    def test_off_contract_wardline_metadata_promotes_as_active(self, db: FiligreeDB, wardline_value: object) -> None:
+        """``metadata.wardline`` is external scanner payload stored verbatim and
+        not shape-validated, so it may be a non-dict value. The suppression guard
+        must treat a non-dict ``wardline`` node as active (absent => active)
+        rather than raising AttributeError on ``.get(...)``."""
+        fp = f"fp-offcontract-{hash(repr(wardline_value)) & 0xFFFF}"
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/oc.py", fp, metadata={"wardline": wardline_value})],
+        )
+        finding = db.find_finding_by_fingerprint("wardline", fp)
+        assert finding is not None
+        fid = finding["id"]
+        # Treated as active: promotes normally, no refusal, no force-override warning.
+        result = db.promote_finding_to_issue(fid, actor="t")
+        assert result["created"] is True
+        assert db.get_finding(fid)["issue_id"] == result["issue"].id
+        assert not any("force override" in w for w in (result.get("warnings") or []))
+
+    def test_off_contract_wardline_metadata_attach_promotes_as_active(self, db: FiligreeDB) -> None:
+        """The composed attach surface delegates to ``promote_finding_to_issue``
+        and must likewise survive an off-contract ``wardline`` node."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[_wln("src/oc2.py", "fp-oc-attach", metadata={"wardline": "baselined"})],
+        )
+        finding = db.find_finding_by_fingerprint("wardline", "fp-oc-attach")
+        assert finding is not None
+        result = db.promote_finding_and_attach_entity(finding["id"], "loomweave:eid:y", "h", actor="t")
+        assert result["created"] is True
+        assert not any("force override" in w for w in (result.get("warnings") or []))
+
 
 class TestCloseOnFixed:
     def test_clean_stale_closes_linked_issue(self, db: FiligreeDB) -> None:
