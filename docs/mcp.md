@@ -2,6 +2,14 @@
 
 Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 116 tools, 1 resource, and 1 prompt.
 
+!!! note "3.0.0 tool names"
+    The tool names below are the subsystem-namespaced `<entity>_<verb>` names
+    (`issue_get`, `finding_list`, `work_start`, …). 3.0.0 **removed** the legacy
+    flat names (`get_issue`, `list_findings`, `start_work`, …) that 2.3.0 still
+    resolved — a call to a removed name now returns the `NOT_FOUND` envelope. See
+    the [3.0.0 consumer migration guide](MIGRATION-3.0.md#1-mcp-tool-name-namespacing)
+    for the full old→new table.
+
 ## Contents
 
 - [Setup](#setup)
@@ -778,9 +786,9 @@ file deletion treat `fixed` and `false_positive` as terminal; stale
 ### Cross-Product Entity Associations
 
 Bind a Filigree issue to an opaque entity identifier from a sibling
-product (notably Clarion — see ADR-029). Filigree never parses the
+product (notably Loomweave — see ADR-029). Filigree never parses the
 entity-ID grammar; the binding stores opaque strings so the federation
-enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
+enrich-only rule is preserved.
 
 | Tool | Description |
 |------|-------------|
@@ -795,7 +803,7 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
-| `entity_id` | string | yes | Opaque external entity ID; may be a `clarion:eid:...` SEI or a legacy locator; not parsed |
+| `entity_id` | string | yes | Opaque external entity ID; may be a `loomweave:eid:...` SEI or a legacy locator; not parsed |
 | `content_hash` | string | yes | Snapshot of the caller's current content hash for drift detection at query time |
 | `entity_kind` / `external_entity_kind` | string | no | Caller-supplied kind metadata; never inferred from `entity_id` |
 | `actor` | string | no | Actor identity recorded as `attached_by` on first attach |
@@ -1036,11 +1044,11 @@ create a linked triage observation; full responses then include
 3. `prompt_pack_list` — choose an advisory review lens, if needed
 4. `scan_trigger` or `scan_trigger_batch` — fire-and-forget, get `scan_run_id`(s)
 5. `scan_status_get` — poll for completion / tail logs
-6. Check results via `finding_list` / `finding_get` or `GET /api/loom/files/{file_id}/findings`
+6. Check results via `finding_list` / `finding_get` or `GET /api/weft/files/{file_id}/findings`
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Loom generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
 External scanner producers should include a globally unique, non-empty
 `scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`

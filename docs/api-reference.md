@@ -1323,6 +1323,40 @@ class HardEnforcementError(ValueError):
     missing_fields: list[str]
 ```
 
+### TransitionMode (3.0.0)
+
+```python
+from filigree.types.api import TransitionMode
+
+class TransitionMode(Enum):
+    FORWARD = "forward"
+    BACKWARD = "backward"
+```
+
+3.0.0 replaced the internal `backward: bool` selector on `update_issue` /
+`validate_transition` (and the `DBMixinProtocol`) with this enum
+([ADR-019](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-019-transition-mode-enum.md)).
+A reverse/escape transition is now selected with `mode=TransitionMode.BACKWARD`
+(was `backward=True`); the default `TransitionMode.FORWARD` selects normal
+forward validation. The flag has no MCP/CLI/HTTP exposure, so there is no
+`backward=` compatibility alias — embedders of the Python API must migrate the
+keyword. `InvalidTransitionError.backward` is likewise now
+`InvalidTransitionError.mode`.
+
+### InvalidTransitionError / ClaimConflictError safe messages (3.0.0)
+
+`InvalidTransitionError` and `ClaimConflictError` (both `ValueError` subclasses,
+`filigree.types.api`) gained a `safe_message` property in 3.0.0, mirroring the
+`WrongProjectError` pattern. On the **untrusted** HTTP / MCP surfaces the error
+*string* is now the fixed, ID/actor-free `safe_message` (`"Requested status
+transition is not allowed"` / `"Issue is claimed by a different assignee"`)
+rather than the full `str(exc)`. The structured recovery data is **retained** in
+the wire `details` payload (transition: `current_status` / `type_name` /
+`to_state` / `valid_transitions`; claim: `observed` / `expected`), so agents
+still self-correct. The in-process Python API and the CLI keep the full rich
+`str(exc)`. See the
+[3.0.0 consumer migration guide §5](MIGRATION-3.0.md#5-safe_message-parity-for-claimtransition-errors).
+
 ---
 
 ## Module Functions

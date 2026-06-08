@@ -79,6 +79,7 @@ nav:
       - Contracts: federation/contracts.md
       - Registry backend runbook: federation/registry-backend-launch-runbook.md
   - Migrating &amp; upgrading:
+      - 3.0 consumer migration: MIGRATION-3.0.md
       - From Beads: MIGRATION.md
       - Upgrading: UPGRADING.md
       - Schema migrations: SCHEMA_MIGRATIONS.md

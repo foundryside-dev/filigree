@@ -73,8 +73,9 @@ but the edge is still declared and audited.
 
 - **Refines**: [ADR-005: Workflow Enforcement and Explicit Cleanup Paths](./ADR-005-workflow-enforcement-and-cleanup-paths.md)
 - **Related to**: [ADR-003: Operational Durability, Not Audit-Proof Records](./ADR-003-operational-durability-not-audit-proofing.md)
+- **Refined by**: [ADR-019: TransitionMode Enum](./ADR-019-transition-mode-enum.md) — the `backward=True` opt-in this ADR defined is, as of 3.0.0, `mode=TransitionMode.BACKWARD`. The reverse-lane semantics are unchanged.
 
 ## References
 
-- `docs/plans/2026-05-18-2.1.0-release-prep.md`
+- `docs/plans/completed/2026-05-18-2.1.0-release-prep.md`
 - `docs/plans/2026-05-17-2.1-db-issues-hardening-design.md`

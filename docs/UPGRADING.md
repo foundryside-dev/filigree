@@ -1,7 +1,9 @@
 # Upgrading Filigree
 
 This guide covers version-to-version Filigree upgrades. For Beads import, see
-[MIGRATION.md](MIGRATION.md).
+[MIGRATION.md](MIGRATION.md). For the consumer-facing old→new contract reference
+(MCP tool names, stats keys, the Loomweave/Weft rebrand surfaces), see the
+[3.0.0 consumer migration guide](MIGRATION-3.0.md).
 
 ## Upgrading to 3.0.0 (store consolidation)
 
@@ -69,124 +71,70 @@ server token is supplied by the client wrapper.
 
 ### Full old → new tool-name mapping
 
+The complete ~115-row old→new table (grouped by subsystem) is the
+[3.0.0 consumer migration guide §1](MIGRATION-3.0.md#1-mcp-tool-name-namespacing).
+A few of the most-bound renames, to orient:
+
 | Old name (removed) | New name |
 | --- | --- |
-| `batch_close` | `issue_batch_close` |
-| `batch_update` | `issue_batch_update` |
-| `close_issue` | `issue_close` |
-| `create_issue` | `issue_create` |
-| `delete_issue` | `issue_delete` |
 | `get_issue` | `issue_get` |
-| `get_issue_annotations` | `issue_annotation_list` |
-| `get_issue_events` | `issue_event_list` |
-| `get_issue_files` | `issue_file_list` |
-| `label_subtree` | `issue_subtree_label` |
 | `list_issues` | `issue_list` |
-| `reopen_issue` | `issue_reopen` |
-| `search_issues` | `issue_search` |
-| `update_issue` | `issue_update` |
-| `validate_issue` | `issue_validate` |
-| `claim_issue` | `work_claim` |
-| `claim_next` | `work_claim_next` |
-| `get_blocked` | `work_blocked` |
-| `get_ready` | `work_ready` |
-| `get_stale_claims` | `work_stale_list` |
-| `heartbeat_work` | `work_heartbeat` |
-| `reclaim_issue` | `work_reclaim` |
-| `release_claim` | `work_release` |
-| `release_my_claims` | `work_release_mine` |
-| `start_next_work` | `work_start_next` |
 | `start_work` | `work_start` |
-| `add_dependency` | `dependency_add` |
-| `get_critical_path` | `dependency_critical_path` |
-| `remove_dependency` | `dependency_remove` |
-| `add_plan_step` | `plan_step_add` |
-| `create_plan` | `plan_create` |
-| `create_plan_from_file` | `plan_create_from_file` |
-| `get_plan` | `plan_get` |
-| `label_plan_tree` | `plan_label_tree` |
-| `move_plan_step` | `plan_step_move` |
-| `retarget_plan_dependency` | `plan_dependency_retarget` |
-| `add_label` | `label_add` |
-| `batch_add_label` | `label_batch_add` |
-| `batch_remove_label` | `label_batch_remove` |
-| `get_label_taxonomy` | `label_taxonomy_get` |
-| `list_labels` | `label_list` |
-| `remove_label` | `label_remove` |
-| `add_comment` | `comment_add` |
-| `batch_add_comment` | `comment_batch_add` |
-| `get_comments` | `comment_list` |
-| `list_reconciliation_debt` | `reconciliation_debt_list` |
-| `add_file_association` | `file_association_add` |
-| `delete_file_record` | `file_delete` |
-| `get_file` | `file_get` |
-| `get_file_annotations` | `file_annotation_list` |
-| `get_file_timeline` | `file_timeline_get` |
-| `list_files` | `file_list` |
-| `register_file` | `file_register` |
-| `batch_update_findings` | `finding_batch_update` |
-| `dismiss_finding` | `finding_dismiss` |
-| `get_finding` | `finding_get` |
+| `start_next_work` | `work_start_next` |
+| `get_ready` | `work_ready` |
 | `list_findings` | `finding_list` |
-| `promote_finding` | `finding_promote` |
-| `promote_finding_and_attach_entity` | `finding_promote_and_attach_entity` |
 | `report_finding` | `finding_report` |
-| `update_finding` | `finding_update` |
-| `annotate_file` | `annotation_create` |
-| `carry_forward_annotation` | `annotation_carry_forward` |
-| `get_annotation` | `annotation_get` |
-| `link_annotation` | `annotation_link` |
-| `list_annotations` | `annotation_list` |
-| `list_attention_annotations` | `annotation_attention_list` |
-| `promote_annotation` | `annotation_promote` |
-| `resolve_annotation` | `annotation_resolve` |
-| `supersede_annotation` | `annotation_supersede` |
-| `unlink_annotation` | `annotation_unlink` |
-| `update_annotation` | `annotation_update` |
-| `batch_dismiss_observations` | `observation_batch_dismiss` |
-| `batch_link_observations` | `observation_batch_link` |
-| `batch_promote_observations` | `observation_batch_promote` |
-| `dismiss_observation` | `observation_dismiss` |
-| `link_observation` | `observation_link` |
-| `list_observations` | `observation_list` |
-| `observe` | `observation_create` |
-| `promote_observation` | `observation_promote` |
-| `promote_observations_to_issue` | `observation_promote_to_issue` |
-| `add_entity_association` | `entity_association_add` |
-| `list_associations_by_entity` | `entity_association_list_by_entity` |
-| `list_entity_associations` | `entity_association_list` |
-| `remove_entity_association` | `entity_association_remove` |
-| `disable_scanner` | `scanner_disable` |
-| `enable_scanner` | `scanner_enable` |
-| `list_available_scanners` | `scanner_available_list` |
-| `list_scanners` | `scanner_list` |
-| `get_scan_status` | `scan_status_get` |
-| `preview_scan` | `scan_preview` |
-| `trigger_scan` | `scan_trigger` |
-| `trigger_scan_batch` | `scan_trigger_batch` |
-| `list_prompt_packs` | `prompt_pack_list` |
-| `get_changes` | `change_list` |
-| `get_template` | `template_get` |
-| `get_type_info` | `type_get` |
-| `list_types` | `type_list` |
-| `list_packs` | `pack_list` |
-| `get_schema` | `schema_get` |
-| `explain_status` | `workflow_status_explain` |
-| `get_valid_transitions` | `workflow_transition_list` |
-| `get_workflow_guide` | `workflow_guide_get` |
-| `get_workflow_statuses` | `workflow_status_list` |
 | `get_stats` | `stats_get` |
-| `get_summary` | `summary_get` |
-| `get_metrics` | `metrics_get` |
-| `get_mcp_status` | `mcp_status_get` |
 | `session_context` | `session_context_get` |
-| `archive_closed` | `admin_archive_closed` |
-| `compact_events` | `admin_compact_events` |
-| `export_jsonl` | `admin_export_jsonl` |
-| `import_jsonl` | `admin_import_jsonl` |
-| `reload_templates` | `admin_reload_templates` |
-| `restart_dashboard` | `admin_restart_dashboard` |
-| `undo_last` | `admin_undo_last` |
+
+The pattern is `<verb>_<entity>` → `<entity>_<verb>` (`get_issue` → `issue_get`),
+with batch/list/get verbs trailing (`batch_close` → `issue_batch_close`). See the
+guide for every row.
+
+## Upgrading to 3.0.0 (Loomweave / Weft rebrand)
+
+3.0.0 lands the **Clarion → Loomweave** and **Loom → Weft** renames as a hard
+wire-break (schema v26), **with no compatibility aliases**. The v26 data
+migration rewrites every stored identifier prefix in place — it runs
+automatically on the first database open after the binary is upgraded, alongside
+the v27 entity-association signing-column add.
+
+The consumer-visible contract changes are enumerated in the
+[3.0.0 consumer migration guide §3](MIGRATION-3.0.md#3-loomweave-weft-rebrand).
+In brief:
+
+- HTTP federation prefix `/api/loom/*` → `/api/weft/*`.
+- Entity-association response field `clarion_entity_id` → `loomweave_entity_id`
+  (the opaque request parameter `entity_id` is unchanged).
+- Stored SEI prefix `clarion:eid:` → `loomweave:eid:`; finding rule-ids
+  `CLA-` → `LMWV-`.
+- Outbound registry token env var `CLARION_LOOM_TOKEN` → `WEFT_TOKEN` (distinct
+  from the inbound `WEFT_FEDERATION_TOKEN` that gates this server's
+  `/api/weft/*` + `/mcp` surface).
+- `registry_backend` config value `clarion` → `loomweave` (migrated on load).
+
+**Not renamed in 3.0.0** (intentionally — do not migrate these): the registry
+error codes `CLARION_REGISTRY_VERSION_MISMATCH` / `CLARION_OUT_OF_SYNC` and the
+`loom://` URI scheme.
+
+### What you must do
+
+- Repoint federation consumers from `/api/loom/*` to `/api/weft/*`.
+- Export `WEFT_TOKEN` where a deployment previously set `CLARION_LOOM_TOKEN`.
+- No manual database or config edit is required — the v26 migration and the
+  config rename-on-load shim handle the stored data.
+
+## Upgrading to 3.0.0 (TransitionMode enum — internal Python API)
+
+The internal transition-direction flag `backward: bool` is replaced by a
+`TransitionMode{FORWARD, BACKWARD}` enum
+([ADR-019](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-019-transition-mode-enum.md)).
+This flag has **no MCP / CLI / HTTP / wire exposure** — only code that embeds the
+in-process `FiligreeDB` Python API is affected. Migrate
+`update_issue(..., backward=True)` to `mode=TransitionMode.BACKWARD` (imported
+from `filigree.types.api`); `InvalidTransitionError.backward` is now `.mode`.
+There is no `backward=` alias. See the
+[consumer migration guide §4](MIGRATION-3.0.md#4-transitionmode-enum-internal-python-api).
 
 ## Upgrading to 3.0.0 (get_stats alias keys removed)
 
@@ -230,7 +178,8 @@ The migration is an additive `ALTER TABLE ... ADD COLUMN` (`NOT NULL DEFAULT
 automatically on first normal database open after the binary is upgraded. Use
 `filigree doctor` before and after the upgrade to validate local configuration;
 `doctor --fix` is limited to local binding and dashboard-pointer repair. No application-level action is required. A
-federation consumer of `/api/loom/changes` should begin honouring the new
+federation consumer of `/api/weft/changes` (the `/api/loom/changes` endpoint as
+of 2.1.1; renamed to `/api/weft/*` in 3.0.0) should begin honouring the new
 `affected_entities` field on `issue_deleted` records — purge the listed entity
 bindings on reconcile; see `docs/federation/contracts.md` §F5.
 
