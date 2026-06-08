@@ -107,12 +107,14 @@ class TestDataclasses:
         registry = TemplateRegistry()
         registry._register_type(tpl)
 
-        result = registry.validate_transition("demo", "closed", "open", {}, backward=True)
+        from filigree.types.api import TransitionMode
+
+        result = registry.validate_transition("demo", "closed", "open", {}, mode=TransitionMode.BACKWARD)
         assert result.allowed is True
         assert result.enforcement == "soft"
         assert registry.get_valid_transitions("demo", "closed", {}) == []
 
-        gated = registry.validate_transition("demo", "in_progress", "open", {}, backward=True)
+        gated = registry.validate_transition("demo", "in_progress", "open", {}, mode=TransitionMode.BACKWARD)
         assert gated.allowed is False
         assert gated.missing_fields == ("reason",)
 

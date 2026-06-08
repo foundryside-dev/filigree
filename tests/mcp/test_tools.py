@@ -4219,7 +4219,7 @@ class TestMCPReleaseClaim:
         mcp_db: FiligreeDB,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from filigree.types.api import InvalidTransitionError
+        from filigree.types.api import InvalidTransitionError, TransitionMode
 
         issue = mcp_db.create_issue("Reverse transition MCP")
         mcp_db.start_work(issue.id, assignee="agent-1", actor="agent-1")
@@ -4231,11 +4231,11 @@ class TestMCPReleaseClaim:
             to_state: str,
             fields: dict[str, Any],
             *,
-            backward: bool = False,
+            mode: TransitionMode = TransitionMode.FORWARD,
         ) -> Any:
-            if backward:
-                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
-            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+            if mode is TransitionMode.BACKWARD:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, mode=TransitionMode.BACKWARD)
+            return original_validate_transition(type_name, from_state, to_state, fields, mode=mode)
 
         monkeypatch.setattr(mcp_db.templates, "validate_transition", fail_backward_validation)
 

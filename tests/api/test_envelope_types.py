@@ -144,18 +144,19 @@ def test_transition_errors_exist() -> None:
     from filigree.types.api import (
         AmbiguousTransitionError,
         InvalidTransitionError,
+        TransitionMode,
     )
 
     exc1 = AmbiguousTransitionError("X", ["fixing", "reviewing"])
     assert "fixing" in str(exc1)
     assert isinstance(exc1, ValueError)
 
-    exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", backward=True)
+    exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", mode=TransitionMode.BACKWARD)
     assert "confirmed" in str(exc2)
     enriched = exc2.with_valid_transitions([{"to": "open", "category": "open", "ready": True}])
     assert enriched is not exc2
     assert str(enriched) == str(exc2)
-    assert enriched.backward is True
+    assert enriched.mode is TransitionMode.BACKWARD
     assert enriched.valid_transitions == [{"to": "open", "category": "open", "ready": True}]
 
 

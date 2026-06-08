@@ -18,7 +18,7 @@ import pytest
 
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_config
 from filigree.templates import StateDefinition, TransitionOption, TypeTemplate, ValidationResult
-from filigree.types.api import ErrorCode, InvalidTransitionError
+from filigree.types.api import ErrorCode, InvalidTransitionError, TransitionMode
 from tests._db_factory import make_db
 
 # ---------------------------------------------------------------------------
@@ -404,7 +404,7 @@ class TestUpdateIssueTransitionEnforcement:
         db.update_issue(
             issue.id,
             status="triage",
-            backward=True,
+            mode=TransitionMode.BACKWARD,
             actor="ops",
         )
         events = db.get_issue_events(issue.id, limit=20)
@@ -467,13 +467,13 @@ class TestUpdateIssueTransitionEnforcement:
             to_state: str,
             fields: dict[str, Any],
             *,
-            backward: bool = False,
+            mode: TransitionMode = TransitionMode.FORWARD,
         ) -> Any:
-            if backward:
-                exc = InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
+            if mode is TransitionMode.BACKWARD:
+                exc = InvalidTransitionError(type_name, from_state, to_state=to_state, mode=TransitionMode.BACKWARD)
                 raised_errors.append(exc)
                 raise exc
-            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+            return original_validate_transition(type_name, from_state, to_state, fields, mode=mode)
 
         monkeypatch.setattr(db.templates, "validate_transition", fail_backward_validation)
 
@@ -483,7 +483,7 @@ class TestUpdateIssueTransitionEnforcement:
         assert raised_errors
         assert raised_errors[0].valid_transitions is None
         assert excinfo.value is not raised_errors[0]
-        assert excinfo.value.backward is True
+        assert excinfo.value.mode is TransitionMode.BACKWARD
         assert excinfo.value.valid_transitions is not None
 
         restored = db.get_issue(issue.id)

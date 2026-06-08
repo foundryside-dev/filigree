@@ -17,6 +17,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, cast, get_args
 
+from filigree.types.api import TransitionMode
 from filigree.types.core import StatusCategory as StateCategory
 
 # ---------------------------------------------------------------------------
@@ -982,7 +983,7 @@ class TemplateRegistry:
         to_state: str,
         fields: dict[str, Any],
         *,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
     ) -> TransitionResult:
         """Validate a state transition.
 
@@ -991,11 +992,12 @@ class TemplateRegistry:
             from_state: Current state.
             to_state: Target state.
             fields: Current issue fields dict.
-            backward: If True, validate against ``reverse_transitions`` and
-                raise ``InvalidTransitionError`` when the reverse edge is
-                undeclared; reverse edges enforce only their explicit
-                ``requires_fields`` and do not inherit target ``required_at``
-                gates.
+            mode: ``TransitionMode.BACKWARD`` validates against
+                ``reverse_transitions`` and raises ``InvalidTransitionError``
+                when the reverse edge is undeclared; reverse edges enforce only
+                their explicit ``requires_fields`` and do not inherit target
+                ``required_at`` gates. ``TransitionMode.FORWARD`` (default) is
+                the normal workflow lane.
 
         Returns:
             TransitionResult indicating whether the transition is allowed,
@@ -1014,14 +1016,18 @@ class TemplateRegistry:
                 ),
             )
 
-        transition_map = self._reverse_transition_cache.get(type_name, {}) if backward else self._transition_cache.get(type_name, {})
+        transition_map = (
+            self._reverse_transition_cache.get(type_name, {})
+            if mode is TransitionMode.BACKWARD
+            else self._transition_cache.get(type_name, {})
+        )
         transition = transition_map.get((from_state, to_state))
 
         if transition is None:
-            if backward:
+            if mode is TransitionMode.BACKWARD:
                 from filigree.types.api import InvalidTransitionError
 
-                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, mode=TransitionMode.BACKWARD)
             # Transition not in table: REJECTED for known types. Inline the
             # reachable states (facts, no tool name) instead of deferring.
             from filigree.types.api import allowed_transitions_clause
@@ -1044,7 +1050,7 @@ class TemplateRegistry:
         # state. Backward/escape edges only enforce their explicit
         # requires_fields contract so force-close preserves its historical
         # cleanup semantics instead of inheriting normal close gates.
-        state_required = [] if backward else self.validate_fields_for_state(type_name, to_state, fields)
+        state_required = [] if mode is TransitionMode.BACKWARD else self.validate_fields_for_state(type_name, to_state, fields)
         all_missing = tuple(dict.fromkeys(list(missing) + state_required))  # dedupe, preserve order
 
         warnings: list[str] = []

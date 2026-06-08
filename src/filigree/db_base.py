@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
 
 from filigree.models import FileRecord, Issue
+from filigree.types.api import TransitionMode
 from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRunStatus, StatusCategory
 from filigree.types.events import EventType
 
@@ -390,7 +391,7 @@ class DBMixinProtocol(Protocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

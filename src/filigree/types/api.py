@@ -644,15 +644,30 @@ class AmbiguousTransitionError(ValueError):
         )
 
 
+class TransitionMode(StrEnum):
+    """Direction of a workflow status transition.
+
+    Replaces the historical ``backward: bool`` that was conflated with
+    force/escape semantics across ``validate_transition`` / ``update_issue`` /
+    ``DBMixinProtocol`` / ``InvalidTransitionError``. ``BACKWARD`` selects the
+    declared reverse/escape edge table (force-close, reopen, release) instead
+    of the forward workflow transitions. Internal Python API only — no MCP,
+    CLI, or wire exposure — so call sites pass the enum member directly.
+    """
+
+    FORWARD = "forward"
+    BACKWARD = "backward"
+
+
 class InvalidTransitionError(ValueError):
     """Workflow transition failure with machine-readable context.
 
     Raised for explicit status updates, close/reopen/release reverse paths, and
     start-work canonicalization when a requested target is unavailable. The
     error carries ``type_name`` and ``current_status`` for the source state,
-    optional ``to_state`` for the rejected target, and ``backward`` when the
-    caller was using the declared reverse/escape lane instead of a forward
-    workflow transition.
+    optional ``to_state`` for the rejected target, and ``mode`` (a
+    ``TransitionMode``) recording whether the caller was using the declared
+    reverse/escape lane instead of a forward workflow transition.
 
     ``valid_transitions`` is a compact hint list suitable for API, CLI, and MCP
     error payloads. It is populated by callers that have enough field/template
@@ -661,7 +676,7 @@ class InvalidTransitionError(ValueError):
     ``ValueError`` so existing state-machine handlers continue to classify it
     as INVALID_TRANSITION.
 
-    ``backward`` is in-process diagnostic context for reverse/escape-edge
+    ``mode`` is in-process diagnostic context for reverse/escape-edge
     validation. Wire serializers intentionally choose the fields they expose
     instead of serializing ``__dict__`` wholesale.
     """
@@ -672,21 +687,21 @@ class InvalidTransitionError(ValueError):
         current_status: str,
         *,
         to_state: str | None = None,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
         valid_transitions: list[TransitionHint] | None = None,
         message: str | None = None,
     ) -> None:
         self.type_name = type_name
         self.current_status = current_status
         self.to_state = to_state
-        self.backward = backward
+        self.mode = mode
         self.valid_transitions = valid_transitions
         if message is not None:
             super().__init__(message)
             return
         if to_state is None:
             message = f"No wip-category transition from {current_status!r} for type {type_name!r}."
-        elif backward:
+        elif mode is TransitionMode.BACKWARD:
             message = f"Reverse transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
         else:
             message = f"Transition {current_status!r} -> {to_state!r} is not declared for type {type_name!r}."
@@ -697,7 +712,7 @@ class InvalidTransitionError(ValueError):
 
         Enrichment often happens after a lower layer raises. Returning a new
         exception preserves the original object for diagnostics while keeping
-        ``type_name``, ``current_status``, ``to_state``, ``backward``, and the
+        ``type_name``, ``current_status``, ``to_state``, ``mode``, and the
         human-readable message intact for the caller that will serialize or log
         the enriched failure.
         """
@@ -705,7 +720,7 @@ class InvalidTransitionError(ValueError):
             self.type_name,
             self.current_status,
             to_state=self.to_state,
-            backward=self.backward,
+            mode=self.mode,
             valid_transitions=valid_transitions,
             message=str(self),
         )

@@ -35,6 +35,7 @@ from filigree.types.api import (
     InvalidTransitionError,
     IssueDeletionRefusedError,
     TransitionHint,
+    TransitionMode,
     allowed_transitions_clause,
     classify_value_error,
 )
@@ -746,7 +747,7 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
         _skip_begin: bool = False,
     ) -> Issue:
         """Update issue fields, workflow status, assignment, and parent links.
@@ -754,8 +755,9 @@ class IssuesMixin(DBMixinProtocol):
         The write runs in an IMMEDIATE transaction and applies a compare-and-swap
         guard when the issue is already assigned, so a concurrent reassignment
         cannot be silently overwritten. Status changes are validated against the
-        issue type's workflow template; pass ``backward=True`` only for declared
-        reverse/escape transitions such as force-close, reopen, or release.
+        issue type's workflow template; pass ``mode=TransitionMode.BACKWARD``
+        only for declared reverse/escape transitions such as force-close,
+        reopen, or release.
 
         Args:
             issue_id: Issue identifier to mutate. The id prefix must belong to
@@ -779,8 +781,10 @@ class IssuesMixin(DBMixinProtocol):
             force_overwrite_corrupt: When the stored ``fields`` JSON is corrupt,
                 refuse merges by default. Set this to replace the corrupt value
                 entirely and record a ``corrupt_fields_overwritten`` event.
-            backward: Validate a status change against declared reverse/escape
-                transitions and audit the shortcut with ``transition_forced``.
+            mode: ``TransitionMode.BACKWARD`` validates a status change against
+                declared reverse/escape transitions and audits the shortcut with
+                ``transition_forced``. ``TransitionMode.FORWARD`` (default) uses
+                the normal workflow lane.
 
         Returns:
             The freshly loaded issue. Soft transition data warnings are also
@@ -850,8 +854,9 @@ class IssuesMixin(DBMixinProtocol):
             self._validate_status(status, current.type)
 
             # Atomic transition-with-fields: validate merged fields against target state.
-            # ``backward=True`` routes through the declared reverse/escape edge
-            # table, preserving auditability without the old skip-check bypass.
+            # ``mode=TransitionMode.BACKWARD`` routes through the declared
+            # reverse/escape edge table, preserving auditability without the old
+            # skip-check bypass.
             merged_fields = {**current.fields}
             if fields is not None:
                 merged_fields.update(fields)
@@ -863,7 +868,7 @@ class IssuesMixin(DBMixinProtocol):
                     current.status,
                     status,
                     merged_fields,
-                    backward=backward,
+                    mode=mode,
                 )
                 if not _transition_result.allowed:
                     valid_transitions = _transition_hints(self.templates.get_valid_transitions(current.type, current.status, merged_fields))
@@ -941,7 +946,7 @@ class IssuesMixin(DBMixinProtocol):
             # alongside the ``status_changed`` so reviewers can find every
             # workflow shortcut. Sequenced before the status_changed event so
             # the chain is causally ordered when read top-to-bottom.
-            if backward:
+            if mode is TransitionMode.BACKWARD:
                 self._record_event(
                     issue_id,
                     "transition_forced",
@@ -1172,14 +1177,14 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
-        use_reverse_transition = force
+        mode = TransitionMode.BACKWARD if force else TransitionMode.FORWARD
         return self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
             actor=actor,
             expected_assignee=expected_assignee,
-            backward=use_reverse_transition,
+            mode=mode,
             _skip_begin=_skip_begin,
         )
 
@@ -1191,8 +1196,8 @@ class IssuesMixin(DBMixinProtocol):
         The target comes from the most recent ``status_changed`` event whose
         old status is non-done and whose new status is done. If no such event is
         available, the issue type's initial state is used. Reopen routes through
-        ``update_issue(backward=True)`` so the reverse/escape transition must be
-        declared and any invalid transition carries normal ``valid_transitions``
+        ``update_issue(mode=TransitionMode.BACKWARD)`` so the reverse/escape
+        transition must be declared and any invalid transition carries normal ``valid_transitions``
         context. After the transition it clears ``closed_at`` and stale
         close-only fields such as ``close_reason``.
 
@@ -1221,7 +1226,7 @@ class IssuesMixin(DBMixinProtocol):
             status=reopen_status,
             actor=actor,
             expected_assignee=current.assignee,
-            backward=True,
+            mode=TransitionMode.BACKWARD,
             _skip_begin=True,
         )
         reopen_fields = _fields_for_reopen(current.fields)
@@ -1612,7 +1617,7 @@ class IssuesMixin(DBMixinProtocol):
                         row["status"],
                         target,
                         fields,
-                        backward=True,
+                        mode=TransitionMode.BACKWARD,
                     )
                 except InvalidTransitionError as exc:
                     if exc.valid_transitions is None:
@@ -1634,7 +1639,7 @@ class IssuesMixin(DBMixinProtocol):
                         row["type"],
                         row["status"],
                         to_state=target,
-                        backward=True,
+                        mode=TransitionMode.BACKWARD,
                         valid_transitions=valid_transitions,
                         message=msg,
                     )

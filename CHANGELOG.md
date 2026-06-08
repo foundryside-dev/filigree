@@ -48,6 +48,17 @@ checklist is complete and a coordinated consumer-migration window is published.
   only the namespaced names since 2.3.0); the CLI surface is unchanged. The
   2.3.0 deprecation-telemetry field (`deprecated_tool_name_calls` in
   `mcp_status_get` / `mcp-status`) is removed.
+- **`TransitionMode` enum replaces the internal `backward: bool` (internal
+  Python API).** The transition-direction flag that was conflated with
+  force/escape semantics across `TemplateRegistry.validate_transition`,
+  `update_issue`, the `DBMixinProtocol` signature, and
+  `InvalidTransitionError` is now a `TransitionMode{FORWARD, BACKWARD}` enum
+  (`filigree.types.api.TransitionMode`); `InvalidTransitionError.backward`
+  becomes `.mode`. The flag has no MCP/CLI/HTTP/wire exposure, so it is
+  replaced outright with no compatibility alias. Only callers of the internal
+  Python API (`backward=True` → `mode=TransitionMode.BACKWARD`) are affected;
+  the close/reopen/release behaviour and `transition_forced` audit events are
+  unchanged.
 
 ### Fixed
 
