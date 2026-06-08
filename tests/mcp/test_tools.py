@@ -1858,6 +1858,14 @@ class TestResource:
         assert data["schema_compatible"] is True
         assert data["database_schema_version"] == data["installed_schema_version"]
         assert data["code"] is None
+        # ADR-012: the actor-verification posture is programmatically discoverable
+        # on the MCP surface and names the deferral. This test DB never had
+        # set_verified_actor called (no transport stamp), so it reads unverified —
+        # exactly the silent-drop state the finding is about, now made loud.
+        av = data["actor_verification"]
+        assert av["verified"] is False
+        assert av["verified_actor"] is None
+        assert av["deferral"] == "filigree-81d3971467"
 
     async def test_get_mcp_status_survives_schema_mismatch(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         import filigree.mcp_server as mcp_mod

@@ -216,6 +216,14 @@ class ScanFinding:
     # (LEFT JOIN miss), or when the read path did not join (bare ``SELECT *``).
     issue_status: str | None = None
     issue_resolution: str | None = None
+    # Wardline's suppression verdict, lifted out of
+    # ``metadata.wardline.suppression_state`` (``"baselined"`` | ``"waived"`` |
+    # ``"judged"`` | …) onto the read surface so an agent triaging via
+    # ``finding_list`` / the weft findings list can tell an accepted/suppressed
+    # defect from open work without parsing nested metadata. ``None`` when the
+    # finding carries no wardline suppression. Mirrors the N6 issue_status lift;
+    # populated from metadata in ``FileDBMixin._build_scan_finding``.
+    suppression_state: str | None = None
 
     def __post_init__(self) -> None:
         if self.severity not in _VALID_SEVERITIES:
@@ -252,6 +260,7 @@ class ScanFinding:
             last_seen_at=self.last_seen_at,
             issue_status=self.issue_status,
             issue_resolution=self.issue_resolution,
+            suppression_state=self.suppression_state,
             metadata=metadata,
             data_warnings=warnings,
         )

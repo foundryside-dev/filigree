@@ -1129,6 +1129,10 @@ class TestLoomGenerationParityLists:
         assert "issue_status" in sf0, f"ScanFindingWeft must carry issue_status, got keys: {sorted(sf0.keys())}"
         assert sf0["issue_status"] is None
         assert sf0["issue_resolution"] is None
+        # Wardline suppression verdict lifted from metadata onto the surface; this
+        # finding carries no wardline suppression → null.
+        assert "suppression_state" in sf0, f"ScanFindingWeft must carry suppression_state, got keys: {sorted(sf0.keys())}"
+        assert sf0["suppression_state"] is None
 
         # Observations
         obs_resp = await dashboard_surface.get("/api/weft/observations")

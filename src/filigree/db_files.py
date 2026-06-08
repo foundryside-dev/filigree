@@ -268,6 +268,13 @@ class FilesMixin(DBMixinProtocol):
         issue status).
         """
         row_keys = row.keys()
+        metadata = self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}")
+        # Lift wardline's suppression verdict out of the metadata blob onto the
+        # read surface (mirrors the N6 issue_status lift). Guard every level: the
+        # wardline namespace and its suppression_state are both optional, and a
+        # corrupt metadata parse yields a non-dict sentinel.
+        wardline_meta = metadata.get("wardline") if isinstance(metadata, dict) else None
+        suppression_state = wardline_meta.get("suppression_state") if isinstance(wardline_meta, dict) else None
         return ScanFinding(
             id=row["id"],
             file_id=row["file_id"],
@@ -290,7 +297,8 @@ class FilesMixin(DBMixinProtocol):
             last_seen_at=row["last_seen_at"],
             issue_status=row["issue_status"] if "issue_status" in row_keys else None,
             issue_resolution=row["issue_resolution"] if "issue_resolution" in row_keys else None,
-            metadata=self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}"),
+            suppression_state=suppression_state,
+            metadata=metadata,
         )
 
     def _is_local_registry_fallback_row(self, registry_backend: str) -> bool:
@@ -2550,6 +2558,35 @@ class FilesMixin(DBMixinProtocol):
             f"{_sev} "
             f"FROM scan_findings WHERE file_id = ?",
             (file_id,),
+        ).fetchone()
+        return {
+            "total_findings": row["total_findings"],
+            "open_findings": row["open_findings"] or 0,
+            "critical": row["critical"] or 0,
+            "high": row["high"] or 0,
+            "medium": row["medium"] or 0,
+            "low": row["low"] or 0,
+            "info": row["info"] or 0,
+        }
+
+    def get_files_findings_summary(self, file_ids: list[str]) -> FindingsSummary:
+        """Severity-bucketed summary aggregated across *file_ids* in one query.
+
+        The multi-file analogue of :meth:`get_file_findings_summary`; a single
+        ``IN (...)`` aggregate so a scan-run posture echo over N files stays one
+        round-trip. An empty list returns the all-zero summary (no ``IN ()``).
+        """
+        if not file_ids:
+            return {"total_findings": 0, "open_findings": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        _open = self._OPEN_FINDINGS_FILTER
+        _sev = self._severity_bucket_sql(_open)
+        placeholders = ", ".join("?" for _ in file_ids)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS total_findings, "
+            f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
+            f"{_sev} "
+            f"FROM scan_findings WHERE file_id IN ({placeholders})",
+            list(file_ids),
         ).fetchone()
         return {
             "total_findings": row["total_findings"],

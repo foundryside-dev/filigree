@@ -590,7 +590,7 @@ Returns `ListResponse[TransitionDetail]` (`{items, has_more}`), with
 
 #### `mcp_status_get`
 
-No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, and `runtime`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
+No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, `runtime`, and `actor_verification`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). The `actor_verification` object (`{verified, verified_actor, deferral, note}`) reports the ADR-012 actor-verification posture for this transport: MCP-stdio stamps the OS identity (`verified=true`); MCP-HTTP cannot vouch for the caller, so the `actor` argument is a self-asserted claim and `verified_actor`/`verified_author` are NULL (`verified=false`) — transport-bound identity is deferred to `filigree-81d3971467`. This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
 
 ### Analytics
 
@@ -966,7 +966,8 @@ scanner's `language_focus`, when selecting a pack.
 | `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `prompt_pack_list`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
-Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, message}`.
+Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, file_summary, message}`.
+`file_summary` is the file's current severity-bucketed findings posture (`{total_findings, open_findings, critical, high, medium, low, info}`) — a posture echo so a "triggered" response is not a vacuous run-state-only green. At trigger time it is the pre-scan posture; poll `scan_status_get` for the updated breakdown once results are ingested.
 If the scanner name is a bundled scanner that is not enabled in this project,
 the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
 "scanner_enable"`, `cli_enable_command`, and a hint pointing at
@@ -983,8 +984,9 @@ the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
 
 Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
 `batch_id` for correlation. The response also echoes `api_url`,
-`api_url_source`, and scanner risk/sandbox metadata. Same 30s rate-limit applies
-per scanner+file.
+`api_url_source`, and scanner risk/sandbox metadata. Each `per_file` entry
+carries a `file_summary` posture echo (severity-bucketed findings for that file).
+Same 30s rate-limit applies per scanner+file.
 
 #### `scan_status_get`
 
@@ -993,7 +995,9 @@ per scanner+file.
 | `scan_run_id` | string | yes | Scan run ID returned by `scan_trigger` / `scan_trigger_batch` |
 | `log_lines` | integer | no | Tail size (1–500, default 50) |
 
-Returns scan status with a live PID check and a tail of the scanner's log.
+Returns scan status with a live PID check and a tail of the scanner's log, plus
+a `file_summary` posture echo — the severity-bucketed findings for the run's
+target file(s), reflecting post-ingest state once results are POSTed back.
 
 #### `scan_preview`
 

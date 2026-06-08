@@ -253,6 +253,10 @@ class ScanFindingWeft(TypedDict):
     issue_id: str | None
     issue_status: str | None
     issue_resolution: str | None
+    # Wardline suppression verdict lifted from ``metadata.wardline.suppression_state``
+    # so deconfliction consumers reading this surface see an accepted/suppressed
+    # defect without nested-metadata parsing. ``None`` when not suppressed.
+    suppression_state: str | None
     seen_count: int
     first_seen: ISOTimestamp
     updated_at: ISOTimestamp

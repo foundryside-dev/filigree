@@ -339,6 +339,24 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
         "runtime": _runtime_diagnostics(),
+        # ADR-012 actor-verification posture, derived from the *actual* session
+        # state so it is truthful per transport: MCP-stdio stamps the OS actor
+        # (verified), MCP-HTTP resolves a project DB with no stamp (NULL = the
+        # actor is a self-asserted claim, never silently treated as verified).
+        # Makes the unverified state programmatically discoverable on the only
+        # MCP-visible surface (tool results carry no HTTP headers) and names the
+        # deferral; authentication itself is filigree-81d3971467, not this signal.
+        "actor_verification": {
+            "verified": active_db._verified_actor is not None,
+            "verified_actor": active_db._verified_actor,
+            "deferral": "filigree-81d3971467",
+            "note": (
+                "verified_actor/verified_author are stamped only when the transport can vouch for the "
+                "caller (CLI / MCP-stdio stamp the OS identity). Over MCP-HTTP they are NULL and the "
+                "'actor' argument is an unauthenticated self-asserted claim; transport-bound identity "
+                "verification is deferred to filigree-81d3971467."
+            ),
+        },
         # Deprecation-readiness signal (plan §5.3): old-name usage counts.
         # Surfaced only on the healthy path; degraded payloads above report
         # *why* the connector is degraded, not migration telemetry.

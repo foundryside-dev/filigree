@@ -4,5 +4,5 @@
 name = "claude"
 description = "Per-file bug hunt using Claude CLI"
 command = "filigree-scanner-claude"
-args = ["--root", "{project_root}", "--file", "{file}", "--max-files", "1", "--api-url", "{api_url}", "--scan-run-id", "{scan_run_id}", "--prompt", "{prompt}"]
+args = ["--root", "{project_root}", "--file", "{file}", "--max-files", "1", "--api-url", "{api_url}", "--api-token-env", "WEFT_FEDERATION_TOKEN", "--scan-run-id", "{scan_run_id}", "--prompt", "{prompt}"]
 file_types = ["py"]

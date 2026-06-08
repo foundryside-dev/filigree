@@ -366,6 +366,32 @@ class TestGetScanStatusTool:
         assert data["status"] == "pending"
         assert "process_alive" in data
         assert "log_tail" in data
+        # Posture echo: status carries the target file's findings breakdown (zero here).
+        assert "file_summary" in data
+        assert data["file_summary"]["total_findings"] == 0
+
+    async def test_get_scan_status_file_summary_reflects_findings(self, mcp_db: FiligreeDB) -> None:
+        fr = mcp_db.register_file("src/scanned.py", language="python")
+        mcp_db.process_scan_results(
+            scan_source="scanner",
+            findings=[
+                {"path": "src/scanned.py", "rule_id": "r1", "severity": "critical", "message": "boom"},
+                {"path": "src/scanned.py", "rule_id": "r2", "severity": "low", "message": "meh"},
+            ],
+        )
+        mcp_db.create_scan_run(
+            scan_run_id="run-fs",
+            scanner_name="scanner",
+            scan_source="scanner",
+            file_paths=["src/scanned.py"],
+            file_ids=[fr.id],
+        )
+        data = _parse(await call_tool("get_scan_status", {"scan_run_id": "run-fs"}))
+        # The vacuous-green fix: a status poll echoes the real findings posture.
+        fs = data["file_summary"]
+        assert fs["total_findings"] == 2
+        assert fs["critical"] == 1
+        assert fs["low"] == 1
 
     async def test_get_scan_status_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("get_scan_status", {"scan_run_id": "nonexistent"}))
@@ -507,6 +533,12 @@ class TestTriggerScanBatchTool:
                 run = mcp_db.get_scan_run(child_id)
                 assert len(run["file_paths"]) == 1
                 assert run["status"] == "running"
+            # Posture echo: each per_file entry carries the file's findings summary
+            # (fresh files → zero findings, but the key is present, not vacuous).
+            assert len(data["per_file"]) == 2
+            for pf in data["per_file"]:
+                assert "file_summary" in pf
+                assert pf["file_summary"]["total_findings"] == 0
         finally:
             _cleanup_files(mcp_db, files)
 

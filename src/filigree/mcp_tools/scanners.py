@@ -973,6 +973,11 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         "sandbox_summary": cfg.sandbox_summary(),
         "sandbox_class": cfg.sandbox_class(),
         **cfg.risk_metadata(),
+        # Posture echo (mirrors W2): the file's current findings breakdown so a
+        # "triggered" response is never a vacuous run-state-only green. At trigger
+        # time this is the pre-scan posture; poll scan_status_get for the updated
+        # breakdown once results are ingested.
+        "file_summary": tracker.get_file_findings_summary(file_record.id),
         "message": (
             f"Scan triggered with run_id={scan_run_id!r}. "
             f"Results will be POSTed to {api_url}. "
@@ -1292,6 +1297,8 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             "file_id": entry["file_id"],
             "pid": entry["pid"],
             "log_path": entry["log_rel"],
+            # Per-file posture echo (mirrors W2 / the single-scan response).
+            "file_summary": tracker.get_file_findings_summary(entry["file_id"]),
         }
         for entry in finalized
     ]

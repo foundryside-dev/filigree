@@ -440,6 +440,10 @@ class TestLoomAuthScopeBoundary:
         assert data["auth"]["classic_api"]["enabled"] is False
         assert data["auth"]["dashboard_ui"]["enabled"] is False
         assert data["auth"]["mcp_http"]["enabled"] is True
+        # ADR-012: HTTP writes are unverified, and the posture says so out loud
+        # (instead of silently dropping verified_author), naming the deferral.
+        assert data["auth"]["actor_verification"]["verified"] is False
+        assert data["auth"]["actor_verification"]["deferral"] == "filigree-81d3971467"
 
     async def test_health_reports_specific_federation_token_source(
         self,

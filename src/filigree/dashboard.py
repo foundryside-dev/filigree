@@ -121,6 +121,22 @@ def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) ->
             "enabled": False,
             "note": "The local dashboard UI remains open under the loopback trust boundary.",
         },
+        # ADR-012 actor-verification posture for the HTTP transport. Writes via any
+        # dashboard/loom HTTP route are unverified: the `actor` field is a
+        # self-asserted claim and verified_actor/verified_author land NULL (only
+        # CLI / MCP-stdio stamp a transport-verified actor). Surfaced here — the
+        # canonical posture surface — so the dropped verification is discoverable
+        # instead of silent. The federation token gates *access*, not *identity*
+        # (C-8); transport-bound identity verification is deferred (filigree-81d3971467).
+        "actor_verification": {
+            "verified": False,
+            "deferral": "filigree-81d3971467",
+            "note": (
+                "HTTP writes are unverified: 'actor' is an unauthenticated self-asserted claim and "
+                "verified_actor/verified_author are NULL. Only CLI and MCP-stdio stamp a transport-verified "
+                "actor. Transport-bound identity verification for HTTP is deferred to filigree-81d3971467."
+            ),
+        },
     }
 
 

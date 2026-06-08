@@ -30,6 +30,7 @@ EXPECTED_KEYS = {
     "guidance",
     "filigree_dir",
     "runtime",
+    "actor_verification",
     "deprecated_tool_name_calls",
 }
 

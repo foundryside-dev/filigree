@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         ObservationLinkDict,
         ScanFindingDict,
     )
-    from filigree.types.files import ScanRunDict
+    from filigree.types.files import FindingsSummary, ScanRunDict
     from filigree.types.planning import CommentRecord
 
 logger = logging.getLogger(__name__)
@@ -484,6 +484,7 @@ class DBMixinProtocol(Protocol):
     def get_file(self, file_id: str) -> FileRecord: ...
     def add_file_association(self, file_id: str, issue_id: str, assoc_type: AssocType, *, actor: str = "") -> None: ...
     def get_finding(self, finding_id: str) -> ScanFindingDict: ...
+    def get_files_findings_summary(self, file_ids: list[str]) -> FindingsSummary: ...
 
     # -- EntityAssociationsMixin ---------------------------------------------
 

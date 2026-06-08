@@ -37,6 +37,47 @@ class TestGetFinding:
             db.get_finding("no-such-id")
 
 
+class TestFindingSuppressionState:
+    """Wardline's suppression verdict is lifted from
+    ``metadata.wardline.suppression_state`` onto the top-level finding read
+    surface (``get_finding`` / ``list_findings_global``) so triage can tell an
+    accepted/suppressed defect from open work without parsing nested metadata.
+    Independent of issue-linkage: a finding can be baselined while unlinked."""
+
+    def _seed_suppressed(self, db: FiligreeDB, state: str = "baselined") -> str:
+        db.register_file("src/s.py", language="python")
+        result = db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/s.py",
+                    "rule_id": "WLN-EXAMPLE",
+                    "severity": "high",
+                    "message": "an accepted defect",
+                    "metadata": {"wardline": {"suppression_state": state}},
+                }
+            ],
+        )
+        return result["new_finding_ids"][0]
+
+    def test_finding_without_wardline_meta_has_null_suppression_state(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        finding = db.get_finding(ids["obo"])
+        assert finding["suppression_state"] is None
+
+    def test_suppressed_finding_surfaces_state_via_get_and_list(self, db: FiligreeDB) -> None:
+        fid = self._seed_suppressed(db, state="baselined")
+        finding = db.get_finding(fid)
+        # Surfaced at the top level — no nested-metadata parsing needed.
+        assert finding["suppression_state"] == "baselined"
+        # ...and it is independent of issue-linkage (unlinked but still suppressed).
+        assert finding["issue_id"] is None
+        # The same lift rides the project-wide finding_list read path.
+        listed = db.list_findings_global(file_id=finding["file_id"])["findings"]
+        assert len(listed) == 1
+        assert listed[0]["suppression_state"] == "baselined"
+
+
 class TestFindingIssueStatus:
     """N6 (weft-c815d5e77d): the finding read surfaces carry the linked issue's
     status (and its ``close_reason`` resolution when closed), so a finding linked

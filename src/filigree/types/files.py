@@ -176,6 +176,11 @@ class ScanRunStatusDict(ScanRunDict):
 
     process_alive: bool
     log_tail: list[str]
+    #: Severity-bucketed posture of the run's target file(s) at read time, so a
+    #: status poll echoes the findings posture instead of a vacuous run-state-only
+    #: green. Aggregated across ``file_ids``; reflects post-ingest state once the
+    #: scan's results have been POSTed back.
+    file_summary: FindingsSummary
 
 
 class ScanIngestResult(TypedDict):

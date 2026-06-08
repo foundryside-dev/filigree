@@ -219,6 +219,8 @@ class TestScanFindingToDictStability:
             # N6 (weft-c815d5e77d): linked issue's status + close_reason resolution.
             "issue_status",
             "issue_resolution",
+            # Wardline suppression verdict lifted from metadata.wardline.suppression_state.
+            "suppression_state",
             "seen_count",
             "created_by",
             "updated_by",

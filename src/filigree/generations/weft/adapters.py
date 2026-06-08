@@ -195,6 +195,8 @@ def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
         # N6 (weft-c815d5e77d): linked issue status + close_reason resolution.
         issue_status=record["issue_status"],
         issue_resolution=record["issue_resolution"],
+        # Wardline suppression verdict (lifted from metadata) rides the same surface.
+        suppression_state=record["suppression_state"],
         seen_count=record["seen_count"],
         first_seen=record["first_seen"],
         updated_at=record["updated_at"],

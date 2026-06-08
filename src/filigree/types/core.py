@@ -214,6 +214,10 @@ class ScanFindingDict(TypedDict):
     # is null unless the issue was closed with a ``close_reason``.
     issue_status: str | None
     issue_resolution: str | None
+    # Wardline's suppression verdict lifted from ``metadata.wardline.suppression_state``
+    # (``"baselined"`` | ``"waived"`` | ``"judged"`` | …) so triage surfaces it
+    # without nested-metadata parsing. ``None`` when the finding is not suppressed.
+    suppression_state: str | None
     seen_count: int
     created_by: str
     updated_by: str
