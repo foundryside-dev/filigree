@@ -4,5 +4,5 @@
 name = "codex"
 description = "Per-file bug hunt using Codex CLI"
 command = "filigree-scanner-codex"
-args = ["--root", "{project_root}", "--file", "{file}", "--max-files", "1", "--api-url", "{api_url}", "--api-token-env", "FILIGREE_FEDERATION_API_TOKEN", "--scan-run-id", "{scan_run_id}", "--prompt", "{prompt}"]
+args = ["--root", "{project_root}", "--file", "{file}", "--max-files", "1", "--api-url", "{api_url}", "--api-token-env", "WEFT_FEDERATION_TOKEN", "--scan-run-id", "{scan_run_id}", "--prompt", "{prompt}"]
 file_types = ["py"]
