@@ -37,6 +37,79 @@ class TestGetFinding:
             db.get_finding("no-such-id")
 
 
+class TestFindingIssueStatus:
+    """N6 (weft-c815d5e77d): the finding read surfaces carry the linked issue's
+    status (and its ``close_reason`` resolution when closed), so a finding linked
+    to a dismissed (``not_a_bug``) issue reads as triaged, not open work."""
+
+    def test_unlinked_finding_has_null_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        finding = db.get_finding(ids["obo"])
+        assert finding["issue_status"] is None
+        assert finding["issue_resolution"] is None
+
+    def test_linked_finding_surfaces_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_id"] == issue.id
+        # Freshly promoted bug sits at its initial open state.
+        assert finding["issue_status"] == issue.status
+        assert finding["issue_resolution"] is None
+
+    def test_dismissed_issue_surfaces_not_a_bug_and_resolution(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="intentional/by-design", actor="human")
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_status"] == "not_a_bug"
+        assert finding["issue_resolution"] == "intentional/by-design"
+
+    def test_list_findings_global_carries_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="dup", actor="human")
+        listed = db.list_findings_global(issue_id=issue.id)
+        assert len(listed["findings"]) == 1
+        f0 = listed["findings"][0]
+        assert f0["issue_status"] == "not_a_bug"
+        assert f0["issue_resolution"] == "dup"
+
+    def test_list_findings_global_status_filter_unambiguous_after_join(self, db: FiligreeDB) -> None:
+        # Regression guard: the finding-status filter must not collide with
+        # issues.status after the LEFT JOIN (both tables have a ``status`` column).
+        ids = _seed_findings(db)
+        db.promote_finding_to_issue(ids["sqli"], actor="t")
+        listed = db.list_findings_global(status="open")
+        assert len(listed["findings"]) == 3
+        assert all(f["status"] == "open" for f in listed["findings"])
+
+    def test_get_findings_paginated_carries_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        files = db.list_files_paginated(limit=1)
+        file_id = files["results"][0]["id"]
+        page = db.get_findings_paginated(file_id=file_id, limit=10)
+        linked = next(f for f in page["results"] if f["id"] == ids["sqli"])
+        assert linked["issue_status"] == issue.status
+        unlinked = next(f for f in page["results"] if f["id"] == ids["obo"])
+        assert unlinked["issue_status"] is None
+
+    def test_missing_linked_issue_yields_null_status_not_crash(self, db: FiligreeDB) -> None:
+        # A finding may carry an ``issue_id`` whose issue row no longer exists
+        # (the FK is ON DELETE SET NULL, so this only arises off-contract). The
+        # LEFT JOIN must yield null rather than crash.
+        ids = _seed_findings(db)
+        db.conn.execute("PRAGMA foreign_keys = OFF")
+        db.conn.execute("UPDATE scan_findings SET issue_id = 'iss-ghost' WHERE id = ?", (ids["sqli"],))
+        db.conn.commit()
+        db.conn.execute("PRAGMA foreign_keys = ON")
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_id"] == "iss-ghost"
+        assert finding["issue_status"] is None
+        assert finding["issue_resolution"] is None
+
+
 class TestListFindingsGlobal:
     def test_returns_all_findings(self, db: FiligreeDB) -> None:
         _seed_findings(db)

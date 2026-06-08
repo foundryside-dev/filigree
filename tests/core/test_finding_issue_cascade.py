@@ -346,6 +346,23 @@ class TestPromoteCreatedFlag:
         assert second["created"] is False
         assert second["issue"].id == first["issue"].id
 
+    def test_repromote_of_dismissed_finding_returns_existing_with_warning(self, db: FiligreeDB) -> None:
+        """N6 (b): re-promoting a finding whose linked issue was dismissed as
+        ``not_a_bug`` returns that dismissed issue (``created=False``) rather than
+        minting a new bug — the ``issue_id`` idempotency return already prevents
+        resurrection. A warning naming the dismissed status surfaces the prior
+        triage so the caller doesn't read it as fresh, open work.
+        """
+        finding_id = _ingest(db, "fp-redismiss")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="by-design", actor="human")
+
+        again = db.promote_finding_to_issue(finding_id, actor="t")
+        assert again["created"] is False
+        assert again["issue"].id == issue.id
+        assert again["issue"].status == "not_a_bug"
+        assert any("not_a_bug" in w for w in again.get("warnings", []))
+
 
 def _ingest_suppressed(db: FiligreeDB, state: str, fingerprint: str = "fp-supp") -> str:
     """Ingest a wardline finding stamped with a suppression_state and return its id."""
@@ -600,6 +617,29 @@ class TestReopenOnRegress:
         db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-human")])
         assert db.get_finding(finding_id)["status"] == "open"  # finding regressed
         assert _is_done(db, issue.id)  # issue stays closed
+
+    def test_not_a_bug_dismissal_not_reopened_on_regress(self, db: FiligreeDB) -> None:
+        """N6 (b): a finding whose promoted issue a human dismissed as
+        ``not_a_bug`` must not auto-resurrect across a rescan. No parallel guard
+        is needed — the reopen gate already refuses. The load-bearing invariant is
+        ``issue_last_closed_by_cascade``: reopen fires only when the actor of the
+        most-recent into-done transition is ``FINDING_CASCADE_MARKER``. A human
+        dismissal carries the human's actor, so reopen is refused regardless of
+        WHICH done state was chosen — the guarantee is status-agnostic (it also
+        covers ``wont_fix`` and any custom done state). The narrower fact that the
+        cascade only ever closes into ``closed`` (never ``not_a_bug``) is a
+        corollary, not the mechanism. This pins the dismissal-memory contract.
+        """
+        finding_id = _ingest(db, "fp-nab")
+        issue = db.promote_finding_to_issue(finding_id, actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="by-design", actor="human")
+        assert db.get_issue(issue.id).status == "not_a_bug"
+        # Drive the finding fixed, then regress it via a rescan.
+        db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE id = ?", (finding_id,))
+        db.conn.commit()
+        db.process_scan_results(scan_source="wardline", findings=[_wln("src/a.py", "fp-nab")])
+        assert db.get_finding(finding_id)["status"] == "open"  # finding regressed
+        assert db.get_issue(issue.id).status == "not_a_bug"  # dismissal preserved
 
     def test_auto_close_reopen_human_close_regress_stays_closed(self, db: FiligreeDB) -> None:
         """The marker-clear is load-bearing: after we reopen, a human's later

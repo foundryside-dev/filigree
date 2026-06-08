@@ -98,6 +98,9 @@ _SCAN_FINDING_KEYS = frozenset(
         "line_end",
         "fingerprint",
         "issue_id",
+        # N6 (weft-c815d5e77d): linked issue's status + close_reason resolution.
+        "issue_status",
+        "issue_resolution",
         "seen_count",
         "created_by",
         "updated_by",

@@ -209,6 +209,13 @@ class ScanFinding:
     updated_at: ISOTimestamp = _EMPTY_TS
     last_seen_at: ISOTimestamp | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # N6 (weft-c815d5e77d): the linked issue's status and resolution, surfaced
+    # via a LEFT JOIN in the finding read paths so a finding pointing at a
+    # dismissed (``not_a_bug``) issue reads as triaged, not open work. Both are
+    # ``None`` when the finding is unlinked, when the linked issue row is missing
+    # (LEFT JOIN miss), or when the read path did not join (bare ``SELECT *``).
+    issue_status: str | None = None
+    issue_resolution: str | None = None
 
     def __post_init__(self) -> None:
         if self.severity not in _VALID_SEVERITIES:
@@ -243,6 +250,8 @@ class ScanFinding:
             first_seen=self.first_seen,
             updated_at=self.updated_at,
             last_seen_at=self.last_seen_at,
+            issue_status=self.issue_status,
+            issue_resolution=self.issue_resolution,
             metadata=metadata,
             data_warnings=warnings,
         )

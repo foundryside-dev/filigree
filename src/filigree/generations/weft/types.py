@@ -227,9 +227,13 @@ class ScanFindingWeft(TypedDict):
     """Scan finding row — items in ``GET /api/weft/findings`` and the
     embedded findings list inside file/finding details.
 
-    Mirrors classic ``ScanFindingDict`` except the finding's own primary
-    key is renamed ``id`` → ``finding_id``. Cross-entity refs (``file_id``,
-    ``issue_id``) keep their existing names.
+    Mirrors classic ``ScanFindingDict`` (minus the ``created_by``/``updated_by``
+    audit columns) except the finding's own primary key is renamed ``id`` →
+    ``finding_id``. Cross-entity refs (``file_id``, ``issue_id``) keep their
+    existing names. ``issue_status``/``issue_resolution`` (N6, weft-c815d5e77d)
+    carry the linked issue's status + ``close_reason`` so deconfliction
+    consumers reading this surface can tell a finding whose issue was dismissed
+    (``not_a_bug``) from open work.
 
     Pinned by ``tests/fixtures/contracts/loom/findings.json``.
     """
@@ -247,6 +251,8 @@ class ScanFindingWeft(TypedDict):
     line_end: int | None
     fingerprint: str
     issue_id: str | None
+    issue_status: str | None
+    issue_resolution: str | None
     seen_count: int
     first_seen: ISOTimestamp
     updated_at: ISOTimestamp

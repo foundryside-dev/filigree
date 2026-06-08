@@ -221,6 +221,14 @@ class FilesMixin(DBMixinProtocol):
     _VALID_FILE_SORTS = frozenset({"updated_at", "first_seen", "path", "language"})
     _VALID_FINDING_SORTS = frozenset({"updated_at", "severity"})
 
+    # N6 (weft-c815d5e77d): finding read paths LEFT JOIN the linked issue so the
+    # finding carries the issue's status + ``close_reason`` resolution. The
+    # ``scan_findings`` table is aliased ``sf`` and ``issues`` ``i``; any WHERE /
+    # ORDER BY column that exists on BOTH tables (``status``, ``updated_at``,
+    # ``id``) MUST be qualified with ``sf.`` to stay unambiguous after the join.
+    _FINDING_ISSUE_JOIN = "FROM scan_findings sf LEFT JOIN issues i ON sf.issue_id = i.id"
+    _FINDING_SELECT_COLS = "sf.*, i.status AS issue_status, json_extract(i.fields, '$.close_reason') AS issue_resolution"
+
     # -- Build helpers -------------------------------------------------------
 
     @staticmethod
@@ -251,7 +259,15 @@ class FilesMixin(DBMixinProtocol):
         )
 
     def _build_scan_finding(self, row: sqlite3.Row) -> ScanFinding:
-        """Build a ScanFinding from a database row."""
+        """Build a ScanFinding from a database row.
+
+        The optional ``issue_status`` / ``issue_resolution`` columns are present
+        only when the caller's query LEFT JOINs ``issues`` (N6). Bare
+        ``SELECT * FROM scan_findings`` callers omit them, so read them
+        defensively and default to ``None`` (an unjoined read carries no linked
+        issue status).
+        """
+        row_keys = row.keys()
         return ScanFinding(
             id=row["id"],
             file_id=row["file_id"],
@@ -272,6 +288,8 @@ class FilesMixin(DBMixinProtocol):
             first_seen=row["first_seen"],
             updated_at=row["updated_at"],
             last_seen_at=row["last_seen_at"],
+            issue_status=row["issue_status"] if "issue_status" in row_keys else None,
+            issue_resolution=row["issue_resolution"] if "issue_resolution" in row_keys else None,
             metadata=self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}"),
         )
 
@@ -2098,18 +2116,21 @@ class FilesMixin(DBMixinProtocol):
             valid = ", ".join(sorted(self._VALID_FINDING_SORTS))
             raise ValueError(f'Invalid sort field "{sort}". Must be one of: {valid}')
 
-        clauses = ["file_id = ?"]
+        # ``sf.`` qualifiers: the shared WHERE/ORDER feed queries that LEFT JOIN
+        # ``issues`` (N6), where ``status``/``updated_at`` are ambiguous. The
+        # count path aliases ``scan_findings sf`` too (no join) so these resolve.
+        clauses = ["sf.file_id = ?"]
         params: list[Any] = [file_id]
 
         if severity is not None:
-            clauses.append("severity = ?")
+            clauses.append("sf.severity = ?")
             params.append(severity)
         if status is not None:
-            clauses.append("status = ?")
+            clauses.append("sf.status = ?")
             params.append(status)
 
         where = " AND ".join(clauses)
-        order_clause = f"{self._SEVERITY_ORDER_SQL} ASC, updated_at DESC" if sort == "severity" else "updated_at DESC"
+        order_clause = f"{self._SEVERITY_ORDER_SQL} ASC, sf.updated_at DESC" if sort == "severity" else "sf.updated_at DESC"
         return where, params, order_clause
 
     def get_findings(
@@ -2125,7 +2146,7 @@ class FilesMixin(DBMixinProtocol):
         """Get scan findings for a file with optional filters."""
         where, params, order_clause = self._findings_where(file_id, severity=severity, status=status, sort=sort)
         rows = self.conn.execute(
-            f"SELECT * FROM scan_findings WHERE {where} ORDER BY {order_clause} LIMIT ? OFFSET ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE {where} ORDER BY {order_clause} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
         return [self._build_scan_finding(r) for r in rows]
@@ -2146,8 +2167,10 @@ class FilesMixin(DBMixinProtocol):
         """
         where, params, _order = self._findings_where(file_id, severity=severity, status=status, sort=sort)
 
+        # ``where`` carries ``sf.`` qualifiers (N6), so alias the table here too.
+        # The COUNT needs no join — the filters are all finding-level.
         total: int = self.conn.execute(
-            f"SELECT COUNT(*) FROM scan_findings WHERE {where}",
+            f"SELECT COUNT(*) FROM scan_findings sf WHERE {where}",
             params,
         ).fetchone()[0]
 
@@ -2183,7 +2206,7 @@ class FilesMixin(DBMixinProtocol):
     def get_finding(self, finding_id: str) -> ScanFindingDict:
         """Get a single finding by ID.  Raises *KeyError* if not found."""
         row = self.conn.execute(
-            "SELECT * FROM scan_findings WHERE id = ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE sf.id = ?",
             (finding_id,),
         ).fetchone()
         if row is None:
@@ -2244,22 +2267,25 @@ class FilesMixin(DBMixinProtocol):
             "issue_id": issue_id,
             "fingerprint": fingerprint,
         }
+        # ``sf.`` qualifiers: the rows query LEFT JOINs ``issues`` (N6), where the
+        # ``status`` filter would otherwise be ambiguous (both tables have it).
+        # The COUNT aliases ``scan_findings sf`` for the same qualified WHERE.
         clauses: list[str] = []
         params: list[Any] = []
         for col, val in filters.items():
             if val is not None:
-                clauses.append(f"{col} = ?")
+                clauses.append(f"sf.{col} = ?")
                 params.append(val)
 
         where = " AND ".join(clauses) if clauses else "1=1"
 
         total: int = self.conn.execute(
-            f"SELECT COUNT(*) FROM scan_findings WHERE {where}",
+            f"SELECT COUNT(*) FROM scan_findings sf WHERE {where}",
             params,
         ).fetchone()[0]
 
         rows = self.conn.execute(
-            f"SELECT * FROM scan_findings WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE {where} ORDER BY sf.updated_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
 
@@ -2358,7 +2384,18 @@ class FilesMixin(DBMixinProtocol):
             except KeyError:
                 warnings.append(f"Finding {finding_id} referenced missing issue {linked_issue_id}; creating a new issue")
             else:
-                warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
+                # N6 (b): a finding linked to an already-closed issue (e.g. a
+                # human dismissal as ``not_a_bug``) returns that issue rather than
+                # minting new work — the prior triage stands. Name the done state
+                # so the caller does not read the result as fresh, open work.
+                if self._resolve_status_category(issue.type, issue.status) == "done":
+                    warnings.append(
+                        f"Finding {finding_id} already linked to issue {issue.id}, which is closed as "
+                        f"'{issue.status}'; returning the existing (dismissed) issue rather than minting "
+                        "new work — its prior triage stands."
+                    )
+                else:
+                    warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
                 return {"issue": issue, "created": False, "warnings": warnings}
 
         existing_issue_row = self.conn.execute(

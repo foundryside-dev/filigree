@@ -192,6 +192,9 @@ def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
         line_end=record["line_end"],
         fingerprint=record["fingerprint"],
         issue_id=record["issue_id"],
+        # N6 (weft-c815d5e77d): linked issue status + close_reason resolution.
+        issue_status=record["issue_status"],
+        issue_resolution=record["issue_resolution"],
         seen_count=record["seen_count"],
         first_seen=record["first_seen"],
         updated_at=record["updated_at"],

@@ -208,6 +208,12 @@ class ScanFindingDict(TypedDict):
     line_end: int | None
     fingerprint: str
     issue_id: str | None
+    # N6 (weft-c815d5e77d): linked issue's status + close_reason resolution,
+    # joined in by the finding read paths. ``issue_status`` is null when the
+    # finding is unlinked or the linked issue row is missing; ``issue_resolution``
+    # is null unless the issue was closed with a ``close_reason``.
+    issue_status: str | None
+    issue_resolution: str | None
     seen_count: int
     created_by: str
     updated_by: str

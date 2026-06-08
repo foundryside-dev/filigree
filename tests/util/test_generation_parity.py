@@ -1123,6 +1123,12 @@ class TestLoomGenerationParityLists:
         assert isinstance(sf0["finding_id"], str)
         assert sf0["severity"] == "high"
         assert sf0["rule_id"] == "C4-rule"
+        # N6 (weft-c815d5e77d): the federation finding surface carries the linked
+        # issue's status + resolution so deconfliction consumers can tell a
+        # dismissed finding from open work. This finding is unlinked → both null.
+        assert "issue_status" in sf0, f"ScanFindingWeft must carry issue_status, got keys: {sorted(sf0.keys())}"
+        assert sf0["issue_status"] is None
+        assert sf0["issue_resolution"] is None
 
         # Observations
         obs_resp = await dashboard_surface.get("/api/weft/observations")
