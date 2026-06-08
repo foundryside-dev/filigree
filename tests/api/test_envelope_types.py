@@ -163,11 +163,23 @@ def test_transition_errors_exist() -> None:
 def test_invalid_transition_details_omits_uncomputed_transitions() -> None:
     from filigree.types.api import InvalidTransitionError, invalid_transition_details
 
+    # filigree-d25e75cebf: details always carry the source state (so the wire
+    # string can be the generic safe_message without losing recovery info);
+    # valid_transitions is appended only once computed.
     exc = InvalidTransitionError("X", "confirmed", to_state="closed")
-    assert invalid_transition_details(exc) is None
+    assert invalid_transition_details(exc) == {
+        "type_name": "X",
+        "current_status": "confirmed",
+        "to_state": "closed",
+    }
 
     enriched = exc.with_valid_transitions([])
-    assert invalid_transition_details(enriched) == {"valid_transitions": []}
+    assert invalid_transition_details(enriched) == {
+        "type_name": "X",
+        "current_status": "confirmed",
+        "to_state": "closed",
+        "valid_transitions": [],
+    }
 
 
 def test_scan_ingest_response_loom_concrete_shape() -> None:

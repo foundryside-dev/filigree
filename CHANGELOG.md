@@ -72,6 +72,31 @@ checklist is complete and a coordinated consumer-migration window is published.
   in-suite sibling (loomweave / wardline / legis / lacuna / weft) read the
   removed keys (confirmed by full call-site enumeration, filigree-034931a584).
 
+### Changed
+
+- **`safe_message` parity for claim/transition errors on HTTP & MCP
+  (filigree-d25e75cebf).** `ClaimConflictError` and `InvalidTransitionError`
+  now follow the `WrongProjectError` pattern: the untrusted HTTP/MCP error
+  *string* is a fixed, generic `safe_message` ("Issue is claimed by a different
+  assignee" / "Requested status transition is not allowed") instead of
+  reflecting arbitrary call-site exception text on the wire. The structured
+  recovery data is **retained** so agents still self-correct — claim conflicts
+  keep `details.observed`/`details.expected` (the assignees); transition errors
+  keep `current_status`/`type_name`/`to_state` (and `valid_transitions` when
+  computed), now carried in the HTTP `details` payload and the MCP
+  `TransitionError` payload even when no allowed-transition hint was enriched
+  (previously these were only in the human string). The CLI keeps the full rich
+  `str(exc)` operator message — it is the local diagnostic surface and is
+  unchanged. **Not breaking:** assignees/statuses/transitions are coordination
+  data, not confidential, and remain available in structured `details`; only a
+  consumer that string-matched the prose of these two error *messages* over
+  HTTP/MCP (rather than switching on `code` + reading `details`) is affected,
+  which the 2.0 envelope contract already directs against. Scope note: batch
+  per-item failures (`batch_close`/`batch_update`) and `AmbiguousTransitionError`
+  are intentionally out of scope — batch failures carry only structured
+  coordination data with no probe-sensitive text, and there is no
+  `WrongProjectError` batch precedent to mirror.
+
 ### Fixed
 
 - **HTTP / MCP-HTTP writes no longer silently drop `verified_author`/`verified_actor` — the unverified posture is now discoverable (ADR-012).** Only CLI and MCP-stdio can vouch for the caller (they stamp the OS identity); over HTTP the `actor` is a self-asserted claim and the `verified_*` columns are correctly NULL (stamping the server's OS user would be a *false* attestation). The drop was silent — callers had no signal. Both transports now expose an `actor_verification` posture (`verified`, `deferral`, explanatory `note`): on the dashboard/loom HTTP surface via the `/api/health` `auth` scope, and on the MCP surface via `mcp_status_get` (where it is derived from the live session state, so MCP-stdio reads verified and MCP-HTTP reads unverified). Authentication itself — transport-bound caller identity — remains deferred to `filigree-81d3971467`; this change makes the *current* state honest, not silent.

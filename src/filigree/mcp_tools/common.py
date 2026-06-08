@@ -21,7 +21,16 @@ from filigree.registry_errors import RegistryPublicError, registry_error_respons
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
-from filigree.types.api import ErrorCode, ErrorResponse, ListResponse, ReadyIssue, SlimIssue, TransitionError, TransitionHint
+from filigree.types.api import (
+    ErrorCode,
+    ErrorResponse,
+    InvalidTransitionError,
+    ListResponse,
+    ReadyIssue,
+    SlimIssue,
+    TransitionError,
+    TransitionHint,
+)
 from filigree.validation import sanitize_actor
 
 logger = logging.getLogger(__name__)
@@ -242,6 +251,7 @@ def _build_transition_error(
     *,
     include_ready: bool = True,
     valid_transitions: list[TransitionHint] | None = None,
+    exc: BaseException | None = None,
 ) -> TransitionError:
     """Build a structured error dict with valid-transition hints.
 
@@ -249,8 +259,27 @@ def _build_transition_error(
     the issue from SQLite, so a backend exception during error construction
     must not mask the caller's original invalid_transition payload (see
     filigree-55c5347992).
+
+    When ``exc`` is a typed :class:`InvalidTransitionError`, the wire ``error``
+    string is replaced with its generic ``safe_message`` and the source-state
+    recovery fields (``current_status`` / ``type_name`` / ``to_state``) are
+    added so an agent can still self-correct from a probe-safe string
+    (filigree-d25e75cebf). Untyped transition errors (raw ``ValueError`` routed
+    here by the message heuristic, or ``AmbiguousTransitionError``) keep the
+    passed ``error`` unchanged.
     """
+    if isinstance(exc, InvalidTransitionError):
+        error = exc.safe_message
     data: TransitionError = {"error": error, "code": ErrorCode.INVALID_TRANSITION}
+    if isinstance(exc, InvalidTransitionError):
+        data["current_status"] = exc.current_status
+        data["type_name"] = exc.type_name
+        if exc.to_state is not None:
+            data["to_state"] = exc.to_state
+        if exc.next_action is not None:
+            data["next_action"] = exc.next_action
+        if exc.missing_fields:
+            data["missing_fields"] = exc.missing_fields
     if valid_transitions is not None:
         data["valid_transitions"] = valid_transitions
         try:

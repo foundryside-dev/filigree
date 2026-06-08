@@ -87,7 +87,9 @@ def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
 
 
 def _claim_conflict_response(exc: ClaimConflictError) -> list[TextContent]:
-    return _text(claim_conflict_envelope(exc))
+    # MCP is an untrusted surface: emit the generic safe_message string while
+    # retaining the observed/expected assignees in details (filigree-d25e75cebf).
+    return _text(claim_conflict_envelope(exc, safe=True))
 
 
 def _closure_gate_error(decision: governance.GateDecision) -> ErrorResponse:
@@ -171,7 +173,7 @@ def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) ->
     msg = str(exc)
     if isinstance(exc, (AmbiguousTransitionError, InvalidTransitionError)):
         valid_transitions = exc.valid_transitions if isinstance(exc, InvalidTransitionError) else None
-        return _text(_build_transition_error(tracker, issue_id, msg, valid_transitions=valid_transitions))
+        return _text(_build_transition_error(tracker, issue_id, msg, valid_transitions=valid_transitions, exc=exc))
     code = classify_value_error(msg)
     if code == ErrorCode.INVALID_TRANSITION:
         return _text(_build_transition_error(tracker, issue_id, msg))
@@ -184,7 +186,7 @@ def _release_claim_value_error_response(tracker: Any, issue_id: str, exc: ValueE
     if code == ErrorCode.CONFLICT:
         return _text(ErrorResponse(error=msg, code=code))
     if code == ErrorCode.INVALID_TRANSITION:
-        return _text(_build_transition_error(tracker, issue_id, msg))
+        return _text(_build_transition_error(tracker, issue_id, msg, exc=exc))
     return _text(ErrorResponse(error=msg, code=code))
 
 
@@ -1088,7 +1090,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
             return _claim_conflict_response(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
-            return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
+            return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions, exc=e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
@@ -1279,7 +1281,7 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         return _wrong_project_response(e)
     except InvalidTransitionError as e:
-        return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
+        return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions, exc=e))
     except ClaimConflictError as e:
         return _claim_conflict_response(e)
     except ValueError as e:
@@ -1632,7 +1634,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         if isinstance(e, InvalidTransitionError):
-            return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
+            return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions, exc=e))
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
     except ClaimConflictError as e:
         # Optimistic-lock conflict — emit a structured CONFLICT envelope so

@@ -46,7 +46,7 @@ from filigree.mcp_tools.issues import (
     _handle_get_issue,
     _handle_update_issue,
 )
-from filigree.types.api import ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode, InvalidTransitionError
 
 _VALID_CODES: frozenset[str] = frozenset(e.value for e in ErrorCode)
 
@@ -989,3 +989,123 @@ class TestStartWorkEnvelopeParity:
         mcp_keys = set(mcp_body.keys())
         cli_keys = set(cli_body.keys())
         assert mcp_keys == cli_keys, f"start-work success key set mismatch: mcp={mcp_keys} cli={cli_keys}"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8: safe_message parity for claim / transition errors
+# (filigree-d25e75cebf).
+#
+# HTTP + MCP error *strings* must be the generic safe_message; the structured
+# recovery details (assignee for claim; current state + allowed transitions
+# for transition) must still be present so an agent can self-correct. CLI is
+# the rich operator surface and keeps str(exc).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestClaimConflictSafeMessageParity:
+    async def test_parity(
+        self,
+        dashboard_surface: AsyncClient,
+        mcp_surface: FiligreeDB,
+        cli_surface: Callable[..., Any],
+    ) -> None:
+        # Dashboard: claim as agent-a, then a coordinator write expecting agent-b.
+        dash_create = await dashboard_surface.post("/api/issues", json={"title": "Claim conflict", "type": "bug"})
+        assert dash_create.status_code == 201
+        dash_id = dash_create.json()["id"]
+        claim = await dashboard_surface.post(f"/api/issue/{dash_id}/claim", json={"assignee": "agent-a"})
+        assert claim.status_code == 200, claim.text
+        dash_resp = await dashboard_surface.patch(
+            f"/api/issue/{dash_id}",
+            json={"priority": 1, "expected_assignee": "agent-b"},
+        )
+        assert dash_resp.status_code == 409, dash_resp.text
+        dash_env = dash_resp.json()
+        _assert_flat_envelope(dash_env, surface="dashboard")
+        # Wire string is the generic safe form...
+        assert dash_env["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert "agent-a" not in dash_env["error"]
+        # ...but the assignees are retained in structured details.
+        assert dash_env["details"]["observed"] == "agent-a"
+        assert dash_env["details"]["expected"] == "agent-b"
+
+        # MCP: same shape via update_issue.
+        mcp_issue = mcp_surface.create_issue("Claim conflict", type="bug")
+        mcp_surface.claim_issue(mcp_issue.id, assignee="agent-a")
+        mcp_env = _mcp_envelope(await _handle_update_issue({"issue_id": mcp_issue.id, "priority": 1, "expected_assignee": "agent-b"}))
+        _assert_flat_envelope(mcp_env, surface="mcp")
+        assert mcp_env["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert mcp_env["details"]["observed"] == "agent-a"
+        assert mcp_env["details"]["expected"] == "agent-b"
+
+        # CLI: rich operator string, unchanged.
+        def cli_action(runner: CliRunner, _: Path) -> Any:
+            create = runner.invoke(cli, ["create", "Claim conflict", "--type", "bug", "--json"])
+            assert create.exit_code == 0, create.output
+            issue_id = json.loads(create.output)["issue_id"]
+            claimed = runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-a", "--json"])
+            assert claimed.exit_code == 0, claimed.output
+            return runner.invoke(
+                cli,
+                ["update", issue_id, "--priority", "1", "--expected-assignee", "agent-b", "--json"],
+            )
+
+        cli_env = _cli_envelope(cli_surface(cli_action))
+        _assert_flat_envelope(cli_env, surface="cli")
+        assert cli_env["error"] != ClaimConflictError.SAFE_MESSAGE
+        assert "agent-a" in cli_env["error"]
+        assert cli_env["details"]["observed"] == "agent-a"
+
+        # All three surfaces agree on the code.
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.CONFLICT, (
+            f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
+        )
+
+
+@pytest.mark.asyncio
+class TestInvalidTransitionSafeMessageParity:
+    async def test_parity(
+        self,
+        dashboard_surface: AsyncClient,
+        mcp_surface: FiligreeDB,
+        cli_surface: Callable[..., Any],
+    ) -> None:
+        # Dashboard: bug starts at 'triage'; reject a bogus target.
+        dash_create = await dashboard_surface.post("/api/issues", json={"title": "Transition", "type": "bug"})
+        assert dash_create.status_code == 201
+        dash_id = dash_create.json()["id"]
+        dash_resp = await dashboard_surface.patch(f"/api/issue/{dash_id}", json={"status": "fixing"})
+        assert dash_resp.status_code == 409, dash_resp.text
+        dash_env = dash_resp.json()
+        _assert_flat_envelope(dash_env, surface="dashboard")
+        assert dash_env["error"] == InvalidTransitionError.SAFE_MESSAGE
+        assert "triage" not in dash_env["error"]
+        # State + allowed-transitions retained in structured details.
+        assert dash_env["details"]["current_status"] == "triage"
+        assert dash_env["details"]["type_name"] == "bug"
+        assert "valid_transitions" in dash_env["details"]
+
+        # MCP: TransitionError carries the recovery fields top-level.
+        mcp_issue = mcp_surface.create_issue("Transition", type="bug")
+        mcp_env = _mcp_envelope(await _handle_update_issue({"issue_id": mcp_issue.id, "status": "fixing"}))
+        _assert_flat_envelope(mcp_env, surface="mcp")
+        assert mcp_env["error"] == InvalidTransitionError.SAFE_MESSAGE
+        assert mcp_env["current_status"] == "triage"
+        assert "valid_transitions" in mcp_env
+
+        # CLI: rich operator string, unchanged.
+        def cli_action(runner: CliRunner, _: Path) -> Any:
+            create = runner.invoke(cli, ["create", "Transition", "--type", "bug", "--json"])
+            assert create.exit_code == 0, create.output
+            issue_id = json.loads(create.output)["issue_id"]
+            return runner.invoke(cli, ["update", issue_id, "--status", "fixing", "--json"])
+
+        cli_env = _cli_envelope(cli_surface(cli_action))
+        _assert_flat_envelope(cli_env, surface="cli")
+        assert cli_env["error"] != InvalidTransitionError.SAFE_MESSAGE
+        assert "triage" in cli_env["error"]
+
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.INVALID_TRANSITION, (
+            f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
+        )

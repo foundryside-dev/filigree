@@ -47,6 +47,7 @@ from filigree.types.api import (
     classify_value_error,
     errorcode_to_http_status,
     invalid_transition_details,
+    safe_error_message,
 )
 from filigree.types.api import (
     classify_issue_write_error as _classify_issue_write_error,
@@ -590,7 +591,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/close")
@@ -636,7 +637,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         result: dict[str, Any] = dict(issue.to_dict())
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
@@ -659,7 +660,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/comments", status_code=201)
@@ -693,7 +694,7 @@ def create_classic_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         # Fetch just the single comment to get the real created_at timestamp
         # and the stored verified_author (ADR-012) so the response is truthful.
         row = db.conn.execute("SELECT created_at, verified_author FROM comments WHERE id = ?", (comment_id,)).fetchone()
@@ -899,10 +900,10 @@ def create_classic_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/release")
@@ -925,16 +926,16 @@ def create_classic_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except InvalidTransitionError as e:
             return _error_response(
-                str(e),
+                e.safe_message,
                 ErrorCode.INVALID_TRANSITION,
                 errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/claim-next")
@@ -954,10 +955,10 @@ def create_classic_router() -> APIRouter:
         try:
             issue = db.claim_next(assignee, actor=actor)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(issue.to_dict())
@@ -1433,7 +1434,7 @@ def create_weft_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/close")
@@ -1482,7 +1483,7 @@ def create_weft_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
         result: dict[str, Any] = dict(issue_to_weft(issue))
@@ -1509,7 +1510,7 @@ def create_weft_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/claim")
@@ -1533,10 +1534,10 @@ def create_weft_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/release")
@@ -1559,16 +1560,16 @@ def create_weft_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except InvalidTransitionError as e:
             return _error_response(
-                str(e),
+                e.safe_message,
                 ErrorCode.INVALID_TRANSITION,
                 errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/claim-next")
@@ -1591,10 +1592,10 @@ def create_weft_router() -> APIRouter:
         try:
             issue = db.claim_next(assignee, actor=actor)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(issue_to_weft(issue))
@@ -1630,7 +1631,7 @@ def create_weft_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)

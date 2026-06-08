@@ -70,10 +70,11 @@ def _assert_flat_envelope(payload: dict, *, surface: str) -> None:
     # violation.
     allowed_top_level = {"error", "code", "details"}
     extra = set(payload.keys()) - allowed_top_level
-    # Allow transition-error hints (valid_transitions, hint) for now since
-    # TransitionError carries them as top-level optional fields. Anything
-    # else is a violation.
-    extra -= {"valid_transitions", "hint"}
+    # Allow transition-error hints (valid_transitions, hint) and the
+    # source-state recovery fields (current_status, type_name, to_state)
+    # since TransitionError carries them as top-level optional fields
+    # (filigree-d25e75cebf). Anything else is a violation.
+    extra -= {"valid_transitions", "hint", "current_status", "type_name", "to_state"}
     assert not extra, f"[{surface}] unexpected top-level keys {extra!r} — extras should be in 'details': {payload!r}"
 
 

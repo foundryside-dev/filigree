@@ -888,6 +888,7 @@ class IssuesMixin(DBMixinProtocol):
                         current.status,
                         to_state=status,
                         valid_transitions=valid_transitions,
+                        missing_fields=list(_transition_result.missing_fields) or None,
                         message=msg,
                     )
 
@@ -1641,6 +1642,7 @@ class IssuesMixin(DBMixinProtocol):
                         to_state=target,
                         mode=TransitionMode.BACKWARD,
                         valid_transitions=valid_transitions,
+                        missing_fields=list(result.missing_fields) or None,
                         message=msg,
                     )
 
@@ -2275,6 +2277,7 @@ class IssuesMixin(DBMixinProtocol):
             raise InvalidTransitionError(
                 row["type"],
                 row["status"],
+                next_action=next_action,
                 message=(
                     f"{row['type']!r} in {row['status']!r} is not directly startable: no single-hop "
                     f"transition to a working state. Move it to {next_action!r} first (or pass advance=True), "

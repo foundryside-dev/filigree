@@ -29,7 +29,7 @@ from filigree.mcp_server import (  # type: ignore[attr-defined]
     list_tools,
     read_context,
 )
-from filigree.types.api import ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode, InvalidTransitionError
 from tests.mcp._helpers import _parse
 
 
@@ -346,8 +346,10 @@ class TestUpdateAndClose:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
-        assert "assigned to 'agent-holder'" in data["error"]
-        assert "expected 'other-agent'" in data["error"]
+        # filigree-d25e75cebf: MCP error string is the generic safe form; the
+        # observed/expected assignees move to structured details.
+        assert data["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert "agent-holder" not in data["error"]
         assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
     async def test_update_issue_force_overwrite_corrupt_fields(self, mcp_db: FiligreeDB) -> None:
@@ -820,8 +822,10 @@ class TestLabels:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.CONFLICT
-        assert "assigned to 'agent-holder'" in data["error"]
-        assert "expected 'other-agent'" in data["error"]
+        # filigree-d25e75cebf: MCP error string is the generic safe form; the
+        # observed/expected assignees move to structured details.
+        assert data["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert "agent-holder" not in data["error"]
         assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
     async def test_remove_label_defaults_expected_assignee_to_actor_for_held_issue(self, mcp_db: FiligreeDB) -> None:
@@ -1418,10 +1422,13 @@ class TestStartWork:
 
         data = _parse(result)
         assert data["code"] == ErrorCode.INVALID_TRANSITION
-        # filigree-406e6b7ee0: actionable hint naming the intermediate hop.
-        assert "triage" in data["error"]
-        assert "not directly startable" in data["error"]
-        assert "confirmed" in data["error"]
+        # filigree-406e6b7ee0 + filigree-d25e75cebf: the untrusted MCP string is
+        # the generic safe form; the actionable intermediate hop is carried in
+        # structured fields (current_status + next_action) so the agent can still
+        # self-correct (move to 'confirmed', or pass advance=True).
+        assert data["error"] == InvalidTransitionError.SAFE_MESSAGE
+        assert data["current_status"] == "triage"
+        assert data["next_action"] == "confirmed"
         current = mcp_db.get_issue(issue.id)
         assert current.assignee == ""
         assert current.status == "triage"

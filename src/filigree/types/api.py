@@ -163,6 +163,14 @@ class TransitionError(TypedDict):
     valid_transitions: NotRequired[list[TransitionHint]]
     hint: NotRequired[str]
     reopen_available: NotRequired[bool]
+    # Source-state recovery details, retained when the human-readable ``error``
+    # is the generic ``InvalidTransitionError.safe_message`` (filigree-d25e75cebf)
+    # so an agent can still self-correct from a probe-safe wire string.
+    current_status: NotRequired[str]
+    type_name: NotRequired[str]
+    to_state: NotRequired[str]
+    next_action: NotRequired[str]
+    missing_fields: NotRequired[list[str]]
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +596,17 @@ class ClaimConflictError(ValueError):
     continue to work; the dashboard / MCP / CLI surfaces route this class
     to ``ErrorCode.CONFLICT`` via ``isinstance`` rather than message-text
     matching (2.1.0 §0.3).
+
+    ``str(exc)`` embeds the issue id and the observed/expected assignees for
+    CLI / operator diagnostics. Untrusted callers (HTTP, MCP) get
+    :attr:`safe_message` instead — a generic, interpolation-free string — so
+    arbitrary exception text is never reflected on the wire (filigree-d25e75cebf).
+    The observed/expected assignees are *coordination data, not confidential*;
+    they are retained in the structured ``details`` payload so agents can still
+    self-correct. This mirrors :class:`filigree.core.WrongProjectError`.
     """
+
+    SAFE_MESSAGE = "Issue is claimed by a different assignee"
 
     def __init__(self, issue_id: str, *, observed: str, expected: str, message: str | None = None) -> None:
         self.issue_id = issue_id
@@ -596,15 +614,32 @@ class ClaimConflictError(ValueError):
         self.expected = expected
         super().__init__(message or f"Cannot operate on {issue_id}: assigned to '{observed}' (expected '{expected}')")
 
+    @property
+    def safe_message(self) -> str:
+        """Generic, interpolation-free wording suitable for untrusted clients.
+
+        HTTP and MCP error *strings* surface this so arbitrary call-site
+        message text never reaches the wire; the observed/expected assignees
+        remain in the structured ``details`` (see :func:`claim_conflict_details`).
+        CLI handlers keep ``str(exc)`` for the rich operator view.
+        """
+        return self.SAFE_MESSAGE
+
 
 def claim_conflict_details(exc: ClaimConflictError) -> dict[str, str]:
     """Return the stable details payload for claim-aware CONFLICT envelopes."""
     return {"issue_id": exc.issue_id, "observed": exc.observed, "expected": exc.expected}
 
 
-def claim_conflict_envelope(exc: ClaimConflictError) -> ErrorResponse:
-    """Return the canonical ErrorResponse for claim-aware optimistic-lock conflicts."""
-    return ErrorResponse(error=str(exc), code=ErrorCode.CONFLICT, details=claim_conflict_details(exc))
+def claim_conflict_envelope(exc: ClaimConflictError, *, safe: bool = False) -> ErrorResponse:
+    """Return the canonical ErrorResponse for claim-aware optimistic-lock conflicts.
+
+    ``safe=True`` (untrusted HTTP/MCP surfaces) emits :attr:`ClaimConflictError.safe_message`
+    as the ``error`` string while keeping the full ``details`` payload; the
+    default ``safe=False`` (CLI) keeps the rich ``str(exc)`` operator string.
+    """
+    error = exc.safe_message if safe else str(exc)
+    return ErrorResponse(error=error, code=ErrorCode.CONFLICT, details=claim_conflict_details(exc))
 
 
 class IssueDeletionRefusedError(ValueError):
@@ -679,7 +714,19 @@ class InvalidTransitionError(ValueError):
     ``mode`` is in-process diagnostic context for reverse/escape-edge
     validation. Wire serializers intentionally choose the fields they expose
     instead of serializing ``__dict__`` wholesale.
+
+    ``str(exc)`` embeds ``type_name`` / ``current_status`` / ``to_state`` for
+    CLI / operator diagnostics. Untrusted callers (HTTP, MCP) get
+    :attr:`safe_message` — a generic, interpolation-free string — so arbitrary
+    call-site message text is never reflected on the wire (filigree-d25e75cebf).
+    The state and allowed-transition data are *coordination data, not
+    confidential*; they are retained in the structured details
+    (:func:`invalid_transition_details` / the MCP ``TransitionError`` payload)
+    so agents can still self-correct. Mirrors
+    :class:`filigree.core.WrongProjectError`.
     """
+
+    SAFE_MESSAGE = "Requested status transition is not allowed"
 
     def __init__(
         self,
@@ -689,6 +736,8 @@ class InvalidTransitionError(ValueError):
         to_state: str | None = None,
         mode: TransitionMode = TransitionMode.FORWARD,
         valid_transitions: list[TransitionHint] | None = None,
+        next_action: str | None = None,
+        missing_fields: list[str] | None = None,
         message: str | None = None,
     ) -> None:
         self.type_name = type_name
@@ -696,6 +745,13 @@ class InvalidTransitionError(ValueError):
         self.to_state = to_state
         self.mode = mode
         self.valid_transitions = valid_transitions
+        # Recovery hints that bespoke ``message=`` raises used to express only in
+        # prose: the intermediate hop a non-startable issue must move through
+        # (``next_action``), and the required fields a transition is waiting on
+        # (``missing_fields``). Carried structurally so the untrusted-surface
+        # ``safe_message`` does not strip them (filigree-d25e75cebf).
+        self.next_action = next_action
+        self.missing_fields = missing_fields
         if message is not None:
             super().__init__(message)
             return
@@ -722,20 +778,67 @@ class InvalidTransitionError(ValueError):
             to_state=self.to_state,
             mode=self.mode,
             valid_transitions=valid_transitions,
+            next_action=self.next_action,
+            missing_fields=self.missing_fields,
             message=str(self),
         )
 
+    @property
+    def safe_message(self) -> str:
+        """Generic, interpolation-free wording suitable for untrusted clients.
 
-def invalid_transition_details(exc: BaseException) -> dict[str, list[TransitionHint]] | None:
-    """Return the optional details payload for invalid-transition envelopes.
+        HTTP and MCP error *strings* surface this so arbitrary call-site
+        message text never reaches the wire; the source state and allowed
+        transitions remain in the structured details (see
+        :func:`invalid_transition_details`). CLI handlers keep ``str(exc)``
+        for the rich operator view.
+        """
+        return self.SAFE_MESSAGE
 
-    ``InvalidTransitionError.valid_transitions`` keeps ``None`` as the
-    internal "not yet enriched" sentinel. Public envelopes omit the details
-    key in that state rather than serializing ``valid_transitions: null``.
+
+def invalid_transition_details(exc: BaseException) -> dict[str, Any] | None:
+    """Return the structured recovery details for invalid-transition envelopes.
+
+    Always carries the *source state* (``current_status`` / ``type_name``, and
+    ``to_state`` when a rejected target is known) so an untrusted surface can
+    swap the human-readable string for :attr:`InvalidTransitionError.safe_message`
+    without stripping the agent's only self-correction signal
+    (filigree-d25e75cebf). ``valid_transitions`` is appended only when the
+    error was enriched — ``InvalidTransitionError.valid_transitions`` keeps
+    ``None`` as the internal "not yet computed" sentinel, and public envelopes
+    omit the key rather than serializing ``valid_transitions: null``.
     """
-    if isinstance(exc, InvalidTransitionError) and exc.valid_transitions is not None:
-        return {"valid_transitions": exc.valid_transitions}
-    return None
+    if not isinstance(exc, InvalidTransitionError):
+        return None
+    details: dict[str, Any] = {
+        "type_name": exc.type_name,
+        "current_status": exc.current_status,
+    }
+    if exc.to_state is not None:
+        details["to_state"] = exc.to_state
+    if exc.next_action is not None:
+        details["next_action"] = exc.next_action
+    if exc.missing_fields:
+        details["missing_fields"] = exc.missing_fields
+    if exc.valid_transitions is not None:
+        details["valid_transitions"] = exc.valid_transitions
+    return details
+
+
+def safe_error_message(exc: BaseException) -> str:
+    """Untrusted-surface error string for claim-aware issue writes.
+
+    Returns the generic :attr:`safe_message` for the typed
+    :class:`ClaimConflictError` / :class:`InvalidTransitionError` failures and
+    plain ``str(exc)`` for everything else (ordinary input-validation messages,
+    which are already caller-facing and carry no probe-sensitive text). Used by
+    the HTTP/MCP generic ``except ValueError`` arms so the same arm that handles
+    validation errors does not leak rich claim/transition text on the wire
+    (filigree-d25e75cebf). CLI keeps ``str(exc)``.
+    """
+    if isinstance(exc, (ClaimConflictError, InvalidTransitionError)):
+        return exc.safe_message
+    return str(exc)
 
 
 def allowed_transitions_clause(from_state: str, allowed_states: list[str]) -> str:

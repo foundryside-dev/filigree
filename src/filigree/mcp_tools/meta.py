@@ -564,7 +564,8 @@ async def _handle_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(claim_conflict_envelope(e))
+            # Untrusted MCP surface: generic safe_message string, details retained.
+            return _text(claim_conflict_envelope(e, safe=True))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     refresh_summary()
     issue = tracker.get_issue(args["issue_id"])
@@ -610,7 +611,8 @@ async def _handle_add_label(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(claim_conflict_envelope(e))
+            # Untrusted MCP surface: generic safe_message string, details retained.
+            return _text(claim_conflict_envelope(e, safe=True))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     refresh_summary()
     # Mutual-exclusivity displacement was previously silent — surface it as
@@ -654,7 +656,8 @@ async def _handle_remove_label(arguments: dict[str, Any]) -> list[TextContent]:
     except ValueError as e:
         msg = str(e)
         if isinstance(e, ClaimConflictError):
-            return _text(claim_conflict_envelope(e))
+            # Untrusted MCP surface: generic safe_message string, details retained.
+            return _text(claim_conflict_envelope(e, safe=True))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
     refresh_summary()
     status = "removed" if removed else "not_found"
