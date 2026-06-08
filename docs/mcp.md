@@ -5,8 +5,8 @@ Filigree exposes an MCP (Model Context Protocol) server so AI agents interact na
 !!! note "3.0.0 tool names"
     The tool names below are the subsystem-namespaced `<entity>_<verb>` names
     (`issue_get`, `finding_list`, `work_start`, …). 3.0.0 **removed** the legacy
-    flat names (`get_issue`, `list_findings`, `start_work`, …) that 2.3.0 still
-    resolved — a call to a removed name now returns the `NOT_FOUND` envelope. See
+    flat aliases that 2.3.0 still resolved — a call to a removed name now returns
+    the `NOT_FOUND` envelope. See
     the [3.0.0 consumer migration guide](MIGRATION-3.0.md#1-mcp-tool-name-namespacing)
     for the full old→new table.
 
