@@ -38,7 +38,7 @@ class TestObserveTool:
 
         mcp_db.registry = UnavailableRegistry()
 
-        result = await call_tool("observe", {"summary": "registry-backed note", "file_path": "src/observed.py"})
+        result = await call_tool("observation_create", {"summary": "registry-backed note", "file_path": "src/observed.py"})
         data = _parse(result)
 
         assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
@@ -48,7 +48,7 @@ class TestObserveTool:
         assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fobserved.py"
 
     async def test_observe_creates_observation(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "Something looks wrong"})
+        result = await call_tool("observation_create", {"summary": "Something looks wrong"})
         data = _parse(result)
         assert data["observation_id"].startswith("mcp-")
         assert "id" not in data
@@ -57,7 +57,7 @@ class TestObserveTool:
 
     async def test_observe_with_all_fields(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "observe",
+            "observation_create",
             {
                 "summary": "Null deref risk",
                 "detail": "result.data used without check",
@@ -72,23 +72,23 @@ class TestObserveTool:
         assert data["priority"] == 1
 
     async def test_observe_empty_summary_fails(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": ""})
+        result = await call_tool("observation_create", {"summary": ""})
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_observe_priority_zero(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "critical", "priority": 0})
+        result = await call_tool("observation_create", {"summary": "critical", "priority": 0})
         data = _parse(result)
         assert data["priority"] == 0
 
     async def test_observe_priority_four(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "backlog", "priority": 4})
+        result = await call_tool("observation_create", {"summary": "backlog", "priority": 4})
         data = _parse(result)
         assert data["priority"] == 4
 
     async def test_observe_with_source_issue(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "observe",
+            "observation_create",
             {
                 "summary": "side note",
                 "source_issue_id": "mcp-abc123",
@@ -98,7 +98,7 @@ class TestObserveTool:
         assert data["source_issue_id"] == "mcp-abc123"
 
     async def test_observe_huge_line_rejected_before_sqlite(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("observe", {"summary": "line overflow", "line": 9_223_372_036_854_775_808}))
+        data = _parse(await call_tool("observation_create", {"summary": "line overflow", "line": 9_223_372_036_854_775_808}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "line must be <=" in data["error"]
@@ -106,7 +106,7 @@ class TestObserveTool:
 
 class TestListObservationsTool:
     async def test_list_empty(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("list_observations", {})
+        result = await call_tool("observation_list", {})
         data = _parse(result)
         assert data["items"] == []
         assert data["has_more"] is False
@@ -114,7 +114,7 @@ class TestListObservationsTool:
     async def test_list_returns_observations(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_observation("First")
         mcp_db.create_observation("Second")
-        result = await call_tool("list_observations", {})
+        result = await call_tool("observation_list", {})
         data = _parse(result)
         assert len(data["items"]) == 2
         assert all("observation_id" in item for item in data["items"])
@@ -123,7 +123,7 @@ class TestListObservationsTool:
     async def test_list_with_file_path_filter(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_observation("api bug", file_path="src/api/routes.py")
         mcp_db.create_observation("core bug", file_path="src/core.py")
-        result = await call_tool("list_observations", {"file_path": "src/api"})
+        result = await call_tool("observation_list", {"file_path": "src/api"})
         data = _parse(result)
         assert len(data["items"]) == 1
         assert data["items"][0]["summary"] == "api bug"
@@ -131,14 +131,14 @@ class TestListObservationsTool:
     async def test_list_with_limit(self, mcp_db: FiligreeDB) -> None:
         for i in range(5):
             mcp_db.create_observation(f"Obs {i}")
-        result = await call_tool("list_observations", {"limit": 2})
+        result = await call_tool("observation_list", {"limit": 2})
         data = _parse(result)
         assert len(data["items"]) == 2
 
     async def test_list_has_more_true_when_more_results(self, mcp_db: FiligreeDB) -> None:
         for i in range(5):
             mcp_db.create_observation(f"Obs {i}")
-        result = await call_tool("list_observations", {"limit": 2})
+        result = await call_tool("observation_list", {"limit": 2})
         data = _parse(result)
         assert len(data["items"]) == 2
         assert data["has_more"] is True
@@ -146,7 +146,7 @@ class TestListObservationsTool:
     async def test_list_has_more_false_when_no_more_results(self, mcp_db: FiligreeDB) -> None:
         for i in range(2):
             mcp_db.create_observation(f"Obs {i}")
-        result = await call_tool("list_observations", {"limit": 5})
+        result = await call_tool("observation_list", {"limit": 5})
         data = _parse(result)
         assert len(data["items"]) == 2
         assert data["has_more"] is False
@@ -154,7 +154,7 @@ class TestListObservationsTool:
     async def test_list_with_file_id_filter(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("api bug", file_path="src/api.py")
         mcp_db.create_observation("other bug", file_path="src/other.py")
-        result = await call_tool("list_observations", {"file_id": obs["file_id"]})
+        result = await call_tool("observation_list", {"file_id": obs["file_id"]})
         data = _parse(result)
         assert len(data["items"]) == 1
         assert data["items"][0]["summary"] == "api bug"
@@ -162,7 +162,7 @@ class TestListObservationsTool:
     async def test_list_with_source_issue_filter(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_observation("from issue", source_issue_id="mcp-issue-1")
         mcp_db.create_observation("unrelated", source_issue_id="mcp-issue-2")
-        result = await call_tool("list_observations", {"source_issue_id": "mcp-issue-1"})
+        result = await call_tool("observation_list", {"source_issue_id": "mcp-issue-1"})
         data = _parse(result)
         assert len(data["items"]) == 1
         assert data["items"][0]["summary"] == "from issue"
@@ -172,7 +172,7 @@ class TestListObservationsTool:
         mcp_db.conn.execute("UPDATE observations SET expires_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", obs["id"]))
         mcp_db.conn.commit()
 
-        result = await call_tool("list_observations", {})
+        result = await call_tool("observation_list", {})
         data = _parse(result)
 
         assert data["items"] == []
@@ -183,14 +183,14 @@ class TestListObservationsTool:
 class TestDismissObservationTool:
     async def test_dismiss(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("To dismiss")
-        result = await call_tool("dismiss_observation", {"observation_id": obs["id"]})
+        result = await call_tool("observation_dismiss", {"observation_id": obs["id"]})
         data = _parse(result)
         assert data["status"] == "dismissed"
 
     async def test_dismiss_with_reason(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Not a bug")
         result = await call_tool(
-            "dismiss_observation",
+            "observation_dismiss",
             {
                 "observation_id": obs["id"],
                 "reason": "false positive",
@@ -202,7 +202,7 @@ class TestDismissObservationTool:
         assert row["reason"] == "false positive"
 
     async def test_dismiss_nonexistent_fails(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("dismiss_observation", {"observation_id": "nope-123"})
+        result = await call_tool("observation_dismiss", {"observation_id": "nope-123"})
         data = _parse(result)
         assert data["code"] == ErrorCode.NOT_FOUND
 
@@ -213,7 +213,7 @@ class TestBatchDismissTool:
         o2 = mcp_db.create_observation("Two")
         mcp_db.create_observation("Three")
         result = await call_tool(
-            "batch_dismiss_observations",
+            "observation_batch_dismiss",
             {
                 "observation_ids": [o1["id"], o2["id"]],
             },
@@ -227,13 +227,13 @@ class TestBatchDismissTool:
         assert data["failed"] == []
 
     async def test_batch_dismiss_empty_list(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("batch_dismiss_observations", {"observation_ids": []})
+        result = await call_tool("observation_batch_dismiss", {"observation_ids": []})
         data = _parse(result)
         assert data["succeeded"] == []
         assert data["failed"] == []
 
     async def test_batch_dismiss_invalid_ids_reports_not_found(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("batch_dismiss_observations", {"observation_ids": ["nope-1", "nope-2"]})
+        result = await call_tool("observation_batch_dismiss", {"observation_ids": ["nope-1", "nope-2"]})
         data = _parse(result)
         assert data["succeeded"] == []
         assert {f["id"] for f in data["failed"]} == {"nope-1", "nope-2"}
@@ -241,13 +241,13 @@ class TestBatchDismissTool:
 
     async def test_batch_dismiss_rejects_bare_string_ids(self, mcp_db: FiligreeDB) -> None:
         """filigree-45580755aa: bare string must not be iterated char-by-char."""
-        result = await call_tool("batch_dismiss_observations", {"observation_ids": "obs-123"})
+        result = await call_tool("observation_batch_dismiss", {"observation_ids": "obs-123"})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
     async def test_batch_dismiss_rejects_non_string_members(self, mcp_db: FiligreeDB) -> None:
         """filigree-45580755aa: non-string ids rejected up front."""
-        result = await call_tool("batch_dismiss_observations", {"observation_ids": [1, 2, 3]})
+        result = await call_tool("observation_batch_dismiss", {"observation_ids": [1, 2, 3]})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
@@ -261,7 +261,7 @@ class TestBatchDismissTool:
 
         result = _parse(
             await call_tool(
-                "batch_dismiss_observations",
+                "observation_batch_dismiss",
                 {"observation_ids": [obs["id"]], "response_detail": "full"},
             )
         )
@@ -277,7 +277,7 @@ class TestBatchPromoteTool:
         mcp_db.create_observation("Three")
 
         result = await call_tool(
-            "batch_promote_observations",
+            "observation_batch_promote",
             {
                 "observation_ids": [o1["id"], o2["id"]],
                 "type": "bug",
@@ -300,7 +300,7 @@ class TestBatchPromoteTool:
         obs = mcp_db.create_observation("Promote me")
 
         result = await call_tool(
-            "batch_promote_observations",
+            "observation_batch_promote",
             {"observation_ids": [obs["id"], "obs-missing"]},
         )
 
@@ -321,18 +321,18 @@ class TestBatchPromoteTool:
         monkeypatch.setattr(FiligreeDB, "batch_promote_observations", _promote)
         monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
 
-        data = _parse(await call_tool("batch_promote_observations", {"observation_ids": ["obs-1"]}))
+        data = _parse(await call_tool("observation_batch_promote", {"observation_ids": ["obs-1"]}))
 
         assert data["code"] == ErrorCode.IO
         assert "issue refresh failed" in data["error"]
 
     async def test_batch_promote_rejects_bare_string_ids(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("batch_promote_observations", {"observation_ids": "obs-123"})
+        result = await call_tool("observation_batch_promote", {"observation_ids": "obs-123"})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
     async def test_batch_promote_rejects_non_string_members(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("batch_promote_observations", {"observation_ids": [1, 2, 3]})
+        result = await call_tool("observation_batch_promote", {"observation_ids": [1, 2, 3]})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION
 
@@ -343,7 +343,7 @@ class TestObservationTriageTools:
         obs = mcp_db.create_observation("Same evidence")
 
         result = await call_tool(
-            "link_observation",
+            "observation_link",
             {
                 "observation_id": obs["id"],
                 "issue_id": issue.id,
@@ -364,7 +364,7 @@ class TestObservationTriageTools:
         obs = mcp_db.create_observation("Attach me")
 
         result = await call_tool(
-            "batch_link_observations",
+            "observation_batch_link",
             {
                 "observation_ids": [obs["id"], "obs-missing"],
                 "issue_id": issue.id,
@@ -380,7 +380,7 @@ class TestObservationTriageTools:
     async def test_batch_link_missing_issue_id_rejected(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Attach me")
 
-        data = _parse(await call_tool("batch_link_observations", {"observation_ids": [obs["id"]]}))
+        data = _parse(await call_tool("observation_batch_link", {"observation_ids": [obs["id"]]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "issue_id is required"
@@ -388,7 +388,7 @@ class TestObservationTriageTools:
     async def test_batch_link_non_string_issue_id_rejected(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Attach me")
 
-        data = _parse(await call_tool("batch_link_observations", {"observation_ids": [obs["id"]], "issue_id": ["bad"]}))
+        data = _parse(await call_tool("observation_batch_link", {"observation_ids": [obs["id"]], "issue_id": ["bad"]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "issue_id must be a string"
@@ -399,7 +399,7 @@ class TestObservationTriageTools:
 
         data = _parse(
             await call_tool(
-                "batch_link_observations",
+                "observation_batch_link",
                 {"observation_ids": [obs["id"]], "issue_id": issue.id, "disposition": ["evidence"]},
             )
         )
@@ -413,7 +413,7 @@ class TestObservationTriageTools:
 
         data = _parse(
             await call_tool(
-                "batch_link_observations",
+                "observation_batch_link",
                 {"observation_ids": [obs["id"]], "issue_id": issue.id, "reason": ["bad"]},
             )
         )
@@ -426,7 +426,7 @@ class TestObservationTriageTools:
         obs2 = mcp_db.create_observation("Second signal", priority=1)
 
         result = await call_tool(
-            "promote_observations_to_issue",
+            "observation_promote_to_issue",
             {
                 "observation_ids": [obs1["id"], obs2["id"]],
                 "type": "bug",
@@ -454,7 +454,7 @@ class TestObservationTriageTools:
         monkeypatch.setattr(FiligreeDB, "promote_observations_to_issue", _promote)
         monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
 
-        result = _parse(await call_tool("promote_observations_to_issue", {"observation_ids": ["obs-1"]}))
+        result = _parse(await call_tool("observation_promote_to_issue", {"observation_ids": ["obs-1"]}))
 
         assert result["code"] == ErrorCode.IO
         assert "issue refresh failed" in result["error"]
@@ -467,26 +467,26 @@ class TestSummaryRefreshOnObservationMutations:
 
     async def test_observe_refreshes_summary(self, mcp_db: FiligreeDB) -> None:
         with patch("filigree.mcp_server.write_summary") as mock_write:
-            await call_tool("observe", {"summary": "fresh observation"})
+            await call_tool("observation_create", {"summary": "fresh observation"})
         assert mock_write.called, "observe must call _refresh_summary"
 
     async def test_dismiss_refreshes_summary(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("will dismiss")
         with patch("filigree.mcp_server.write_summary") as mock_write:
-            await call_tool("dismiss_observation", {"observation_id": obs["id"]})
+            await call_tool("observation_dismiss", {"observation_id": obs["id"]})
         assert mock_write.called, "dismiss_observation must call _refresh_summary"
 
     async def test_batch_dismiss_refreshes_summary(self, mcp_db: FiligreeDB) -> None:
         o1 = mcp_db.create_observation("A")
         o2 = mcp_db.create_observation("B")
         with patch("filigree.mcp_server.write_summary") as mock_write:
-            await call_tool("batch_dismiss_observations", {"observation_ids": [o1["id"], o2["id"]]})
+            await call_tool("observation_batch_dismiss", {"observation_ids": [o1["id"], o2["id"]]})
         assert mock_write.called, "batch_dismiss_observations must call _refresh_summary"
 
     async def test_batch_promote_refreshes_summary(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("will promote")
         with patch("filigree.mcp_server.write_summary") as mock_write:
-            await call_tool("batch_promote_observations", {"observation_ids": [obs["id"]]})
+            await call_tool("observation_batch_promote", {"observation_ids": [obs["id"]]})
         assert mock_write.called, "batch_promote_observations must call _refresh_summary"
 
 
@@ -499,7 +499,7 @@ class TestPromoteObservationTool:
             priority=2,
         )
         result = await call_tool(
-            "promote_observation",
+            "observation_promote",
             {
                 "observation_id": obs["id"],
                 "type": "bug",
@@ -513,7 +513,7 @@ class TestPromoteObservationTool:
     async def test_promote_returns_flat_public_issue_after_enrichments(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Promote shape")
 
-        result = await call_tool("promote_observation", {"observation_id": obs["id"]})
+        result = await call_tool("observation_promote", {"observation_id": obs["id"]})
 
         data = _parse(result)
         assert "issue" not in data
@@ -525,7 +525,7 @@ class TestPromoteObservationTool:
     async def test_promote_with_title_override(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Original summary")
         result = await call_tool(
-            "promote_observation",
+            "observation_promote",
             {"observation_id": obs["id"], "title": "Better title"},
         )
         data = _parse(result)
@@ -537,7 +537,7 @@ class TestPromoteObservationTool:
             detail="Some detail",
         )
         result = await call_tool(
-            "promote_observation",
+            "observation_promote",
             {"observation_id": obs["id"], "description": "Extra context from review"},
         )
         data = _parse(result)
@@ -547,7 +547,7 @@ class TestPromoteObservationTool:
     async def test_promote_with_title_and_description(self, mcp_db: FiligreeDB) -> None:
         obs = mcp_db.create_observation("Original", detail="Original detail")
         result = await call_tool(
-            "promote_observation",
+            "observation_promote",
             {
                 "observation_id": obs["id"],
                 "title": "Custom title",
@@ -559,7 +559,7 @@ class TestPromoteObservationTool:
         assert "Prepended context" in data["description"]
 
     async def test_promote_nonexistent_fails(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("promote_observation", {"observation_id": "nope-123"})
+        result = await call_tool("observation_promote", {"observation_id": "nope-123"})
         data = _parse(result)
         assert data["code"] == ErrorCode.NOT_FOUND
 
@@ -567,7 +567,7 @@ class TestPromoteObservationTool:
         """Invalid issue_type should return 'validation_error', not 'not_found'."""
         obs = mcp_db.create_observation("test obs for type validation")
         result = await call_tool(
-            "promote_observation",
+            "observation_promote",
             {"observation_id": obs["id"], "type": "nonexistent_type"},
         )
         data = _parse(result)
@@ -575,13 +575,13 @@ class TestPromoteObservationTool:
         assert "nonexistent_type" in data["error"]
 
     async def test_promote_missing_observation_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("promote_observation", {}))
+        data = _parse(await call_tool("observation_promote", {}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "observation_id is required"
 
     async def test_promote_non_string_observation_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("promote_observation", {"observation_id": ["obs-1"]}))
+        data = _parse(await call_tool("observation_promote", {"observation_id": ["obs-1"]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "observation_id must be a string"
@@ -590,7 +590,7 @@ class TestPromoteObservationTool:
     async def test_promote_rejects_non_string_optional_fields(self, mcp_db: FiligreeDB, field: str) -> None:
         obs = mcp_db.create_observation("test obs for field validation")
 
-        data = _parse(await call_tool("promote_observation", {"observation_id": obs["id"], field: ["bad"]}))
+        data = _parse(await call_tool("observation_promote", {"observation_id": obs["id"], field: ["bad"]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == f"{field} must be a string"
@@ -605,7 +605,7 @@ class TestPromoteObservationTool:
         monkeypatch.setattr(FiligreeDB, "promote_observation", _promote)
         monkeypatch.setattr(FiligreeDB, "get_issue", _raise_sqlite_error)
 
-        data = _parse(await call_tool("promote_observation", {"observation_id": "obs-1"}))
+        data = _parse(await call_tool("observation_promote", {"observation_id": "obs-1"}))
 
         assert data["code"] == ErrorCode.IO
         assert "issue refresh failed" in data["error"]
@@ -616,7 +616,7 @@ class TestPromoteObservationTool:
 
         obs = mcp_db.create_observation("will warn")
         with patch.object(mcp_db, "add_label", side_effect=sqlite3.OperationalError("label boom")):
-            result = await call_tool("promote_observation", {"observation_id": obs["id"]})
+            result = await call_tool("observation_promote", {"observation_id": obs["id"]})
         data = _parse(result)
         assert "issue_id" in data
         assert "warnings" in data
@@ -638,7 +638,7 @@ class TestListObservationsStatsGuard:
         from unittest.mock import patch
 
         with patch.object(mcp_db, "list_observations", side_effect=sqlite3.InterfaceError("connection closed")):
-            result = await call_tool("list_observations", {})
+            result = await call_tool("observation_list", {})
         data = _parse(result)
         assert data["code"] == ErrorCode.IO
 
@@ -654,6 +654,6 @@ class TestPromoteExpiredObservationMCP:
             (obs["id"],),
         )
         mcp_db.conn.commit()
-        result = await call_tool("promote_observation", {"observation_id": obs["id"]})
+        result = await call_tool("observation_promote", {"observation_id": obs["id"]})
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION

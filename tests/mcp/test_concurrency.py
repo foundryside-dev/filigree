@@ -92,7 +92,7 @@ async def test_concurrent_mutations_both_persist(mcp_db: FiligreeDB) -> None:
     """Two concurrent ``create_issue`` calls must both persist."""
 
     async def _create(title: str) -> None:
-        result = await call_tool("create_issue", {"title": title})
+        result = await call_tool("issue_create", {"title": title})
         text = result[0].text
         assert '"error":' not in text, text
 

@@ -29,7 +29,7 @@ class TestAddEntityAssociationMCP:
         issue = mcp_db.create_issue("Refactor parser", priority=2)
         result = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": issue.id,
                     "entity_id": "py:func:parser.tokenize",
@@ -49,7 +49,7 @@ class TestAddEntityAssociationMCP:
         response shape matches the HTTP surface reported to Legis."""
         issue = mcp_db.create_issue("Governed", priority=2)
         mcp_db.add_entity_association(issue.id, "sei:gov", content_hash="h1", actor="legis", signature="deadbeef", signoff_seq=7)
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         row = result["associations"][0]
         assert row["signature"] == "deadbeef"
         assert row["signoff_seq"] == 7
@@ -58,7 +58,7 @@ class TestAddEntityAssociationMCP:
         issue = mcp_db.create_issue("Refactor parser", priority=2)
         result = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": issue.id,
                     "entity_id": "not-a-loomweave-locator",
@@ -73,7 +73,7 @@ class TestAddEntityAssociationMCP:
     async def test_attach_idempotent_preserves_attached_by(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("t", priority=2)
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {
                 "issue_id": issue.id,
                 "entity_id": "py:func:foo",
@@ -83,7 +83,7 @@ class TestAddEntityAssociationMCP:
         )
         second = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": issue.id,
                     "entity_id": "py:func:foo",
@@ -99,7 +99,7 @@ class TestAddEntityAssociationMCP:
         # mcp_db prefix is "mcp"; use a properly-prefixed-but-nonexistent id
         result = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": "mcp-nonexistent",
                     "entity_id": "py:func:foo",
@@ -113,7 +113,7 @@ class TestAddEntityAssociationMCP:
         issue = mcp_db.create_issue("t", priority=2)
         result = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": issue.id,
                     "entity_id": "",
@@ -126,7 +126,7 @@ class TestAddEntityAssociationMCP:
     async def test_attach_foreign_prefix_validation(self, mcp_db: FiligreeDB) -> None:
         result = _parse(
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {
                     "issue_id": "other-1234567890",
                     "entity_id": "py:func:foo",
@@ -141,12 +141,12 @@ class TestRemoveEntityAssociationMCP:
     async def test_remove_existing(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("t", priority=2)
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {"issue_id": issue.id, "entity_id": "py:func:foo", "content_hash": "h"},
         )
         result = _parse(
             await call_tool(
-                "remove_entity_association",
+                "entity_association_remove",
                 {"issue_id": issue.id, "entity_id": "py:func:foo"},
             )
         )
@@ -156,7 +156,7 @@ class TestRemoveEntityAssociationMCP:
         issue = mcp_db.create_issue("t", priority=2)
         result = _parse(
             await call_tool(
-                "remove_entity_association",
+                "entity_association_remove",
                 {"issue_id": issue.id, "entity_id": "py:func:not-attached"},
             )
         )
@@ -169,7 +169,7 @@ class TestRemoveEntityAssociationMCP:
         """
         result = _parse(
             await call_tool(
-                "remove_entity_association",
+                "entity_association_remove",
                 {"issue_id": "other-1234567890", "entity_id": "py:func:foo"},
             )
         )
@@ -179,20 +179,20 @@ class TestRemoveEntityAssociationMCP:
 class TestListEntityAssociationsMCP:
     async def test_list_empty(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("t", priority=2)
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         assert result == {"associations": []}
 
     async def test_list_returns_attached_rows(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("t", priority=2)
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {"issue_id": issue.id, "entity_id": "py:func:a", "content_hash": "h1"},
         )
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {"issue_id": issue.id, "entity_id": "py:func:b", "content_hash": "h2"},
         )
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         ids = {row["loomweave_entity_id"] for row in result["associations"]}
         assert ids == {"py:func:a", "py:func:b"}
 
@@ -200,21 +200,21 @@ class TestListEntityAssociationsMCP:
         """ADR-029 §"Decision 3": no drift_warning field — caller's job."""
         issue = mcp_db.create_issue("t", priority=2)
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {"issue_id": issue.id, "entity_id": "py:func:foo", "content_hash": "h"},
         )
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         assert "drift_warning" not in result["associations"][0]
 
     async def test_list_missing_issue_returns_not_found(self, mcp_db: FiligreeDB) -> None:
         """A typoed or deleted issue_id surfaces as NOT_FOUND rather than
         an empty associations list, matching the get_issue_files pattern.
         """
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": "mcp-nonexistent"}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": "mcp-nonexistent"}))
         assert result["code"] == ErrorCode.NOT_FOUND
 
     async def test_list_foreign_prefix_validation(self, mcp_db: FiligreeDB) -> None:
-        result = _parse(await call_tool("list_entity_associations", {"issue_id": "other-1234567890"}))
+        result = _parse(await call_tool("entity_association_list", {"issue_id": "other-1234567890"}))
         _assert_wrong_project_payload(result)
 
 
@@ -222,7 +222,7 @@ class TestListAssociationsByEntityMCP:
     """Reverse lookup — the surface Loomweave's issues_for (B.6) calls."""
 
     async def test_returns_empty_for_unbound_entity(self, mcp_db: FiligreeDB) -> None:
-        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "py:func:never"}))
+        result = _parse(await call_tool("entity_association_list_by_entity", {"entity_id": "py:func:never"}))
         assert result == {"associations": []}
 
     async def test_returns_every_issue_bound_to_entity(self, mcp_db: FiligreeDB) -> None:
@@ -232,25 +232,25 @@ class TestListAssociationsByEntityMCP:
         target = "py:func:parser.tokenize"
         for issue in (a, b):
             await call_tool(
-                "add_entity_association",
+                "entity_association_add",
                 {"issue_id": issue.id, "entity_id": target, "content_hash": "h"},
             )
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {"issue_id": c.id, "entity_id": "py:func:other", "content_hash": "h"},
         )
 
-        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": target}))
+        result = _parse(await call_tool("entity_association_list_by_entity", {"entity_id": target}))
         issue_ids = {row["issue_id"] for row in result["associations"]}
         assert issue_ids == {a.id, b.id}
         assert all(row["entity_id"] == target for row in result["associations"])
 
     async def test_rejects_blank_entity_id(self, mcp_db: FiligreeDB) -> None:
-        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "   "}))
+        result = _parse(await call_tool("entity_association_list_by_entity", {"entity_id": "   "}))
         assert result["code"] == ErrorCode.VALIDATION
 
     async def test_foreign_looking_entity_id_is_opaque_lookup_key(self, mcp_db: FiligreeDB) -> None:
-        result = _parse(await call_tool("list_associations_by_entity", {"entity_id": "other-1234567890"}))
+        result = _parse(await call_tool("entity_association_list_by_entity", {"entity_id": "other-1234567890"}))
         assert result == {"associations": []}
 
 
@@ -261,7 +261,7 @@ class TestRoundTrip:
 
         # Attach
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {
                 "issue_id": issue.id,
                 "entity_id": "py:func:lifecycle",
@@ -269,13 +269,13 @@ class TestRoundTrip:
                 "actor": "alice",
             },
         )
-        listed = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        listed = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         assert len(listed["associations"]) == 1
         assert listed["associations"][0]["content_hash_at_attach"] == "v1"
 
         # Re-attach with new hash (drift refresh) — preserves attached_by
         await call_tool(
-            "add_entity_association",
+            "entity_association_add",
             {
                 "issue_id": issue.id,
                 "entity_id": "py:func:lifecycle",
@@ -283,7 +283,7 @@ class TestRoundTrip:
                 "actor": "bob",
             },
         )
-        listed = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        listed = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         assert len(listed["associations"]) == 1  # still one row
         assert listed["associations"][0]["content_hash_at_attach"] == "v2"
         assert listed["associations"][0]["attached_by"] == "alice"
@@ -291,12 +291,12 @@ class TestRoundTrip:
         # Remove
         removed = _parse(
             await call_tool(
-                "remove_entity_association",
+                "entity_association_remove",
                 {"issue_id": issue.id, "entity_id": "py:func:lifecycle"},
             )
         )
         assert removed["removed"] is True
 
         # List is empty
-        listed = _parse(await call_tool("list_entity_associations", {"issue_id": issue.id}))
+        listed = _parse(await call_tool("entity_association_list", {"issue_id": issue.id}))
         assert listed == {"associations": []}

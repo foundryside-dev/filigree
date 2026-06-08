@@ -19,7 +19,6 @@ import sqlite3
 import sys
 import time
 import weakref
-from collections import Counter
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -67,14 +66,6 @@ server = Server("filigree")
 db: FiligreeDB | None = None
 _filigree_dir: Path | None = None
 _logger: logging.Logger | None = None
-
-# Deprecation telemetry (rollout plan §5.3): count how often callers reach a
-# tool via its DEPRECATED OLD name (keyed by the inbound wire name) so we can
-# PROVE, before old names are removed in Phase 2, that consumers have migrated.
-# The count is exact: ``call_tool`` runs as an asyncio coroutine on the single
-# event-loop thread, and there is no ``await`` between the Counter read and
-# write, so each ``+= 1`` is uninterruptible — the GIL is not relied upon.
-_deprecated_tool_calls: Counter[str] = Counter()
 
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
 _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_dir", default=None)
@@ -215,33 +206,6 @@ def _safe_path(raw: str) -> Path:
     return safe_path(raw, active_db.project_root)
 
 
-def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
-    """Record that a caller reached a tool via its deprecated OLD name.
-
-    Best-effort: increment the per-wire-name counter and emit a structured
-    ``deprecated_tool_name`` log event (matching the ``tool_call``/``tool_error``
-    style elsewhere in this module). ``wire_name`` is guaranteed to be a key of
-    ``RENAME_MAP`` by the caller's detection guard.
-
-    Runs before the handler's try/except in ``call_tool``, so it is wrapped in a
-    blanket guard: telemetry must NEVER break a real tool call.
-    """
-    try:
-        _deprecated_tool_calls[wire_name] += 1
-        if _logger:
-            _logger.info(
-                "deprecated_tool_name",
-                extra={
-                    "tool": wire_name,
-                    "canonical": RENAME_MAP[wire_name],
-                    "actor": arguments.get("actor"),
-                },
-            )
-    except Exception:
-        # Telemetry is best-effort; never break a tool call.
-        pass
-
-
 def get_mcp_status_payload() -> dict[str, Any]:
     """Return read-only MCP server health without requiring a usable DB.
 
@@ -356,13 +320,6 @@ def get_mcp_status_payload() -> dict[str, Any]:
                 "'actor' argument is an unauthenticated self-asserted claim; transport-bound identity "
                 "verification is deferred to filigree-81d3971467."
             ),
-        },
-        # Deprecation-readiness signal (plan §5.3): old-name usage counts.
-        # Surfaced only on the healthy path; degraded payloads above report
-        # *why* the connector is degraded, not migration telemetry.
-        "deprecated_tool_name_calls": {
-            "total": sum(_deprecated_tool_calls.values()),
-            "by_name": dict(_deprecated_tool_calls),
         },
     }
 
@@ -865,27 +822,33 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     t0 = time.monotonic()
 
-    # Canonicalize at the very top: callers may use the namespaced wire name
-    # (served by list_tools) OR the legacy old name. Resolve the new name back
-    # to its canonical (old) identity so EVERY downstream guard, dispatch, arg
-    # check, and log line operates on one name. Critically, this keeps the three
-    # ``name != "get_mcp_status"`` degraded-mode exemptions reachable via the new
-    # ``mcp_status_get`` name. Unknown names pass through unchanged to the
-    # NOT_FOUND fast-path below.
+    # Canonicalize at the very top: the namespaced ``<entity>_<verb>`` names
+    # served by ``list_tools`` are the ONLY accepted wire surface. Resolve each
+    # inbound new name to its canonical (old) internal identity so EVERY
+    # downstream guard, dispatch, arg check, and log line operates on one name.
+    # Critically, this keeps the three ``name != "get_mcp_status"`` degraded-mode
+    # exemptions reachable via the new ``mcp_status_get`` name.
     #
-    # Deprecation telemetry (plan §5.3): capture the inbound wire name BEFORE
-    # canonicalizing, then detect the deprecated-old-name case. A caller using
-    # the NEW name (``issue_get``) resolves to a different canonical name
-    # (``get_issue``) — not deprecated. A caller using the OLD name
-    # (``get_issue``) resolves to itself AND is a key of ``RENAME_MAP`` (has a
-    # successor) — deprecated. An unknown name resolves to itself but is not in
-    # ``RENAME_MAP``, so it is not recorded (it falls through to the NOT_FOUND
-    # fast-path). Recorded here, before the degraded-mode guards, so old-name
-    # usage is counted regardless of the call's eventual outcome.
-    wire_name = name
-    name = NEW_TO_OLD.get(name, name)
-    if name == wire_name and wire_name in RENAME_MAP:
-        _record_deprecated_tool_call(wire_name, arguments)
+    # Phase 2 (ADR-016, 3.0 major boundary): the legacy flat names were REMOVED
+    # here. A caller using one now gets the standard Unknown-tool NOT_FOUND
+    # envelope, exactly as a typo would (rename-plan §6.3). The old names are
+    # still the INTERNAL canonical handler keys — re-keying ``_all_handlers`` /
+    # ``TIER_MAP`` / ``_tool_argument_names`` to the new shape would silently
+    # collapse the tier markers and read-only/destructive hints (plan §5.1.1) —
+    # so a legacy name must be rejected explicitly: a bare passthrough would let
+    # it dispatch against its still-live handler key. The no-shadow invariant
+    # (``tests/mcp/test_rename_map.py``) guarantees old ∩ new = ∅, so a new name
+    # is never a ``RENAME_MAP`` key and a legacy name is never a ``NEW_TO_OLD``
+    # key — the two branches below are unambiguous.
+    canonical = NEW_TO_OLD.get(name)
+    if canonical is not None:
+        name = canonical
+    elif name in RENAME_MAP:
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text({"error": f"Unknown tool: {name}", "code": ErrorCode.NOT_FOUND})
+    # else: a genuinely unknown name — left unchanged so it reaches the existing
+    # NOT_FOUND fast-path after the degraded-mode guards (prior behavior).
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools

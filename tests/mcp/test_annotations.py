@@ -36,7 +36,7 @@ class TestAnnotationMcpTools:
         source.write_text("alpha\n")
         mcp_db.registry = UnavailableRegistry()
 
-        result = await call_tool("annotate_file", {"file_path": "src/mcp_ann.py", "note": "note"})
+        result = await call_tool("annotation_create", {"file_path": "src/mcp_ann.py", "note": "note"})
         data = _parse(result)
 
         assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
@@ -53,7 +53,7 @@ class TestAnnotationMcpTools:
         issue = mcp_db.create_issue("Linked issue")
 
         result = await call_tool(
-            "annotate_file",
+            "annotation_create",
             {
                 "file_path": "src/mcp_ann.py",
                 "note": "Future agents should read beta.",
@@ -80,14 +80,14 @@ class TestAnnotationMcpTools:
         first = mcp_db.annotate_file("a.py", "critical", critical=True)
         second = mcp_db.annotate_file("b.py", "regular", critical=False)
 
-        result = await call_tool("list_annotations", {"limit": 1})
+        result = await call_tool("annotation_list", {"limit": 1})
         data = _parse(result)
 
         assert set(data) == {"items", "has_more", "next_offset"}
         assert data["items"][0]["annotation_id"] == first["annotation_id"]
         assert "provenance" not in data["items"][0]
         assert data["has_more"] is True
-        result2 = await call_tool("list_annotations", {"limit": 10, "response_detail": "full"})
+        result2 = await call_tool("annotation_list", {"limit": 10, "response_detail": "full"})
         data2 = _parse(result2)
         assert {item["annotation_id"] for item in data2["items"]} == {first["annotation_id"], second["annotation_id"]}
         assert "provenance" in data2["items"][0]
@@ -103,7 +103,7 @@ class TestAnnotationMcpTools:
             links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
         )
 
-        result = await call_tool("close_issue", {"issue_id": issue.id, "reason": "done"})
+        result = await call_tool("issue_close", {"issue_id": issue.id, "reason": "done"})
         data = _parse(result)
 
         assert data["issue_id"] == issue.id
@@ -111,7 +111,7 @@ class TestAnnotationMcpTools:
         assert data["annotation_warnings"][0]["relationship"] == "must_consider"
 
     async def test_validation_errors_use_flat_envelope(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("annotate_file", {"file_path": "missing.py", "note": ""})
+        result = await call_tool("annotation_create", {"file_path": "missing.py", "note": ""})
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
         assert set(data) >= {"error", "code"}
@@ -134,7 +134,7 @@ class TestAnnotationMcpMutationTools:
 
         supersede = _parse(
             await call_tool(
-                "supersede_annotation",
+                "annotation_supersede",
                 {
                     "annotation_id": original["annotation_id"],
                     "replacement_annotation_id": replacement["annotation_id"],
@@ -144,12 +144,12 @@ class TestAnnotationMcpMutationTools:
         )
         assert supersede["status"] == "superseded"
 
-        resolved = _parse(await call_tool("resolve_annotation", {"annotation_id": replacement["annotation_id"], "reason": "done"}))
+        resolved = _parse(await call_tool("annotation_resolve", {"annotation_id": replacement["annotation_id"], "reason": "done"}))
         assert resolved["status"] == "resolved"
 
         promoted = _parse(
             await call_tool(
-                "promote_annotation",
+                "annotation_promote",
                 {
                     "annotation_id": replacement["annotation_id"],
                     "target_type": "observation",
@@ -163,7 +163,7 @@ class TestAnnotationMcpMutationTools:
 
         carried = _parse(
             await call_tool(
-                "carry_forward_annotation",
+                "annotation_carry_forward",
                 {
                     "annotation_id": original["annotation_id"],
                     "from_target_id": old_issue.id,
@@ -189,7 +189,7 @@ class TestAnnotationMcpMutationTools:
         )
 
         result = await call_tool(
-            "carry_forward_annotation",
+            "annotation_carry_forward",
             {
                 "annotation_id": annotation["annotation_id"],
                 "from_target_id": unrelated_issue.id,

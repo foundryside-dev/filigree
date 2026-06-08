@@ -19,7 +19,7 @@ class TestMCPCommentErrors:
 
     async def test_add_comment_missing_issue(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "add_comment",
+            "comment_add",
             {"issue_id": "mcp-nonexistent", "text": "Hello"},
         )
         data = _parse(result)
@@ -28,7 +28,7 @@ class TestMCPCommentErrors:
 
     async def test_get_comments_missing_issue(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "get_comments",
+            "comment_list",
             {"issue_id": "mcp-nonexistent"},
         )
         data = _parse(result)
@@ -39,7 +39,7 @@ class TestMCPCommentErrors:
         """Verify normal add_comment still works after the fix."""
         issue = mcp_db.create_issue("Commentable")
         result = await call_tool(
-            "add_comment",
+            "comment_add",
             {"issue_id": issue.id, "text": "Hello"},
         )
         data = _parse(result)
@@ -53,7 +53,7 @@ class TestMCPLabelErrors:
 
     async def test_add_label_missing_issue(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "add_label",
+            "label_add",
             {"issue_id": "mcp-nonexistent", "label": "bug"},
         )
         data = _parse(result)
@@ -62,7 +62,7 @@ class TestMCPLabelErrors:
 
     async def test_remove_label_missing_issue(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "remove_label",
+            "label_remove",
             {"issue_id": "mcp-nonexistent", "label": "bug"},
         )
         data = _parse(result)
@@ -73,7 +73,7 @@ class TestMCPLabelErrors:
         """Verify normal add_label still works after the fix."""
         issue = mcp_db.create_issue("Labelable")
         result = await call_tool(
-            "add_label",
+            "label_add",
             {"issue_id": issue.id, "label": "urgent"},
         )
         data = _parse(result)
@@ -88,7 +88,7 @@ def test_meta_errors_use_error_code_enum(mcp_client_for_empty_project) -> None:
     valid ErrorCode member."""
     client = mcp_client_for_empty_project
     # add_comment on a non-existent issue
-    result = client.call_tool("add_comment", {"issue_id": "nope-123", "text": "x"})
+    result = client.call_tool("comment_add", {"issue_id": "nope-123", "text": "x"})
     payload = json.loads(result.content[0].text)
     assert payload["code"] in {e.value for e in ErrorCode}
 
@@ -102,7 +102,7 @@ class TestMCPDispatchSchemaValidation:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/app.py",
                     "rule_id": "bad-severity",
@@ -122,7 +122,7 @@ class TestMCPDispatchSchemaValidation:
 
         monkeypatch.setitem(mcp_mod._all_handlers, "batch_close", unreachable)
 
-        data = _parse(await call_tool("batch_close", {"issue_ids": "issue-1"}))
+        data = _parse(await call_tool("issue_batch_close", {"issue_ids": "issue-1"}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "issue_ids" in data["error"]

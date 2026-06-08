@@ -52,7 +52,7 @@ class TestIssueBatchDetail:
     async def test_batch_close_slim_default(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
         b = mcp_db.create_issue("B")
-        result = await call_tool("batch_close", {"issue_ids": [a.id, b.id]})
+        result = await call_tool("issue_batch_close", {"issue_ids": [a.id, b.id]})
         data = _parse(result)
         assert len(data["succeeded"]) == 2
         for item in data["succeeded"]:
@@ -60,7 +60,7 @@ class TestIssueBatchDetail:
 
     async def test_batch_close_full(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", description="full-detail trigger")
-        result = await call_tool("batch_close", {"issue_ids": [a.id], "response_detail": "full"})
+        result = await call_tool("issue_batch_close", {"issue_ids": [a.id], "response_detail": "full"})
         data = _parse(result)
         item = data["succeeded"][0]
         assert set(item.keys()) >= _FULL_ONLY_KEYS
@@ -68,14 +68,14 @@ class TestIssueBatchDetail:
 
     async def test_batch_update_slim_default(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
-        result = await call_tool("batch_update", {"issue_ids": [a.id], "priority": 0})
+        result = await call_tool("issue_batch_update", {"issue_ids": [a.id], "priority": 0})
         data = _parse(result)
         assert set(data["succeeded"][0].keys()) == _SLIM_KEYS
 
     async def test_batch_update_full(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", description="d")
         result = await call_tool(
-            "batch_update",
+            "issue_batch_update",
             {"issue_ids": [a.id], "priority": 0, "response_detail": "full"},
         )
         data = _parse(result)
@@ -83,14 +83,14 @@ class TestIssueBatchDetail:
 
     async def test_batch_close_invalid_detail_returns_validation(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
-        result = await call_tool("batch_close", {"issue_ids": [a.id], "response_detail": "medium"})
+        result = await call_tool("issue_batch_close", {"issue_ids": [a.id], "response_detail": "medium"})
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_batch_update_invalid_detail_returns_validation(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
         result = await call_tool(
-            "batch_update",
+            "issue_batch_update",
             {"issue_ids": [a.id], "priority": 0, "response_detail": "medium"},
         )
         data = _parse(result)
@@ -106,14 +106,14 @@ class TestIssueBatchDetail:
 class TestMetaBatchDetail:
     async def test_batch_add_label_slim_default(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
-        result = await call_tool("batch_add_label", {"issue_ids": [a.id], "label": "x"})
+        result = await call_tool("label_batch_add", {"issue_ids": [a.id], "label": "x"})
         data = _parse(result)
         assert data["succeeded"] == [a.id]
 
     async def test_batch_add_label_full(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", description="d")
         result = await call_tool(
-            "batch_add_label",
+            "label_batch_add",
             {"issue_ids": [a.id], "label": "x", "response_detail": "full"},
         )
         data = _parse(result)
@@ -124,14 +124,14 @@ class TestMetaBatchDetail:
 
     async def test_batch_remove_label_slim_default(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", labels=["x"])
-        result = await call_tool("batch_remove_label", {"issue_ids": [a.id], "label": "x"})
+        result = await call_tool("label_batch_remove", {"issue_ids": [a.id], "label": "x"})
         data = _parse(result)
         assert data["succeeded"] == [a.id]
 
     async def test_batch_remove_label_full(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", description="d", labels=["x"])
         result = await call_tool(
-            "batch_remove_label",
+            "label_batch_remove",
             {"issue_ids": [a.id], "label": "x", "response_detail": "full"},
         )
         data = _parse(result)
@@ -142,14 +142,14 @@ class TestMetaBatchDetail:
 
     async def test_batch_add_comment_slim_default(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A")
-        result = await call_tool("batch_add_comment", {"issue_ids": [a.id], "text": "hi"})
+        result = await call_tool("comment_batch_add", {"issue_ids": [a.id], "text": "hi"})
         data = _parse(result)
         assert data["succeeded"] == [a.id]
 
     async def test_batch_add_comment_full(self, mcp_db: FiligreeDB) -> None:
         a = mcp_db.create_issue("A", description="d")
         result = await call_tool(
-            "batch_add_comment",
+            "comment_batch_add",
             {"issue_ids": [a.id], "text": "hi", "response_detail": "full"},
         )
         data = _parse(result)
@@ -168,7 +168,7 @@ class TestFindingsBatchDetail:
     async def test_batch_update_findings_slim_default(self, mcp_db: FiligreeDB) -> None:
         file_id = seed_file(mcp_db, path="src/x.py")
         finding_id = seed_finding(mcp_db, file_id=file_id)
-        result = await call_tool("batch_update_findings", {"finding_ids": [finding_id], "status": "fixed"})
+        result = await call_tool("finding_batch_update", {"finding_ids": [finding_id], "status": "fixed"})
         data = _parse(result)
         assert data["succeeded"] == [finding_id]
 
@@ -176,7 +176,7 @@ class TestFindingsBatchDetail:
         file_id = seed_file(mcp_db, path="src/y.py")
         finding_id = seed_finding(mcp_db, file_id=file_id)
         result = await call_tool(
-            "batch_update_findings",
+            "finding_batch_update",
             {"finding_ids": [finding_id], "status": "fixed", "response_detail": "full"},
         )
         data = _parse(result)
@@ -196,14 +196,14 @@ class TestFindingsBatchDetail:
 class TestObservationsBatchDetail:
     async def test_batch_dismiss_slim_default(self, mcp_db: FiligreeDB) -> None:
         ids = seed_observations(mcp_db, count=2)
-        result = await call_tool("batch_dismiss_observations", {"observation_ids": ids})
+        result = await call_tool("observation_batch_dismiss", {"observation_ids": ids})
         data = _parse(result)
         assert set(data["succeeded"]) == set(ids)
 
     async def test_batch_dismiss_full(self, mcp_db: FiligreeDB) -> None:
         ids = seed_observations(mcp_db, count=2)
         result = await call_tool(
-            "batch_dismiss_observations",
+            "observation_batch_dismiss",
             {"observation_ids": ids, "response_detail": "full"},
         )
         data = _parse(result)
@@ -215,7 +215,7 @@ class TestObservationsBatchDetail:
 
     async def test_batch_promote_slim_default(self, mcp_db: FiligreeDB) -> None:
         ids = seed_observations(mcp_db, count=2)
-        result = await call_tool("batch_promote_observations", {"observation_ids": ids})
+        result = await call_tool("observation_batch_promote", {"observation_ids": ids})
         data = _parse(result)
         assert len(data["succeeded"]) == 2
         for item in data["succeeded"]:
@@ -224,7 +224,7 @@ class TestObservationsBatchDetail:
     async def test_batch_promote_full(self, mcp_db: FiligreeDB) -> None:
         ids = seed_observations(mcp_db, count=2)
         result = await call_tool(
-            "batch_promote_observations",
+            "observation_batch_promote",
             {"observation_ids": ids, "response_detail": "full"},
         )
         data = _parse(result)

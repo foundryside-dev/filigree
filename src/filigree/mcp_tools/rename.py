@@ -8,15 +8,20 @@ identity is the client wrapper's job; the entity token (``finding_`` / ``file_``
 / ``issue_``) does the intra-server disambiguation this rename exists for.
 
 This module is **data + a derived inverse only**, and it **is** consumed by
-``mcp_server`` (Phase-1 aliasing — see
-``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5):
+``mcp_server`` (the namespaced wire surface — see
+``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5-6):
 
 * the canonicalize-at-top resolve step in ``call_tool`` maps an inbound new
-  name to its canonical (old) name via ``NEW_TO_OLD``, keeping every downstream
-  guard/dispatch valid;
-* ``list_tools`` renames the served ``Tool.name`` via ``RENAME_MAP``;
-* a deprecation-telemetry counter records inbound calls that arrive under an
-  old name so the cutover can be tracked.
+  name to its canonical (old) internal name via ``NEW_TO_OLD``, keeping every
+  downstream guard/dispatch valid;
+* ``list_tools`` renames the served ``Tool.name`` via ``RENAME_MAP``.
+
+Phase 2 (ADR-016, the 3.0 major boundary) removed the legacy flat names from the
+wire: ``call_tool`` rejects any name that is a ``RENAME_MAP`` *key* (an old
+name) with the standard Unknown-tool NOT_FOUND envelope. The old names survive
+only as the *internal* canonical handler keys — never as an accepted wire name —
+so ``NEW_TO_OLD`` is the live new→canonical dispatch table, not a transition
+shim.
 
 It remains the frozen, CI-validated source of truth so the agreed names cannot
 drift. ``RENAME_MAP`` is exposed as a read-only ``MappingProxyType`` so the

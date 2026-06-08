@@ -39,6 +39,155 @@ After the migration completes, restart the dashboard / server / MCP processes so
 they reopen against `.weft/filigree/`. A daemon left running from before the move
 keeps writing to its now-stale connection until it is restarted.
 
+## Upgrading to 3.0.0 (MCP tool-name namespacing)
+
+3.0.0 completes the MCP tool-name namespacing started in 2.3.0 (ADR-016). The
+~115 flat tool names (`get_issue`, `list_findings`, `start_work`, …) were
+renamed to a subsystem-namespaced `<entity>_<verb>` convention (`issue_get`,
+`finding_list`, `work_start`, …) so an agent — and the tool-search ranker — can
+disambiguate the catalogue by entity prefix.
+
+**2.3.0 served the new names while still accepting the old ones** (a transition
+window: `list_tools` advertised only the 116 namespaced names, but `call_tool`
+resolved a legacy name to the same handler). **3.0.0 removes that fallback.** A
+call to a legacy flat name now returns the standard `NOT_FOUND` (`Unknown tool`)
+envelope, exactly as a typo would. There is no `filigree_` prefix on the new
+names: MCP clients already surface every tool as `mcp__filigree__<name>`, so the
+server token is supplied by the client wrapper.
+
+### What you must do
+
+- **MCP consumers (federation siblings, agents, scripts) that bind tool names by
+  string must switch to the new names.** Any caller that reads `list_tools`
+  dynamically already sees only the new names and needs no change — only
+  hardcoded old names break. The full mapping is below.
+- The **CLI is unaffected** — CLI verbs (`start-next-work`, `close`, …) are a
+  separate surface and were never renamed.
+- The deprecation-telemetry signal that 2.3.0 surfaced in `get_mcp_status`
+  (`deprecated_tool_name_calls`) is **removed** — there is no longer a deprecated
+  call to count.
+
+### Full old → new tool-name mapping
+
+| Old name (removed) | New name |
+| --- | --- |
+| `batch_close` | `issue_batch_close` |
+| `batch_update` | `issue_batch_update` |
+| `close_issue` | `issue_close` |
+| `create_issue` | `issue_create` |
+| `delete_issue` | `issue_delete` |
+| `get_issue` | `issue_get` |
+| `get_issue_annotations` | `issue_annotation_list` |
+| `get_issue_events` | `issue_event_list` |
+| `get_issue_files` | `issue_file_list` |
+| `label_subtree` | `issue_subtree_label` |
+| `list_issues` | `issue_list` |
+| `reopen_issue` | `issue_reopen` |
+| `search_issues` | `issue_search` |
+| `update_issue` | `issue_update` |
+| `validate_issue` | `issue_validate` |
+| `claim_issue` | `work_claim` |
+| `claim_next` | `work_claim_next` |
+| `get_blocked` | `work_blocked` |
+| `get_ready` | `work_ready` |
+| `get_stale_claims` | `work_stale_list` |
+| `heartbeat_work` | `work_heartbeat` |
+| `reclaim_issue` | `work_reclaim` |
+| `release_claim` | `work_release` |
+| `release_my_claims` | `work_release_mine` |
+| `start_next_work` | `work_start_next` |
+| `start_work` | `work_start` |
+| `add_dependency` | `dependency_add` |
+| `get_critical_path` | `dependency_critical_path` |
+| `remove_dependency` | `dependency_remove` |
+| `add_plan_step` | `plan_step_add` |
+| `create_plan` | `plan_create` |
+| `create_plan_from_file` | `plan_create_from_file` |
+| `get_plan` | `plan_get` |
+| `label_plan_tree` | `plan_label_tree` |
+| `move_plan_step` | `plan_step_move` |
+| `retarget_plan_dependency` | `plan_dependency_retarget` |
+| `add_label` | `label_add` |
+| `batch_add_label` | `label_batch_add` |
+| `batch_remove_label` | `label_batch_remove` |
+| `get_label_taxonomy` | `label_taxonomy_get` |
+| `list_labels` | `label_list` |
+| `remove_label` | `label_remove` |
+| `add_comment` | `comment_add` |
+| `batch_add_comment` | `comment_batch_add` |
+| `get_comments` | `comment_list` |
+| `list_reconciliation_debt` | `reconciliation_debt_list` |
+| `add_file_association` | `file_association_add` |
+| `delete_file_record` | `file_delete` |
+| `get_file` | `file_get` |
+| `get_file_annotations` | `file_annotation_list` |
+| `get_file_timeline` | `file_timeline_get` |
+| `list_files` | `file_list` |
+| `register_file` | `file_register` |
+| `batch_update_findings` | `finding_batch_update` |
+| `dismiss_finding` | `finding_dismiss` |
+| `get_finding` | `finding_get` |
+| `list_findings` | `finding_list` |
+| `promote_finding` | `finding_promote` |
+| `promote_finding_and_attach_entity` | `finding_promote_and_attach_entity` |
+| `report_finding` | `finding_report` |
+| `update_finding` | `finding_update` |
+| `annotate_file` | `annotation_create` |
+| `carry_forward_annotation` | `annotation_carry_forward` |
+| `get_annotation` | `annotation_get` |
+| `link_annotation` | `annotation_link` |
+| `list_annotations` | `annotation_list` |
+| `list_attention_annotations` | `annotation_attention_list` |
+| `promote_annotation` | `annotation_promote` |
+| `resolve_annotation` | `annotation_resolve` |
+| `supersede_annotation` | `annotation_supersede` |
+| `unlink_annotation` | `annotation_unlink` |
+| `update_annotation` | `annotation_update` |
+| `batch_dismiss_observations` | `observation_batch_dismiss` |
+| `batch_link_observations` | `observation_batch_link` |
+| `batch_promote_observations` | `observation_batch_promote` |
+| `dismiss_observation` | `observation_dismiss` |
+| `link_observation` | `observation_link` |
+| `list_observations` | `observation_list` |
+| `observe` | `observation_create` |
+| `promote_observation` | `observation_promote` |
+| `promote_observations_to_issue` | `observation_promote_to_issue` |
+| `add_entity_association` | `entity_association_add` |
+| `list_associations_by_entity` | `entity_association_list_by_entity` |
+| `list_entity_associations` | `entity_association_list` |
+| `remove_entity_association` | `entity_association_remove` |
+| `disable_scanner` | `scanner_disable` |
+| `enable_scanner` | `scanner_enable` |
+| `list_available_scanners` | `scanner_available_list` |
+| `list_scanners` | `scanner_list` |
+| `get_scan_status` | `scan_status_get` |
+| `preview_scan` | `scan_preview` |
+| `trigger_scan` | `scan_trigger` |
+| `trigger_scan_batch` | `scan_trigger_batch` |
+| `list_prompt_packs` | `prompt_pack_list` |
+| `get_changes` | `change_list` |
+| `get_template` | `template_get` |
+| `get_type_info` | `type_get` |
+| `list_types` | `type_list` |
+| `list_packs` | `pack_list` |
+| `get_schema` | `schema_get` |
+| `explain_status` | `workflow_status_explain` |
+| `get_valid_transitions` | `workflow_transition_list` |
+| `get_workflow_guide` | `workflow_guide_get` |
+| `get_workflow_statuses` | `workflow_status_list` |
+| `get_stats` | `stats_get` |
+| `get_summary` | `summary_get` |
+| `get_metrics` | `metrics_get` |
+| `get_mcp_status` | `mcp_status_get` |
+| `session_context` | `session_context_get` |
+| `archive_closed` | `admin_archive_closed` |
+| `compact_events` | `admin_compact_events` |
+| `export_jsonl` | `admin_export_jsonl` |
+| `import_jsonl` | `admin_import_jsonl` |
+| `reload_templates` | `admin_reload_templates` |
+| `restart_dashboard` | `admin_restart_dashboard` |
+| `undo_last` | `admin_undo_last` |
+
 ## Upgrading from 2.1.0 to 2.1.1
 
 Filigree 2.1.1 ships database schema `user_version` 21 (2.1.0 ships 20). The

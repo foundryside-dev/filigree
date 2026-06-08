@@ -162,9 +162,9 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     import json as _json
 
     for tool_name, args in (
-        ("get_issue", {"issue_id": "anything"}),
-        ("list_issues", {}),
-        ("create_issue", {"title": "x", "type": "task"}),
+        ("issue_get", {"issue_id": "anything"}),
+        ("issue_list", {}),
+        ("issue_create", {"title": "x", "type": "task"}),
     ):
         result = asyncio.run(mcp_mod.call_tool(tool_name, args))
         assert len(result) == 1, f"{tool_name}: expected single TextContent reply"
@@ -179,7 +179,7 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     payload = _json.loads(result[0].text)
     assert payload["code"] == "SCHEMA_MISMATCH"
 
-    status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))
+    status_result = asyncio.run(mcp_mod.call_tool("mcp_status_get", {}))
     status_payload = _json.loads(status_result[0].text)
     assert status_payload["status"] == "schema_mismatch"
     runtime = status_payload["runtime"]

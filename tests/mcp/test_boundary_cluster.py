@@ -29,7 +29,7 @@ class TestRemoveDependencyWrongProject:
         a = mcp_db.create_issue("A")
         # mcp_db uses prefix "mcp"; a foreign-prefix id triggers WrongProjectError
         result = await call_tool(
-            "remove_dependency",
+            "dependency_remove",
             {"from_issue_id": a.id, "to_issue_id": "other-deadbeef12"},
         )
         data = _parse(result)
@@ -41,7 +41,7 @@ class TestRemoveDependencyWrongProject:
         a = mcp_db.create_issue("A")
         b = mcp_db.create_issue("B")
         result = await call_tool(
-            "remove_dependency",
+            "dependency_remove",
             {"from_issue_id": a.id, "to_issue_id": b.id},
         )
         data = _parse(result)
@@ -52,7 +52,7 @@ class TestRemoveDependencyWrongProject:
         """Removing from a missing issue returns NOT_FOUND, not a not_found edge status."""
         b = mcp_db.create_issue("B")
         result = await call_tool(
-            "remove_dependency",
+            "dependency_remove",
             {"from_issue_id": "mcp-0000000000", "to_issue_id": b.id},
         )
         data = _parse(result)
@@ -69,7 +69,7 @@ class TestClaimBlankAssignee:
         """claim_issue with explicit actor but blank assignee must be validation_error."""
         issue = mcp_db.create_issue("Target")
         result = await call_tool(
-            "claim_issue",
+            "work_claim",
             {"id": issue.id, "assignee": "", "actor": "user"},
         )
         data = _parse(result)
@@ -78,7 +78,7 @@ class TestClaimBlankAssignee:
     async def test_claim_issue_whitespace_assignee_is_validation_error(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Target")
         result = await call_tool(
-            "claim_issue",
+            "work_claim",
             {"id": issue.id, "assignee": "   ", "actor": "user"},
         )
         data = _parse(result)
@@ -88,7 +88,7 @@ class TestClaimBlankAssignee:
         """claim_next with explicit actor but blank assignee must be validation_error (not crash)."""
         mcp_db.create_issue("Target")
         result = await call_tool(
-            "claim_next",
+            "work_claim_next",
             {"assignee": "", "actor": "user"},
         )
         data = _parse(result)
@@ -98,7 +98,7 @@ class TestClaimBlankAssignee:
     async def test_claim_next_whitespace_assignee_returns_error(self, mcp_db: FiligreeDB) -> None:
         mcp_db.create_issue("Target")
         result = await call_tool(
-            "claim_next",
+            "work_claim_next",
             {"assignee": "\t\t", "actor": "user"},
         )
         data = _parse(result)
@@ -130,7 +130,7 @@ class TestPromoteFindingPriority:
     async def test_string_priority_rejected_as_validation_error(self, mcp_db: FiligreeDB, finding_id: str) -> None:
         """String priority must return validation_error, not TypeError."""
         result = await call_tool(
-            "promote_finding",
+            "finding_promote",
             {"finding_id": finding_id, "priority": "high"},
         )
         data = _parse(result)
@@ -139,7 +139,7 @@ class TestPromoteFindingPriority:
 
     async def test_float_priority_rejected(self, mcp_db: FiligreeDB, finding_id: str) -> None:
         result = await call_tool(
-            "promote_finding",
+            "finding_promote",
             {"finding_id": finding_id, "priority": 2.5},
         )
         data = _parse(result)
@@ -147,7 +147,7 @@ class TestPromoteFindingPriority:
 
     async def test_out_of_range_priority_rejected(self, mcp_db: FiligreeDB, finding_id: str) -> None:
         result = await call_tool(
-            "promote_finding",
+            "finding_promote",
             {"finding_id": finding_id, "priority": 99},
         )
         data = _parse(result)
@@ -156,7 +156,7 @@ class TestPromoteFindingPriority:
     async def test_bool_priority_rejected(self, mcp_db: FiligreeDB, finding_id: str) -> None:
         """bool is an int subclass but must be rejected (True would silently become priority=1)."""
         result = await call_tool(
-            "promote_finding",
+            "finding_promote",
             {"finding_id": finding_id, "priority": True},
         )
         data = _parse(result)
@@ -170,40 +170,40 @@ class TestPromoteFindingPriority:
 
 class TestPaginationValidation:
     async def test_string_limit_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("search_issues", {"query": "x", "limit": "5"})
+        result = await call_tool("issue_search", {"query": "x", "limit": "5"})
         data = _parse(result)
         assert isinstance(data, dict), f"crashed: {data!r}"
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_negative_limit_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("list_issues", {"limit": -1})
+        result = await call_tool("issue_list", {"limit": -1})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_negative_offset_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("list_issues", {"offset": -1})
+        result = await call_tool("issue_list", {"offset": -1})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_string_no_limit_rejected(self, mcp_db: FiligreeDB) -> None:
         """'false' as string must not be treated as truthy."""
-        result = await call_tool("search_issues", {"query": "x", "no_limit": "false"})
+        result = await call_tool("issue_search", {"query": "x", "no_limit": "false"})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_bool_limit_rejected(self, mcp_db: FiligreeDB) -> None:
         """Bool is int subclass — must not be accepted as limit."""
-        result = await call_tool("list_issues", {"limit": True})
+        result = await call_tool("issue_list", {"limit": True})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_no_limit_huge_limit_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("list_issues", {"no_limit": True, "limit": 9223372036854775807})
+        result = await call_tool("issue_list", {"no_limit": True, "limit": 9223372036854775807})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_huge_offset_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("list_observations", {"offset": 9223372036854775808})
+        result = await call_tool("observation_list", {"offset": 9223372036854775808})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
@@ -215,25 +215,25 @@ class TestPaginationValidation:
 
 class TestObserveValidation:
     async def test_bool_priority_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "x", "priority": True})
+        result = await call_tool("observation_create", {"summary": "x", "priority": True})
         data = _parse(result)
         assert isinstance(data, dict), f"crashed: {data!r}"
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_string_line_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "x", "line": "42"})
+        result = await call_tool("observation_create", {"summary": "x", "line": "42"})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_non_string_file_path_rejected(self, mcp_db: FiligreeDB) -> None:
         """file_path=42 would crash in _normalize_scan_path via .replace()."""
-        result = await call_tool("observe", {"summary": "x", "file_path": 42})
+        result = await call_tool("observation_create", {"summary": "x", "file_path": 42})
         data = _parse(result)
         assert isinstance(data, dict), f"crashed: {data!r}"
         assert data.get("code") == ErrorCode.VALIDATION, data
 
     async def test_non_string_detail_rejected(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("observe", {"summary": "x", "detail": {"nope": 1}})
+        result = await call_tool("observation_create", {"summary": "x", "detail": {"nope": 1}})
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data
 
@@ -247,7 +247,7 @@ class TestCreatePlanDeps:
     async def test_float_dep_rejected(self, mcp_db: FiligreeDB) -> None:
         """Float 0.1 must not be reinterpreted as 'phase 0 step 1' cross-phase dep."""
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [
@@ -267,7 +267,7 @@ class TestCreatePlanDeps:
 
     async def test_bool_dep_rejected(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [{"title": "P0", "steps": [{"title": "S0"}, {"title": "S1", "deps": [True]}]}],
@@ -278,7 +278,7 @@ class TestCreatePlanDeps:
 
     async def test_object_dep_rejected(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [{"title": "P0", "steps": [{"title": "S0"}, {"title": "S1", "deps": [{"bad": 1}]}]}],
@@ -290,7 +290,7 @@ class TestCreatePlanDeps:
     async def test_malformed_string_dep_rejected(self, mcp_db: FiligreeDB) -> None:
         """'1.2.3' or 'abc' must be rejected, not crash via int()."""
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [{"title": "P0", "steps": [{"title": "S0"}, {"title": "S1", "deps": ["abc"]}]}],
@@ -302,7 +302,7 @@ class TestCreatePlanDeps:
     async def test_valid_int_dep_still_works(self, mcp_db: FiligreeDB) -> None:
         """Valid same-phase int dep still creates plan."""
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [{"title": "P0", "steps": [{"title": "S0"}, {"title": "S1", "deps": [0]}]}],
@@ -314,7 +314,7 @@ class TestCreatePlanDeps:
     async def test_valid_cross_phase_string_dep_still_works(self, mcp_db: FiligreeDB) -> None:
         """Valid 'p.s' cross-phase string dep still creates plan."""
         result = await call_tool(
-            "create_plan",
+            "plan_create",
             {
                 "milestone": {"title": "M"},
                 "phases": [
@@ -338,6 +338,6 @@ class TestCreatePlanMalformedOptionalFields:
         ],
     )
     async def test_malformed_optional_fields_return_validation(self, mcp_db: FiligreeDB, payload: dict[str, object]) -> None:
-        result = await call_tool("create_plan", payload)
+        result = await call_tool("plan_create", payload)
         data = _parse(result)
         assert data.get("code") == ErrorCode.VALIDATION, data

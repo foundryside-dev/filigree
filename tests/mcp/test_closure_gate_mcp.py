@@ -39,7 +39,7 @@ async def test_mcp_close_governed_blocked(mcp_db: FiligreeDB, monkeypatch: pytes
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
-    result = _parse(await call_tool("close_issue", {"issue_id": issue.id, "actor": "agent"}))
+    result = _parse(await call_tool("issue_close", {"issue_id": issue.id, "actor": "agent"}))
     assert result["code"] == ErrorCode.CONFLICT
     assert "no verified binding" in result["error"]
 
@@ -48,7 +48,7 @@ async def test_mcp_close_governed_allowed(mcp_db: FiligreeDB, monkeypatch: pytes
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
-    result = _parse(await call_tool("close_issue", {"issue_id": issue.id, "actor": "agent"}))
+    result = _parse(await call_tool("issue_close", {"issue_id": issue.id, "actor": "agent"}))
     assert result.get("code") != ErrorCode.CONFLICT
     assert result["issue_id"] == issue.id
 
@@ -56,7 +56,7 @@ async def test_mcp_close_governed_allowed(mcp_db: FiligreeDB, monkeypatch: pytes
 async def test_mcp_close_ungoverned_does_not_call_gate(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
     issue = mcp_db.create_issue("Ungoverned", priority=2)
     calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
-    result = _parse(await call_tool("close_issue", {"issue_id": issue.id, "actor": "agent"}))
+    result = _parse(await call_tool("issue_close", {"issue_id": issue.id, "actor": "agent"}))
     assert result["issue_id"] == issue.id
     assert calls == []
 
@@ -65,7 +65,7 @@ async def test_mcp_close_integrity_failure(mcp_db: FiligreeDB, monkeypatch: pyte
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
-    result = _parse(await call_tool("close_issue", {"issue_id": issue.id, "actor": "agent"}))
+    result = _parse(await call_tool("issue_close", {"issue_id": issue.id, "actor": "agent"}))
     assert result["code"] == ErrorCode.INTERNAL
 
 
@@ -74,7 +74,7 @@ async def test_mcp_batch_close_reports_blocked(mcp_db: FiligreeDB, monkeypatch: 
     ungov = mcp_db.create_issue("Ungoverned", priority=2)
     _make_governed(mcp_db, gov.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
-    result = _parse(await call_tool("batch_close", {"issue_ids": [gov.id, ungov.id], "actor": "agent"}))
+    result = _parse(await call_tool("issue_batch_close", {"issue_ids": [gov.id, ungov.id], "actor": "agent"}))
     succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
     failed_ids = {e["id"] for e in result["failed"]}
     assert ungov.id in succeeded_ids
@@ -97,7 +97,7 @@ async def test_mcp_batch_close_gate_read_error_fails_closed(mcp_db: FiligreeDB, 
         return real_eval(tracker, issue_id)
 
     monkeypatch.setattr(governance, "evaluate_closure_gate", _boom)
-    result = _parse(await call_tool("batch_close", {"issue_ids": [gov.id, ungov.id], "actor": "agent"}))
+    result = _parse(await call_tool("issue_batch_close", {"issue_ids": [gov.id, ungov.id], "actor": "agent"}))
     succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
     failed_ids = {e["id"] for e in result["failed"]}
     assert gov.id not in succeeded_ids
@@ -121,7 +121,7 @@ async def test_mcp_batch_update_gate_read_error_fails_closed(mcp_db: FiligreeDB,
         return real_eval(tracker, issue_id, requested_status)  # type: ignore[arg-type]
 
     monkeypatch.setattr(governance, "evaluate_status_change_gate", _boom)
-    result = _parse(await call_tool("batch_update", {"issue_ids": [gov.id, ungov.id], "status": "closed", "actor": "agent"}))
+    result = _parse(await call_tool("issue_batch_update", {"issue_ids": [gov.id, ungov.id], "status": "closed", "actor": "agent"}))
     succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
     failed_ids = {e["id"] for e in result["failed"]}
     assert gov.id not in succeeded_ids
@@ -136,7 +136,7 @@ async def test_mcp_batch_foreign_prefix_aborts_under_governance_on(mcp_db: Filig
     envelope-level WrongProjectError abort (VALIDATION), not an unhandled crash."""
     valid = mcp_db.create_issue("Valid", priority=2)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
-    result = _parse(await call_tool("batch_close", {"issue_ids": ["other-1234567890", valid.id], "actor": "agent"}))
+    result = _parse(await call_tool("issue_batch_close", {"issue_ids": ["other-1234567890", valid.id], "actor": "agent"}))
     assert result["code"] == ErrorCode.VALIDATION
 
 
@@ -150,7 +150,7 @@ async def test_mcp_update_to_done_governed_blocked(mcp_db: FiligreeDB, monkeypat
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
-    result = _parse(await call_tool("update_issue", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
+    result = _parse(await call_tool("issue_update", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
     assert result["code"] == ErrorCode.CONFLICT
     assert "no verified binding" in result["error"]
     # the close was actually refused, not merely reported
@@ -161,7 +161,7 @@ async def test_mcp_update_to_done_governed_allowed(mcp_db: FiligreeDB, monkeypat
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
-    result = _parse(await call_tool("update_issue", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
+    result = _parse(await call_tool("issue_update", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
     assert result.get("code") != ErrorCode.CONFLICT
     assert result["status"] == "closed"
 
@@ -170,7 +170,7 @@ async def test_mcp_update_to_non_done_does_not_call_gate(mcp_db: FiligreeDB, mon
     issue = mcp_db.create_issue("Governed", priority=2)
     _make_governed(mcp_db, issue.id)
     calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
-    result = _parse(await call_tool("update_issue", {"issue_id": issue.id, "status": "in_progress", "actor": "agent"}))
+    result = _parse(await call_tool("issue_update", {"issue_id": issue.id, "status": "in_progress", "actor": "agent"}))
     assert result["status"] == "in_progress"
     assert calls == []  # a non-closing status change is never gated
 
@@ -178,7 +178,7 @@ async def test_mcp_update_to_non_done_does_not_call_gate(mcp_db: FiligreeDB, mon
 async def test_mcp_update_to_done_ungoverned_does_not_call_gate(mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
     issue = mcp_db.create_issue("Ungoverned", priority=2)
     calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
-    result = _parse(await call_tool("update_issue", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
+    result = _parse(await call_tool("issue_update", {"issue_id": issue.id, "status": "closed", "actor": "agent"}))
     assert result["status"] == "closed"
     assert calls == []
 
@@ -188,7 +188,7 @@ async def test_mcp_batch_update_to_done_reports_blocked(mcp_db: FiligreeDB, monk
     ungov = mcp_db.create_issue("Ungoverned", priority=2)
     _make_governed(mcp_db, gov.id)
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
-    result = _parse(await call_tool("batch_update", {"issue_ids": [gov.id, ungov.id], "status": "closed", "actor": "agent"}))
+    result = _parse(await call_tool("issue_batch_update", {"issue_ids": [gov.id, ungov.id], "status": "closed", "actor": "agent"}))
     succeeded_ids = {i["issue_id"] for i in result["succeeded"]}
     failed_ids = {e["id"] for e in result["failed"]}
     assert ungov.id in succeeded_ids

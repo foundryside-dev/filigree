@@ -36,6 +36,18 @@ checklist is complete and a coordinated consumer-migration window is published.
   reads do not break). The registry error codes (`CLARION_REGISTRY_VERSION_MISMATCH`,
   `CLARION_OUT_OF_SYNC`) and the `loom://` URI scheme are intentionally NOT
   renamed in 3.0.0 (the hub has not locked them; tracked as residuals).
+- **MCP tool-name namespacing — legacy flat names removed (ADR-016 Phase 2).**
+  The ~115 flat MCP tool names (`get_issue`, `list_findings`, `start_work`, …)
+  were renamed to the subsystem-namespaced `<entity>_<verb>` convention
+  (`issue_get`, `finding_list`, `work_start`, …) in 2.3.0, which served the new
+  names while still resolving the old ones as a transition window. 3.0.0 removes
+  that fallback: `call_tool` rejects a legacy name with the standard `NOT_FOUND`
+  (`Unknown tool`) envelope. MCP consumers that hardcode tool names must switch
+  to the new names — see [UPGRADING.md](docs/UPGRADING.md) for the full old→new
+  table. Callers that read `list_tools` dynamically are unaffected (it has served
+  only the namespaced names since 2.3.0); the CLI surface is unchanged. The
+  2.3.0 deprecation-telemetry field (`deprecated_tool_name_calls` in
+  `mcp_status_get` / `mcp-status`) is removed.
 
 ### Fixed
 

@@ -200,7 +200,7 @@ class TestStdioStartupHonoursConf:
             assert mcp_mod._registry_startup_error is not None
             assert mcp_mod._db_open_error is None
 
-            result = asyncio.run(mcp_mod.call_tool("list_issues", {}))
+            result = asyncio.run(mcp_mod.call_tool("issue_list", {}))
             payload = json.loads(result[0].text)
             assert payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
             assert payload["details"] == {
@@ -210,7 +210,7 @@ class TestStdioStartupHonoursConf:
                 "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
             }
 
-            status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))
+            status_result = asyncio.run(mcp_mod.call_tool("mcp_status_get", {}))
             status_payload = json.loads(status_result[0].text)
             assert status_payload["status"] == "registry_version_mismatch"
             assert status_payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH

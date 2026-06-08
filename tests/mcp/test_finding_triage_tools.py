@@ -44,49 +44,49 @@ def _seed_findings(db: FiligreeDB) -> dict[str, str]:
 class TestGetFindingTool:
     async def test_get_finding(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("get_finding", {"finding_id": ids["obo"]}))
+        data = _parse(await call_tool("finding_get", {"finding_id": ids["obo"]}))
         assert data["finding_id"] == ids["obo"]
         assert "id" not in data
         assert data["rule_id"] == "logic-error"
         assert data["severity"] == "high"
 
     async def test_get_finding_not_found(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_finding", {"finding_id": "nonexistent"}))
+        data = _parse(await call_tool("finding_get", {"finding_id": "nonexistent"}))
         assert data["code"] == ErrorCode.NOT_FOUND
 
     async def test_get_finding_empty_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_finding", {"finding_id": ""}))
+        data = _parse(await call_tool("finding_get", {"finding_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_get_finding_missing_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_finding", {}))
+        data = _parse(await call_tool("finding_get", {}))
         assert data["code"] == ErrorCode.VALIDATION
 
 
 class TestListFindingsTool:
     async def test_list_all(self, mcp_db: FiligreeDB) -> None:
         _seed_findings(mcp_db)
-        data = _parse(await call_tool("list_findings", {}))
+        data = _parse(await call_tool("finding_list", {}))
         assert len(data["items"]) == 3
         assert all("finding_id" in item for item in data["items"])
         assert all("id" not in item for item in data["items"])
 
     async def test_filter_by_severity(self, mcp_db: FiligreeDB) -> None:
         _seed_findings(mcp_db)
-        data = _parse(await call_tool("list_findings", {"severity": "critical"}))
+        data = _parse(await call_tool("finding_list", {"severity": "critical"}))
         assert len(data["items"]) == 1
         assert data["items"][0]["rule_id"] == "injection"
 
     async def test_filter_by_status(self, mcp_db: FiligreeDB) -> None:
         _seed_findings(mcp_db)
-        data = _parse(await call_tool("list_findings", {"status": "open"}))
+        data = _parse(await call_tool("finding_list", {"status": "open"}))
         assert len(data["items"]) == 3
 
     async def test_pagination(self, mcp_db: FiligreeDB) -> None:
         _seed_findings(mcp_db)
-        page1 = _parse(await call_tool("list_findings", {"limit": 2, "offset": 0}))
+        page1 = _parse(await call_tool("finding_list", {"limit": 2, "offset": 0}))
         assert len(page1["items"]) == 2
-        page2 = _parse(await call_tool("list_findings", {"limit": 2, "offset": 2}))
+        page2 = _parse(await call_tool("finding_list", {"limit": 2, "offset": 2}))
         assert len(page2["items"]) == 1
 
 
@@ -96,7 +96,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/report_target.py",
                     "rule_id": "agent-noted-risk",
@@ -129,7 +129,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/report_target.py",
                     "rule_id": "agent-noted-risk",
@@ -166,7 +166,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "missing.py",
                     "rule_id": "agent-noted-risk",
@@ -198,7 +198,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "secret.py",
                     "rule_id": "agent-noted-risk",
@@ -240,7 +240,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "SRC/Report_Target.py",
                     "rule_id": "agent-noted-risk",
@@ -256,7 +256,7 @@ class TestReportFindingTool:
     async def test_report_finding_default_does_not_create_observation(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/report_target.py",
                     "rule_id": "agent-noted-risk",
@@ -277,7 +277,7 @@ class TestReportFindingTool:
     async def test_report_finding_can_create_observation_when_requested(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/report_target.py",
                     "rule_id": "agent-noted-risk",
@@ -299,7 +299,7 @@ class TestReportFindingTool:
     async def test_report_finding_line_end_before_line_start_returns_validation(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/report_target.py",
                     "rule_id": "invalid-range",
@@ -331,11 +331,11 @@ class TestReportFindingTool:
             "response_detail": "full",
         }
 
-        first = _parse(await call_tool("report_finding", payload))
+        first = _parse(await call_tool("finding_report", payload))
         assert first["finding_result"] == "created"
         assert any("line_start 389" in warning for warning in first["warnings"])
 
-        second = _parse(await call_tool("report_finding", payload))
+        second = _parse(await call_tool("finding_report", payload))
         assert second["finding_result"] == "updated"
         assert second["findings_updated"] == 1
 
@@ -371,7 +371,7 @@ class TestReportFindingTool:
 
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/beta.py",
                     "create_observation": True,
@@ -389,7 +389,7 @@ class TestReportFindingTool:
 class TestUpdateFindingTool:
     async def test_update_status(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"], "status": "acknowledged"}))
+        data = _parse(await call_tool("finding_update", {"finding_id": ids["obo"], "status": "acknowledged"}))
         assert data["finding_id"] == ids["obo"]
         assert "id" not in data
         assert data["status"] == "acknowledged"
@@ -397,29 +397,29 @@ class TestUpdateFindingTool:
     async def test_update_issue_id(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
         issue = mcp_db.create_issue("Bug ticket")
-        data = _parse(await call_tool("update_finding", {"finding_id": ids["sqli"], "issue_id": issue.id}))
+        data = _parse(await call_tool("finding_update", {"finding_id": ids["sqli"], "issue_id": issue.id}))
         assert data["finding_id"] == ids["sqli"]
         assert data["issue_id"] == issue.id
 
     async def test_update_not_found(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("update_finding", {"finding_id": "nonexistent", "status": "acknowledged"}))
+        data = _parse(await call_tool("finding_update", {"finding_id": "nonexistent", "status": "acknowledged"}))
         assert data["code"] == ErrorCode.NOT_FOUND
 
     async def test_update_no_fields_rejected(self, mcp_db: FiligreeDB) -> None:
         """At least one of status or issue_id must be provided."""
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"]}))
+        data = _parse(await call_tool("finding_update", {"finding_id": ids["obo"]}))
         assert data["code"] == ErrorCode.VALIDATION
         assert "at least one" in data["error"].lower()
 
     async def test_update_invalid_status_rejected(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"], "status": "banana"}))
+        data = _parse(await call_tool("finding_update", {"finding_id": ids["obo"], "status": "banana"}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_update_non_string_status_rejected(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("update_finding", {"finding_id": ids["obo"], "status": ["fixed"]}))
+        data = _parse(await call_tool("finding_update", {"finding_id": ids["obo"], "status": ["fixed"]}))
         assert data["code"] == ErrorCode.VALIDATION
         assert "status must be a string" in data["error"]
 
@@ -429,7 +429,7 @@ class TestBatchUpdateFindingsTool:
         ids = _seed_findings(mcp_db)
         data = _parse(
             await call_tool(
-                "batch_update_findings",
+                "finding_batch_update",
                 {"finding_ids": [ids["obo"], ids["type"]], "status": "acknowledged"},
             )
         )
@@ -440,7 +440,7 @@ class TestBatchUpdateFindingsTool:
         ids = _seed_findings(mcp_db)
         data = _parse(
             await call_tool(
-                "batch_update_findings",
+                "finding_batch_update",
                 {"finding_ids": [ids["obo"], "nonexistent"], "status": "acknowledged"},
             )
         )
@@ -450,19 +450,19 @@ class TestBatchUpdateFindingsTool:
         assert data["failed"][0]["code"] == ErrorCode.NOT_FOUND
 
     async def test_batch_update_empty_ids_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("batch_update_findings", {"finding_ids": [], "status": "acknowledged"}))
+        data = _parse(await call_tool("finding_batch_update", {"finding_ids": [], "status": "acknowledged"}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_batch_update_missing_status_rejected(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("batch_update_findings", {"finding_ids": [ids["obo"]], "status": ""}))
+        data = _parse(await call_tool("finding_batch_update", {"finding_ids": [ids["obo"]], "status": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
 
 class TestPromoteFindingTool:
     async def test_promote_creates_issue(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["sqli"]}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["sqli"]}))
         assert "issue_id" in data
         assert "id" not in data
         assert "observation_id" not in data
@@ -475,12 +475,12 @@ class TestPromoteFindingTool:
 
     async def test_promote_with_priority_override(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "priority": 0}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "priority": 0}))
         assert data["priority"] == 0
 
     async def test_promote_rejects_invalid_priority(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "priority": 5}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "priority": 5}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "priority must be <= 4"
@@ -488,7 +488,7 @@ class TestPromoteFindingTool:
 
     async def test_promote_rejects_invalid_labels_shape(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["ok", 42]}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "labels": ["ok", 42]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "labels must be a list of strings"
@@ -496,7 +496,7 @@ class TestPromoteFindingTool:
 
     async def test_promote_returns_validation_error_for_reserved_label(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["severity:high"]}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "labels": ["severity:high"]}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "system-managed auto-tag namespace" in data["error"]
@@ -504,7 +504,7 @@ class TestPromoteFindingTool:
 
     async def test_promote_carries_labels_to_created_issue(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "labels": ["cluster:mcp"]}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "labels": ["cluster:mcp"]}))
 
         assert set(data["labels"]) == {"from-finding", "cluster:mcp"}
 
@@ -513,7 +513,7 @@ class TestPromoteFindingTool:
 
         data = _parse(
             await call_tool(
-                "promote_finding_and_attach_entity",
+                "finding_promote_and_attach_entity",
                 {
                     "finding_id": ids["sqli"],
                     "entity_id": "loomweave:eid:mcp",
@@ -530,11 +530,11 @@ class TestPromoteFindingTool:
         assert mcp_db.list_entity_associations(data["issue_id"])[0]["content_hash_at_attach"] == "hash-v1"
 
     async def test_promote_not_found(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("promote_finding", {"finding_id": "nonexistent"}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": "nonexistent"}))
         assert data["code"] == ErrorCode.NOT_FOUND
 
     async def test_promote_empty_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("promote_finding", {"finding_id": ""}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_promote_suppressed_finding_refused_without_force(self, mcp_db: FiligreeDB) -> None:
@@ -555,7 +555,7 @@ class TestPromoteFindingTool:
         )
         fid = result["new_finding_ids"][0]
 
-        data = _parse(await call_tool("promote_finding", {"finding_id": fid}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": fid}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "baselined" in data["error"]
@@ -580,7 +580,7 @@ class TestPromoteFindingTool:
         )
         fid = result["new_finding_ids"][0]
 
-        data = _parse(await call_tool("promote_finding", {"finding_id": fid, "force": True}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": fid, "force": True}))
 
         assert "issue_id" in data
         assert "code" not in data  # not an error envelope
@@ -590,7 +590,7 @@ class TestPromoteFindingTool:
 
     async def test_promote_rejects_non_bool_force(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["obo"], "force": "yes"}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "force": "yes"}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == "force must be a boolean"
@@ -600,7 +600,7 @@ class TestPromoteFindingTool:
         """Regression guard: an active finding (no suppression_state) promotes
         normally without force."""
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("promote_finding", {"finding_id": ids["sqli"]}))
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["sqli"]}))
 
         assert "issue_id" in data
         assert "code" not in data
@@ -628,12 +628,12 @@ class TestPromoteFindingTool:
             "content_hash": "hash-v1",
         }
         # Without force: refused as a suppressed defect (clean VALIDATION error).
-        refused = _parse(await call_tool("promote_finding_and_attach_entity", args))
+        refused = _parse(await call_tool("finding_promote_and_attach_entity", args))
         assert refused["code"] == ErrorCode.VALIDATION
         assert "judged" in refused["error"]
         assert mcp_db.get_finding(fid)["issue_id"] is None
         # With force: promotes, attaches, and records the override warning.
-        forced = _parse(await call_tool("promote_finding_and_attach_entity", {**args, "force": True}))
+        forced = _parse(await call_tool("finding_promote_and_attach_entity", {**args, "force": True}))
         assert "code" not in forced
         assert forced["issue_id"]
         assert forced["association"]["entity_id"] == "loomweave:eid:attach"
@@ -643,7 +643,7 @@ class TestPromoteFindingTool:
         ids = _seed_findings(mcp_db)
         data = _parse(
             await call_tool(
-                "promote_finding_and_attach_entity",
+                "finding_promote_and_attach_entity",
                 {
                     "finding_id": ids["obo"],
                     "entity_id": "loomweave:eid:x",
@@ -660,27 +660,27 @@ class TestPromoteFindingTool:
 class TestDismissFindingTool:
     async def test_dismiss_marks_false_positive(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("dismiss_finding", {"finding_id": ids["type"]}))
+        data = _parse(await call_tool("finding_dismiss", {"finding_id": ids["type"]}))
         assert data["finding_id"] == ids["type"]
         assert "id" not in data
         assert data["status"] == "false_positive"
 
     async def test_dismiss_not_found(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("dismiss_finding", {"finding_id": "nonexistent"}))
+        data = _parse(await call_tool("finding_dismiss", {"finding_id": "nonexistent"}))
         assert data["code"] == ErrorCode.NOT_FOUND
 
     async def test_dismiss_empty_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("dismiss_finding", {"finding_id": ""}))
+        data = _parse(await call_tool("finding_dismiss", {"finding_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_dismiss_non_string_status_rejected(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("dismiss_finding", {"finding_id": ids["type"], "status": ["fixed"]}))
+        data = _parse(await call_tool("finding_dismiss", {"finding_id": ids["type"], "status": ["fixed"]}))
         assert data["code"] == ErrorCode.VALIDATION
         assert "status" in data["error"].lower()
 
     async def test_dismiss_non_string_reason_rejected(self, mcp_db: FiligreeDB) -> None:
         ids = _seed_findings(mcp_db)
-        data = _parse(await call_tool("dismiss_finding", {"finding_id": ids["type"], "reason": ["not", "a", "string"]}))
+        data = _parse(await call_tool("finding_dismiss", {"finding_id": ids["type"], "reason": ["not", "a", "string"]}))
         assert data["code"] == ErrorCode.VALIDATION
         assert "reason" in data["error"].lower()

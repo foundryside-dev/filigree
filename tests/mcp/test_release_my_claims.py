@@ -21,7 +21,7 @@ class TestReleaseMyClaims:
         mcp_db.claim_issue(mine.id, assignee="agent-1")
         mcp_db.claim_issue(other.id, assignee="agent-2")
 
-        data = _parse(await call_tool("release_my_claims", {"actor": "agent-1", "reason": "session ended"}))
+        data = _parse(await call_tool("work_release_mine", {"actor": "agent-1", "reason": "session ended"}))
 
         assert data["succeeded"] == [
             {
@@ -45,7 +45,7 @@ class TestReleaseMyClaims:
 
         data = _parse(
             await call_tool(
-                "release_my_claims",
+                "work_release_mine",
                 {
                     "actor": "agent-1",
                     "label_prefix": "cluster:",
