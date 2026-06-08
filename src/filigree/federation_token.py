@@ -69,6 +69,16 @@ def read_env_token() -> tuple[str, str | None]:
             continue
         token = raw.strip()
         if token:
+            if name in DEPRECATED_FEDERATION_ENV_VARS:
+                # Auto-migration: the deprecated alias is still honoured (soft
+                # fallback), but nudge the operator to the canonical var so the
+                # rename actually completes. Only fires when no canonical var is
+                # set — setting WEFT_FEDERATION_TOKEN silences it.
+                logger.warning(
+                    "%s is DEPRECATED — set %s instead (the deprecated name is still honoured for now, but will be removed)",
+                    name,
+                    WEFT_FEDERATION_ENV_VAR,
+                )
             return token, name
         empty.append(name)
     for name in empty:

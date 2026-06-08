@@ -40,8 +40,26 @@ class TestReadEnvToken:
         monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "dep")
         assert read_env_token() == ("dep", "FILIGREE_FEDERATION_API_TOKEN")
 
-    def test_none_set(self) -> None:
+    def test_none_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(v, raising=False)
         assert read_env_token() == ("", None)
+
+    def test_deprecated_alias_warns_to_migrate(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        """Auto-migration nudge: a deprecated alias is still honoured (soft
+        fallback) but warns the operator to move to the canonical var."""
+        monkeypatch.delenv(WEFT_FEDERATION_ENV_VAR, raising=False)
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "dep")
+        with caplog.at_level("WARNING"):
+            assert read_env_token() == ("dep", "FILIGREE_FEDERATION_API_TOKEN")
+        assert any("DEPRECATED" in r.message and WEFT_FEDERATION_ENV_VAR in r.message for r in caplog.records)
+
+    def test_canonical_does_not_warn_deprecation(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        monkeypatch.setenv(WEFT_FEDERATION_ENV_VAR, "canon")
+        with caplog.at_level("WARNING"):
+            read_env_token()
+        assert not any("DEPRECATED" in r.message for r in caplog.records)
 
     def test_blank_is_skipped_with_warning(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         monkeypatch.setenv(WEFT_FEDERATION_ENV_VAR, "   ")
