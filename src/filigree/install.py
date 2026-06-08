@@ -438,6 +438,11 @@ ephemeral.port
 instructions.lock
 instance_id
 
+# Per-machine federation bearer (auto-minted, 0600). A secret that survives
+# *local* store migration but must NEVER be committed — mirrors the .mcp.json
+# token guard. Tracking this dir as committed payload must not leak it.
+federation_token
+
 # Generated project snapshot (regenerated on demand)
 context.md
 """
@@ -477,6 +482,11 @@ ephemeral.pid
 ephemeral.port
 instructions.lock
 instance_id
+
+# Per-machine federation bearer (auto-minted, 0600). A secret that survives
+# *local* store migration but must NEVER be committed — mirrors the .mcp.json
+# token guard. Tracking this dir as committed payload must not leak it.
+federation_token
 
 # Generated project snapshot (regenerated on demand)
 context.md

@@ -874,6 +874,71 @@ def ensure_dashboard_cmd(port: int | None) -> None:
         click.echo("Warning: ensure-dashboard hook failed (run with -v for details)", err=True)
 
 
+@click.command("rotate-federation-token")
+@click.option("--json", "as_json", is_flag=True, help="JSON output")
+def rotate_federation_token(as_json: bool) -> None:
+    """Rotate this project's federation bearer token (deconfliction plumbing).
+
+    Force-(re)writes ``<store>/federation_token`` with a fresh value (0600). The
+    supported way to recover from a tier-2 sibling lockout — e.g. a daemon pinned
+    to ``WEFT_FEDERATION_TOKEN`` while a *stale* file holds a different value, so
+    same-host siblings reading the file get 401. With the env var set, rotation
+    realigns the file to it; otherwise it mints a new secret.
+
+    NOT live: the token is resolved once at daemon boot and baked into the auth
+    middleware, so a running daemon keeps serving the OLD token until it (and any
+    siblings) restart. This command tells you when that is needed.
+    """
+    from filigree.federation_token import FEDERATION_TOKEN_FILENAME, mint_token_file, read_env_token
+
+    try:
+        anchor = find_filigree_anchor()
+    except ProjectNotInitialisedError as exc:
+        if as_json:
+            click.echo(json_mod.dumps({"error": str(exc), "code": "NOT_INITIALIZED"}))
+        else:
+            click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    store_dir = anchor.store_dir
+    mint_token_file(store_dir, rotate=True)
+    token_path = store_dir / FEDERATION_TOKEN_FILENAME
+    env_tok, env_name = read_env_token()
+
+    # Always advise a restart rather than keying off daemon liveness: an ethereal
+    # single-project daemon bakes its token at boot (so it needs a restart) but is
+    # tracked by a different PID file than the server daemon, so a liveness probe
+    # would under-warn it (a false "no restart needed"). A server-mode daemon
+    # re-reads each project's scoped token live, but its unscoped home token is
+    # also baked — so "restart to be sure" is never wrong, only sometimes
+    # unnecessary. The token rotated here is the PROJECT store's.
+    restart_hint = (
+        "restart any running daemon (`filigree server restart`, or close the ethereal dashboard) "
+        "and any sibling tools so they re-read the token"
+    )
+
+    if as_json:
+        click.echo(
+            json_mod.dumps(
+                {
+                    "rotated": True,
+                    "token_path": str(token_path),
+                    "env_pinned": bool(env_tok),
+                    "env_var": env_name,
+                    "restart_required": True,
+                    "next": restart_hint,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(f"Rotated federation token → {token_path}")
+    if env_tok:
+        click.echo(f"Note: {env_name} is set and takes precedence; the file was realigned to it.")
+    click.echo(f"Next: {restart_hint}.")
+
+
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="JSON output")
 @click.option(
@@ -1029,6 +1094,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(dashboard)
     cli.add_command(ensure_dashboard_cmd)
     cli.add_command(session_context)
+    cli.add_command(rotate_federation_token)
     cli.add_command(metrics)
     cli.add_command(export_data)
     cli.add_command(import_data)

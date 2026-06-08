@@ -594,8 +594,8 @@ class TestEnsureFiligreeDirGitignore:
         nested = filigree_dir / ".gitignore"
         assert nested.exists()
         body = nested.read_text()
-        # Ephemeral sidecars / logs / runtime state are excluded.
-        for pattern in ("*.db-wal", "*.db-shm", "*.log", "context.md", "ephemeral.port"):
+        # Ephemeral sidecars / logs / runtime state / the per-machine secret are excluded.
+        for pattern in ("*.db-wal", "*.db-shm", "*.log", "context.md", "ephemeral.port", "federation_token"):
             assert pattern in body, f"expected {pattern!r} in nested .gitignore"
 
     def test_does_not_ignore_durable_files(self, tmp_path: Path) -> None:
@@ -637,6 +637,7 @@ class TestEnsureFiligreeDirGitignore:
         assert ignored(f"{FILIGREE_DIR_NAME}/context.md")
         assert ignored(f"{FILIGREE_DIR_NAME}/ephemeral.lock")
         assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db.pre-v26-bak")
+        assert ignored(f"{FILIGREE_DIR_NAME}/federation_token")  # per-machine secret, never commit
         # Durable → NOT ignored
         assert not ignored(f"{FILIGREE_DIR_NAME}/{DB_FILENAME}")
         assert not ignored(f"{FILIGREE_DIR_NAME}/{CONFIG_FILENAME}")
@@ -660,6 +661,17 @@ class TestEnsureFiligreeDirGitignore:
         body = nested.read_text()
         assert "secret-notes.txt" in body
         assert "*.db-wal" in body
+
+    def test_both_shipped_bodies_ignore_federation_token(self) -> None:
+        """The per-machine federation_token secret must be in BOTH nested-ignore
+        bodies (legacy ``.filigree/`` and consolidated ``.weft/filigree/``), or a
+        project that tracks its store dir as committed payload leaks it — the same
+        class as the .mcp.json token guard."""
+        from filigree.install import FILIGREE_DIR_GITIGNORE, WEFT_STORE_GITIGNORE
+
+        for body in (FILIGREE_DIR_GITIGNORE, WEFT_STORE_GITIGNORE):
+            lines = {ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            assert "federation_token" in lines
 
 
 class TestRunDoctor:

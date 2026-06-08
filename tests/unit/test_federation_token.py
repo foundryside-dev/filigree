@@ -116,6 +116,94 @@ class TestMintTokenFile:
         token = mint_token_file(blocker / "store")
         assert token  # returned despite failing to persist
 
+    def test_rotate_overwrites_existing_with_fresh(self, tmp_path: Path) -> None:
+        first = mint_token_file(tmp_path)
+        rotated = mint_token_file(tmp_path, rotate=True)
+        assert rotated != first  # genuinely new secret (no env pin)
+        assert read_token_file(tmp_path) == rotated
+        # Still 0600.
+        mode = stat.S_IMODE((tmp_path / FEDERATION_TOKEN_FILENAME).stat().st_mode)
+        assert mode == 0o600
+
+    def test_rotate_realigns_stale_file_to_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The tier-2 lockout: a daemon pinned to the env while the file holds a
+        different (stale) value. Rotation with the env set realigns the file TO the
+        env, so same-host siblings reading the file converge on what the daemon
+        enforces."""
+        (tmp_path / FEDERATION_TOKEN_FILENAME).write_text("stale-file-tok\n")
+        monkeypatch.setenv(WEFT_FEDERATION_ENV_VAR, "env-pinned-tok")
+        rotated = mint_token_file(tmp_path, rotate=True)
+        assert rotated == "env-pinned-tok"
+        assert read_token_file(tmp_path) == "env-pinned-tok"
+
+
+class TestMintAndGuardFederationToken:
+    """The daemon-boot guard against a *silently-open* serve (the mint write
+    failed, so create_app would re-resolve to no-token and drop federation auth).
+    """
+
+    def test_persisted_mint_does_not_touch_env(self, tmp_path: Path) -> None:
+        import os
+
+        from filigree.dashboard import _mint_and_guard_federation_token
+
+        pinned = _mint_and_guard_federation_token(tmp_path, allow_env_pin=True)
+        # Mint persisted → tier-2 file resolves → no env fallback needed.
+        assert pinned is False
+        assert (tmp_path / FEDERATION_TOKEN_FILENAME).is_file()
+        assert WEFT_FEDERATION_ENV_VAR not in os.environ
+
+    def test_unpersisted_mint_pins_in_memory_token_to_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import os
+
+        from filigree import dashboard
+
+        # Simulate a write failure: mint returns a token but nothing lands on disk.
+        monkeypatch.setattr("filigree.federation_token.mint_token_file", lambda _d: "in-mem-tok")
+        try:
+            pinned = dashboard._mint_and_guard_federation_token(tmp_path, allow_env_pin=True)
+            # No env token + un-persisted mint → pin the in-memory token (tier 1)
+            # so the daemon enforces, not silently-open.
+            assert pinned is True
+            assert os.environ.get(WEFT_FEDERATION_ENV_VAR) == "in-mem-tok"
+            # ...and warn loudly so the sibling-unreadable token is visible.
+            assert "could not persist the federation token" in capsys.readouterr().err
+        finally:
+            os.environ.pop(WEFT_FEDERATION_ENV_VAR, None)
+
+    def test_server_mode_unpersisted_mint_does_not_pin_cross_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """F1: in server mode (allow_env_pin=False) a persist failure must NOT
+        promote the home/server token to a tier-1 env pin — that would be accepted
+        across every project scope. It warns loudly but does not pin."""
+        import os
+
+        from filigree import dashboard
+
+        monkeypatch.setattr("filigree.federation_token.mint_token_file", lambda _d: "in-mem-tok")
+        pinned = dashboard._mint_and_guard_federation_token(tmp_path, allow_env_pin=False)
+        assert pinned is False
+        assert WEFT_FEDERATION_ENV_VAR not in os.environ  # NOT promoted cross-project
+        assert "could not persist the federation token" in capsys.readouterr().err  # still loud
+
+    def test_env_token_present_no_fallback_even_if_unpersisted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import os
+
+        from filigree import dashboard
+
+        monkeypatch.setenv(WEFT_FEDERATION_ENV_VAR, "operator-env-tok")
+        monkeypatch.setattr("filigree.federation_token.mint_token_file", lambda _d: "in-mem-tok")
+        pinned = dashboard._mint_and_guard_federation_token(tmp_path, allow_env_pin=True)
+        # An operator env token already wins — the guard must not warn or clobber it.
+        assert pinned is False
+        assert os.environ[WEFT_FEDERATION_ENV_VAR] == "operator-env-tok"
+        assert "could not persist" not in capsys.readouterr().err
+
 
 class TestResolveFederationToken:
     def test_env_wins_over_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

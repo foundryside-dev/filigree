@@ -31,9 +31,11 @@ directly) never create a file as a side effect.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ def read_token_file(store_dir: Path) -> str:
         return ""
 
 
-def mint_token_file(store_dir: Path) -> str:
+def mint_token_file(store_dir: Path, *, rotate: bool = False) -> str:
     """Persist (idempotently) a federation token in *store_dir* and return it.
 
     Reuses an existing non-empty file. Otherwise records an already-exported env
@@ -115,22 +117,46 @@ def mint_token_file(store_dir: Path) -> str:
     that env token — or, failing that, mints a fresh ``secrets.token_urlsafe(32)``.
     Writes ``0600``.
 
+    *rotate* forces a (re)write, ignoring any existing file — the supported
+    rotation path (no separate "delete then re-mint" dance, which races a reader).
+    It keeps the same value rule (an exported env token is written through,
+    reconciling a stale file *to* the env the daemon already enforces; otherwise a
+    fresh secret), so it closes both lockout shapes: a file-only deployment gets a
+    new secret, and an env-pinned deployment's stale file is realigned to the env.
+    The change is only live after the daemon (and any siblings) restart — the token
+    is resolved once at ``create_app`` and baked into the auth middleware.
+
     Best-effort: a write failure (read-only mount, missing parent that cannot be
     created) is logged, and the in-memory value is returned so the caller still
     has a usable token for this run rather than crashing the daemon.
     """
     existing = read_token_file(store_dir)
-    if existing:
+    if existing and not rotate:
         return existing
     env_value, _env_name = read_env_token()
     token = env_value or secrets.token_urlsafe(32)
     path = store_dir / FEDERATION_TOKEN_FILENAME
+    tmp_name: str | None = None
     try:
         store_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(token + "\n")
-        path.chmod(0o600)
+        # Atomic publish: stage 0600 to a dest-dir temp, then os.replace. A bare
+        # write_text open-truncates the existing file first, so a concurrent
+        # reader (server mode resolves a project's token per request) could read an
+        # empty file mid-rotate and 401 a valid bearer. Staging keeps the path
+        # always-complete; os.replace is an atomic same-dir rename.
+        fd, tmp_name = tempfile.mkstemp(dir=store_dir, prefix=FEDERATION_TOKEN_FILENAME + ".", suffix=".tmp")
+        try:
+            os.write(fd, (token + "\n").encode())
+        finally:
+            os.close(fd)
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+        tmp_name = None
     except OSError as exc:
         logger.warning("Could not persist federation token to %s: %s", path, exc)
+        if tmp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
     return token
 
 

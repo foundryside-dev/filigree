@@ -2104,3 +2104,46 @@ class TestFixMcpTokenReference:
         ok, msg = _fix_mcp_token_reference(tmp_path)
         assert ok is False
         assert "already" in msg.lower()
+
+
+class TestRotateFederationToken:
+    """`filigree rotate-federation-token` — the supported deconfliction-token
+    rotation path that closes the tier-2 sibling lockout."""
+
+    def test_rotates_store_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        store = tmp_path / ".weft" / "filigree"
+
+        # First rotation creates the token file (init does not mint one).
+        first = cli_runner.invoke(cli, ["rotate-federation-token", "--json"])
+        assert first.exit_code == 0, first.output
+        assert json.loads(first.output)["rotated"] is True
+        before = (store / "federation_token").read_text().strip()
+        assert before
+
+        # Second rotation replaces it with a fresh secret.
+        second = cli_runner.invoke(cli, ["rotate-federation-token", "--json"])
+        assert second.exit_code == 0, second.output
+        after = (store / "federation_token").read_text().strip()
+        assert after  # a token is present
+        assert after != before  # genuinely rotated
+
+    def test_rotation_realigns_file_to_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        store = tmp_path / ".weft" / "filigree"
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "env-pinned-tok")
+
+        result = cli_runner.invoke(cli, ["rotate-federation-token", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["env_pinned"] is True
+        # The stale file is realigned to what the daemon enforces (the env token).
+        assert (store / "federation_token").read_text().strip() == "env-pinned-tok"
+
+    def test_refuses_outside_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)  # no init → not a project
+        result = cli_runner.invoke(cli, ["rotate-federation-token", "--json"])
+        assert result.exit_code == 1
+        assert json.loads(result.output)["code"] == "NOT_INITIALIZED"

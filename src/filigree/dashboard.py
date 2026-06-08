@@ -101,6 +101,69 @@ def _resolve_federation_api_token(store_dir: Path | None = None) -> tuple[str, s
     return resolve_federation_token(store_dir)
 
 
+def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> bool:
+    """Mint the daemon's federation token and guard against a *silently-open* serve.
+
+    Fail-LOUD, not silently-open. :func:`mint_token_file` is best-effort: a write
+    failure (read-only mount, full disk) logs quietly and returns the in-memory
+    token — which :func:`run` would otherwise DISCARD, leaving ``create_app`` to
+    re-resolve from the now-absent file → tier-3 → federation auth silently OFF on
+    the (loopback) bind, exactly when the operator expects it ON. Either way the
+    failure is now made loud (stderr *and* the structured logger launchers tail).
+
+    *allow_env_pin* gates the in-memory tier-1 fallback, and is the ETHEREAL
+    single-project posture only. There, on a persist failure with no operator env
+    token, pinning the daemon's own token into the process env (tier 1) keeps the
+    expected posture — that daemon serves exactly one project, so a process-scoped
+    pin is correct and bounded. In SERVER mode it MUST be ``False``: the
+    home/server token must never become a tier-1 env pin, which
+    :func:`dashboard_auth.build_auth_middleware` would accept across EVERY project
+    scope, breaking the per-project scoping invariant (F1 / filigree-23574069a1).
+    Server mode therefore warns loudly but fails open on its unscoped surface
+    rather than minting cross-project authority (per-project scoped tokens are
+    resolved independently and are unaffected). Availability/observability, not
+    hardening (C-8): a present env token already wins, and a persisted mint is
+    untouched (no warning, no env mutation).
+
+    Returns ``True`` iff it pinned the env var, so the caller can unset it in its
+    ``finally`` for in-process cleanup symmetry.
+    """
+    from filigree.federation_token import (
+        WEFT_FEDERATION_ENV_VAR,
+        mint_token_file,
+        read_env_token,
+        read_token_file,
+    )
+
+    minted = mint_token_file(mint_dir)
+    env_tok, _ = read_env_token()
+    if not (minted and not env_tok and read_token_file(mint_dir) != minted):
+        return False
+    if allow_env_pin:
+        posture = (
+            "Federation auth will use an in-memory token for THIS daemon only; same-host siblings "
+            "cannot read it and will get 401 until the store dir is writable."
+        )
+    else:
+        posture = (
+            "Federation auth on the daemon's unscoped surface is OFF until the store dir is writable "
+            "(per-project scoped tokens are unaffected). The token is NOT promoted to a cross-project "
+            "credential in server mode."
+        )
+    msg = (
+        f"could not persist the federation token to {mint_dir}/federation_token. {posture} "
+        "Fix the mount/permissions and restart, or export WEFT_FEDERATION_TOKEN."
+    )
+    # Dual-emit (stderr + structured log) so a launcher capturing only the
+    # filigree log still sees it — mirroring run()'s schema-mismatch branch.
+    print(f"WARNING: {msg}", file=sys.stderr)
+    logger.warning("federation_token_persist_failed: %s", msg)
+    if allow_env_pin:
+        os.environ[WEFT_FEDERATION_ENV_VAR] = minted
+        return True
+    return False
+
+
 def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
     return {
         "federation": {
@@ -1146,14 +1209,15 @@ def main(
     # the served project's store dir (ethereal) or the server config dir (server
     # mode). Done here at real serve only, never in create_app (tests call that
     # directly and must not write to a shared/real dir).
-    from filigree.federation_token import mint_token_file
-
+    _pinned_token_env = False
     if server_mode:
         from filigree.server import SERVER_CONFIG_DIR
 
-        mint_token_file(SERVER_CONFIG_DIR)
+        # Server mode: never pin (F1 — a home/server token must not become a
+        # cross-project tier-1 credential). Warn loudly only.
+        _mint_and_guard_federation_token(SERVER_CONFIG_DIR, allow_env_pin=False)
     elif _db is not None:
-        mint_token_file(_db.meta_dir)
+        _pinned_token_env = _mint_and_guard_federation_token(_db.meta_dir, allow_env_pin=True)
 
     app = create_app(server_mode=server_mode)
 
@@ -1195,3 +1259,11 @@ def main(
         _db = None
         _allow_http_force_close = False
         _config.clear()
+        # Cleanup symmetry: if THIS run synthesised an in-memory federation-token
+        # env pin (ethereal persist-failure fallback), unset it so a later
+        # in-process run() does not inherit a stale tier-1 token that masks a
+        # since-recovered mount or a fresh file (matches the global reset above).
+        if _pinned_token_env:
+            from filigree.federation_token import WEFT_FEDERATION_ENV_VAR
+
+            os.environ.pop(WEFT_FEDERATION_ENV_VAR, None)
