@@ -458,25 +458,50 @@ def _merge_into_survivor(
     Preference rule: the survivor keeps its identity and ``attached_by``, but
     adopts the newest ``attached_at`` and the matching ``content_hash_at_attach``
     so freshness reflects the most recent attach across the merged pair.
+
+    Governance carry-forward (DECISION 1A): the deleted duplicate may carry a
+    Legis sign-off (``signature``/``signoff_seq``/``signed_content_hash``) that
+    the survivor lacks. Dropping it would silently downgrade the issue
+    governed -> ungoverned (governed = >=1 association with a non-null signature),
+    after which the closure gate short-circuits to PROCEED with no Legis call. So
+    the survivor must end up with the freshest valid sign-off across the merged
+    pair — never lose a signature to the DELETE. This mirrors the v27 upsert
+    stickiness in ``db_entity_associations`` (a signed write wins; a signatureless
+    one preserves the existing sign-off).
     """
     survivor = conn.execute(
-        "SELECT content_hash_at_attach, attached_at, attached_by FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
+        "SELECT content_hash_at_attach, attached_at, attached_by, signature, signoff_seq, signed_content_hash "
+        "FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, sei),
     ).fetchone()
     # ``incoming`` from the outer scan carries only (issue_id, loomweave_entity_id);
-    # fetch its full attach metadata before we delete the duplicate row.
+    # fetch its full attach metadata + sign-off before we delete the duplicate row.
     incoming_full = conn.execute(
-        "SELECT content_hash_at_attach, attached_at FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
+        "SELECT content_hash_at_attach, attached_at, signature, signoff_seq, signed_content_hash "
+        "FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, old_locator),
     ).fetchone()
     conn.execute(
         "DELETE FROM entity_associations WHERE issue_id = ? AND loomweave_entity_id = ?",
         (issue_id, old_locator),
     )
-    if survivor is not None and incoming_full is not None and incoming_full["attached_at"] > survivor["attached_at"]:
+    if survivor is None or incoming_full is None:
+        return
+    if incoming_full["attached_at"] > survivor["attached_at"]:
         conn.execute(
             "UPDATE entity_associations SET content_hash_at_attach = ?, attached_at = ? WHERE issue_id = ? AND loomweave_entity_id = ?",
             (incoming_full["content_hash_at_attach"], incoming_full["attached_at"], issue_id, sei),
+        )
+    # Carry the incoming sign-off onto the survivor only when it is signed AND the
+    # survivor is unsigned or carries an older ``signoff_seq`` — so the freshest
+    # valid sign-off wins and a signed survivor is never downgraded.
+    if incoming_full["signature"] is not None and (
+        survivor["signature"] is None or (incoming_full["signoff_seq"] or 0) > (survivor["signoff_seq"] or 0)
+    ):
+        conn.execute(
+            "UPDATE entity_associations SET signature = ?, signoff_seq = ?, signed_content_hash = ? "
+            "WHERE issue_id = ? AND loomweave_entity_id = ?",
+            (incoming_full["signature"], incoming_full["signoff_seq"], incoming_full["signed_content_hash"], issue_id, sei),
         )
 
 

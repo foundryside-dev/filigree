@@ -365,6 +365,135 @@ def test_merge_keeps_newest_attach_axis_and_preserves_attached_by(tmp_path: Path
         db.close()
 
 
+def _set_signoff(
+    db: FiligreeDB,
+    issue_id: str,
+    locator: str,
+    *,
+    signature: str | None,
+    signoff_seq: int | None,
+    signed_content_hash: str | None,
+) -> None:
+    """Pin the Legis sign-off columns on an association directly.
+
+    ``add_entity_association`` never signs — agents structurally cannot sign
+    (only Legis can, over the HTTP binding route), so a signed binding is seeded
+    by writing the three sign-off columns straight onto the row.
+    """
+    db.conn.execute(
+        "UPDATE entity_associations SET signature = ?, signoff_seq = ?, signed_content_hash = ? "
+        "WHERE issue_id = ? AND loomweave_entity_id = ?",
+        (signature, signoff_seq, signed_content_hash, issue_id, locator),
+    )
+    db.conn.commit()
+
+
+def test_merge_carries_forward_signed_nonsurvivor_signoff(tmp_path: Path) -> None:
+    """Governance integrity: when a *signed* non-survivor collapses onto an
+    *unsigned* survivor, the Legis sign-off MUST carry forward to the survivor.
+
+    Otherwise the merge silently downgrades the issue governed -> ungoverned
+    (DECISION 1A: governed = >=1 association carrying a non-null signature), and
+    the closure gate then short-circuits to PROCEED with no Legis call — the same
+    governance-integrity failure as the agent-reachable removal vector closed in
+    25cd704, here on the owner-gated backfill merge path. ``loc_b`` (inserted
+    second) is the incoming/merged row that gets DELETEd; it is the one that
+    carries the sign-off, so without carry-forward the signature vanishes."""
+    loc_a = "py:func:mod::f"
+    loc_b = "py:func:mod::f_alias"
+    sei = "loomweave:eid:00000000000000000000000000000007"
+    with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
+        db = _loomweave_db(tmp_path, base_url)
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, loc_a, content_hash="sha256:unsigned")
+        db.add_entity_association(issue.id, loc_b, content_hash="sha256:signed")
+        # The non-survivor (loc_b) carries a Legis sign-off; the survivor (loc_a) does not.
+        _set_signoff(db, issue.id, loc_b, signature="legis-hmac-xyz", signoff_seq=5, signed_content_hash="sha256:signed")
+
+        report = run_sei_backfill(db, dry_run=False, actor="op")
+
+        assert report.associations_merged == 1
+        rows = db.conn.execute(
+            "SELECT loomweave_entity_id, signature, signoff_seq, signed_content_hash FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchall()
+        assert len(rows) == 1
+        survivor = rows[0]
+        assert survivor["loomweave_entity_id"] == sei
+        # The sign-off survived the merge — the issue stays governed.
+        assert survivor["signature"] == "legis-hmac-xyz"
+        assert survivor["signoff_seq"] == 5
+        assert survivor["signed_content_hash"] == "sha256:signed"
+        db.close()
+
+
+def test_merge_does_not_downgrade_signed_survivor_with_unsigned_incoming(tmp_path: Path) -> None:
+    """The mirror of carry-forward: a *signed* survivor must NOT be clobbered to
+    NULL by an *unsigned* incoming. (A naive "always copy the incoming sign-off"
+    fix would un-sign the survivor here — the exact governed -> ungoverned
+    downgrade we are guarding against, just from the other direction.) ``loc_a``
+    (survivor) is signed; ``loc_b`` (incoming) is not."""
+    loc_a = "py:func:mod::f"
+    loc_b = "py:func:mod::f_alias"
+    sei = "loomweave:eid:00000000000000000000000000000008"
+    with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
+        db = _loomweave_db(tmp_path, base_url)
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, loc_a, content_hash="sha256:signed")
+        db.add_entity_association(issue.id, loc_b, content_hash="sha256:unsigned")
+        _set_signoff(db, issue.id, loc_a, signature="legis-hmac-survivor", signoff_seq=3, signed_content_hash="sha256:signed")
+
+        report = run_sei_backfill(db, dry_run=False, actor="op")
+
+        assert report.associations_merged == 1
+        rows = db.conn.execute(
+            "SELECT signature, signoff_seq, signed_content_hash FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["signature"] == "legis-hmac-survivor"
+        assert rows[0]["signoff_seq"] == 3
+        assert rows[0]["signed_content_hash"] == "sha256:signed"
+        db.close()
+
+
+@pytest.mark.parametrize("incoming_fresher", [True, False], ids=["incoming_fresher", "survivor_fresher"])
+def test_merge_keeps_freshest_signoff_when_both_signed(tmp_path: Path, incoming_fresher: bool) -> None:
+    """When BOTH merged rows are signed, the survivor must end up with the
+    freshest valid sign-off — the higher ``signoff_seq`` wins, in both directions.
+    An always-fire or never-fire comparison would pin a stale sign-off (whose
+    ``signed_content_hash`` no longer matches live content), which the closure
+    gate reads as STALE and fails closed — a false governance state either way.
+    ``loc_a`` is the survivor; ``loc_b`` the incoming/merged row."""
+    loc_a = "py:func:mod::f"
+    loc_b = "py:func:mod::f_alias"
+    sei = "loomweave:eid:00000000000000000000000000000009"
+    with clarion_stub(sei_supported=True, sei_by_locator={loc_a: sei, loc_b: sei}) as (base_url, _state):
+        db = _loomweave_db(tmp_path, base_url)
+        issue = db.create_issue("t", priority=2)
+        db.add_entity_association(issue.id, loc_a, content_hash="sha256:a")
+        db.add_entity_association(issue.id, loc_b, content_hash="sha256:b")
+        if incoming_fresher:
+            _set_signoff(db, issue.id, loc_a, signature="legis-old", signoff_seq=2, signed_content_hash="sha256:old")
+            _set_signoff(db, issue.id, loc_b, signature="legis-new", signoff_seq=7, signed_content_hash="sha256:new")
+            expected = ("legis-new", 7, "sha256:new")
+        else:
+            _set_signoff(db, issue.id, loc_a, signature="legis-new", signoff_seq=7, signed_content_hash="sha256:new")
+            _set_signoff(db, issue.id, loc_b, signature="legis-old", signoff_seq=2, signed_content_hash="sha256:old")
+            expected = ("legis-new", 7, "sha256:new")
+
+        report = run_sei_backfill(db, dry_run=False, actor="op")
+
+        assert report.associations_merged == 1
+        rows = db.conn.execute(
+            "SELECT signature, signoff_seq, signed_content_hash FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert (rows[0]["signature"], rows[0]["signoff_seq"], rows[0]["signed_content_hash"]) == expected
+        db.close()
+
+
 def test_applied_run_rolls_back_all_writes_on_mid_apply_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The applied run is a single ``BEGIN IMMEDIATE`` transaction whose only
     no-partial-writes guarantee is the ``except: rollback; raise`` in ``_apply``.
