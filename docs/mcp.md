@@ -294,10 +294,9 @@ callers can confirm the exact inserted comment without a follow-up read.
 Returns `by_status` (counts by literal workflow status name such as `open` or
 `in_progress`) and `by_category` (template categories `open`/`wip`/`done`),
 plus `by_type`, `ready_count`, `blocked_count`, and `total_dependencies`. The
-`status_name_counts` and `status_category_counts` maps are **deprecated** exact
-duplicates of `by_status` / `by_category` (filigree-17694d2db8), kept as
-compatibility aliases per ADR-009 §7 and scheduled for removal in the next
-major.
+deprecated `status_name_counts` / `status_category_counts` maps (exact
+duplicates of `by_status` / `by_category`) were **removed in 3.0.0**
+(filigree-e4181ae767). Read `by_status` / `by_category`.
 
 ### Planning
 

@@ -764,14 +764,12 @@ class TestStatsResultShape:
         db.create_issue("Test", type="task")
         result = db.get_stats()
         assert isinstance(result["by_status"], dict)
-        # status_name_counts / status_category_counts are DEPRECATED
+        # status_name_counts / status_category_counts were DEPRECATED
         # (filigree-17694d2db8) exact duplicates of by_status / by_category,
-        # retained as wire-compatibility aliases per ADR-009 §7. Lock the
-        # contract: still present, still identical, until the next major.
-        assert isinstance(result["status_name_counts"], dict)
-        assert result["status_name_counts"] == result["by_status"]
-        assert isinstance(result["status_category_counts"], dict)
-        assert result["status_category_counts"] == result["by_category"]
+        # REMOVED in 3.0.0 (filigree-e4181ae767). Read by_status / by_category.
+        assert "status_name_counts" not in result
+        assert "status_category_counts" not in result
+        assert isinstance(result["by_category"], dict)
         assert isinstance(result["by_type"], dict)
         assert isinstance(result["ready_count"], int)
         assert isinstance(result["blocked_count"], int)

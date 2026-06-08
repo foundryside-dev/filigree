@@ -59,6 +59,18 @@ checklist is complete and a coordinated consumer-migration window is published.
   Python API (`backward=True` → `mode=TransitionMode.BACKWARD`) are affected;
   the close/reopen/release behaviour and `transition_forced` audit events are
   unchanged.
+- **`get_stats` alias keys `status_name_counts` / `status_category_counts`
+  removed.** Deprecated in 2.1.0 (filigree-17694d2db8) as exact duplicates of
+  `by_status` / `by_category`, they are now dropped from every surface that
+  carries `get_stats` output: the MCP `stats_get` tool, the MCP `summary_get`
+  JSON envelope (nested under `stats`), the HTTP `GET /api/stats` projection,
+  and the `filigree stats --json` CLI output. The keys never held information
+  beyond the canonical pair, so the drop loses no data. **Migration:** read
+  `by_status` (literal workflow status names) and `by_category` (template
+  categories `open`/`wip`/`done`). The public `GET /api/stats` endpoint is the
+  out-of-suite breaking boundary — pinned external consumers must switch. No
+  in-suite sibling (loomweave / wardline / legis / lacuna / weft) read the
+  removed keys (confirmed by full call-site enumeration, filigree-034931a584).
 
 ### Fixed
 

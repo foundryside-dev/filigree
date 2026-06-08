@@ -770,11 +770,10 @@ filigree events <id>                        # Event history for one issue
 ### `stats`
 
 Project statistics: counts by literal status name (`by_status`), template
-status category (`by_category`), type, ready, and blocked. JSON also includes
-the **deprecated** `status_name_counts` and `status_category_counts` maps —
-exact duplicates of `by_status` and `by_category` (filigree-17694d2db8), kept as
-compatibility aliases per ADR-009 §7 and scheduled for removal in the next
-major. Read `by_status` / `by_category`.
+status category (`by_category`), type, ready, and blocked. The deprecated
+`status_name_counts` / `status_category_counts` JSON aliases (exact duplicates
+of `by_status` / `by_category`) were **removed in 3.0.0**
+(filigree-e4181ae767). Read `by_status` / `by_category`.
 
 ### `metrics`
 

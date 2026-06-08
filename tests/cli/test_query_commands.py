@@ -295,10 +295,11 @@ class TestJsonOutput:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "by_status" in data
-        # DEPRECATED (filigree-17694d2db8) aliases, retained on the CLI JSON
-        # wire surface per ADR-009 §7: still present, still duplicates.
-        assert data["status_name_counts"] == data["by_status"]
-        assert data["status_category_counts"] == data["by_category"]
+        assert "by_category" in data
+        # status_name_counts / status_category_counts removed in 3.0.0
+        # (filigree-e4181ae767) — gone from the CLI JSON surface too.
+        assert "status_name_counts" not in data
+        assert "status_category_counts" not in data
 
     def test_search_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

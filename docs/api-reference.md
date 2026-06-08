@@ -835,8 +835,6 @@ Returns project statistics:
 {
     "by_status": {"open": 5, "in_progress": 2, ...},
     "by_category": {"open": 5, "wip": 2, "done": 10},
-    "status_name_counts": {"open": 5, "in_progress": 2, ...},
-    "status_category_counts": {"open": 5, "wip": 2, "done": 10},
     "by_type": {"task": 8, "bug": 4, ...},
     "ready_count": int,
     "blocked_count": int,
@@ -845,11 +843,9 @@ Returns project statistics:
 ```
 
 `by_status` holds counts keyed by literal workflow status name; `by_category`
-holds template-aware category counts (`open`/`wip`/`done`). `status_name_counts`
-and `status_category_counts` are **deprecated** exact duplicates of `by_status`
-and `by_category` respectively (filigree-17694d2db8), retained as compatibility
-aliases per ADR-009 §7 and scheduled for removal in the next major. Read
-`by_status` / `by_category`.
+holds template-aware category counts (`open`/`wip`/`done`). The deprecated
+`status_name_counts` / `status_category_counts` aliases (exact duplicates of
+`by_status` / `by_category`) were **removed in 3.0.0** (filigree-e4181ae767).
 
 #### `get_recent_events`
 

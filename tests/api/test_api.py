@@ -84,11 +84,16 @@ class TestStatsAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert "by_status" in data
+        assert "by_category" in data
         assert "by_type" in data
         assert "ready_count" in data
         assert "blocked_count" in data
         assert "total_dependencies" in data
         assert "prefix" in data
+        # status_name_counts / status_category_counts removed in 3.0.0
+        # (filigree-e4181ae767) — public /api/stats no longer emits the aliases.
+        assert "status_name_counts" not in data
+        assert "status_category_counts" not in data
 
     async def test_stats_prefix(self, client: AsyncClient) -> None:
         resp = await client.get("/api/stats")

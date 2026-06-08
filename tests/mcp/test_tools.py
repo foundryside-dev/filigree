@@ -225,8 +225,10 @@ class TestToolDescriptions:
         assert "(open, no blockers)" not in get_ready_description
 
         get_stats_description = tools["stats_get"].description or ""
-        assert "status_name_counts" in get_stats_description
-        assert "status_category_counts" in get_stats_description
+        # status_name_counts / status_category_counts removed in 3.0.0
+        # (filigree-e4181ae767) — the description must not advertise them.
+        assert "status_name_counts" not in get_stats_description
+        assert "status_category_counts" not in get_stats_description
 
         for tool_name in ("work_claim_next", "work_start_next"):
             description = tools[tool_name].description or ""
@@ -747,6 +749,18 @@ class TestTemplateAndSummary:
         text = _parse(result)
         assert "Project Pulse" in text
 
+    async def test_get_summary_json_envelope_drops_deprecated_alias_keys(self, mcp_db: FiligreeDB) -> None:
+        # get_summary's JSON envelope nests get_stats output under "stats";
+        # the removed alias keys (filigree-e4181ae767) must not survive there.
+        mcp_db.create_issue("A")
+        result = await call_tool("summary_get", {"format": "json"})
+        data = _parse(result)
+        stats = data["stats"]
+        assert "by_status" in stats
+        assert "by_category" in stats
+        assert "status_name_counts" not in stats
+        assert "status_category_counts" not in stats
+
     async def test_session_context_tool_is_available(self, mcp_db: FiligreeDB) -> None:
         tools = await list_tools()
         assert "session_context_get" in {tool.name for tool in tools}
@@ -770,21 +784,21 @@ class TestTemplateAndSummary:
         assert "by_status" in data
         assert data["by_status"]["open"] == 1
 
-    async def test_get_stats_exposes_unambiguous_status_count_names(self, mcp_db: FiligreeDB) -> None:
+    async def test_get_stats_drops_deprecated_alias_keys(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("A")
         mcp_db.update_issue(issue.id, status="in_progress")
 
         result = await call_tool("stats_get", {})
 
         data = _parse(result)
-        # status_name_counts / status_category_counts are DEPRECATED
-        # (filigree-17694d2db8) duplicates of by_status / by_category, kept as
-        # wire-compatibility aliases per ADR-009 §7. Pin them on the MCP wire
-        # surface: present and identical until the next major.
-        assert data["status_name_counts"] == data["by_status"]
-        assert data["status_category_counts"] == data["by_category"]
-        assert data["status_name_counts"]["in_progress"] == 1
-        assert data["status_category_counts"]["wip"] == 1
+        # status_name_counts / status_category_counts were DEPRECATED
+        # (filigree-17694d2db8) duplicates of by_status / by_category, REMOVED
+        # in 3.0.0 (filigree-e4181ae767). The MCP stats_get wire surface must
+        # carry only the canonical keys.
+        assert data["by_status"]["in_progress"] == 1
+        assert data["by_category"]["wip"] == 1
+        assert "status_name_counts" not in data
+        assert "status_category_counts" not in data
 
 
 class TestLabels:

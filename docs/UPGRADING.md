@@ -188,6 +188,34 @@ server token is supplied by the client wrapper.
 | `restart_dashboard` | `admin_restart_dashboard` |
 | `undo_last` | `admin_undo_last` |
 
+## Upgrading to 3.0.0 (get_stats alias keys removed)
+
+The deprecated `status_name_counts` / `status_category_counts` keys are gone
+from the project-stats payload. They were always exact duplicates of
+`by_status` / `by_category` respectively — deprecated in 2.1.0 and removed at
+this major boundary.
+
+The keys are dropped from **every** surface that carries `get_stats` output:
+
+- the MCP `stats_get` tool,
+- the MCP `summary_get` JSON envelope (under the nested `stats` object),
+- the HTTP `GET /api/stats` projection,
+- the `filigree stats --json` CLI output.
+
+### What you must do
+
+If you read either removed key, switch to the canonical pair:
+
+| Removed key | Read instead |
+| --- | --- |
+| `status_name_counts` | `by_status` (counts keyed by literal workflow status name, e.g. `open`, `in_progress`) |
+| `status_category_counts` | `by_category` (template categories `open` / `wip` / `done`) |
+
+The values are identical to what the removed keys carried, so this is a
+key-name change only. No in-suite sibling read the removed keys; the affected
+audience is any **out-of-suite** consumer pinned to the public `GET /api/stats`
+endpoint.
+
 ## Upgrading from 2.1.0 to 2.1.1
 
 Filigree 2.1.1 ships database schema `user_version` 21 (2.1.0 ships 20). The
