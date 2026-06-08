@@ -46,6 +46,8 @@ from filigree.db_base import _now_iso
 from filigree.registry import LoomweaveRegistry, RegistryResolutionError, RegistryUnavailableError, SeiResolution
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from filigree.core import FiligreeDB
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,30 @@ class SeiBackfillError(RuntimeError):
 
 class LoomweaveOutOfSyncError(SeiBackfillError):
     """The local Loomweave database is not synchronized or online."""
+
+
+def _resolve_loomweave_db_path(project_root: Path) -> Path | None:
+    """Locate Loomweave's local index DB, forward-compatible across the WEFT
+    store consolidation.
+
+    Probe order: the consolidated ``.weft/loomweave/loomweave.db`` first (the
+    shared-subtree layout filigree already adopted for its own store), then the
+    legacy standalone ``.loomweave/loomweave.db``. Returns the first that exists,
+    or ``None`` when neither is present. ``.weft`` is filigree's shared-store dir
+    name (``core.WEFT_DIR_NAME``); ``loomweave`` is Loomweave's own member subdir
+    by the same suite convention (filigree's is ``filigree``). Probing both means
+    this self-heals the moment Loomweave cuts over — no coordinated release.
+    """
+    from filigree.core import WEFT_DIR_NAME
+
+    candidates = (
+        project_root / WEFT_DIR_NAME / "loomweave" / "loomweave.db",
+        project_root / ".loomweave" / "loomweave.db",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,12 +201,17 @@ def _require_sei_capable(db: FiligreeDB) -> None:
 
     # 2. Local database sync checks (only run if db.project_root is not None and .git directory exists)
     if db.project_root is not None and (db.project_root / ".git").exists():
-        # Loomweave's local index DB (its own dot-dir, mirroring filigree's
-        # .filigree/filigree.db convention). Hard cutover from the pre-rebrand
-        # .clarion/clarion.db — Clarion never shipped, so there is no installed
-        # base to fall back to (3.0.0 rebrand: no compatibility aliases).
-        loomweave_db_path = db.project_root / ".loomweave" / "loomweave.db"
-        if not loomweave_db_path.is_file():
+        # Loomweave's local index DB. Forward-compatible across the WEFT store
+        # consolidation: Loomweave, like filigree, is migrating its store under the
+        # shared ``.weft/`` subtree (filigree's own DB moved to
+        # ``.weft/filigree/filigree.db``; Loomweave's mirrors to
+        # ``.weft/loomweave/loomweave.db``). Probe the consolidated location FIRST,
+        # then fall back to the legacy standalone ``.loomweave/loomweave.db`` so this
+        # self-heals whenever Loomweave cuts over — neither side needs a coordinated
+        # release. (Hard cutover from the pre-rebrand .clarion/clarion.db: Clarion
+        # never shipped, so no compatibility alias is owed there — 3.0.0 rebrand.)
+        loomweave_db_path = _resolve_loomweave_db_path(db.project_root)
+        if loomweave_db_path is None:
             raise LoomweaveOutOfSyncError("Local Loomweave database not found.")
 
         try:

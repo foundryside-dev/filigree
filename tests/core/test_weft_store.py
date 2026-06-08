@@ -271,6 +271,69 @@ class TestMigrateStoreToWeft:
         store, migrated = migrate_store_to_weft(tmp_path)
         assert migrated is True
         assert (store / "federation_token").read_text() == "tok-12345\n"
+        # The secret is carried forward, NOT left behind in the auditable husk —
+        # a tracked-husk project must not retain a (now-dead) federation_token.
+        assert not (legacy / "federation_token").exists()
+
+    def test_resumed_confless_migration_re_copies_changed_metadata(self, tmp_path: Path) -> None:
+        """M1: a resumed migration must ship CURRENT metadata, not a copy frozen at
+        the first (interrupted) run. For a CONFLESS install legacy stays canonical
+        until step 4, so a federation_token rotated on legacy between the interrupt
+        and the resume must win. Copy-once froze the stale weft copy; the symmetric
+        re-copy (mirroring the DB) refreshes it.
+        """
+        import shutil
+
+        # Confless legacy install with an initial token.
+        legacy = tmp_path / FILIGREE_DIR_NAME
+        legacy.mkdir()
+        write_config(legacy, {"prefix": "proj", "version": 1, "enabled_packs": ["core"]})
+        ldb = FiligreeDB(legacy / DB_FILENAME, prefix="proj")
+        ldb.initialize()
+        ldb.close()
+        (legacy / "federation_token").write_text("tok-OLD\n")
+        assert not (tmp_path / CONF_FILENAME).exists()  # confless
+
+        # Interrupted run: weft DB + weft token already staged (stale), legacy present.
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        shutil.copy2(str(legacy / DB_FILENAME), str(store / DB_FILENAME))
+        (store / "federation_token").write_text("tok-OLD\n")
+
+        # Token rotated on the still-canonical legacy store after the interrupt.
+        (legacy / "federation_token").write_text("tok-NEW\n")
+
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        # The resumed migration refreshed the token from canonical legacy.
+        assert (store / "federation_token").read_text() == "tok-NEW\n"
+
+    def test_resumed_conf_migration_does_not_clobber_fresher_weft_metadata(self, tmp_path: Path) -> None:
+        """M1 boundary: the symmetric re-copy must NOT introduce a clobber. For a
+        CONF install, weft becomes canonical the moment the weft DB lands (step 1) —
+        before the conf commits. A metadata write that resolved to the now-canonical
+        weft must survive a re-run; re-copying legacy→weft unconditionally would
+        destroy it. The fix re-copies ONLY while legacy is canonical, so here it
+        leaves the fresher weft copy intact.
+        """
+        import shutil
+
+        legacy = _make_legacy_install(tmp_path)
+        (legacy / "federation_token").write_text("tok-OLD\n")
+
+        # Interrupted run: weft DB staged (so weft is now canonical for a conf
+        # install), conf still points at legacy.
+        store = _weft_store(tmp_path)
+        store.mkdir(parents=True)
+        shutil.copy2(str(legacy / DB_FILENAME), str(store / DB_FILENAME))
+        assert read_conf(tmp_path / CONF_FILENAME)["db"] == f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"
+        # A token write that resolved to the now-canonical weft store.
+        (store / "federation_token").write_text("tok-WEFT\n")
+
+        _store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        # The fresher weft token was preserved, NOT clobbered by stale legacy.
+        assert (store / "federation_token").read_text() == "tok-WEFT\n"
 
     def test_store_dir_override_blocks_auto_migration(self, tmp_path: Path) -> None:
         _make_legacy_install(tmp_path)

@@ -633,6 +633,28 @@ def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
         raise
 
 
+def _atomic_copy_file(src: Path, dest: Path) -> None:
+    """Copy *src* → *dest* atomically (stage to a dest-dir temp, ``os.replace``).
+
+    Mirrors the publish in :func:`_checkpoint_and_copy_sqlite` for the small
+    metadata sidecars (config.json, INSTALL_VERSION, summary, federation_token):
+    ``dest`` only ever appears complete, and an overwrite of an existing ``dest``
+    is atomic. ``copy2`` to a temp in the dest dir keeps the byte copy
+    cross-device safe while ``os.replace`` stays a same-filesystem atomic rename.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(str(src), str(tmp))
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
     """Best-effort: the project's ephemeral dashboard port if one is bound, else ``None``.
 
@@ -833,15 +855,40 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         _checkpoint_and_copy_sqlite(legacy_db, weft_db)
     # 2. Copy durable + runtime metadata beside the DB. config.json must follow
     #    so the enabled_packs fallback resolves; federation_token must follow so
-    #    sibling continuity survives. Idempotent (skip if already present).
-    for name in (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token", "scanners", "templates"):
+    #    sibling continuity (and token rotation) survives.
+    #
+    #    M1 — symmetry with the DB re-copy, WITHOUT introducing a clobber. The DB
+    #    (step 1) re-copies unconditionally because legacy stays canonical until
+    #    the conf commit, so a resumed migration must refresh from it. The small
+    #    metadata FILES need the SAME refresh, or a resumed migration ships stale
+    #    metadata (e.g. a federation_token rotated on legacy between an interrupted
+    #    run and its resume) — copy-once froze them at first-copy. But the canonical
+    #    source differs by install shape: a CONFLESS install keeps legacy canonical
+    #    until step 4 deletes the legacy DB, whereas a CONF install's conf flips
+    #    canonicality to weft the moment step 1 lands the weft DB. So we re-copy
+    #    from legacy ONLY while legacy is still the resolved canonical store;
+    #    otherwise weft may already hold fresher metadata (a write that resolved to
+    #    weft) and an unconditional re-copy would clobber it (the exact data-loss
+    #    we must not introduce). Directories (scanners/templates) stay copy-once:
+    #    copytree cannot overwrite an existing dest, and durable config does not
+    #    drift mid-migration.
+    legacy_canonical = resolve_store_dir(project_root).resolve() == legacy_dir.resolve()
+    metadata_files = (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token")
+    metadata_dirs = ("scanners", "templates")
+    for name in metadata_files:
         src = legacy_dir / name
         dest = weft_store / name
-        if src.exists() and not dest.exists():
-            if src.is_dir():
-                shutil.copytree(str(src), str(dest))
-            else:
-                shutil.copy2(str(src), str(dest))
+        if not src.is_file():
+            continue
+        # Re-copy from legacy while it is canonical (mirrors the DB); else copy-once
+        # so a fresher weft copy is never clobbered.
+        if legacy_canonical or not dest.exists():
+            _atomic_copy_file(src, dest)
+    for name in metadata_dirs:
+        src = legacy_dir / name
+        dest = weft_store / name
+        if src.is_dir() and not dest.exists():
+            shutil.copytree(str(src), str(dest))
     # 3. Rewrite the conf to point at the destination — only now that a valid DB
     #    exists there. (Idempotent: skip if it already points at the weft DB.)
     new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
@@ -857,6 +904,13 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         stale = legacy_dir / (DB_FILENAME + suffix)
         if stale.is_file():
             stale.unlink()
+    # Also remove the per-machine federation_token secret from the husk: it was
+    # copied forward in step 2, the husk has no use for it, and a project that
+    # tracks .filigree/ as committed payload (root rule removed) would otherwise
+    # leave a (now-dead) secret behind a nested-ignore that an old pre-rule install
+    # may not carry. Same secret-hygiene class as the .mcp.json token guard.
+    with contextlib.suppress(OSError):
+        (legacy_dir / "federation_token").unlink(missing_ok=True)
     # Auditable, non-destructive breadcrumb — never delete the legacy dir.
     (legacy_dir / LEGACY_MOVED_BREADCRUMB).write_text(
         f"This store was migrated to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/.\n"

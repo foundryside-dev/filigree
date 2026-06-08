@@ -32,6 +32,47 @@ def test_sei_prefix_is_loomweave() -> None:
     assert "loomweave:eid:abc".startswith(SEI_PREFIX)
 
 
+class TestResolveLoomweaveDbPath:
+    """Forward-compat: the local Loomweave index DB is probed at the consolidated
+    ``.weft/loomweave/`` location first, then the legacy ``.loomweave/`` — so the
+    backfill self-heals when Loomweave cuts its store under ``.weft/`` (no
+    coordinated release needed). filigree-flagged cross-product coordination.
+    """
+
+    def test_legacy_location_resolved(self, tmp_path: Path) -> None:
+        from filigree.sei_backfill import _resolve_loomweave_db_path
+
+        legacy = tmp_path / ".loomweave"
+        legacy.mkdir()
+        (legacy / "loomweave.db").write_bytes(b"x")
+        assert _resolve_loomweave_db_path(tmp_path) == legacy / "loomweave.db"
+
+    def test_consolidated_weft_location_resolved(self, tmp_path: Path) -> None:
+        from filigree.sei_backfill import _resolve_loomweave_db_path
+
+        weft = tmp_path / ".weft" / "loomweave"
+        weft.mkdir(parents=True)
+        (weft / "loomweave.db").write_bytes(b"x")
+        assert _resolve_loomweave_db_path(tmp_path) == weft / "loomweave.db"
+
+    def test_consolidated_location_preferred_over_legacy(self, tmp_path: Path) -> None:
+        from filigree.sei_backfill import _resolve_loomweave_db_path
+
+        legacy = tmp_path / ".loomweave"
+        legacy.mkdir()
+        (legacy / "loomweave.db").write_bytes(b"x")
+        weft = tmp_path / ".weft" / "loomweave"
+        weft.mkdir(parents=True)
+        (weft / "loomweave.db").write_bytes(b"x")
+        # Consolidated wins once Loomweave cuts over.
+        assert _resolve_loomweave_db_path(tmp_path) == weft / "loomweave.db"
+
+    def test_neither_present_returns_none(self, tmp_path: Path) -> None:
+        from filigree.sei_backfill import _resolve_loomweave_db_path
+
+        assert _resolve_loomweave_db_path(tmp_path) is None
+
+
 def _switch_to_loomweave_mode(project: Path, base_url: str) -> None:
     """Repoint a local-mode project's conf at a (live-stub) Loomweave authority."""
     conf_path = project / ".filigree.conf"
