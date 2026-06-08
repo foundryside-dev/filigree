@@ -400,8 +400,14 @@ def _route_supports(route_table: dict[str, set[str]], path: str, method: str) ->
     return method.upper() in route_table.get(path, set())
 
 
-def _doctor_dashboard_contract_checks() -> list[CheckResult]:
-    """Validate dashboard/API route registration without issuing mutating calls."""
+def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[CheckResult]:
+    """Validate dashboard/API route registration without issuing mutating calls.
+
+    *project_root* lets the Auth config check resolve the tier-2 (file) federation
+    token, so an on-by-default daemon authed via ``<store_dir>/federation_token``
+    is not misreported as "auth disabled" (filigree-b09a4854d7). ``None`` skips
+    tier 2 (env-only), preserving the legacy no-arg behaviour for direct callers.
+    """
     try:
         from filigree.dashboard import FEDERATION_TOKEN_ENV_VARS, create_app
 
@@ -478,7 +484,35 @@ def _doctor_dashboard_contract_checks() -> list[CheckResult]:
     auth_envs = {name: os.environ.get(name) for name in FEDERATION_TOKEN_ENV_VARS}
     empty_envs = sorted(name for name, value in auth_envs.items() if value is not None and not value.strip())
     configured_envs = sorted(name for name, value in auth_envs.items() if value is not None and value.strip())
-    if empty_envs:
+
+    # Tier-2 resolution: since the auth flip (f7eb673) the inbound token is
+    # auto-minted to ``<store_dir>/federation_token`` and federation auth is
+    # on-by-default on that daemon even with no env var set. An env-only check
+    # misreports such a daemon as "auth disabled" and sabotages the very
+    # lockout-debugging the flip exists to support (filigree-b09a4854d7). Resolve
+    # the project store token read-only (never mints here) when a project_root is
+    # available; ``None`` keeps the legacy env-only behaviour.
+    file_token_source: str | None = None
+    if project_root is not None:
+        from filigree.core import resolve_store_dir
+        from filigree.federation_token import FEDERATION_TOKEN_FILE_SOURCE, read_token_file
+
+        if read_token_file(resolve_store_dir(project_root)):
+            file_token_source = FEDERATION_TOKEN_FILE_SOURCE
+
+    if configured_envs:
+        # A valid env token wins (tier 1) — auth is on regardless of any blank alias.
+        results.append(CheckResult("Auth config", True, f"Federation bearer auth configured via {configured_envs[0]}"))
+    elif file_token_source:
+        # Tier 2: file token authes the daemon. A blank env var is ignored (it does
+        # not enable auth and does not disable it) — surface it as a heads-up, but
+        # the daemon is authed, so this is a PASS, not a "disabled".
+        message = f"Federation bearer auth enabled via {file_token_source}"
+        if empty_envs:
+            message += f" ({', '.join(empty_envs)} set but blank — ignored; file token wins)"
+        results.append(CheckResult("Auth config", True, message))
+    elif empty_envs:
+        # Blank env var and no file token: a likely unset-by-accident worth flagging.
         results.append(
             CheckResult(
                 "Auth config",
@@ -487,8 +521,6 @@ def _doctor_dashboard_contract_checks() -> list[CheckResult]:
                 fix_hint=f"Unset {', '.join(empty_envs)} or set a non-empty token before starting the dashboard.",
             )
         )
-    elif configured_envs:
-        results.append(CheckResult("Auth config", True, f"Federation bearer auth configured via {configured_envs[0]}"))
     else:
         results.append(CheckResult("Auth config", True, "Federation auth disabled; loopback dashboard remains open by default"))
 
@@ -1296,7 +1328,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     results.extend(_doctor_federation_token_checks(project_root, mode))
 
     # 13. Check dashboard/API route registration without mutating records.
-    results.extend(_doctor_dashboard_contract_checks())
+    results.extend(_doctor_dashboard_contract_checks(project_root))
 
     # 14. Check scanner registration drift
     results.extend(_doctor_bundled_scanner_checks(filigree_dir))

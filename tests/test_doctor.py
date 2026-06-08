@@ -1043,6 +1043,49 @@ class TestDoctorSharedContractChecks:
         assert by_id["entity_associations.routes"].passed is True
         assert by_id["auth.config"].passed is True
 
+    def test_auth_config_reports_tier2_file_token_as_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tier-2 (file) federation token with NO env var must read as auth
+        ENABLED, not 'disabled'. Since the auth flip (f7eb673) the inbound token
+        is auto-minted to <store_dir>/federation_token and auth is on-by-default;
+        an env-only check misreads that daemon as 'disabled' and sabotages the
+        lockout debugging the flip exists to support (filigree-b09a4854d7)."""
+        for var in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        from filigree.core import resolve_store_dir
+
+        project = _make_project(tmp_path)
+        store = resolve_store_dir(project)
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "federation_token").write_text("tier2-file-token-abc\n")
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+        auth = by_id["auth.config"]
+        assert auth.passed is True
+        assert "disabled" not in auth.message.lower()
+        assert "file" in auth.message.lower()
+
+    def test_auth_config_empty_env_with_file_token_reports_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty/blank env var alongside a valid tier-2 file token must still
+        report auth ENABLED — read_env_token skips the blank var and falls through
+        to tier 2, so the daemon is authed. The blank-var heads-up may remain, but
+        the check must not fail or claim 'disabled' (filigree-b09a4854d7)."""
+        for var in ("FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "   ")
+        from filigree.core import resolve_store_dir
+
+        project = _make_project(tmp_path)
+        store = resolve_store_dir(project)
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "federation_token").write_text("tier2-file-token-xyz\n")
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+        auth = by_id["auth.config"]
+        assert auth.passed is True
+        assert "disabled" not in auth.message.lower()
+
 
 # ---------------------------------------------------------------------------
 # _find_all_filigree_binaries

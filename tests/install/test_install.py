@@ -2698,6 +2698,57 @@ class TestInstallMcpServerMode:
         assert server_config.get("type") == "stdio" or "command" in server_config
         assert server_config["args"] == []
 
+    def test_server_mode_mcp_json_is_owner_only(self, tmp_path: Path) -> None:
+        """The server-mode .mcp.json carries the LITERAL federation token, so it
+        must be written 0600 — matching the token file's own mode and making the
+        module's "0600" claim honest (filigree-ebfc16a090)."""
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        mode = stat.S_IMODE((tmp_path / ".mcp.json").stat().st_mode)
+        assert mode == 0o600, f"expected 0600, got {mode:#o}"
+
+    def test_server_mode_guards_mcp_json_in_gitignore(self, tmp_path: Path) -> None:
+        """Server-mode install must add a .mcp.json gitignore guard so the embedded
+        per-machine literal token never enters git history — a committed literal
+        makes every other clone 401 (filigree-ebfc16a090)."""
+        from filigree.install_support.gitignore import MCP_JSON_IGNORE_RULES, has_active_ignore
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        assert has_active_ignore(gitignore.read_text(), MCP_JSON_IGNORE_RULES)
+
+    def test_ethereal_mode_does_not_guard_mcp_json(self, tmp_path: Path) -> None:
+        """Ethereal mode writes a token-less stdio entry that is safe to commit;
+        .mcp.json is a shared suite artifact, so filigree must NOT gitignore it in
+        ethereal mode (guard is server-mode only) (filigree-ebfc16a090)."""
+        from filigree.install_support.gitignore import MCP_JSON_IGNORE_RULES, has_active_ignore
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="ethereal")
+        assert ok
+        gitignore = tmp_path / ".gitignore"
+        content = gitignore.read_text() if gitignore.exists() else ""
+        assert not has_active_ignore(content, MCP_JSON_IGNORE_RULES)
+
+    def test_server_mode_warns_when_mcp_json_already_tracked(self, tmp_path: Path) -> None:
+        """If .mcp.json is already git-tracked, the gitignore guard is a no-op for
+        it — the literal token still lands on the next commit. The install must
+        surface that as a warning (filigree-ebfc16a090)."""
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        subprocess.run(["git", "add", ".mcp.json"], cwd=tmp_path, check=True)
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        lower = msg.lower()
+        assert "track" in lower
+        assert "git rm --cached" in lower
+
 
 class TestCheckResult:
     def test_passed_icon(self) -> None:

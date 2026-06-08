@@ -18,6 +18,10 @@ from typing import Any
 from urllib.parse import quote
 
 from filigree.core import read_config, resolve_store_dir
+from filigree.install_support.gitignore import (
+    MCP_JSON_IGNORE_RULES,
+    has_active_ignore,
+)
 from filigree.install_support.safe_paths import (
     UnsafeInstallPathError,
     project_path,
@@ -28,9 +32,15 @@ logger = logging.getLogger(__name__)
 
 # The server-mode ``.mcp.json`` Authorization header carries the LITERAL
 # federation token (see ``_install_mcp_server_mode``), not a ``${ENV}`` reference:
-# the token is loopback deconfliction plumbing, not a security secret (0600 file,
-# do not harden), and the env-var indirection forced an export in every client
-# shell — recurring 401 toil. The daemon validates against the same minted token.
+# the env-var indirection forced an export in every client shell — recurring 401
+# toil, and the daemon validates against the same minted token. The token is
+# loopback deconfliction plumbing, not a security secret — but the literal still
+# must not enter git history: it is minted per-machine in ``.weft/filigree/``, so a
+# committed copy makes every *other* clone present one machine's token and the
+# daemon 401s the rest (the exact failure ``_doctor_federation_token_checks``
+# reports). So the artifact is written ``0600`` AND gitignore-guarded — see
+# ``_guard_mcp_json_gitignore``. (The 0600 token *file* itself lives under the
+# already-gitignored ``.weft/``; this guard protects the literal copy.)
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +325,77 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
-    return True, f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded)"
+    # The literal token makes this artifact machine-private: tighten to 0600
+    # (matching the source token file) and gitignore-guard it so it never lands
+    # in git history. Both are best-effort — the install still succeeds if the
+    # filesystem/git refuses.
+    try:
+        mcp_json_path.chmod(0o600)
+    except OSError as exc:
+        logger.warning("Could not chmod %s to 0600: %s", mcp_json_path, exc)
+    note = _guard_mcp_json_gitignore(project_root)
+    msg = f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded, mode 0600)"
+    if note:
+        msg += f"; {note}"
+    return True, msg
+
+
+def _git_tracks(project_root: Path, relpath: str) -> bool:
+    """Return True if *relpath* is already tracked by git under *project_root*.
+
+    Best-effort: no git, no repo, or any error → False (treated as not tracked).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "--error-unmatch", relpath],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _guard_mcp_json_gitignore(project_root: Path) -> str | None:
+    """Ensure the project-root ``.gitignore`` ignores ``.mcp.json`` (server mode).
+
+    The server-mode ``.mcp.json`` carries the LITERAL per-machine federation
+    token; committing it makes every other clone present this machine's token
+    and the daemon 401s the rest. Appending the rule keeps the literal out of
+    git history. Returns a human-readable note (folded into the install message),
+    or ``None`` when nothing needed saying.
+
+    A ``.gitignore`` rule is a no-op on an already-*tracked* file, so if
+    ``.mcp.json`` is already committed the literal still lands on the next commit
+    — that case is surfaced as an explicit warning telling the operator to
+    ``git rm --cached`` it. Best-effort: a write/path failure degrades to a note
+    rather than failing the install.
+    """
+    notes: list[str] = []
+    try:
+        gitignore = project_path(project_root, ".gitignore")
+    except UnsafeInstallPathError as exc:
+        logger.warning("Could not resolve .gitignore for MCP guard: %s", exc)
+        gitignore = None
+    if gitignore is not None:
+        content = gitignore.read_text() if gitignore.exists() else ""
+        if has_active_ignore(content, MCP_JSON_IGNORE_RULES):
+            notes.append(".mcp.json already gitignored")
+        else:
+            block = "\n# Filigree server-mode MCP config embeds a literal federation token\n.mcp.json\n"
+            if content and not content.endswith("\n"):
+                content += "\n"
+            try:
+                gitignore.write_text((content + block).lstrip("\n"))
+                notes.append("added .mcp.json to .gitignore")
+            except OSError as exc:
+                logger.warning("Could not update .gitignore for MCP guard: %s", exc)
+    if _git_tracks(project_root, ".mcp.json"):
+        notes.append(
+            "WARNING: .mcp.json is already git-tracked — the literal token will still be committed; run `git rm --cached .mcp.json`"
+        )
+    return "; ".join(notes) if notes else None
 
 
 def install_claude_code_mcp(
