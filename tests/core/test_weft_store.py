@@ -27,6 +27,7 @@ from filigree.core import (
     WEFT_MEMBER_SUBDIR,
     FiligreeDB,
     StoreMigrationBusyError,
+    StoreMigrationConfUnreadableError,
     WeftConfigUnreadableError,
     find_filigree_anchor,
     migrate_store_to_weft,
@@ -800,6 +801,81 @@ class TestMigrationWalAndBusy:
             assert reopened.get_issue(created.id) is not None
         finally:
             reopened.close()
+
+    def test_corrupt_conf_refuses_migration_before_any_mutation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A present-but-unreadable ``.filigree.conf`` must REFUSE before any
+        filesystem mutation, not crash mid-migration with a half-published weft
+        husk (filigree-obs-85b37a7cdc).
+
+        Steps 1-2 of the migration publish the weft DB + copy metadata, and step
+        3 rewrites the conf's ``db`` field (preserving ``prefix`` / registry
+        settings) — a corrupt conf can be neither rewritten nor trusted to reveal
+        a relocated custom layout, so we mirror the strict ``weft.toml`` read (I1)
+        and refuse up front. The legacy store and conf are left byte-identical; a
+        re-run converges once the conf is readable.
+        """
+        # The conf gate runs AFTER the daemon-liveness probe, whose deterministic
+        # per-path port can false-refuse with StoreMigrationBusyError when an
+        # unrelated daemon happens to hold that port (obs-fcbeb1718d). This test
+        # does not intend a live daemon, so no-op the probe to keep the assertion
+        # on StoreMigrationConfUnreadableError deterministic.
+        monkeypatch.setattr("filigree.core._refuse_if_daemon_serving", lambda _root: None)
+        legacy = _make_legacy_install(tmp_path)
+        db = FiligreeDB.from_filigree_dir(legacy)
+        try:
+            created = db.create_issue("seed before corrupt conf", type="task")
+        finally:
+            db.close()
+
+        conf_path = tmp_path / CONF_FILENAME
+        valid_conf_bytes = conf_path.read_bytes()  # kept to restore for the re-run
+        corrupt_conf_bytes = b"{ this is not valid json"
+        conf_path.write_bytes(corrupt_conf_bytes)  # corrupt it
+
+        with pytest.raises(StoreMigrationConfUnreadableError):
+            migrate_store_to_weft(tmp_path)
+
+        # Refused BEFORE mutation: no weft store, no breadcrumb, legacy DB present,
+        # and the migration left the conf byte-identical to what it found (it never
+        # half-wrote a rewrite — the corrupt bytes are exactly as we left them).
+        assert not _weft_store(tmp_path).exists()
+        assert not (legacy / LEGACY_MOVED_BREADCRUMB).exists()
+        assert (legacy / DB_FILENAME).is_file()
+        assert conf_path.read_bytes() == corrupt_conf_bytes
+
+        # Fix the conf → a re-run converges and the seeded data survives intact.
+        conf_path.write_bytes(valid_conf_bytes)
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        assert store == _weft_store(tmp_path)
+        db2 = FiligreeDB.from_anchor(find_filigree_anchor(tmp_path))
+        try:
+            assert db2.get_issue(created.id) is not None
+        finally:
+            db2.close()
+
+    def test_completed_migration_with_corrupt_conf_is_noop_not_refusal(self, tmp_path: Path) -> None:
+        """Regression: the conf-readability gate sits AFTER the idempotency no-op
+        checks, not at the top.
+
+        A migration that already completed (legacy DB carried forward + removed)
+        has nothing left to mutate, so a conf that gets corrupted *afterwards*
+        must still no-op — the confless-completion short-circuit (conf_db is None,
+        weft present, legacy DB gone) fires before the gate. Refusing here would
+        block an unrelated re-run on a problem the caller's own post-migrate guard
+        already reports.
+        """
+        _make_legacy_install(tmp_path)
+        store, migrated = migrate_store_to_weft(tmp_path)  # complete it
+        assert migrated is True
+
+        # Corrupt the conf AFTER completion — legacy DB is already gone.
+        (tmp_path / CONF_FILENAME).write_text("{ corrupt after the fact")
+        assert not (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).exists()
+
+        store2, migrated2 = migrate_store_to_weft(tmp_path)  # must NOT raise
+        assert migrated2 is False
+        assert store2 == store
 
 
 class TestDeepStoreDirOverrideProjectRoot:

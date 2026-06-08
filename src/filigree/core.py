@@ -582,6 +582,21 @@ class StoreMigrationBusyError(RuntimeError):
     """A live writer holds the DB, so migration cannot safely checkpoint it."""
 
 
+class StoreMigrationConfUnreadableError(RuntimeError):
+    """``.filigree.conf`` is present but unreadable when a store migration needs it.
+
+    The mutating migration path (:func:`migrate_store_to_weft`) rewrites the
+    conf's ``db`` field — preserving ``prefix`` / ``project_name`` / registry
+    settings — and then deletes the legacy DB. A corrupt conf can be neither
+    rewritten (parsing it back is a prerequisite for preserving those fields) nor
+    trusted to reveal a relocated custom ``db`` layout we must not disturb. So,
+    mirroring the strict ``weft.toml`` read (I1, :class:`WeftConfigUnreadableError`),
+    we refuse BEFORE any filesystem mutation rather than treat broken-as-confless
+    or crash mid-migration with a half-published weft husk. The conf and legacy
+    store are left untouched; a re-run converges once the conf is readable.
+    """
+
+
 def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
     """Checkpoint *src_db*'s WAL and COPY it to *dest_db*, preserving all data.
 
@@ -832,6 +847,27 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # itself fails never blocks migration (filigree-031f9a413f).
     _refuse_if_daemon_serving(project_root)
 
+    # Second pre-mutation gate: a present .filigree.conf must be READABLE before
+    # we touch the filesystem. Steps 1-2 publish the weft DB + copy metadata, and
+    # step 3 rewrites the conf's `db` field *preserving* prefix / project_name /
+    # registry settings — which is impossible without first parsing the conf back.
+    # The lenient `_conf_db()` above deliberately swallows a corrupt conf to None
+    # for the idempotency/layout DECISIONS (so a completed-but-later-corrupted
+    # confless state still no-ops); here, having DECIDED to mutate, we re-read it
+    # STRICTLY and refuse — mirroring the weft.toml strict read (I1) and the
+    # don't-auto-migrate-over-a-config-you-can't-read rule (a corrupt conf may pin
+    # a relocated custom `db` we must not clobber). Refusing now, before step 1,
+    # leaves the conf + legacy store byte-identical (no half-published weft husk,
+    # no raw traceback at step 3); a re-run converges once the conf is readable.
+    # filigree-obs-85b37a7cdc.
+    conf_data: dict[str, Any] | None = None
+    if conf_path.is_file():
+        try:
+            conf_data = read_conf(conf_path)
+        except (OSError, ValueError) as exc:
+            msg = f"Cannot migrate store: {conf_path} is present but unreadable ({exc}). Fix or remove the file, then re-run."
+            raise StoreMigrationConfUnreadableError(msg) from exc
+
     # Do NOT pre-create weft_store here: the copy below can abort
     # (StoreMigrationBusyError before any mutation), and an empty .weft/filigree/
     # left behind would be picked up as canonical by a confless open and stamped
@@ -891,12 +927,13 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
             shutil.copytree(str(src), str(dest))
     # 3. Rewrite the conf to point at the destination — only now that a valid DB
     #    exists there. (Idempotent: skip if it already points at the weft DB.)
+    #    Reuses `conf_data` from the strict pre-mutation read above: it is None
+    #    for a confless install (nothing to rewrite) and a parsed dict otherwise,
+    #    so this never re-reads a file the gate already proved readable.
     new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
-    if conf_path.is_file():
-        conf_data = read_conf(conf_path)
-        if conf_data.get("db") != new_db_rel:
-            conf_data["db"] = new_db_rel
-            write_conf(conf_path, conf_data)
+    if conf_data is not None and conf_data.get("db") != new_db_rel:
+        conf_data["db"] = new_db_rel
+        write_conf(conf_path, conf_data)
     # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
     #    a stale second database. Done last: until here the legacy DB was the
     #    live one. The rest of the legacy dir is left as an auditable husk.

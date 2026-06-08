@@ -59,6 +59,20 @@ checklist is complete and a coordinated consumer-migration window is published.
   falls through to a needless re-copy or a spurious `StoreMigrationBusyError`
   when a daemon is live — `migrate_store_to_weft` short-circuits on the
   confless-completion state before the daemon-liveness probe.
+- **Store migration fails closed (not with a raw traceback) on a corrupt
+  `.filigree.conf`.** `migrate_store_to_weft` publishes the weft DB and copies
+  metadata (steps 1-2) before rewriting the conf's `db` field (step 3); a
+  present-but-unreadable conf made step 3's `read_conf` raise *after* those
+  mutations, escaping `filigree init`/`install` as an uncaught traceback and
+  leaving a half-published weft husk. The conf read is now a strict pre-mutation
+  gate (mirroring the `weft.toml` I1 read): a present-but-unreadable conf raises
+  `StoreMigrationConfUnreadableError` **before any filesystem mutation** — the
+  conf and legacy store are left byte-identical and a re-run converges once the
+  conf is readable — and the install path reports it as a clean `exit 1` with a
+  fix-or-remove message. The gate sits after the idempotency no-op checks, so a
+  migration that already completed and was corrupted afterward still no-ops
+  rather than refusing. Not data-loss (step 4 never ran; legacy stayed
+  canonical) — an availability/robustness fix. (filigree-obs-85b37a7cdc)
 - **`read_token_file` honours its "unreadable → empty" contract for corrupt
   files.** A non-UTF-8 federation-token file raised `UnicodeDecodeError` (a
   `ValueError`, not `OSError`) — now caught (with a warning) so it fails closed
