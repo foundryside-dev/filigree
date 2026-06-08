@@ -665,7 +665,10 @@ export async function retryReleaseTree(releaseId) {
   }
 }
 
-export function toggleReleaseTreeNode(nodeId, releaseId) {
+// `releaseId` is accepted for signature parity with the sibling tree handlers
+// (collapse/expand), which key off it — toggling only needs the globally-unique
+// nodeId. The leading underscore marks it intentionally unused (biome).
+export function toggleReleaseTreeNode(nodeId, _releaseId) {
   if (expandedNodeIds.has(nodeId)) {
     expandedNodeIds.delete(nodeId);
   } else {
