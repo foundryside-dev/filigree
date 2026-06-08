@@ -38,9 +38,12 @@ logger = logging.getLogger(__name__)
 # must not enter git history: it is minted per-machine in ``.weft/filigree/``, so a
 # committed copy makes every *other* clone present one machine's token and the
 # daemon 401s the rest (the exact failure ``_doctor_federation_token_checks``
-# reports). So the artifact is written ``0600`` AND gitignore-guarded — see
-# ``_guard_mcp_json_gitignore``. (The 0600 token *file* itself lives under the
-# already-gitignored ``.weft/``; this guard protects the literal copy.)
+# reports). So the artifact is chmod-tightened toward ``0600`` (best-effort: a
+# no-op that returns success on filesystems like WSL DrvFs / CIFS, so the install
+# message stats and reports the *real* mode rather than assuming 0600) AND
+# gitignore-guarded — see ``_guard_mcp_json_gitignore``. (The 0600 token *file*
+# itself lives under the already-gitignored ``.weft/``; this guard protects the
+# literal copy.)
 
 
 # ---------------------------------------------------------------------------
