@@ -73,6 +73,17 @@ checklist is complete and a coordinated consumer-migration window is published.
   migration that already completed and was corrupted afterward still no-ops
   rather than refusing. Not data-loss (step 4 never ran; legacy stayed
   canonical) — an availability/robustness fix. (filigree-obs-85b37a7cdc)
+- **Server-mode `.mcp.json` install reports its *actual* file mode, not an
+  assumed `0600`.** The success message unconditionally claimed `mode 0600`
+  while the `chmod(0o600)` that tightens the token-bearing file is best-effort —
+  on filesystems where `chmod` is a no-op that still *returns success* (WSL
+  DrvFs, CIFS) the file stays at the umask default, so the message asserted a
+  lockdown that never happened (the same false-`0600`-posture class `d2597d0`
+  set out to fix, partially reintroduced in the message path). The install now
+  stats the file after `chmod` and states the real mode, appending "could not
+  tighten to 0600 on this filesystem" when it differs. Posture-honesty, not
+  hardening (the file is local, not world-writable, and the gitignore guard
+  already prevents git-history leakage).
 - **`read_token_file` honours its "unreadable → empty" contract for corrupt
   files.** A non-UTF-8 federation-token file raised `UnicodeDecodeError` (a
   `ValueError`, not `OSError`) — now caught (with a warning) so it fails closed

@@ -333,8 +333,20 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
         mcp_json_path.chmod(0o600)
     except OSError as exc:
         logger.warning("Could not chmod %s to 0600: %s", mcp_json_path, exc)
+    # Report the ACTUAL resulting mode, never an assumed 0600. chmod is
+    # best-effort and on filesystems like WSL DrvFs / CIFS it is a no-op that
+    # *returns success* (no OSError) while the file stays at the umask default —
+    # so conditioning on the call not raising would still misreport. Stat the
+    # file and state the real mode: claiming "mode 0600" when it is not is the
+    # false-posture class d2597d0 fixed, and must not creep back into the
+    # success message.
+    try:
+        actual_mode = mcp_json_path.stat().st_mode & 0o777
+        mode_note = "mode 0600" if actual_mode == 0o600 else f"mode {actual_mode:04o} (could not tighten to 0600 on this filesystem)"
+    except OSError:
+        mode_note = "mode unknown"
     note = _guard_mcp_json_gitignore(project_root)
-    msg = f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded, mode 0600)"
+    msg = f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded, {mode_note})"
     if note:
         msg += f"; {note}"
     return True, msg

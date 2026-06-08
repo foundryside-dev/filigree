@@ -465,6 +465,42 @@ class TestAtomicWritePermissions:
         assert mode & 0o044, f"new file created with overly restrictive mode {oct(mode)}"
 
 
+class TestServerModeMcpJsonModePosture:
+    """The server-mode .mcp.json carries a literal federation token, so install
+    tightens it to 0600. The success message must report the ACTUAL resulting
+    mode, never an assumed 0600 — chmod is a no-op that returns success on
+    WSL DrvFs / CIFS, where the file stays at the umask default. Claiming "mode
+    0600" there is the false-posture class d2597d0 fixed.
+    """
+
+    def test_message_reports_0600_when_chmod_takes_effect(self, tmp_path: Path) -> None:
+        ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        mcp_json = tmp_path / ".mcp.json"
+        assert stat.S_IMODE(mcp_json.stat().st_mode) == 0o600
+        assert "mode 0600" in msg
+        assert "could not tighten" not in msg
+
+    def test_message_does_not_falsely_claim_0600_when_chmod_is_a_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Simulate WSL DrvFs / CIFS: chmod returns success but does not change
+        # the bits. Only Path.chmod is no-op'd; mint_token_file uses os.chmod and
+        # is unaffected.
+        monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+        old_umask = os.umask(0o022)
+        try:
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        finally:
+            os.umask(old_umask)
+        assert ok
+        mcp_json = tmp_path / ".mcp.json"
+        actual = stat.S_IMODE(mcp_json.stat().st_mode)
+        assert actual != 0o600, "test premise broken — chmod was not actually a no-op"
+        # The message must state the real mode and NOT the false 0600 posture.
+        assert "mode 0600" not in msg
+        assert f"mode {actual:04o}" in msg
+        assert "could not tighten to 0600 on this filesystem" in msg
+
+
 class TestEnsureGitignore:
     def test_create_gitignore(self, tmp_path: Path) -> None:
         ok, _msg = ensure_gitignore(tmp_path)
