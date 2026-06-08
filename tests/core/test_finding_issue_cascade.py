@@ -217,6 +217,34 @@ class TestBatchShortCircuit:
         db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
         assert calls["n"] == 3  # each issue evaluated; integrity is not short-circuited
 
+    def test_batch_contract_violation_not_short_circuited(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A contract-violating 2xx (INVALID_RESPONSE) is a per-issue verdict, NOT
+        a connectivity failure: Legis *answered*, so every governed issue in the
+        batch must still get its own (cheap, already-responding) gate evaluation
+        rather than being starved by the legis-down short-circuit. Each fails
+        closed locally and records debt."""
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        calls = {"n": 0}
+
+        def _gate(_issue_id: str) -> LegisGateResult:
+            calls["n"] += 1
+            return LegisGateResult(LegisGateStatus.INVALID_RESPONSE, reason="2xx did not affirm allowed=true")
+
+        monkeypatch.setattr(governance, "check_closure_gate", _gate)
+
+        candidates: list[tuple[str, str]] = []
+        for i in range(3):
+            finding_id, issue_id = _resolved_finding_linked_to_issue(db, f"fp-cv-{i}")
+            _govern(db, issue_id, entity=f"ent-cv-{i}")
+            candidates.append((finding_id, issue_id))
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
+        assert calls["n"] == 3  # each issue evaluated; contract-violation is not short-circuited
+        assert closed == []  # all fail closed
+        for _finding_id, issue_id in candidates:
+            assert not _is_done(db, issue_id)
+            assert _debt_count(db, issue_id) == 1
+
     def test_batch_closes_allowed_and_defers_blocked(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """An allowed issue closes; a blocked one in the same batch defers."""
         monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")

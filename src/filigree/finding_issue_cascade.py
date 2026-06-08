@@ -117,9 +117,12 @@ class FindingIssueCascadeService:
         governance-off issue later in the batch still PROCEEDs (DECISION 1A —
         ungoverned closes never touch Legis), and a stale binding still reports
         ``STALE``. Only a governed, non-stale issue fails closed as
-        ``UNAVAILABLE`` without a further network call. ``INTEGRITY_FAILURE`` is
-        a per-issue ledger-tamper verdict, not a connectivity problem, so it
-        never sets ``legis_down``.
+        ``UNAVAILABLE`` without a further network call. ``INTEGRITY_FAILURE``
+        (ledger tamper) and ``CONTRACT_VIOLATION`` (a 2xx that broke the wire
+        contract — Legis answered, so it is reachable) are per-issue verdicts,
+        not connectivity problems, so neither sets ``legis_down``: a single
+        malformed Legis answer fails closed for its own issue while every later
+        issue in the batch still gets its own gate evaluation.
         """
         from filigree import governance
         from filigree.governance import GateOutcome

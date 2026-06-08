@@ -40,37 +40,39 @@ def test_200_maps_to_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_200_allowed_false_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 200 carrying ``allowed: false`` violates the wire contract (409 means
-    blocked), so it must NOT read as ALLOWED. The gate fails closed (B7)."""
+    blocked), so it must NOT read as ALLOWED. It fails closed as INVALID_RESPONSE
+    — Legis *answered*, so this is a per-issue contract violation, not a
+    connectivity failure (it must not short-circuit a cascade batch). (B7)"""
     with legis_stub() as (url, state):
         state.status = 200
         state.body = {"allowed": False, "reason": "no verified binding"}
         _set_url(monkeypatch, url)
         result = legis_client.check_closure_gate("iss-1")
-    assert result.status is LegisGateStatus.UNREACHABLE
+    assert result.status is LegisGateStatus.INVALID_RESPONSE
 
 
 def test_200_empty_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 200 with no ``allowed`` field — an empty/unparseable body (``{}`` from
     ``_read_json``) or an interposed proxy/cache 2xx — must not be silently
-    treated as an allow (B7)."""
+    treated as an allow. INVALID_RESPONSE (per-issue), not UNREACHABLE (B7)."""
     with legis_stub() as (url, state):
         state.status = 200
         state.body = {}
         _set_url(monkeypatch, url)
         result = legis_client.check_closure_gate("iss-1")
-    assert result.status is LegisGateStatus.UNREACHABLE
+    assert result.status is LegisGateStatus.INVALID_RESPONSE
 
 
 def test_200_non_true_allowed_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """``allowed`` must be the JSON ``true`` literal: a truthy string or ``1`` is
     a contract violation, not an allow — no truthiness coercion on a security
-    gate (B7)."""
+    gate. INVALID_RESPONSE (per-issue), not UNREACHABLE (B7)."""
     with legis_stub() as (url, state):
         state.status = 200
         state.body = {"allowed": "true", "reason": "stringly-typed"}
         _set_url(monkeypatch, url)
         result = legis_client.check_closure_gate("iss-1")
-    assert result.status is LegisGateStatus.UNREACHABLE
+    assert result.status is LegisGateStatus.INVALID_RESPONSE
 
 
 def test_409_maps_to_blocked_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:

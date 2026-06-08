@@ -16,9 +16,12 @@ DECISIONS (see the B5 design notes):
 - **DECISION 2 — fail-closed for governed.** When Legis is disabled (404)
   or unreachable (timeout/connection error), a *governed* close is blocked
   (``UNAVAILABLE``) so an operator cannot dodge the gate by taking Legis
-  offline. A 500 (tampered ledger) is ``INTEGRITY_FAILURE``. With
-  ``LEGIS_URL`` unset, governance is OFF entirely and every close proceeds
-  ("invisible until wanted").
+  offline. A 500 (tampered ledger) is ``INTEGRITY_FAILURE``. A 2xx that
+  violates the wire contract (no ``allowed=true``) is ``CONTRACT_VIOLATION``
+  — a *per-issue* fail-closed verdict, NOT ``UNAVAILABLE``: Legis answered, so
+  it is reachable, and one bad answer must not short-circuit a whole cascade
+  batch. With ``LEGIS_URL`` unset, governance is OFF entirely and every close
+  proceeds ("invisible until wanted").
 """
 
 from __future__ import annotations
@@ -44,6 +47,12 @@ class GateOutcome(Enum):
     # per-issue verdict — distinct from UNAVAILABLE so it never short-circuits a
     # whole cascade batch the way a Legis-down verdict does.
     STALE = "stale"
+    # Legis answered a governed close with a contract-violating 2xx (a body that
+    # did not affirm allowed=true). Like STALE, this is a *per-issue* fail-closed
+    # verdict, NOT a connectivity failure: Legis is reachable (it returned a 2xx),
+    # so it must not short-circuit the rest of a cascade batch the way UNAVAILABLE
+    # does. The next issue still gets its own (cheap, already-responding) gate call.
+    CONTRACT_VIOLATION = "contract_violation"
 
 
 @dataclass(frozen=True)
@@ -185,5 +194,14 @@ def _map_result(result: LegisGateResult) -> GateDecision:
         return GateDecision(GateOutcome.BLOCKED, result.reason or "Closure blocked by Legis governance")
     if status is LegisGateStatus.INTEGRITY_FAILURE:
         return GateDecision(GateOutcome.INTEGRITY_FAILURE, result.reason or "Legis binding ledger integrity failure")
+    if status is LegisGateStatus.INVALID_RESPONSE:
+        # Legis answered, but the answer broke the wire contract. Per-issue
+        # fail-closed (CONTRACT_VIOLATION), NOT UNAVAILABLE: Legis is reachable, so
+        # this must not flip the batch's legis_known_down short-circuit and starve
+        # the remaining issues of their own gate evaluation.
+        return GateDecision(
+            GateOutcome.CONTRACT_VIOLATION,
+            result.reason or "Legis returned a contract-violating response",
+        )
     # NOT_ENABLED or UNREACHABLE for a governed issue → fail closed (DECISION 2).
     return GateDecision(GateOutcome.UNAVAILABLE, result.reason or "Governance backend unavailable")

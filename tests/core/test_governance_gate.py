@@ -141,6 +141,17 @@ def test_governed_integrity_failure_fails_closed(monkeypatch: pytest.MonkeyPatch
     assert decision.outcome is GateOutcome.INTEGRITY_FAILURE
 
 
+def test_governed_invalid_response_is_contract_violation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contract-violating 2xx (Legis answered, but the body broke the wire
+    contract) maps to CONTRACT_VIOLATION, not UNAVAILABLE: it fails closed for
+    this issue but — unlike UNAVAILABLE — never trips the batch short-circuit."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INVALID_RESPONSE, reason="2xx no allowed=true"))
+    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
+    assert decision.outcome is GateOutcome.CONTRACT_VIOLATION
+    assert not decision.allowed
+    assert "2xx no allowed=true" in decision.reason
+
+
 # --- v27 drift: a governed sign-off whose bound content has moved on ----------
 # The Legis signature is an HMAC over the content snapshot recorded in
 # signed_content_hash. When it no longer matches content_hash_at_attach the

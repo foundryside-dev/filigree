@@ -62,6 +62,12 @@ class LegisGateStatus(Enum):
     NOT_ENABLED = "not_enabled"
     INTEGRITY_FAILURE = "integrity_failure"
     UNREACHABLE = "unreachable"
+    # A 2xx whose body does not affirm allowed=true — Legis *answered*, so this is
+    # NOT a connectivity failure. Distinct from UNREACHABLE so a single malformed
+    # answer fails closed for that one issue without short-circuiting a whole
+    # cascade batch the way a Legis-down verdict does (the answer cost a fast 2xx,
+    # not a timeout, so re-asking the next issue is cheap and correct).
+    INVALID_RESPONSE = "invalid_response"
     NOT_CONFIGURED = "not_configured"
 
 
@@ -115,8 +121,13 @@ def check_closure_gate(issue_id: str, *, timeout: float = DEFAULT_TIMEOUT_SECOND
             # reassuring message; name the contract violation instead. (B7)
             if body.get("allowed") is not True:
                 logger.warning("Legis closure-gate returned 2xx without allowed=true for %s", issue_id)
+                # INVALID_RESPONSE, not UNREACHABLE: Legis answered (a 2xx), so it is
+                # reachable — the defect is in THIS response, not connectivity. Mapping
+                # it to UNREACHABLE would let one malformed answer poison the rest of a
+                # cascade batch (the batch short-circuits after a Legis-down verdict).
+                # Fail closed for this issue only; the next issue still gets its own gate.
                 return LegisGateResult(
-                    LegisGateStatus.UNREACHABLE,
+                    LegisGateStatus.INVALID_RESPONSE,
                     reason="Legis 2xx did not affirm allowed=true (wire-contract violation; fail-closed)",
                 )
             return LegisGateResult(
