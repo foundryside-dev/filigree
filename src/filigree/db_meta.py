@@ -1448,8 +1448,8 @@ class MetaMixin(DBMixinProtocol):
                 if merge:
                     created = _normalize_iso_to_utc(record.get("created_at")) or _now_iso()
                     cursor = self.conn.execute(
-                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, verified_actor, created_at) "
-                        "SELECT ?, ?, ?, ?, ?, ?, ? "
+                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
                         "WHERE NOT EXISTS ("
                         "  SELECT 1 FROM file_events "
                         "  WHERE file_id = ? AND event_type = ? AND field = ? AND old_value = ? AND new_value = ? AND created_at = ?"
@@ -1460,6 +1460,9 @@ class MetaMixin(DBMixinProtocol):
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            # B4: preserve the claimed actor on round-trip; the dedup
+                            # identity (WHERE NOT EXISTS below) deliberately excludes it.
+                            record.get("actor", ""),
                             record.get("verified_actor"),
                             created,
                             file_id,
@@ -1473,14 +1476,15 @@ class MetaMixin(DBMixinProtocol):
                 else:
                     cursor = self.conn.execute(
                         "INSERT INTO file_events "
-                        "(file_id, event_type, field, old_value, new_value, verified_actor, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             file_id,
                             record.get("event_type", "file_metadata_update"),
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            record.get("actor", ""),  # B4: preserve claimed actor on round-trip
                             record.get("verified_actor"),
                             _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         ),

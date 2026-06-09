@@ -181,3 +181,54 @@ def test_export_import_round_trips_verified_actor(tmp_path: Path) -> None:
     ae = dst.conn.execute("SELECT verified_actor FROM annotation_events ORDER BY rowid DESC LIMIT 1").fetchone()
     assert ae is not None
     assert ae["verified_actor"] == "alice"
+
+
+def _export_file_event_with_actor(tmp_path: Path) -> Path:
+    """Build a dump whose file_metadata_update event carries actor='agent-x'."""
+    src_dir = tmp_path / "src" / ".filigree"
+    src_dir.mkdir(parents=True)
+    src = FiligreeDB.from_filigree_dir(src_dir)
+    src.project_root = tmp_path
+    (tmp_path / "foo.py").write_text("one\ntwo\nthree\n")
+    src.register_file("foo.py")
+    src.register_file("foo.py", metadata={"k": "v"}, actor="agent-x")
+    export_path = tmp_path / "dump.jsonl"
+    src.export_jsonl(export_path)
+    return export_path
+
+
+def test_export_import_round_trips_file_event_actor(tmp_path: Path) -> None:
+    """The claimed actor on a file_event survives a non-merge import round-trip (B4).
+
+    Write paths stamp a real claimed actor (register_file(actor=...)) and export
+    dumps it, but the non-merge import INSERT omitted the actor column, silently
+    resetting it to '' on restore — an audit-trail fidelity defect.
+    """
+    export_path = _export_file_event_with_actor(tmp_path)
+
+    dst_dir = tmp_path / "dst" / ".filigree"
+    dst_dir.mkdir(parents=True)
+    dst = FiligreeDB.from_filigree_dir(dst_dir)
+    dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+    fe = dst.conn.execute("SELECT actor FROM file_events WHERE event_type = 'file_metadata_update'").fetchone()
+    assert fe is not None
+    assert fe["actor"] == "agent-x"
+
+
+def test_export_import_merge_round_trips_file_event_actor(tmp_path: Path) -> None:
+    """The claimed actor on a file_event survives a merge import round-trip (B4).
+
+    Covers the second import INSERT (the merge / WHERE-NOT-EXISTS branch), which
+    likewise omitted the actor column.
+    """
+    export_path = _export_file_event_with_actor(tmp_path)
+
+    dst_dir = tmp_path / "dst" / ".filigree"
+    dst_dir.mkdir(parents=True)
+    dst = FiligreeDB.from_filigree_dir(dst_dir)
+    dst.import_jsonl(export_path, merge=True, allow_foreign_ids=True)
+
+    fe = dst.conn.execute("SELECT actor FROM file_events WHERE event_type = 'file_metadata_update'").fetchone()
+    assert fe is not None
+    assert fe["actor"] == "agent-x"
