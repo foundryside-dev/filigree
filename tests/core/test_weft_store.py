@@ -12,6 +12,7 @@ never hard-fails (C-9c).
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -31,6 +32,8 @@ from filigree.core import (
     StoreMigrationBusyError,
     StoreMigrationConfUnreadableError,
     WeftConfigUnreadableError,
+    _migration_write_fence,
+    _snapshot_copy_sqlite_locked,
     find_filigree_anchor,
     migrate_store_to_weft,
     read_conf,
@@ -489,9 +492,11 @@ class TestMigrateStoreToWeft:
     def test_crash_during_copy_leaves_no_partial_and_re_run_recovers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A hard crash mid-copy must NOT leave a partial DB at the final path.
 
-        The copy stages to a temp file in the dest dir and publishes with an
-        atomic ``os.replace``, so the destination only ever appears as a
-        complete file. A re-run then completes the migration with data intact.
+        The DB snapshot (``_snapshot_copy_sqlite_locked``) backs up into a temp
+        file in the dest dir and publishes with an atomic ``os.replace``, so the
+        destination only ever appears as a complete file — a crash at/just before
+        the publish leaves only the temp (cleaned up), never a torn DB at the
+        final path. A re-run then completes the migration with data intact.
         """
         legacy = _make_legacy_install(tmp_path)
         db = FiligreeDB.from_filigree_dir(legacy)
@@ -500,12 +505,16 @@ class TestMigrateStoreToWeft:
         finally:
             db.close()
 
-        def _boom(src: str, dst: str, *a: object, **k: object) -> None:
-            # Simulate power loss mid-copy: a partial file then a crash.
-            Path(dst).write_bytes(b"\x00" * 50)
-            raise OSError("simulated crash mid-copy")
+        real_replace = os.replace
 
-        monkeypatch.setattr("filigree.core.shutil.copy2", _boom)
+        def _boom(src: str, dst: str, *a: object, **k: object) -> None:
+            # Simulate power loss at the atomic publish of the DB snapshot: the
+            # temp holds a complete backup, but the os.replace never lands.
+            if str(dst).endswith(DB_FILENAME):
+                raise OSError("simulated crash mid-copy")
+            return real_replace(src, dst, *a, **k)  # type: ignore[return-value]
+
+        monkeypatch.setattr("filigree.core.os.replace", _boom)
         with pytest.raises(OSError, match="simulated crash mid-copy"):
             migrate_store_to_weft(tmp_path)
 
@@ -745,15 +754,15 @@ class TestMigrationWalAndBusy:
 
     def test_committed_wal_pages_are_not_orphaned_by_copy(self, tmp_path: Path) -> None:
         """Committed pages can live in the ``-wal`` sidecar (a normal ``close()``
-        does not truncate it), and ``shutil.copy2`` copies only the main ``.db``.
-        The migration must therefore fold the WAL into the main file (it runs
-        ``wal_checkpoint(TRUNCATE)`` through a real connection) BEFORE copying. The
-        data-loss regression this guards is a refactor that copies the main file
-        without going through SQLite's checkpoint at all (a "just copy the file"
-        simplification) — that orphans WAL-resident commits: green suite, lost
-        data. Force a populated ``-wal`` at copy time and assert the row survives.
-        (Note: dropping only the explicit pragma is masked by SQLite's last-close
-        checkpoint, so the meaningful guard is against bypassing the connection.)
+        does not truncate it), and a plain copy of only the main ``.db`` would
+        orphan them. The migration must therefore read through SQLite so the
+        WAL-resident commit is folded into the snapshot: ``_snapshot_copy_sqlite_locked``
+        uses the online-backup API (``Connection.backup``), which reads the
+        WAL-merged logical view via a real connection. The data-loss regression
+        this guards is a refactor that copies the main file at the byte level
+        without going through SQLite (a "just copy the file" simplification) —
+        that orphans WAL-resident commits: green suite, lost data. Force a
+        populated ``-wal`` at copy time and assert the row survives.
         """
         legacy = _make_legacy_install(tmp_path)
         legacy_db = legacy / DB_FILENAME
@@ -946,6 +955,81 @@ class TestMigrationWalAndBusy:
         store2, migrated2 = migrate_store_to_weft(tmp_path)  # must NOT raise
         assert migrated2 is False
         assert store2 == store
+
+
+class TestMigrationWriteFence:
+    """The copy→unlink write fence (filigree-39c6958f31).
+
+    Bug 1's daemon detect-and-refuse handles long-lived idle connections; the
+    fence handles the complementary case — an *active* ad-hoc writer — by holding
+    ``BEGIN IMMEDIATE`` on the legacy DB across the whole snapshot→unlink window so
+    no foreign commit can land in it and be orphaned by the unlink.
+    """
+
+    def test_fence_blocks_a_concurrent_writer_for_the_whole_window(self, tmp_path: Path) -> None:
+        """The defining property: while the fence is held, a concurrent writer
+        CANNOT commit (its ``BEGIN IMMEDIATE`` is refused). This is what closes the
+        copy→unlink window — the old copy-time checkpoint only excluded writers
+        during the checkpoint, not across the unlink.
+        """
+        legacy = _make_legacy_install(tmp_path)
+        legacy_db = legacy / DB_FILENAME
+        with _migration_write_fence(legacy_db):
+            intruder = sqlite3.connect(str(legacy_db), timeout=0.2, isolation_level=None)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                    intruder.execute("BEGIN IMMEDIATE")
+            finally:
+                intruder.close()
+
+    def test_fence_refuses_when_a_writer_already_holds_the_lock(self, tmp_path: Path) -> None:
+        """A writer already active on the legacy DB makes fence acquisition fail —
+        raised as ``StoreMigrationBusyError`` before any work, the unit-level form
+        of the integration guarantee the busy-abort tests assert end-to-end.
+        """
+        legacy = _make_legacy_install(tmp_path)
+        legacy_db = legacy / DB_FILENAME
+        blocker = sqlite3.connect(str(legacy_db), isolation_level=None)
+        try:
+            blocker.execute("PRAGMA journal_mode=WAL")
+            blocker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(StoreMigrationBusyError), _migration_write_fence(legacy_db):
+                pass
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+    def test_locked_snapshot_copy_preserves_wal_resident_data_and_app_id(self, tmp_path: Path) -> None:
+        """``_snapshot_copy_sqlite_locked`` (backup API, run under the fence) folds a
+        WAL-resident committed row into the destination and preserves the FILG
+        application_id — no explicit checkpoint, no orphaned ``-wal`` frames, and no
+        leftover sidecars at the published path.
+        """
+        legacy = _make_legacy_install(tmp_path)
+        legacy_db = legacy / DB_FILENAME
+        raw = sqlite3.connect(str(legacy_db), isolation_level=None)
+        try:
+            raw.execute("PRAGMA journal_mode=WAL")
+            raw.execute("PRAGMA wal_autocheckpoint=0")
+            raw.execute("CREATE TABLE probe (marker TEXT)")
+            raw.execute("INSERT INTO probe (marker) VALUES ('wal-resident')")
+            raw.commit()  # committed into the -wal, not the main file
+        finally:
+            raw.close()
+
+        dest = _weft_store(tmp_path) / DB_FILENAME
+        with _migration_write_fence(legacy_db):
+            _snapshot_copy_sqlite_locked(legacy_db, dest)
+
+        # No torn temp/sidecar left beside the published DB.
+        leftovers = [p.name for p in dest.parent.iterdir() if p.name != DB_FILENAME]
+        assert leftovers == []
+        conn = sqlite3.connect(str(dest))
+        try:
+            assert conn.execute("SELECT marker FROM probe").fetchall() == [("wal-resident",)]
+            assert conn.execute("PRAGMA application_id").fetchone()[0] == FILIGREE_APPLICATION_ID
+        finally:
+            conn.close()
 
 
 class TestDeepStoreDirOverrideProjectRoot:

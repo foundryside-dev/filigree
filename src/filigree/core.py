@@ -601,61 +601,95 @@ class StoreMigrationConfUnreadableError(RuntimeError):
     """
 
 
-def _checkpoint_and_copy_sqlite(src_db: Path, dest_db: Path) -> None:
-    """Checkpoint *src_db*'s WAL and COPY it to *dest_db*, preserving all data.
+@contextlib.contextmanager
+def _migration_write_fence(legacy_db: Path) -> Iterator[None]:
+    """Hold an exclusive write fence on *legacy_db* across the copy→unlink window.
 
-    A normal ``close()`` does **not** truncate the WAL, so committed pages can
-    live in the ``-wal`` sidecar; a copy of only the main ``.db`` would orphan
-    them. Checkpoint with ``TRUNCATE`` to fold the WAL fully into the main file
-    first, then byte-copy (``shutil.copy2`` — cross-device safe, and preserves
-    the file header including the FILG ``application_id``).
+    The migration snapshots the legacy DB forward and then unlinks it. An ad-hoc
+    writer (a fresh CLI/MCP process) that opens the legacy DB and commits in the
+    window *between* our snapshot and the unlink would have that commit orphaned
+    on the about-to-be-deleted inode (filigree-39c6958f31). The daemon
+    detect-and-refuse (:func:`_refuse_if_daemon_serving`) handles long-lived
+    *idle* connections that hold no lock; this fence handles the COMPLEMENTARY
+    case — an *active* writer — by taking ``BEGIN IMMEDIATE`` and HOLDING it for
+    the duration. ``BEGIN IMMEDIATE`` excludes all other writers (a concurrent
+    writer's ``BEGIN IMMEDIATE`` blocks then raises ``database is locked``), so no
+    foreign commit can land between the snapshot and the unlink. Readers are
+    unaffected (WAL), and a pure reader loses nothing — the snapshot already
+    captured every committed page. The two guards are not redundant: the fence
+    cannot see an idle daemon connection (it holds no lock), and the refuse cannot
+    see an ad-hoc writer that appears after its check.
 
-    We **copy, not move**: the legacy DB stays in place and valid until the
-    caller rewrites the conf to point at the destination, so a crash mid-
-    migration never leaves a dangling conf nor an empty re-stamped DB (the
-    migration is crash-convergent — a re-run resumes).
-
-    The copy is **atomic at the destination**: it stages to a unique temp file
-    in the dest dir and publishes with ``os.replace`` (mirroring
-    :func:`write_atomic`). ``dest_db`` therefore only ever appears as a *complete*
-    file — a crash (SIGKILL/power loss) during the byte copy leaves only the
-    temp, which is cleaned up, never a truncated DB at the final path that a
-    re-run's existence guard would mistake for a finished copy. ``copy2`` to a
-    temp in the dest dir keeps the byte copy cross-device safe while ``os.replace``
-    stays a same-filesystem (atomic) rename.
-
-    Raises :class:`StoreMigrationBusyError` when another connection holds a
-    write lock: ``PRAGMA wal_checkpoint(TRUNCATE)`` returns ``(1, …)`` (busy)
-    instead of ``(0, …)`` when it cannot fully checkpoint, so we detect that and
-    abort rather than copy a DB with un-folded WAL pages.
+    If the lock cannot be acquired, a writer is *already* active on the legacy DB:
+    raise :class:`StoreMigrationBusyError` BEFORE any filesystem mutation (so no
+    half-published weft husk is littered), replacing — and widening — the old
+    checkpoint-busy guard, which only detected a writer at copy time, not across
+    the whole window. On exit the no-op transaction is rolled back and the
+    connection closed; the rollback is a clean release even though the backing
+    files were unlinked under the lock, because the open fd keeps the inode alive
+    until ``close()`` (POSIX).
     """
-    conn = sqlite3.connect(str(src_db), timeout=5.0)
+    conn = sqlite3.connect(str(legacy_db), timeout=2.0)
+    conn.isolation_level = None  # explicit BEGIN/ROLLBACK control
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            msg = f"Cannot migrate {legacy_db}: another process holds the database. Close other filigree sessions and re-run."
+            raise StoreMigrationBusyError(msg) from exc
+        yield
     finally:
-        conn.close()
-    # row == (busy, log_frames, checkpointed_frames); busy != 0 means a writer
-    # blocked a full checkpoint. For a non-WAL DB the pragma returns (0, -1, -1).
-    if row is not None and row[0] != 0:
-        msg = f"Cannot migrate {src_db}: another process holds the database. Close other filigree sessions and re-run."
-        raise StoreMigrationBusyError(msg)
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        with contextlib.suppress(sqlite3.Error):
+            conn.close()
+
+
+def _snapshot_copy_sqlite_locked(src_db: Path, dest_db: Path) -> None:
+    """Snapshot *src_db* → *dest_db* via the SQLite online-backup API, atomic publish.
+
+    The CALLER MUST hold the migration write fence (:func:`_migration_write_fence`)
+    on *src_db* — this routine assumes no writer can mutate the source mid-copy.
+
+    The backup API reads *src_db* through a real connection, so it folds
+    WAL-resident committed pages into the snapshot (a plain main-file copy would
+    orphan ``-wal`` frames) and copies page 1 verbatim, preserving the FILG
+    ``application_id`` — all WITHOUT an explicit ``wal_checkpoint(TRUNCATE)``,
+    which cannot run while the fence is held (it returns busy / self-conflicts).
+    Backup runs from a fresh *reader* connection, never the fence holder: a
+    ``backup()`` whose source connection itself holds ``BEGIN IMMEDIATE`` hangs.
+
+    We **copy, not move**: the legacy DB stays valid until the caller rewrites the
+    conf to point here, so the migration is crash-convergent (a re-run resumes).
+    The publish is **atomic at the destination**: stage to a unique temp in the
+    dest dir, then ``os.replace`` (mirroring :func:`_atomic_copy_file`), so
+    ``dest_db`` only ever appears complete — a crash leaves only the temp, never a
+    torn DB a re-run's existence guard would mistake for a finished copy.
+    """
     dest_db.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=dest_db.parent, prefix=dest_db.name + ".", suffix=".tmp")
     os.close(fd)
     tmp = Path(tmp_name)
+    src = sqlite3.connect(str(src_db), timeout=5.0)
     try:
-        shutil.copy2(str(src_db), str(tmp))
+        dst = sqlite3.connect(str(tmp))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
         os.replace(tmp, dest_db)
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
+    finally:
+        src.close()
 
 
 def _atomic_copy_file(src: Path, dest: Path) -> None:
     """Copy *src* → *dest* atomically (stage to a dest-dir temp, ``os.replace``).
 
-    Mirrors the publish in :func:`_checkpoint_and_copy_sqlite` for the small
+    Mirrors the publish in :func:`_snapshot_copy_sqlite_locked` for the small
     metadata sidecars (config.json, INSTALL_VERSION, summary, federation_token):
     ``dest`` only ever appears complete, and an overwrite of an existing ``dest``
     is atomic. ``copy2`` to a temp in the dest dir keeps the byte copy
@@ -901,80 +935,96 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
             msg = f"Cannot migrate store: {conf_path} is present but unreadable ({exc}). Fix or remove the file, then re-run."
             raise StoreMigrationConfUnreadableError(msg) from exc
 
-    # Do NOT pre-create weft_store here: the copy below can abort
+    # Do NOT pre-create weft_store here: the fence below can abort
     # (StoreMigrationBusyError before any mutation), and an empty .weft/filigree/
     # left behind would be picked up as canonical by a confless open and stamped
     # with a fresh empty DB (data loss — resolve_store_dir now also defends
     # against this, but we avoid littering the husk in the first place). The dir
-    # is created inside _checkpoint_and_copy_sqlite, AFTER the busy check passes;
+    # is created inside _snapshot_copy_sqlite_locked, AFTER the fence is acquired;
     # the metadata loop and conf rewrite below only run once weft_store exists
     # (legacy_db present → copy created it; legacy_db absent → weft_db present,
     # so the dir already exists).
-    # 1. Copy the DB forward while the legacy DB exists. Re-copy is
-    #    *unconditional* — NOT gated on the destination looking valid. Until the
-    #    conf commits to weft, the conf-pinned legacy DB is canonical and may
-    #    have taken writes since an interrupted copy, so a weft copy that merely
-    #    *looks* intact can be stale; publishing it (then deleting legacy) would
-    #    silently lose those writes. The atomic publish in
-    #    _checkpoint_and_copy_sqlite makes an unconditional refresh safe and
-    #    cheap, and the committed case already short-circuited at the top guard,
-    #    so this never re-copies post-commit. (legacy gone but weft present →
-    #    nothing to copy from; the existing weft DB is the survivor.)
-    if legacy_db.is_file():
-        _checkpoint_and_copy_sqlite(legacy_db, weft_db)
-    # 2. Copy durable + runtime metadata beside the DB. config.json must follow
-    #    so the enabled_packs fallback resolves; federation_token must follow so
-    #    sibling continuity (and token rotation) survives.
     #
-    #    M1 — symmetry with the DB re-copy, WITHOUT introducing a clobber. The DB
-    #    (step 1) re-copies unconditionally because legacy stays canonical until
-    #    the conf commit, so a resumed migration must refresh from it. The small
-    #    metadata FILES need the SAME refresh, or a resumed migration ships stale
-    #    metadata (e.g. a federation_token rotated on legacy between an interrupted
-    #    run and its resume) — copy-once froze them at first-copy. But the canonical
-    #    source differs by install shape: a CONFLESS install keeps legacy canonical
-    #    until step 4 deletes the legacy DB, whereas a CONF install's conf flips
-    #    canonicality to weft the moment step 1 lands the weft DB. So we re-copy
-    #    from legacy ONLY while legacy is still the resolved canonical store;
-    #    otherwise weft may already hold fresher metadata (a write that resolved to
-    #    weft) and an unconditional re-copy would clobber it (the exact data-loss
-    #    we must not introduce). Directories (scanners/templates) stay copy-once
-    #    (durable config does not drift mid-migration) but copy ATOMICALLY via
-    #    _atomic_copy_tree — a raw copytree to the final path is torn-then-skipped
-    #    by the existence guard on a crash mid-copy (filigree-197be8b501).
-    legacy_canonical = resolve_store_dir(project_root).resolve() == legacy_dir.resolve()
-    metadata_files = (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token")
-    metadata_dirs = ("scanners", "templates")
-    for name in metadata_files:
-        src = legacy_dir / name
-        dest = weft_store / name
-        if not src.is_file():
-            continue
-        # Re-copy from legacy while it is canonical (mirrors the DB); else copy-once
-        # so a fresher weft copy is never clobbered.
-        if legacy_canonical or not dest.exists():
-            _atomic_copy_file(src, dest)
-    for name in metadata_dirs:
-        src = legacy_dir / name
-        dest = weft_store / name
-        if src.is_dir() and not dest.exists():
-            _atomic_copy_tree(src, dest)
-    # 3. Rewrite the conf to point at the destination — only now that a valid DB
-    #    exists there. (Idempotent: skip if it already points at the weft DB.)
-    #    Reuses `conf_data` from the strict pre-mutation read above: it is None
-    #    for a confless install (nothing to rewrite) and a parsed dict otherwise,
-    #    so this never re-reads a file the gate already proved readable.
-    new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
-    if conf_data is not None and conf_data.get("db") != new_db_rel:
-        conf_data["db"] = new_db_rel
-        write_conf(conf_path, conf_data)
-    # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
-    #    a stale second database. Done last: until here the legacy DB was the
-    #    live one. The rest of the legacy dir is left as an auditable husk.
-    for suffix in ("", "-wal", "-shm"):
-        stale = legacy_dir / (DB_FILENAME + suffix)
-        if stale.is_file():
-            stale.unlink()
+    # WRITE FENCE (filigree-39c6958f31): acquire BEGIN IMMEDIATE on the legacy DB
+    # and HOLD it across steps 1-4 (snapshot → conf-rewrite → unlink) so an ad-hoc
+    # writer cannot open the legacy DB and commit in the window between our
+    # snapshot and the unlink — that commit would otherwise orphan on the deleted
+    # inode. The fence excludes only writers (readers are unaffected, and a pure
+    # reader loses nothing); it complements _refuse_if_daemon_serving, which
+    # catches long-lived *idle* daemon connections the fence cannot see. A writer
+    # already holding the lock makes acquisition raise StoreMigrationBusyError
+    # here — before any mutation, so no weft husk — superseding (and widening) the
+    # old copy-time checkpoint-busy check. When legacy_db is already gone (resumed
+    # migration, weft DB present) there is nothing to fence or unlink.
+    db_fence = _migration_write_fence(legacy_db) if legacy_db.is_file() else contextlib.nullcontext()
+    with db_fence:
+        # 1. Snapshot the DB forward while the legacy DB exists. Re-copy is
+        #    *unconditional* — NOT gated on the destination looking valid. Until the
+        #    conf commits to weft, the conf-pinned legacy DB is canonical and may
+        #    have taken writes since an interrupted copy, so a weft copy that merely
+        #    *looks* intact can be stale; publishing it (then deleting legacy) would
+        #    silently lose those writes. The atomic publish in
+        #    _snapshot_copy_sqlite_locked makes an unconditional refresh safe and
+        #    cheap, and the committed case already short-circuited at the top guard,
+        #    so this never re-copies post-commit. (legacy gone but weft present →
+        #    nothing to copy from; the existing weft DB is the survivor.)
+        if legacy_db.is_file():
+            _snapshot_copy_sqlite_locked(legacy_db, weft_db)
+        # 2. Copy durable + runtime metadata beside the DB. config.json must follow
+        #    so the enabled_packs fallback resolves; federation_token must follow so
+        #    sibling continuity (and token rotation) survives.
+        #
+        #    M1 — symmetry with the DB re-copy, WITHOUT introducing a clobber. The DB
+        #    (step 1) re-copies unconditionally because legacy stays canonical until
+        #    the conf commit, so a resumed migration must refresh from it. The small
+        #    metadata FILES need the SAME refresh, or a resumed migration ships stale
+        #    metadata (e.g. a federation_token rotated on legacy between an interrupted
+        #    run and its resume) — copy-once froze them at first-copy. But the canonical
+        #    source differs by install shape: a CONFLESS install keeps legacy canonical
+        #    until step 4 deletes the legacy DB, whereas a CONF install's conf flips
+        #    canonicality to weft the moment step 1 lands the weft DB. So we re-copy
+        #    from legacy ONLY while legacy is still the resolved canonical store;
+        #    otherwise weft may already hold fresher metadata (a write that resolved to
+        #    weft) and an unconditional re-copy would clobber it (the exact data-loss
+        #    we must not introduce). Directories (scanners/templates) stay copy-once
+        #    (durable config does not drift mid-migration) but copy ATOMICALLY via
+        #    _atomic_copy_tree — a raw copytree to the final path is torn-then-skipped
+        #    by the existence guard on a crash mid-copy (filigree-197be8b501).
+        legacy_canonical = resolve_store_dir(project_root).resolve() == legacy_dir.resolve()
+        metadata_files = (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token")
+        metadata_dirs = ("scanners", "templates")
+        for name in metadata_files:
+            src = legacy_dir / name
+            dest = weft_store / name
+            if not src.is_file():
+                continue
+            # Re-copy from legacy while it is canonical (mirrors the DB); else copy-once
+            # so a fresher weft copy is never clobbered.
+            if legacy_canonical or not dest.exists():
+                _atomic_copy_file(src, dest)
+        for name in metadata_dirs:
+            src = legacy_dir / name
+            dest = weft_store / name
+            if src.is_dir() and not dest.exists():
+                _atomic_copy_tree(src, dest)
+        # 3. Rewrite the conf to point at the destination — only now that a valid DB
+        #    exists there. (Idempotent: skip if it already points at the weft DB.)
+        #    Reuses `conf_data` from the strict pre-mutation read above: it is None
+        #    for a confless install (nothing to rewrite) and a parsed dict otherwise,
+        #    so this never re-reads a file the gate already proved readable.
+        new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
+        if conf_data is not None and conf_data.get("db") != new_db_rel:
+            conf_data["db"] = new_db_rel
+            write_conf(conf_path, conf_data)
+        # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
+        #    a stale second database. Done last and STILL UNDER THE FENCE: until here
+        #    the legacy DB was the live one, and the fence guarantees no writer can
+        #    commit between the snapshot and this unlink. The rest of the legacy dir
+        #    is left as an auditable husk.
+        for suffix in ("", "-wal", "-shm"):
+            stale = legacy_dir / (DB_FILENAME + suffix)
+            if stale.is_file():
+                stale.unlink()
     # Also remove the per-machine federation_token secret from the husk: it was
     # copied forward in step 2, the husk has no use for it, and a project that
     # tracks .filigree/ as committed payload (root rule removed) would otherwise
