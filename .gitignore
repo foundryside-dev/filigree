@@ -70,3 +70,6 @@ wardline.yaml
 
 # Legis — local working dir / config (regenerated/local; never commit)
 .weft/legis/
+
+# Internal codebase-audit scratch notes — agent working artifacts, never shipped
+READ_ONLY_CODEBASE_AUDIT_*.md
