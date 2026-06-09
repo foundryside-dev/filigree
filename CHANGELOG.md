@@ -134,6 +134,31 @@ checklist is complete and a coordinated consumer-migration window is published.
   migration that already completed and was corrupted afterward still no-ops
   rather than refusing. Not data-loss (step 4 never ran; legacy stayed
   canonical) — an availability/robustness fix. (filigree-obs-85b37a7cdc)
+- **Store-migration metadata sub-trees (`scanners/`, `templates/`) copy
+  atomically (filigree-197be8b501).** Step 2 copied these directories with
+  `shutil.copytree` straight to the final path, guarded on `not dest.exists()`
+  — the same torn-then-skip pattern already fixed for the DB and the metadata
+  files: a crash mid-copy left a *partial* directory that a re-run's existence
+  guard mistook for a finished copy and skipped, publishing the partial. A new
+  `_atomic_copy_tree` copies into a dest-dir temp then `os.replace`-publishes, so
+  the destination only ever appears complete; the copy-once guard stays but is
+  now safe. (Lower-severity than the step-1 DB bug: the legacy `.filigree/` husk
+  is retained, so the original always survives.)
+- **Store migration write-fences the snapshot→unlink window as defense-in-depth
+  against an ad-hoc writer (filigree-39c6958f31).** `migrate_store_to_weft` now
+  holds `BEGIN IMMEDIATE` on the legacy DB across the copy, conf-rewrite, and
+  unlink, and copies the DB via the SQLite online-backup API (folding WAL frames
+  and preserving the `application_id` without a checkpoint that cannot run under
+  the fence). A writer already active at fence-acquire is refused with
+  `StoreMigrationBusyError` before any mutation (superseding the old copy-time
+  checkpoint-busy guard), and a short-/zero-`busy_timeout` writer gets a visible
+  `SQLITE_BUSY`. **Known residual (intentional):** a writer that opens the legacy
+  DB and blocks on the fence *during* the hold commits to the orphaned inode
+  *after* release (POSIX keeps an open fd writing to a deleted inode) — a silent
+  loss that cannot be closed without the writer's cooperation. The mandatory
+  operator quiesce (see UPGRADING — "Stop ALL writers before upgrading") and the
+  daemon detect-and-refuse remain the real backstops; the fence narrows, it does
+  not eliminate.
 - **Server-mode `.mcp.json` install reports its *actual* file mode, not an
   assumed `0600`.** The success message unconditionally claimed `mode 0600`
   while the `chmod(0o600)` that tightens the token-bearing file is best-effort —
