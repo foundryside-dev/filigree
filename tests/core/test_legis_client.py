@@ -161,13 +161,15 @@ def test_redirect_does_not_leak_bearer_token(monkeypatch: pytest.MonkeyPatch) ->
     attacker host. The redirect is still followed (no fail-closed regression),
     but the Authorization header must be stripped. (B3)
     """
-    with legis_redirect_to_sink() as (url, sink):
+    with legis_redirect_to_sink() as (url, origin, sink):
         _set_url(monkeypatch, url)
         _set_token(monkeypatch, "secret-token")
         legis_client.check_closure_gate("iss-1")
-    # Redirect was followed (the request reached the sink)...
+    # The bearer DID reach the operator-configured origin (hop 1)...
+    assert origin.auth_headers == ["Bearer secret-token"]
+    # ...the redirect was followed (the request reached the sink)...
     assert sink.requests == ["/filigree/issues/iss-1/closure-gate"]
-    # ...but the bearer was NOT carried across it.
+    # ...but the bearer was stripped at the redirect boundary, NOT carried across.
     assert sink.auth_headers == [None]
 
 

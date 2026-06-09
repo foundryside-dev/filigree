@@ -107,12 +107,17 @@ def _build_sink_handler(state: RedirectSinkState) -> type[BaseHTTPRequestHandler
     return _SinkHandler
 
 
-def _build_redirect_handler(sink_url: str) -> type[BaseHTTPRequestHandler]:
+def _build_redirect_handler(sink_url: str, state: RedirectSinkState) -> type[BaseHTTPRequestHandler]:
     class _RedirectHandler(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:
             pass
 
         def do_GET(self) -> None:  # stdlib BaseHTTPRequestHandler naming
+            # Record what the ORIGIN (operator-configured) host received, so a
+            # test can prove the bearer WAS sent here and only stripped at the
+            # redirect boundary — not merely "never sent". (B3)
+            state.requests.append(self.path)
+            state.auth_headers.append(self.headers.get("Authorization"))
             self.send_response(302)
             self.send_header("Location", f"{sink_url}{self.path}")
             self.end_headers()
@@ -121,27 +126,31 @@ def _build_redirect_handler(sink_url: str) -> type[BaseHTTPRequestHandler]:
 
 
 @contextmanager
-def legis_redirect_to_sink() -> Iterator[tuple[str, RedirectSinkState]]:
-    """Yield ``(legis_base_url, sink_state)``.
+def legis_redirect_to_sink() -> Iterator[tuple[str, RedirectSinkState, RedirectSinkState]]:
+    """Yield ``(legis_base_url, origin_state, sink_state)``.
 
-    The Legis server 302-redirects every closure-gate request to a separate
-    sink host. ``sink_state`` records whether the ``Authorization`` bearer was
-    re-sent across the redirect (it must not be) and whether the redirect was
-    followed at all (it should be — benign redirects are not blocked). (B3)
+    The Legis server (the operator-configured origin) 302-redirects every
+    closure-gate request to a separate sink host. ``origin_state`` records what
+    the origin received (the bearer SHOULD reach hop 1); ``sink_state`` records
+    what the redirect target received (the bearer must NOT cross the redirect).
+    Together they prove the strip happens precisely at the redirect boundary,
+    and that the redirect was still followed (benign redirects are not
+    blocked). (B3)
     """
     sink_state = RedirectSinkState()
+    origin_state = RedirectSinkState()
     sink_server = ThreadingHTTPServer(("127.0.0.1", 0), _build_sink_handler(sink_state))
     sink_thread = threading.Thread(target=sink_server.serve_forever, daemon=True)
     sink_thread.start()
     try:
         sink_host, sink_port = sink_server.server_address[:2]
         sink_url = f"http://{sink_host}:{sink_port}"
-        legis_server = ThreadingHTTPServer(("127.0.0.1", 0), _build_redirect_handler(sink_url))
+        legis_server = ThreadingHTTPServer(("127.0.0.1", 0), _build_redirect_handler(sink_url, origin_state))
         legis_thread = threading.Thread(target=legis_server.serve_forever, daemon=True)
         legis_thread.start()
         try:
             legis_host, legis_port = legis_server.server_address[:2]
-            yield f"http://{legis_host}:{legis_port}", sink_state
+            yield f"http://{legis_host}:{legis_port}", origin_state, sink_state
         finally:
             legis_server.shutdown()
             legis_server.server_close()
