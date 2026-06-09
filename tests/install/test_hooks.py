@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_conf
+from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeAnchor, FiligreeDB, write_conf
 from filigree.hooks import (
     CONTEXT_TITLE_MAX_LEN,
     READY_CAP,
@@ -47,6 +47,17 @@ def _write_conf_for_db(db: FiligreeDB) -> Path:
         },
     )
     return conf_path
+
+
+def _anchor_for_db(db: FiligreeDB) -> FiligreeAnchor:
+    """Build a resolved anchor for *db* (writing a conf so from_conf opens it).
+
+    Repoints the implicit-startup hook tests off the retired ``find_filigree_conf``
+    onto ``find_filigree_anchor`` (filigree-4bf16e64b6)."""
+    db_path = Path(db.db_path)
+    project_root = db_path.parent.parent if db_path.parent.name == FILIGREE_DIR_NAME else db_path.parent
+    conf_path = _write_conf_for_db(db)
+    return FiligreeAnchor(project_root, conf_path, db_path.parent)
 
 
 class TestBuildContext:
@@ -213,7 +224,7 @@ class TestBuildContext:
 
 class TestGenerateSessionContext:
     def test_returns_none_without_filigree_dir(self, tmp_path: Path) -> None:
-        with patch("filigree.hooks.find_filigree_conf", side_effect=FileNotFoundError):
+        with patch("filigree.hooks.find_filigree_anchor", side_effect=FileNotFoundError):
             assert generate_session_context() is None
 
     def test_returns_none_from_unconfigured_folder_under_legacy_ancestor(
@@ -236,8 +247,8 @@ class TestGenerateSessionContext:
 
     def test_returns_context_string(self, tmp_path: Path, db: FiligreeDB) -> None:
         """Smoke test that generate_session_context returns a string when a project exists."""
-        conf_path = _write_conf_for_db(db)
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        anchor = _anchor_for_db(db)
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Filigree Project Snapshot" in result
@@ -712,20 +723,20 @@ class TestCheckInstructionsFreshness:
 class TestGenerateSessionContextFreshness:
     def test_context_includes_freshness_messages(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should include update messages when instructions are stale."""
-        conf_path = _write_conf_for_db(db)
-        project_root = conf_path.parent
+        anchor = _anchor_for_db(db)
+        project_root = anchor.project_root
         # Create a stale CLAUDE.md in the project root
         claude_md = project_root / "CLAUDE.md"
         claude_md.write_text("<!-- filigree:instructions:v0.0.0:00000000 -->\nold\n<!-- /filigree:instructions -->\n")
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Updated filigree instructions in CLAUDE.md" in result
 
     def test_context_without_stale_instructions(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should not include update messages when everything is fresh."""
-        conf_path = _write_conf_for_db(db)
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        anchor = _anchor_for_db(db)
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Updated" not in result
@@ -1112,10 +1123,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
-        conf_path = _write_conf_for_db(db)
+        anchor = _anchor_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
             patch("filigree.hooks._check_instructions_freshness", side_effect=OSError("disk full")),
             patch("filigree.hooks.logger") as mock_logger,
         ):
@@ -1132,10 +1143,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
-        conf_path = _write_conf_for_db(db)
+        anchor = _anchor_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
             patch("filigree.hooks._check_instructions_freshness", side_effect=RuntimeError("boom")),
             pytest.raises(RuntimeError, match="boom"),
         ):

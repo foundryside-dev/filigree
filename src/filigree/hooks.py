@@ -24,10 +24,9 @@ import portalocker
 from filigree.core import (
     FiligreeDB,
     ForeignDatabaseError,
+    find_filigree_anchor,
     find_filigree_command,
-    find_filigree_conf,
     get_mode,
-    resolve_store_dir,
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
@@ -284,7 +283,7 @@ def generate_session_context() -> str | None:
     Returns ``None`` when there is no filigree project (silent exit).
     """
     try:
-        conf_path = find_filigree_conf()
+        anchor = find_filigree_anchor(include_legacy_dir=False)
     except ForeignDatabaseError as exc:
         # Surface the remediation message rather than swallowing it as a
         # silent "no project" exit (filigree-acbacc5b3e).
@@ -292,8 +291,8 @@ def generate_session_context() -> str | None:
     except FileNotFoundError:
         return None
 
-    project_root = conf_path.parent
-    filigree_dir = resolve_store_dir(project_root)
+    project_root = anchor.project_root
+    filigree_dir = anchor.store_dir
 
     # Check instruction freshness (best-effort — don't let failures block context)
     freshness_messages: list[str] = []
@@ -303,7 +302,7 @@ def generate_session_context() -> str | None:
         logger.warning("Instructions freshness check failed for %s", project_root, exc_info=True)
 
     try:
-        db = FiligreeDB.from_conf(conf_path)
+        db = FiligreeDB.from_anchor(anchor)
     except (sqlite3.Error, ValueError, OSError):
         logger.warning("Database init failed for %s", filigree_dir, exc_info=True)
         context = (
@@ -363,13 +362,13 @@ def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
 def _find_agent_filigree_dir() -> Path:
     """Resolve the metadata dir for implicit agent startup hooks.
 
-    Agent hooks run automatically when a coding agent opens a folder. Require
-    the authoritative ``.filigree.conf`` anchor so a legacy ancestor
-    ``.filigree/`` directory is not treated as consent to attach to that
-    project.
+    Agent hooks run automatically when a coding agent opens a folder. The
+    consent signal is a ``.filigree.conf`` anchor or a ``.weft/filigree/``
+    store; a bare legacy ``.filigree/`` ancestor is NOT treated as consent to
+    attach (``include_legacy_dir=False``). The ``.git``-boundary
+    ``ForeignDatabaseError`` guard is preserved by ``find_filigree_anchor``.
     """
-    conf_path = find_filigree_conf()
-    return resolve_store_dir(conf_path.parent)
+    return find_filigree_anchor(include_legacy_dir=False).store_dir
 
 
 def ensure_dashboard_running(port: int | None = None) -> str:

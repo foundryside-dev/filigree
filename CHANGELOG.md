@@ -19,6 +19,31 @@ checklist is complete and a coordinated consumer-migration window is published.
 
 ### Changed (BREAKING)
 
+- **Config-anchor cutover: `.filigree.conf` → `.weft/filigree/config.json`
+  (filigree-4bf16e64b6).** The project anchor moves off the legacy root file
+  `.filigree.conf` into the store's own `config.json` — completing the WEFT store
+  consolidation for config the way `migrate_store_to_weft` did for the database.
+  `filigree init` now **imports** a present `.filigree.conf` into
+  `.weft/filigree/config.json` (conf-wins on the fields the runtime served —
+  `prefix`/`enabled_packs`/`registry_backend`/`loomweave`/`project_name`; `mode`
+  stays config.json-authoritative; `db` is dropped) and **retires** the conf to
+  `.filigree.conf.imported` — idempotent and crash-convergent (config.json is
+  written atomically before the conf is atomically renamed). **Fresh installs are
+  born confless**; the project anchor is now the **presence of `.weft/filigree/`**
+  (or an operator `weft.toml [filigree].store_dir` override). `weft.toml` is never
+  written by filigree and never holds identity (the C-9c deletion test: filigree
+  boots with no `weft.toml`). Implicit agent-startup surfaces
+  (`generate_session_context`, the agent dashboard hook, stdio-MCP with no
+  `--project`) resolve via `find_filigree_anchor(include_legacy_dir=False)` so a
+  bare legacy `.filigree/` ancestor is still not treated as attach-consent. Legacy
+  `.filigree/` **store** reads are retained as permanent back-compat
+  (`resolve_store_dir` fallback, C-9f); only the conf **anchor** is demoted to
+  one-shot-import-and-retire. Existing installs migrate on their next `filigree
+  init`; nothing breaks until then. Because `config.json` is now the sole identity
+  authority (no conf backstop), a present-but-corrupt `config.json` is refused at
+  **open** with a structured `VALIDATION` error — symmetric with a corrupt conf —
+  rather than being silently defaulted to the directory name (which would write
+  issues into the wrong namespace).
 - **Loomweave / Weft rebrand (schema v26).** The Clarion→Loomweave (sibling/
   registry/SEI) and Loom→Weft (federation + named API generation) renames land
   as a hard wire-break: `/api/loom/*`→`/api/weft/*`, the entity-association key
@@ -103,6 +128,7 @@ checklist is complete and a coordinated consumer-migration window is published.
 - **Scan findings surface the wardline `suppression_state` at the top level.** A finding that wardline has baselined/waived/judged carried that verdict only inside `metadata.wardline.suppression_state`, so an agent triaging via the slim `finding_list` (or `finding_get`, or `GET /api/weft/findings`) could not tell an accepted/suppressed defect from open work without parsing nested metadata. `suppression_state` is now lifted onto `ScanFinding`/`ScanFindingWeft` (mirroring the N6 `issue_status` lift); `None` when the finding is unsuppressed, and independent of issue-linkage.
 - **Agent finding work-views default to active-only — accepted defects no longer read as fresh, open work (filigree-2bdb878bd2, residual of the N2 wardline→filigree seam).** `finding_list` (MCP) and `list-findings` (CLI) previously returned wardline-baselined/waived/judged findings mixed in with real ones at `status:open severity:high`, annotated but not hidden, so a `finding_list status=open severity=high` work-query still surfaced already-accepted defects. Both surfaces now default to `suppression=active`; pass `suppression=all` to include suppressed rows, or a specific verdict (`baselined`/`waived`/`judged`) to triage them. The default-hide lives at the agent surfaces only: the core `list_findings_global` primitive keeps its all-inclusive default (internal callers are unaffected), and the federation read API (`GET /api/weft/findings`) and dashboard are likewise unchanged — federation consumers pass an explicit `suppression=` filter. `all` is now an advertised suppression-filter value. Complements the already-shipped `finding_promote` suppression guard (which refuses to mint a new issue from an accepted defect without `force`) and the session-context actionable/suppressed split.
 - **Scan trigger / status responses echo the file's findings posture (W2 class).** `scan_trigger`, `scan_trigger_batch` (per file), and `scan_status_get` returned run metadata (run id, pid, log path) with no sense of the file's findings — a vacuous run-state-only green. They now carry a `file_summary` (severity-bucketed `FindingsSummary`); on the status shape it aggregates the run's target file(s) in a single query, reflecting post-ingest state once results are POSTed back.
+- **`FindingsSummary` severity rollups now carry a `suppressed` breakdown so accepted defects are distinguishable from actionable work (filigree-c3e2b72f21).** The row level already separated open status from the wardline `suppression_state`, but every summary producer (`get_file_findings_summary`, `get_files_findings_summary`, `get_global_findings_stats`, and the inline `list_files_paginated`/loom file-list summary) bucketed severity by open-status alone — so one active HIGH plus one baselined HIGH read as `{"high": 2}` with no way to tell them apart, and a federation consumer over-reported actionable high/critical work by the count of already-accepted findings. The fix is **additive**: the existing top-level buckets keep their meaning (every open finding, suppression-agnostic) and a parallel `suppressed: SeverityBreakdown` is added, computed with the same shared classifier as the row-level `finding_list` suppression filter (so the two cannot drift). Consumers can now derive actionable work as `bucket − suppressed[bucket]`; no existing number changes. `GlobalFindingsStats` and `EnrichedFileItem.summary` inherit the key. Counterpart of the weft federation interface audit gap G4.
 - **Session-context surfaces un-bridged analyzer findings (F2).** A new
   `ANALYZER FINDINGS: N not yet bridged to the tracker (M actionable, K
   baselined/suppressed)` line in `filigree session-context` (CLI + MCP) so an

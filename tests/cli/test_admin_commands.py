@@ -27,11 +27,13 @@ class TestWeftStoreInit:
         assert (store / "config.json").is_file()
         assert (store / ".gitignore").is_file()
         assert "managed-by: filigree" in (store / ".gitignore").read_text()
-        # legacy dir is NOT created for fresh installs
+        # fresh install is born confless: no legacy dir AND no .filigree.conf —
+        # the anchor is the presence of .weft/filigree/ itself (filigree-4bf16e64b6).
         assert not (tmp_path / ".filigree").exists()
-        # conf anchor at root points at the federation store
-        conf = json.loads((tmp_path / ".filigree.conf").read_text())
-        assert conf["db"] == ".weft/filigree/filigree.db"
+        assert not (tmp_path / ".filigree.conf").exists()
+        # identity lives in the store's config.json (the sole-writer subtree).
+        cfg = json.loads((store / "config.json").read_text())
+        assert cfg["prefix"] == tmp_path.name
 
     def test_init_never_writes_weft_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
@@ -67,8 +69,10 @@ class TestWeftStoreInit:
         assert (custom / "filigree.db").is_file()
         assert (custom / "config.json").is_file()
         assert not (tmp_path / ".weft" / "filigree").exists()
-        conf = json.loads((tmp_path / ".filigree.conf").read_text())
-        assert conf["db"] == "custom/store/filigree.db"
+        # confless: no .filigree.conf; identity in the override store's config.json.
+        assert not (tmp_path / ".filigree.conf").exists()
+        cfg = json.loads((custom / "config.json").read_text())
+        assert cfg["prefix"] == "ov"
         # Runtime round-trips against the same store.
         created = cli_runner.invoke(cli, ["create", "in override", "--json"])
         assert created.exit_code == 0, created.output
@@ -1200,74 +1204,129 @@ def _downgrade_db(tmp_path: Path, target_version: int = 1) -> None:
     conn.close()
 
 
-class TestInitConfBackfill:
-    """filigree-f22fc98687: re-init on a legacy install must write .filigree.conf."""
+class TestInitConfCutover:
+    """filigree-4bf16e64b6: the hard config-anchor cutover. init imports a legacy
+    .filigree.conf into .weft/filigree/config.json (conf-wins) and retires the conf;
+    legacy-dir installs migrate forward and stay confless; nothing re-creates a conf."""
 
-    def test_init_existing_writes_conf_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
-        monkeypatch.chdir(tmp_path)
-        cli_runner.invoke(cli, ["init"])
-
-        # Simulate a legacy install: remove the v2.0 anchor, leave .filigree/.
-        conf = tmp_path / ".filigree.conf"
-        conf.unlink()
-        assert not conf.exists()
-
-        result = cli_runner.invoke(cli, ["init"])
-        assert result.exit_code == 0, result.output
-        assert conf.exists(), "re-init should backfill the v2.0 .filigree.conf anchor"
-
-        data = json.loads(conf.read_text())
-        assert data["prefix"]
-        assert data["db"]
-        assert data["project_name"]
-
-    def test_init_existing_missing_config_backfills_opened_db_prefix(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        cli_runner: CliRunner,
-    ) -> None:
-        from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB
+    def test_init_legacy_dir_stays_confless(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """A legacy .filigree/ install (no conf) migrates forward and stays confless —
+        the deleted backfill never re-creates a .filigree.conf (B4)."""
+        from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB
 
         project_root = tmp_path / "myproj"
         project_root.mkdir()
         filigree_dir = project_root / FILIGREE_DIR_NAME
         filigree_dir.mkdir()
-
         seed = FiligreeDB(filigree_dir / DB_FILENAME, prefix="myproj")
         seed.initialize()
         issue = seed.create_issue("legacy issue")
         seed.close()
 
         monkeypatch.chdir(project_root)
-
         result = cli_runner.invoke(cli, ["init"])
-
         assert result.exit_code == 0, result.output
-        conf = project_root / CONF_FILENAME
-        data = json.loads(conf.read_text())
-        assert data["prefix"] == "myproj"
 
+        # No conf is ever backfilled; identity in the migrated store's config.json.
+        assert not (project_root / ".filigree.conf").exists()
+        cfg = json.loads((project_root / ".weft" / "filigree" / "config.json").read_text())
+        assert cfg["prefix"] == "myproj"
+        # The migrated DB is still openable / writable via the confless path.
         update = cli_runner.invoke(cli, ["update", issue.id, "--title", "renamed", "--json"])
         assert update.exit_code == 0, update.output
         assert json.loads(update.output)["title"] == "renamed"
 
-    def test_init_existing_preserves_custom_conf(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+    def test_init_imports_and_retires_conf_conf_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """A present .filigree.conf is imported into config.json (conf-wins on the
+        fields from_conf served) then retired to .filigree.conf.imported (T1)."""
         monkeypatch.chdir(tmp_path)
-        cli_runner.invoke(cli, ["init"])
+        cli_runner.invoke(cli, ["init"])  # born confless; config.json prefix == cwd.name
+        store = tmp_path / ".weft" / "filigree"
 
-        # User customised the conf — re-init must not clobber it. The db field
-        # must point at the real (federation-layout) store so re-init can open it.
+        # Simulate a pre-cutover conf install whose prefix DIFFERS from config.json,
+        # so conf-wins is provable.
         conf = tmp_path / ".filigree.conf"
-        custom = {"version": 1, "project_name": "custom", "prefix": "custom", "db": ".weft/filigree/filigree.db"}
-        conf.write_text(json.dumps(custom))
+        conf.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "project_name": "confname",
+                    "prefix": "confpfx",
+                    "db": ".weft/filigree/filigree.db",
+                    "registry_backend": "local",
+                }
+            )
+        )
 
         result = cli_runner.invoke(cli, ["init"])
         assert result.exit_code == 0, result.output
+        # Conf retired (not preserved); an audit breadcrumb is left.
+        assert not conf.exists()
+        assert (tmp_path / ".filigree.conf.imported").exists()
+        # config.json now carries the conf's authoritative fields (conf-wins), no db.
+        cfg = json.loads((store / "config.json").read_text())
+        assert cfg["prefix"] == "confpfx"
+        assert cfg["name"] == "confname"
+        assert "db" not in cfg
+        # Runtime opens via the confless path with the imported identity.
+        listed = cli_runner.invoke(cli, ["ready", "--json"])
+        assert listed.exit_code == 0, listed.output
 
-        data = json.loads(conf.read_text())
-        assert data["prefix"] == "custom", "re-init must not overwrite an existing anchor"
-        assert data["project_name"] == "custom"
+    def test_init_conf_import_is_convergent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """Running init twice on a conf install never re-creates a live conf and
+        leaves config.json byte-stable — the retire is one-shot/convergent (T2/B4)."""
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        conf = tmp_path / ".filigree.conf"
+        conf.write_text(json.dumps({"version": 1, "project_name": "p", "prefix": "p", "db": ".weft/filigree/filigree.db"}))
+
+        first = cli_runner.invoke(cli, ["init"])
+        assert first.exit_code == 0, first.output
+        cfg_after_first = (tmp_path / ".weft" / "filigree" / "config.json").read_text()
+
+        second = cli_runner.invoke(cli, ["init"])
+        assert second.exit_code == 0, second.output
+        assert not conf.exists()
+        assert (tmp_path / ".weft" / "filigree" / "config.json").read_text() == cfg_after_first
+
+    def test_init_conf_crash_after_config_self_heals(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """Crash AFTER config.json is reconciled but BEFORE the conf is retired:
+        the conf is still on disk. Re-init re-imports idempotently and completes
+        the retire (T3)."""
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        store = tmp_path / ".weft" / "filigree"
+        cfg = json.loads((store / "config.json").read_text())
+        cfg["prefix"] = "confpfx"
+        cfg["name"] = "confname"
+        (store / "config.json").write_text(json.dumps(cfg))
+        conf = tmp_path / ".filigree.conf"
+        conf.write_text(json.dumps({"version": 1, "project_name": "confname", "prefix": "confpfx", "db": ".weft/filigree/filigree.db"}))
+
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        assert not conf.exists()
+        assert (tmp_path / ".filigree.conf.imported").exists()
+        final = json.loads((store / "config.json").read_text())
+        assert final["prefix"] == "confpfx"
+
+    def test_corrupt_config_json_refuses_open_not_silent_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A corrupt config.json must refuse (VALIDATION), not open under a defaulted
+        prefix and write issues into the wrong namespace. config.json is the sole
+        identity authority post-cutover, so from_store_dir is strict on a corrupt one
+        (symmetric with from_conf's read_conf). Regression guard (advisor)."""
+        from filigree.types.api import ErrorCode
+
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init", "--prefix", "realpfx"])
+        (tmp_path / ".weft" / "filigree" / "config.json").write_text("{not valid json")
+        result = cli_runner.invoke(cli, ["create", "drift", "--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output)
+        assert payload["code"] == ErrorCode.VALIDATION
+        assert "config.json" in payload["error"]
 
 
 class TestInitSchemaMigration:
@@ -1315,9 +1374,11 @@ class TestDoctorFixHonoursConfDbPath:
         custom_db = tmp_path / "custom-data.db"
         shutil.move(str(legacy_db), str(custom_db))
 
+        # init now retires the conf; place a fresh conf-relocated anchor on disk to
+        # represent a not-yet-migrated conf install (doctor reads it but never
+        # retires — only `init` does). doctor --fix must honour its db field.
         conf_path = tmp_path / ".filigree.conf"
-        conf_data = json.loads(conf_path.read_text())
-        conf_data["db"] = "custom-data.db"
+        conf_data = {"version": 1, "project_name": tmp_path.name, "prefix": tmp_path.name, "db": "custom-data.db"}
         conf_path.write_text(json.dumps(conf_data))
 
         # Downgrade the *custom* DB so doctor sees an outdated schema.

@@ -331,7 +331,7 @@ class TestDeleteFileRecordCommand:
         with get_db() as db:
             file_record = db.register_file("src/delete_loomweave_mode.py")
 
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -599,7 +599,7 @@ class TestRegisterFileCommand:
         self, cli_in_project: tuple[CliRunner, Path], caplog: pytest.LogCaptureFixture
     ) -> None:
         runner, project = cli_in_project
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         # ``allow_local_fallback`` is set so the ADR-014 capability probe at
@@ -779,7 +779,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -834,7 +834,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -910,7 +910,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -1028,7 +1028,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FailingLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -1089,7 +1089,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", UnreachableLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -1158,7 +1158,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", ConflictingLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -1329,7 +1329,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
@@ -1404,7 +1404,7 @@ class TestMigrateRegistryCommand:
                 return True
 
         monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
         conf["registry_backend"] = "loomweave"
         conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}

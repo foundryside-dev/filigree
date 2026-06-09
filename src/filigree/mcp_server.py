@@ -43,7 +43,6 @@ from filigree.core import (
     SUMMARY_FILENAME,
     FiligreeDB,
     find_filigree_anchor,
-    find_filigree_conf,
     resolve_store_dir,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
@@ -1192,14 +1191,15 @@ async def _run(project_path: Path | None) -> None:
             sys.exit(1)
     else:
         try:
-            conf_path = find_filigree_conf()
+            anchor = find_filigree_anchor(include_legacy_dir=False)
         except FileNotFoundError as exc:
             # ProjectNotInitialisedError carries a message that points at
             # `filigree init` and `filigree doctor`.
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        project_root = conf_path.parent
-        filigree_dir = resolve_store_dir(project_root)
+        project_root = anchor.project_root
+        filigree_dir = anchor.store_dir
+        conf_path = anchor.conf_path
 
     _attempt_startup(filigree_dir, conf_path=conf_path, project_root=project_root)
 

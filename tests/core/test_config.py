@@ -237,19 +237,26 @@ class TestFromFiligreeDir:
         assert db._check_same_thread is False
         db.close()
 
-    def test_invalid_utf8_config_uses_project_prefix_fallback(self, tmp_path: Path) -> None:
-        """from_filigree_dir treats undecodable config.json like a corrupt partial config."""
+    def test_undecodable_config_refuses_open(self, tmp_path: Path) -> None:
+        """An undecodable config.json is refused at open, NOT silently defaulted to
+        the project-dir prefix.
+
+        Post-cutover (filigree-4bf16e64b6) config.json is the sole identity
+        authority for a confless store — there is no conf backstop — so a corrupt
+        one must not let the project open under the wrong namespace (which would
+        fragment issue IDs between the real prefix and the dir name). This is
+        symmetric with from_conf's read_conf, which already raises on a corrupt
+        conf. (Was: ``test_invalid_utf8_config_uses_project_prefix_fallback``, which
+        asserted the pre-cutover lenient fallback.)
+        """
         project_root = tmp_path / "broken-config"
         project_root.mkdir()
         filigree_dir = project_root / ".filigree"
         filigree_dir.mkdir()
         (filigree_dir / "config.json").write_bytes(b"\xff\xfe")
 
-        db = FiligreeDB.from_filigree_dir(filigree_dir)
-        try:
-            assert db.prefix == "broken-config"
-        finally:
-            db.close()
+        with pytest.raises(ValueError, match="config.json"):
+            FiligreeDB.from_filigree_dir(filigree_dir)
 
 
 class TestConfigEnabledPacks:

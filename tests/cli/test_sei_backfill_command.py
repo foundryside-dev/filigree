@@ -74,12 +74,12 @@ class TestResolveLoomweaveDbPath:
 
 
 def _switch_to_loomweave_mode(project: Path, base_url: str) -> None:
-    """Repoint a local-mode project's conf at a (live-stub) Loomweave authority."""
-    conf_path = project / ".filigree.conf"
-    conf = json.loads(conf_path.read_text())
-    conf["registry_backend"] = "loomweave"
-    conf["loomweave"] = {"base_url": base_url, "timeout_seconds": 2}
-    conf_path.write_text(json.dumps(conf))
+    """Repoint a local-mode project's config.json at a (live-stub) Loomweave authority."""
+    config_path = project / ".weft" / "filigree" / "config.json"
+    config = json.loads(config_path.read_text())
+    config["registry_backend"] = "loomweave"
+    config["loomweave"] = {"base_url": base_url, "timeout_seconds": 2}
+    config_path.write_text(json.dumps(config))
 
 
 def test_sei_backfill_refuses_in_local_mode_human(cli_in_project: tuple[CliRunner, Path]) -> None:

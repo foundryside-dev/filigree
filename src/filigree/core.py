@@ -1123,7 +1123,7 @@ def find_filigree_conf(start: Path | None = None) -> Path:
     raise ProjectNotInitialisedError(msg)
 
 
-def find_filigree_anchor(start: Path | None = None) -> FiligreeAnchor:
+def find_filigree_anchor(start: Path | None = None, *, include_legacy_dir: bool = True) -> FiligreeAnchor:
     """Walk up from *start* for a conf, a ``.weft/filigree/`` store, or a legacy dir.
 
     Returns a :class:`FiligreeAnchor` ``(project_root, conf_path, store_dir)``.
@@ -1135,11 +1135,18 @@ def find_filigree_anchor(start: Path | None = None) -> FiligreeAnchor:
 
     Pure read — never writes. Use this when discovery must work on read-only
     mounts (inspection commands, ``filigree doctor``, and explicit
-    legacy-compatible code paths). Implicit agent startup surfaces use the
-    stricter :func:`find_filigree_conf` path so a legacy ancestor is not
-    treated as a project attachment signal. To force a backfill, run
+    legacy-compatible code paths). Implicit agent startup surfaces pass
+    ``include_legacy_dir=False`` so a bare legacy ``.filigree/`` ancestor is
+    not treated as a project attachment signal — their consent anchor is a
+    conf or a ``.weft/filigree/`` store. To force a forward-migration, run
     ``filigree init`` (or another explicit write path) on a writable copy of
     the project.
+
+    Args:
+        include_legacy_dir: when ``False``, the legacy ``.filigree/`` directory
+            is not considered a valid anchor (conf and ``.weft/filigree/`` still
+            are). The ``.git``-boundary ``ForeignDatabaseError`` guard is
+            unaffected either way.
 
     When *start* sits inside a git linked worktree, discovery is redirected
     to the main worktree root so the worktree's ``.git`` file is not
@@ -1167,11 +1174,22 @@ def find_filigree_anchor(start: Path | None = None) -> FiligreeAnchor:
             if git_boundary is not None:
                 raise ForeignDatabaseError(cwd=orig, found_anchor=weft_store, git_boundary=git_boundary)
             return FiligreeAnchor(parent, None, resolve_store_dir(parent))
-        legacy_dir = parent / FILIGREE_DIR_NAME
-        if legacy_dir.is_dir():
+        # Operator store_dir override (weft.toml ``[filigree].store_dir``): a
+        # confless override install's store lives outside ``.weft/filigree/``, so
+        # the literal rung above misses it. Honour the resolved override when it
+        # exists and is neither the default weft store nor the legacy dir — legacy
+        # stays gated by ``include_legacy_dir`` below (no-legacy-consent).
+        override_store = resolve_store_dir(parent)
+        if override_store.is_dir() and override_store not in (weft_store, parent / FILIGREE_DIR_NAME):
             if git_boundary is not None:
-                raise ForeignDatabaseError(cwd=orig, found_anchor=legacy_dir, git_boundary=git_boundary)
-            return FiligreeAnchor(parent, None, resolve_store_dir(parent))
+                raise ForeignDatabaseError(cwd=orig, found_anchor=override_store, git_boundary=git_boundary)
+            return FiligreeAnchor(parent, None, override_store)
+        if include_legacy_dir:
+            legacy_dir = parent / FILIGREE_DIR_NAME
+            if legacy_dir.is_dir():
+                if git_boundary is not None:
+                    raise ForeignDatabaseError(cwd=orig, found_anchor=legacy_dir, git_boundary=git_boundary)
+                return FiligreeAnchor(parent, None, resolve_store_dir(parent))
         if git_boundary is None and (parent / ".git").exists():
             git_boundary = parent
     msg = (
@@ -2017,8 +2035,22 @@ class FiligreeDB(
         project's ``config.json``, so the capability probe at ``__init__`` time
         downgrades to a WARN instead of aborting when Loomweave is offline.
         """
+        # config.json is the SOLE identity authority for a confless store (there is
+        # no conf backstop post-cutover, filigree-4bf16e64b6). A present-but-corrupt
+        # config.json must NOT be silently defaulted — that would open under the
+        # wrong prefix and write issues into the wrong namespace. Be strict here,
+        # symmetric with from_conf's read_conf (a missing config.json stays lenient:
+        # legacy ``.filigree/`` installs may have none). The raised ValueError
+        # surfaces as the standard VALIDATION envelope, like a corrupt conf.
+        config_path = store_dir / CONFIG_FILENAME
+        if config_path.is_file():
+            try:
+                json.loads(config_path.read_text())
+            except (ValueError, OSError) as exc:
+                msg = f"{config_path} exists but could not be parsed: {exc}"
+                raise ValueError(msg) from exc
         config = read_config(store_dir)
-        configured_prefix = _raw_config_prefix(store_dir / CONFIG_FILENAME)
+        configured_prefix = _raw_config_prefix(config_path)
         prefix = configured_prefix if configured_prefix is not None else (project_root.name or "filigree")
         loomweave_config = _apply_allow_local_fallback_override(config.get("loomweave"), allow_local_fallback_override)
         db = cls(
@@ -2033,6 +2065,13 @@ class FiligreeDB(
         )
         try:
             db.initialize()
+            # For a confless store, config.json is the authoritative source of
+            # enabled_packs — there is no conf to carry an explicit override. Mark
+            # it as project-config-derived (mirroring from_conf) so reload_templates
+            # re-reads config.json and surfaces a corrupt one as a structured error
+            # rather than silently keeping the leniently-defaulted packs
+            # (filigree-259e5b58ef; the cutover made config.json load-bearing).
+            db._enabled_packs_override = None
         except BaseException:
             # ``initialize()`` opens the connection lazily on its first line
             # (``get_schema_version()`` → ``self.conn``). If it raises before

@@ -16,7 +16,7 @@ from filigree.cli_commands.files import finding_group
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     CONF_FILENAME,
-    CONF_VERSION,
+    CONFIG_FILENAME,
     DB_FILENAME,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
@@ -36,7 +36,6 @@ from filigree.core import (
     read_config,
     read_schema_version,
     resolve_store_dir,
-    write_conf,
     write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
@@ -115,17 +114,45 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             click.echo(f"filigree already initialized in {cwd} (store: {store_dir})")
         previous_marker = read_install_version(store_dir)
         config = _read_project_config_or_exit(store_dir)
-        # filigree-fa6309d551: route DB open through the anchor-aware
-        # constructors so a custom .filigree.conf `db` path is honoured.
+        # === Config-anchor cutover (filigree-4bf16e64b6) ===
+        # Reconcile the legacy ``.filigree.conf`` anchor's authoritative fields
+        # into ``.weft/filigree/config.json`` (conf-wins for the fields
+        # ``from_conf`` served — prefix/enabled_packs/registry_backend/loomweave/
+        # name; config.json keeps ``mode`` and drops ``db``), then retire the conf
+        # so the anchor becomes the presence of ``.weft/filigree/``. Idempotent and
+        # crash-convergent: config.json is written atomically BEFORE the conf is
+        # atomically renamed, so an interrupted run re-imports on the next pass and
+        # runtime keeps working off whichever anchor still exists. filigree never
+        # writes ``weft.toml`` here (C-9b). The legacy ``.filigree/`` *store* read
+        # path stays (resolve_store_dir back-compat, C-9f) — only the conf *anchor*
+        # is demoted to one-shot-import-and-retire.
         if conf_path.is_file():
             try:
                 existing_conf = read_conf(conf_path)
-                db_path = (conf_path.parent / existing_conf["db"]).resolve()
             except (json_mod.JSONDecodeError, ValueError, OSError) as exc:
                 click.echo(f"Cannot read {conf_path}: {exc}", err=True)
                 sys.exit(1)
-        else:
-            db_path = store_dir / DB_FILENAME
+            config["prefix"] = existing_conf["prefix"]
+            config["name"] = existing_conf.get("project_name") or config.get("name") or cwd.name
+            if "enabled_packs" in existing_conf:
+                config["enabled_packs"] = existing_conf["enabled_packs"]
+            if "registry_backend" in existing_conf:
+                config["registry_backend"] = existing_conf["registry_backend"]
+            if "loomweave" in existing_conf:
+                config["loomweave"] = existing_conf["loomweave"]
+            # ``mode`` is config.json-authoritative at runtime (``get_mode``); only
+            # carry the conf's value forward when config.json has none.
+            if "mode" not in config and "mode" in existing_conf:
+                config["mode"] = existing_conf["mode"]
+            config.pop("db", None)  # type: ignore[typeddict-item]  # strip a hand-edited db key; never stored in config.json
+            write_config(store_dir, config)
+            imported_path = cwd / (CONF_FILENAME + ".imported")
+            conf_path.rename(imported_path)  # atomic commit point of the cutover
+            click.echo(f"  Imported anchor into {store_dir / CONFIG_FILENAME}; retired {CONF_FILENAME} → {imported_path.name}")
+
+        # The conf (if any) is now retired, so the store DB is always at the
+        # canonical store path (migrate_store_to_weft already normalised it).
+        db_path = store_dir / DB_FILENAME
         # Read pre-init schema version directly so we can detect upgrades —
         # the from_* constructors call initialize() internally, which would
         # mask the old version.
@@ -158,23 +185,18 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             click.echo(f"  Schema upgraded v{old_version} → v{new_version}")
         (store_dir / "scanners").mkdir(exist_ok=True)
         _store_gitignore(store_dir)
-        # filigree-f22fc98687: backfill the anchor on legacy installs where the
-        # existing-project branch was reached without a conf. Do not overwrite
-        # an existing custom anchor.
-        if not conf_path.exists():
-            project_name = config.get("name") or cwd.name
-            rel_db = store_dir.relative_to(cwd) / DB_FILENAME
-            backfill_conf: dict[str, object] = {
-                "version": CONF_VERSION,
-                "project_name": project_name,
-                "prefix": opened_prefix,
-                "db": rel_db.as_posix(),
-            }
-            conf_mode = config.get("mode")
-            if conf_mode and conf_mode != "ethereal":
-                backfill_conf["mode"] = conf_mode
-            write_conf(conf_path, backfill_conf)
-            click.echo(f"  Backfilled anchor: {conf_path}")
+        # Materialise the store's config.json identity for a confless store that
+        # has none yet — e.g. a legacy ``.filigree/`` install migrated forward,
+        # which never carried a config.json. Without it the next confless open
+        # falls back to ``project_root.name``. The conf-import branch above already
+        # wrote config.json, and normal installs already have one, so both skip
+        # this. (Replaces the retired ``.filigree.conf`` backfill — config.json is
+        # the new identity home; B4.)
+        if not (store_dir / CONFIG_FILENAME).is_file():
+            config["prefix"] = opened_prefix
+            if "name" not in config:
+                config["name"] = cwd.name
+            write_config(store_dir, config)
         # Cross-tool skew warning: if a previous marker recorded an older
         # schema, other tools / sessions pinned to that version will now
         # report SCHEMA_MISMATCH against this DB.
@@ -216,22 +238,13 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
 
     ensure_weft_store_gitignore(store_dir)
 
+    # Fresh installs are born confless: identity lives in the store's
+    # config.json (the sole-writer subtree) and the project anchor is the
+    # presence of ``.weft/filigree/`` itself. No ``.filigree.conf`` is written
+    # — filigree only ever *reads* a legacy conf to one-shot-import-and-retire
+    # it (the already-installed branch above). ``weft.toml`` is never written.
     config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
     write_config(store_dir, config)
-
-    # Write the .filigree.conf anchor at the project root — this is the file
-    # agents walk up looking for, the authoritative declaration that "this
-    # folder and its subtree belong to this filigree project". Its `db` field
-    # points at the resolved store.
-    conf_data: dict[str, object] = {
-        "version": CONF_VERSION,
-        "project_name": name,
-        "prefix": prefix,
-        "db": (rel_store / DB_FILENAME).as_posix(),
-    }
-    if mode and mode != "ethereal":
-        conf_data["mode"] = mode
-    write_conf(cwd / CONF_FILENAME, conf_data)
 
     db = FiligreeDB(store_dir / DB_FILENAME, prefix=prefix, project_root=cwd, meta_dir=store_dir)
     db.initialize()
@@ -246,7 +259,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
     click.echo(f"  Database: {store_dir / DB_FILENAME}")
-    click.echo(f"  Anchor: {cwd / CONF_FILENAME}")
+    click.echo(f"  Anchor: {rel_store.as_posix()}/ (store-dir presence; confless — no .filigree.conf)")
     click.echo(f"  Scanners: {store_dir / 'scanners'}/ (add .toml files to register scanners)")
     click.echo("\nNext: filigree install")
 
