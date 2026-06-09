@@ -958,19 +958,25 @@ class TestMigrationWalAndBusy:
 
 
 class TestMigrationWriteFence:
-    """The copy→unlink write fence (filigree-39c6958f31).
+    """The copy→unlink write fence (filigree-39c6958f31) — DEFENSE-IN-DEPTH.
 
-    Bug 1's daemon detect-and-refuse handles long-lived idle connections; the
-    fence handles the complementary case — an *active* ad-hoc writer — by holding
-    ``BEGIN IMMEDIATE`` on the legacy DB across the whole snapshot→unlink window so
-    no foreign commit can land in it and be orphaned by the unlink.
+    The mandatory operator quiesce (docs/UPGRADING.md) and the daemon
+    detect-and-refuse are the real backstops. The fence narrows the residual: it
+    holds ``BEGIN IMMEDIATE`` on the legacy DB across the snapshot→unlink window so
+    (a) a writer ALREADY active at acquire is refused with StoreMigrationBusyError,
+    and (b) short-/zero-busy_timeout writers get a visible SQLITE_BUSY. It does NOT
+    fully close the race: a writer that opens and blocks on the fence during the
+    hold commits to the orphaned inode after release (the known residual the
+    quiesce backstops — see _migration_write_fence). These tests cover the two
+    reliable wins, not the residual (which needs operator cooperation to close).
     """
 
-    def test_fence_blocks_a_concurrent_writer_for_the_whole_window(self, tmp_path: Path) -> None:
-        """The defining property: while the fence is held, a concurrent writer
-        CANNOT commit (its ``BEGIN IMMEDIATE`` is refused). This is what closes the
-        copy→unlink window — the old copy-time checkpoint only excluded writers
-        during the checkpoint, not across the unlink.
+    def test_fence_blocks_a_concurrent_writer_while_held(self, tmp_path: Path) -> None:
+        """While the fence is held, a concurrent writer CANNOT commit (its
+        ``BEGIN IMMEDIATE`` is refused). This is the mechanism behind both wins —
+        but note it only excludes writers *during the hold*; a writer that waits
+        out the hold (long busy_timeout) commits to the orphaned inode after
+        release, which is why the fence is defense-in-depth, not a full close.
         """
         legacy = _make_legacy_install(tmp_path)
         legacy_db = legacy / DB_FILENAME

@@ -605,29 +605,43 @@ class StoreMigrationConfUnreadableError(RuntimeError):
 def _migration_write_fence(legacy_db: Path) -> Iterator[None]:
     """Hold an exclusive write fence on *legacy_db* across the copy→unlink window.
 
-    The migration snapshots the legacy DB forward and then unlinks it. An ad-hoc
-    writer (a fresh CLI/MCP process) that opens the legacy DB and commits in the
-    window *between* our snapshot and the unlink would have that commit orphaned
-    on the about-to-be-deleted inode (filigree-39c6958f31). The daemon
-    detect-and-refuse (:func:`_refuse_if_daemon_serving`) handles long-lived
-    *idle* connections that hold no lock; this fence handles the COMPLEMENTARY
-    case — an *active* writer — by taking ``BEGIN IMMEDIATE`` and HOLDING it for
-    the duration. ``BEGIN IMMEDIATE`` excludes all other writers (a concurrent
-    writer's ``BEGIN IMMEDIATE`` blocks then raises ``database is locked``), so no
-    foreign commit can land between the snapshot and the unlink. Readers are
-    unaffected (WAL), and a pure reader loses nothing — the snapshot already
-    captured every committed page. The two guards are not redundant: the fence
-    cannot see an idle daemon connection (it holds no lock), and the refuse cannot
-    see an ad-hoc writer that appears after its check.
+    DEFENSE-IN-DEPTH, NOT a full close of the ad-hoc-writer race
+    (filigree-39c6958f31). The MANDATORY backstop is the documented quiesce — stop
+    every writer before the one-time 2.x→3.0 migration (docs/UPGRADING.md, "Stop
+    ALL writers before upgrading — this is mandatory, not advisory") — plus the
+    daemon detect-and-refuse (:func:`_refuse_if_daemon_serving`) for long-lived
+    *idle* daemon connections that hold no lock. This fence narrows the residual
+    by taking ``BEGIN IMMEDIATE`` on the legacy DB and HOLDING it across the whole
+    snapshot→unlink window. Two genuine wins:
 
-    If the lock cannot be acquired, a writer is *already* active on the legacy DB:
-    raise :class:`StoreMigrationBusyError` BEFORE any filesystem mutation (so no
-    half-published weft husk is littered), replacing — and widening — the old
-    checkpoint-busy guard, which only detected a writer at copy time, not across
-    the whole window. On exit the no-op transaction is rolled back and the
-    connection closed; the rollback is a clean release even though the backing
-    files were unlinked under the lock, because the open fd keeps the inode alive
-    until ``close()`` (POSIX).
+      * **Refuse-on-already-active.** If a writer already holds the lock, the
+        ``BEGIN IMMEDIATE`` below fails and we raise :class:`StoreMigrationBusyError`
+        BEFORE any filesystem mutation (no half-published weft husk), replacing the
+        old copy-time checkpoint-busy guard with a window-wide one.
+      * **Short-/zero-timeout writers.** A writer that tries to commit during the
+        hold and whose ``busy_timeout`` expires first gets ``SQLITE_BUSY`` (a
+        *visible* error) instead of silently racing the copy.
+
+    Readers are unaffected (WAL) and a pure reader loses nothing — the snapshot
+    captured every committed page.
+
+    KNOWN RESIDUAL (intentionally NOT closed here; this is why quiesce is
+    mandatory). A writer that *opens* the legacy DB and blocks on the fence DURING
+    the hold, with a ``busy_timeout`` longer than the sub-second hold (FiligreeDB
+    sets ``PRAGMA busy_timeout=5000`` = 5 s), will, AFTER the fence
+    releases, acquire the lock and COMMIT — onto the now-unlinked (orphaned) inode,
+    since the unlink ran under the fence. POSIX keeps an open fd writing to a
+    deleted inode, so that commit succeeds *silently* and is unreachable from the
+    migrated store. The migration cannot prevent a writer it does not cooperate
+    with from writing to a file it already holds open; the fence relocates this
+    loss from "during the window" to "after release" but does not eliminate it.
+    Empirically confirmed (the discriminating thread test, 2026-06-09). Closing it
+    for real would require the writer's cooperation (a shared lease/quiesce
+    protocol), which is what the mandatory operator quiesce stands in for.
+
+    On exit the no-op transaction is rolled back and the connection closed; the
+    rollback is a clean release even though the backing files were unlinked under
+    the lock, because the open fd keeps the inode alive until ``close()`` (POSIX).
     """
     conn = sqlite3.connect(str(legacy_db), timeout=2.0)
     conn.isolation_level = None  # explicit BEGIN/ROLLBACK control
@@ -946,15 +960,17 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # so the dir already exists).
     #
     # WRITE FENCE (filigree-39c6958f31): acquire BEGIN IMMEDIATE on the legacy DB
-    # and HOLD it across steps 1-4 (snapshot → conf-rewrite → unlink) so an ad-hoc
-    # writer cannot open the legacy DB and commit in the window between our
-    # snapshot and the unlink — that commit would otherwise orphan on the deleted
-    # inode. The fence excludes only writers (readers are unaffected, and a pure
-    # reader loses nothing); it complements _refuse_if_daemon_serving, which
-    # catches long-lived *idle* daemon connections the fence cannot see. A writer
-    # already holding the lock makes acquisition raise StoreMigrationBusyError
-    # here — before any mutation, so no weft husk — superseding (and widening) the
-    # old copy-time checkpoint-busy check. When legacy_db is already gone (resumed
+    # and HOLD it across steps 1-4 (snapshot → conf-rewrite → unlink). This is
+    # DEFENSE-IN-DEPTH, not a full close of the ad-hoc-writer race — the MANDATORY
+    # backstop is the documented operator quiesce (docs/UPGRADING.md) plus
+    # _refuse_if_daemon_serving for idle daemons. The fence's real wins: a writer
+    # ALREADY active makes acquisition raise StoreMigrationBusyError here (before
+    # any mutation, no weft husk — superseding the old copy-time checkpoint-busy
+    # check), and short-/zero-busy_timeout writers get a visible SQLITE_BUSY rather
+    # than racing the copy. The KNOWN RESIDUAL (see _migration_write_fence): a
+    # writer that opens legacy and blocks on the fence during the hold commits to
+    # the orphaned inode AFTER release — silently lost, which is exactly what the
+    # mandatory quiesce exists to prevent. When legacy_db is already gone (resumed
     # migration, weft DB present) there is nothing to fence or unlink.
     db_fence = _migration_write_fence(legacy_db) if legacy_db.is_file() else contextlib.nullcontext()
     with db_fence:
@@ -1018,9 +1034,10 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
             write_conf(conf_path, conf_data)
         # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
         #    a stale second database. Done last and STILL UNDER THE FENCE: until here
-        #    the legacy DB was the live one, and the fence guarantees no writer can
-        #    commit between the snapshot and this unlink. The rest of the legacy dir
-        #    is left as an auditable husk.
+        #    the legacy DB was the live one, and while the fence is held no writer can
+        #    commit to it. (A writer that blocked on the fence still commits to the
+        #    orphaned inode after release — the known residual the quiesce backstops;
+        #    see _migration_write_fence.) The rest of the legacy dir is an auditable husk.
         for suffix in ("", "-wal", "-shm"):
             stale = legacy_dir / (DB_FILENAME + suffix)
             if stale.is_file():
