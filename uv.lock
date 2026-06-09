@@ -469,6 +469,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "portalocker" },
+    { name = "starlette" },
     { name = "uvicorn" },
 ]
 
@@ -498,6 +499,7 @@ requires-dist = [
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5" },
     { name = "portalocker", specifier = ">=2.7,<4" },
+    { name = "starlette", specifier = ">=1.0,<2" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
 provides-extras = ["docs"]

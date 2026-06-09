@@ -31,6 +31,11 @@ dependencies = [
     "httpx>=0.28",
     "mcp>=1.0,<2",
     "portalocker>=2.7,<4",
+    # Pinned explicitly (not just via fastapi's unbounded starlette>=0.46): the
+    # bearer-auth middleware (dashboard_auth) is built on Starlette 1.0
+    # BaseHTTPMiddleware/Request semantics, so a published-wheel consumer or a
+    # future re-lock must not drift across the 0.x->2.x boundary. (W2)
+    "starlette>=1.0,<2",
     "uvicorn>=0.34",
 ]
 
