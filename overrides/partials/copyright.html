@@ -1,16 +1,21 @@
 {#-
   Filigree override of Material's copyright partial.
-  Adds the Loom suite links to the footer site-wide so suite presence is
-  reachable from every docs page, then preserves Material's default content.
+  Adds the Weft Federation links to the footer site-wide so federation presence
+  is reachable from every docs page, then preserves Material's default content.
+
+  Loomweave's repository is still named `clarion`. Sibling members link to their
+  GitHub repos (the federation hub's own convention — only Wardline's doc
+  subdomain is currently live, and roster/footer stay uniform on repos for it);
+  Filigree self-references its own live doc site.
 -#}
 <div class="md-copyright">
-  <nav class="fg-footer-suite" aria-label="Loom suite">
-    <span class="fg-footer-suite__label">Loom suite</span>
+  <nav class="fg-footer-suite" aria-label="Weft Federation">
+    <span class="fg-footer-suite__label">Weft Federation</span>
+    <a href="https://github.com/foundryside-dev/clarion" rel="noopener" target="_blank">Loomweave</a>
     <a href="https://filigree.foundryside.dev" rel="noopener">Filigree</a>
-    <a href="https://wardline.foundryside.dev" rel="noopener" target="_blank">Wardline</a>
-    <a href="https://clarion.foundryside.dev" rel="noopener" target="_blank">Clarion</a>
-    <a href="https://legis.foundryside.dev" rel="noopener" target="_blank">Legis</a>
-    <a href="https://charter.foundryside.dev" rel="noopener" target="_blank">Charter</a>
+    <a href="https://github.com/foundryside-dev/wardline" rel="noopener" target="_blank">Wardline</a>
+    <a href="https://github.com/foundryside-dev/legis" rel="noopener" target="_blank">Legis</a>
+    <a href="https://github.com/foundryside-dev/charter" rel="noopener" target="_blank">Charter</a>
   </nav>
   {% if config.copyright %}
     <div class="md-copyright__highlight">

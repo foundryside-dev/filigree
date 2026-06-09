@@ -3,20 +3,21 @@
 {#
   Filigree product landing page.
   Applied only to docs/index.md via front-matter `template: home.html`.
-  The hero, feature cards, and Loom-suite grid are defined here; the markdown
-  body of index.md (install + quick-start) is rendered via {{ page.content }}
-  so Material's syntax highlighting and content.code.copy buttons keep working
-  on the real fenced code blocks.
+  The hero, feature cards, and Weft Federation roster are defined here; the
+  markdown body of index.md (install + quick-start) is rendered via
+  {{ page.content }} so Material's syntax highlighting and content.code.copy
+  buttons keep working on the real fenced code blocks.
 #}
 
 {% block content %}
 <div class="fg-landing">
 
   <section class="fg-hero">
+    <p class="fg-hero__eyebrow">Weft Federation &middot; work-state surface</p>
     <h1 class="fg-hero__title">Filigree</h1>
     <p class="fg-hero__tagline">
       A local-first issue tracker built for AI coding agents. SQLite on disk,
-      114 MCP tools for agents, a full CLI for humans &mdash; no cloud, no
+      116 MCP tools for agents, a full CLI for humans &mdash; no cloud, no
       accounts, no scraping log output.
     </p>
     <div class="fg-hero__cta">
@@ -34,7 +35,7 @@
     <div class="fg-feature-card">
       <h3>Agents as first-class citizens</h3>
       <p>
-        114 <code>mcp__filigree__*</code> tools let coding agents create, claim,
+        116 <code>mcp__filigree__*</code> tools let coding agents create, claim,
         and close work natively &mdash; no parsing CLI text. A pre-computed
         <code>context.md</code> orients every session at startup.
       </p>
@@ -58,7 +59,7 @@
     <div class="fg-feature-card">
       <h3>Real workflow, not just a list</h3>
       <p>
-        24 issue types across 9 packs with enforced state machines, a
+        24 issue types across 9 workflow packs with enforced state machines, a
         dependency graph with ready-queue and critical-path analysis, and a
         live web dashboard with Kanban and graph views.
       </p>
@@ -71,42 +72,99 @@
     {{ page.content }}
   </section>
 
-  <section class="fg-suite" aria-labelledby="fg-suite-heading">
-    <h2 id="fg-suite-heading">The Loom Federation suite</h2>
-    <p class="fg-suite__intro">
-      Filigree is one of five Loom Federation citizens &mdash; agent-first tooling built on
-      &ldquo;humans on the loop, not in the loop.&rdquo; Each is zero-config and
-      opt-in: enterprise-class for one-to-two-developer teams, without enterprise
-      weight.
+  <section class="fg-federation" aria-labelledby="fg-federation-heading">
+    <h2 id="fg-federation-heading">The Weft Federation</h2>
+    <p class="fg-federation__intro">
+      Filigree is the <strong>work-state surface</strong> of the Weft
+      Federation &mdash; an agent-first family of small, local-first developer
+      tools. Each member is authoritative for one domain, useful on its own,
+      and <em>enrich-only, never load-bearing</em> when composed: removing a
+      sibling never breaks another's core flow. Filigree owns issues, their
+      dependencies and state machines, and hosts the named <code>weft</code>
+      HTTP generation several siblings use as transport.
+      <a href="{{ 'federation/' | url }}">Read how Filigree engages each member &rarr;</a>
     </p>
-    <div class="fg-suite__grid">
-      <a class="fg-suite-card fg-suite-card--current" href="https://filigree.foundryside.dev"
+
+    <div class="fg-roster">
+
+      <a class="fg-member fg-member--loomweave"
+         href="https://github.com/foundryside-dev/clarion"
          rel="noopener" target="_blank">
-        <h3>Filigree</h3>
-        <p>Issue tracking built for agent-driven teams.</p>
-        <span class="fg-suite-card__badge">You are here</span>
+        <span class="fg-member__head">
+          <span class="fg-member__name">Loomweave</span>
+          <span class="fg-member__lang">Rust</span>
+        </span>
+        <span class="fg-member__domain">
+          Code structure + identity authority (SEI). Repo still named
+          <code>clarion</code>.
+        </span>
+        <span class="fg-member__repo">github.com/foundryside-dev/clarion</span>
       </a>
-      <a class="fg-suite-card" href="https://wardline.foundryside.dev"
+
+      <span class="fg-member fg-member--filigree fg-member--current"
+            aria-current="page">
+        <span class="fg-member__head">
+          <span class="fg-member__name">Filigree</span>
+          <span class="fg-member__lang">Python</span>
+          <span class="fg-member__badge">You are here</span>
+        </span>
+        <span class="fg-member__domain">Work state / issue lifecycle.</span>
+        <span class="fg-member__repo">github.com/foundryside-dev/filigree</span>
+      </span>
+
+      <a class="fg-member fg-member--wardline"
+         href="https://github.com/foundryside-dev/wardline"
          rel="noopener" target="_blank">
-        <h3>Wardline</h3>
-        <p>Semantic-tainting static analysis for Python.</p>
+        <span class="fg-member__head">
+          <span class="fg-member__name">Wardline</span>
+          <span class="fg-member__lang">Python</span>
+        </span>
+        <span class="fg-member__domain">Trust-boundary analysis (semantic taint, SARIF).</span>
+        <span class="fg-member__repo">github.com/foundryside-dev/wardline</span>
       </a>
-      <a class="fg-suite-card" href="https://clarion.foundryside.dev"
+
+      <a class="fg-member fg-member--legis"
+         href="https://github.com/foundryside-dev/legis"
          rel="noopener" target="_blank">
-        <h3>Clarion</h3>
-        <p>Code intelligence &mdash; entity-level facts about your codebase.</p>
+        <span class="fg-member__head">
+          <span class="fg-member__name">Legis</span>
+          <span class="fg-member__lang">Python</span>
+        </span>
+        <span class="fg-member__domain">Git/CI governance &amp; attestations.</span>
+        <span class="fg-member__repo">github.com/foundryside-dev/legis</span>
       </a>
-      <a class="fg-suite-card" href="https://legis.foundryside.dev"
+
+      <a class="fg-member fg-member--charter fg-member--planned"
+         href="https://github.com/foundryside-dev/charter"
          rel="noopener" target="_blank">
-        <h3>Legis</h3>
-        <p>Opt-in governance for the development lifecycle.</p>
+        <span class="fg-member__head">
+          <span class="fg-member__name">Charter</span>
+          <span class="fg-member__lang">Python</span>
+          <span class="fg-member__status">scaffolded</span>
+        </span>
+        <span class="fg-member__domain">Requirements, traceability, verification (planned link to work).</span>
+        <span class="fg-member__repo">github.com/foundryside-dev/charter</span>
       </a>
-      <a class="fg-suite-card" href="https://charter.foundryside.dev"
-         rel="noopener" target="_blank">
-        <h3>Charter</h3>
-        <p>Requirements, traceability, and verification evidence.</p>
-      </a>
+
     </div>
+
+    <a class="fg-lacuna"
+       href="https://github.com/foundryside-dev/lacuna"
+       rel="noopener" target="_blank">
+      <span class="fg-lacuna__label">Adjacent &mdash; not a member</span>
+      <span class="fg-lacuna__body">
+        <strong>Lacuna</strong> is the deliberately-flawed demonstration
+        specimen the whole federation is <em>run against</em>, not a member of
+        it &mdash; point the Weft tools at it and they pick up its seeded bugs.
+      </span>
+    </a>
+
+    <p class="fg-federation__more">
+      <a href="https://github.com/foundryside-dev/weft" rel="noopener" target="_blank">
+        Explore the federation hub &rarr;
+      </a>
+      &mdash; doctrine, the SEI standard, and the integration matrix.
+    </p>
   </section>
 
 </div>

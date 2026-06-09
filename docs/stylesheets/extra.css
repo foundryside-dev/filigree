@@ -1,34 +1,27 @@
 /* ==========================================================================
-   Filigree — thin identity layer over the shared Loom docs theme.
+   Filigree — thin identity layer over the shared Weft docs theme.
 
-   This file is layered ON TOP OF the vendored `loom-mkdocs.css` (loaded first
-   in mkdocs.yml). loom-mkdocs.css owns the base chrome: Material --md-* surface/
-   text/code/footer tokens per scheme, the JetBrains Mono / Space Grotesk faces,
-   headings, links, admonitions, tables, radii. We do NOT re-declare any of that,
-   and we do NOT define --md-accent/--md-primary — the shared theme owns them.
+   Layered ON TOP OF the vendored `weft-mkdocs.css` (loaded first in mkdocs.yml).
+   weft-mkdocs.css owns the base chrome: Material --md-* surface / text / code /
+   footer tokens per scheme, the JetBrains Mono / Space Grotesk faces, headings,
+   links, admonitions, tables, radii, and the per-member `.thread-*` accent hook.
+   We do NOT re-declare any of that.
 
-   Filigree is the SIMPLEST case in the federation: its thread colour, sky
-   (#38BDF8), IS the shared theme's default accent — the dashboard is the
-   canonical origin of the whole palette. So there is no per-product accent
-   override here: vendoring loom-mkdocs.css gives sky on dark AND the AA-safe
-   deepened sky (#0284C7) on light for free. Our --fg-accent simply reads the
-   shared --md-accent-fg-color, so it tracks the scheme automatically.
-
-   (This retires Filigree's former gold/amber accent — the "filigree =
-   ornamental goldwork" pun — in favour of its design-system thread, sky.)
-
-   What stays here is purely Filigree's bespoke landing-page identity: the .fg-*
-   components (hero, feature cards, install body, the Loom suite grid, the
-   footer suite strip), recoloured onto the Loom dark-teal surface ramp + the
-   3 / 6 / 8 radii + the mono/display faces.
+   IDENTITY: the shared "Loom" theme paints in dyed amber (#E9B04A) by default.
+   Filigree's federation thread is SKY (#56B7E2). This layer repaints the
+   interactive accent to sky so Filigree pages read in their own member colour —
+   the same recolour the shared theme's `.thread-filigree` hook performs, applied
+   site-wide here. On the light "Specimen" (warm-paper) scheme, raw sky and even
+   the shared theme's light highlight-sky (#1E7AB0 ≈ 3.7:1 on paper) fail WCAG AA
+   for link text, so we use a deepened sky (#16648F) verified ≥5:1 on both the
+   paper ground (5.06:1) and the raised card (5.74:1).
 
    Strategy (shared with the rest of the suite): Material owns the light/dark
    toggle. We add NO custom toggle and use NO light-dark()/[data-theme]; the
    --fg-* semantic tokens are redefined under Material's own scheme selectors
-   (which Material sets on <body>) so they resolve against the body-level scheme
-   — the same hook loom-mkdocs uses. A token set on <body> overrides one
-   inherited from :root for every descendant, so theme-varying tokens MUST live
-   inside the scheme selectors, not in :root.
+   (which Material sets on <body>) so they resolve against the body-level scheme.
+   A token set on <body> overrides one inherited from :root for every descendant,
+   so theme-varying tokens MUST live inside the scheme selectors, not in :root.
    ========================================================================== */
 
 :root {
@@ -53,62 +46,76 @@
 
   --fg-content-width: 52rem;
 
-  /* Body face = JetBrains Mono (from loom-mkdocs); display = Space Grotesk for
+  /* Body face = JetBrains Mono (from weft-mkdocs); display = Space Grotesk for
      the big landing headlines (matches the design system's brand-display rule). */
   --fg-font-mono: var(--md-code-font-family, 'JetBrains Mono', 'Fira Code',
     ui-monospace, 'SF Mono', Menlo, monospace);
   --fg-font-display: 'Space Grotesk', 'JetBrains Mono', ui-sans-serif,
     system-ui, sans-serif;
+
+  /* ---- Member thread colours (mirrors weft-mkdocs --thread-*; used by the
+     federation roster on the landing page so each member reads in its strand). */
+  --fg-thread-loomweave: #52C9B8;
+  --fg-thread-filigree:  #56B7E2;
+  --fg-thread-wardline:  #F0875E;
+  --fg-thread-legis:     #B79BF2;
+  --fg-thread-charter:   #E9B04A;
 }
 
 /* ==========================================================================
    Filigree semantic tokens — redefined per Material scheme, mapped onto the
-   shared Loom surface ramp. The accent is NOT overridden: --fg-accent reads
-   the shared --md-accent-fg-color, so it resolves to sky on dark and the
-   AA-safe deepened sky on light automatically.
+   shared "Loom" warm-espresso (dark) / warm-paper (light) surface ramp. The
+   accent is REPAINTED to the Filigree sky thread (the shared theme defaults to
+   amber); --fg-accent drives every interactive surface in this layer.
    ========================================================================== */
 
-/* ---- DARK (slate) scheme — the canonical default ---- */
+/* ---- DARK (slate) scheme — the canonical default: warm espresso ground ---- */
 [data-md-color-scheme="slate"] {
   /* Loom dark surface ramp (design-system: base / raised / overlay / hover) */
-  --fg-bg:           #0B1215;  /* surface-base    */
-  --fg-bg-subtle:    #131E24;  /* surface-raised  */
-  --fg-bg-card:      #1A2B34;  /* surface-overlay */
-  --fg-bg-hover:     #243A45;  /* surface-hover   */
+  --fg-bg:           #14110D;  /* surface-base   — warm espresso-black */
+  --fg-bg-subtle:    #1E1A13;  /* surface-raised */
+  --fg-bg-card:      #2A2319;  /* surface-overlay */
+  --fg-bg-hover:     #39301F;  /* surface-hover  */
 
-  /* Text ramp */
-  --fg-text:         #E2EEF2;  /* text-primary    */
-  --fg-text-muted:   #8FAAB8;  /* text-secondary  */
+  /* Ivory text ramp */
+  --fg-text:         #F2E9D8;  /* text-primary   */
+  --fg-text-muted:   #B6A78E;  /* text-secondary */
 
   /* Borders — Loom hairlines */
-  --fg-border:        #1E3340;  /* border-default  */
-  --fg-border-strong: #2A4454;  /* border-strong   */
+  --fg-border:        #332A1F;  /* border-default */
+  --fg-border-strong: #4A3C2A;  /* border-strong  */
 
-  /* Sky accent (the Filigree thread) — inherited from the shared theme so it
-     tracks the scheme; plus a soft tint for chips/pills and a fill foreground. */
-  --fg-accent:       var(--md-accent-fg-color);   /* #38BDF8 sky */
-  --fg-accent-soft:  rgba(56, 189, 248, 0.14);
-  --fg-on-accent:    #0B1215;                      /* dark text on sky fill */
+  /* Sky accent (the Filigree thread) — overrides the shared amber default. */
+  --fg-accent:       #56B7E2;                   /* sky */
+  --fg-accent-soft:  rgba(86, 183, 226, 0.14);
+  --fg-on-accent:    #14110D;                    /* dark text on sky fill */
+
+  /* Repaint Material's own link/accent vars to sky for in-content links too. */
+  --md-accent-fg-color:         #56B7E2;
+  --md-typeset-a-color:         #56B7E2;
 }
 
-/* ---- LIGHT (default) scheme — the documented alternate ---- */
+/* ---- LIGHT (default) scheme — "Specimen": warm-paper field-ledger ---- */
 [data-md-color-scheme="default"] {
   /* Loom light surface ramp */
-  --fg-bg:           #F0F6F8;  /* surface-base    */
-  --fg-bg-subtle:    #E8F1F4;  /* surface-overlay */
-  --fg-bg-card:      #FFFFFF;  /* surface-raised  */
-  --fg-bg-hover:     #DCE9EE;  /* surface-hover   */
+  --fg-bg:           #ECE3D1;  /* surface-base   (paper) */
+  --fg-bg-subtle:    #E2D7BF;  /* surface-overlay        */
+  --fg-bg-card:      #F8F1E3;  /* surface-raised (stock) */
+  --fg-bg-hover:     #D8CBB1;  /* surface-hover          */
 
-  --fg-text:         #0F2027;  /* text-primary (light) */
-  --fg-text-muted:   #3D6070;  /* text-secondary       */
+  --fg-text:         #241E13;  /* text-primary (ink)     */
+  --fg-text-muted:   #5C5238;  /* text-secondary         */
 
-  --fg-border:        #C5D8E0;  /* border-default (light) */
-  --fg-border-strong: #9BBBC8;  /* border-strong          */
+  --fg-border:        #CDBE9F;  /* border-default         */
+  --fg-border-strong: #B6A78E;  /* border-strong          */
 
-  /* Inherited deepened sky (#0284C7) — AA-safe as link/accent on white. */
-  --fg-accent:       var(--md-accent-fg-color);   /* #0284C7 deepened sky */
-  --fg-accent-soft:  rgba(2, 132, 199, 0.10);
-  --fg-on-accent:    #FFFFFF;                       /* white text on sky fill */
+  /* Deepened sky — WCAG AA-safe (≥5:1) as link/accent on warm paper. */
+  --fg-accent:       #16648F;
+  --fg-accent-soft:  rgba(22, 100, 143, 0.10);
+  --fg-on-accent:    #F8F1E3;                     /* light text on sky fill (5.7:1) */
+
+  --md-accent-fg-color:         #16648F;
+  --md-typeset-a-color:         #16648F;
 }
 
 /* ==========================================================================
@@ -127,6 +134,27 @@
   padding: var(--fg-space-10) var(--fg-space-3) var(--fg-space-8);
 }
 
+.fg-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fg-space-2);
+  font-family: var(--fg-font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-text-muted);
+  margin-bottom: var(--fg-space-4);
+}
+
+.fg-hero__eyebrow::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--fg-accent);
+}
+
 .fg-hero__title {
   font-family: var(--fg-font-display);
   font-size: var(--fg-text-hero);
@@ -141,7 +169,7 @@
   font-size: var(--fg-text-lead);
   line-height: 1.5;
   color: var(--fg-text-muted);
-  max-width: 42rem;
+  max-width: 44rem;
   margin: 0 auto var(--fg-space-6);
 }
 
@@ -166,29 +194,32 @@
   transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
 }
 
-.fg-btn--primary {
+/* The `.fg-landing a.fg-btn…` ancestor+element specificity (0,2,1) is required
+   to beat Material's `.md-typeset a { color: var(--md-typeset-a-color) }` (0,1,1)
+   — without it the link colour paints the primary label sky-on-sky (invisible). */
+.fg-landing a.fg-btn--primary {
   background: var(--fg-accent);
   color: var(--fg-on-accent);
 }
-.fg-btn--primary:hover,
-.fg-btn--primary:focus-visible {
+.fg-landing a.fg-btn--primary:hover,
+.fg-landing a.fg-btn--primary:focus-visible {
   /* Light scheme: darken the sky fill on hover. */
   background: color-mix(in oklch, var(--fg-accent) 82%, #000 18%);
   color: var(--fg-on-accent);
 }
-[data-md-color-scheme="slate"] .fg-btn--primary:hover,
-[data-md-color-scheme="slate"] .fg-btn--primary:focus-visible {
-  /* Dark scheme: lighten the sky fill against the dark base. */
+[data-md-color-scheme="slate"] .fg-landing a.fg-btn--primary:hover,
+[data-md-color-scheme="slate"] .fg-landing a.fg-btn--primary:focus-visible {
+  /* Dark scheme: lighten the sky fill against the espresso base. */
   background: color-mix(in oklch, var(--fg-accent) 82%, #fff 18%);
 }
 
-.fg-btn--secondary {
+.fg-landing a.fg-btn--secondary {
   background: transparent;
   color: var(--fg-text);
   border-color: var(--fg-border-strong);
 }
-.fg-btn--secondary:hover,
-.fg-btn--secondary:focus-visible {
+.fg-landing a.fg-btn--secondary:hover,
+.fg-landing a.fg-btn--secondary:focus-visible {
   border-color: var(--fg-accent);
   color: var(--fg-accent);
 }
@@ -251,36 +282,49 @@
   margin-bottom: var(--fg-space-6);
 }
 
-/* ---- Loom suite ---- */
-.fg-suite {
+/* ==========================================================================
+   WEFT FEDERATION ROSTER (landing)
+   ========================================================================== */
+.fg-federation {
   margin-top: var(--fg-space-10);
   padding-top: var(--fg-space-6);
   border-top: 1px solid var(--fg-border);
 }
 
-.fg-suite h2 {
+.fg-federation h2 {
   font-family: var(--fg-font-display);
   margin: 0 0 var(--fg-space-2);
   font-weight: 600;
 }
 
-.fg-suite__intro {
+.fg-federation__intro {
   color: var(--fg-text-muted);
-  max-width: 44rem;
+  max-width: 46rem;
   line-height: 1.55;
   margin: 0 0 var(--fg-space-5);
 }
 
-.fg-suite__grid {
+.fg-federation__intro a {
+  color: var(--fg-accent);
+  text-decoration: none;
+}
+.fg-federation__intro a:hover {
+  text-decoration: underline;
+}
+
+.fg-roster {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: var(--fg-space-4);
 }
 
-.fg-suite-card {
+.fg-member {
   display: block;
+  position: relative;
   padding: var(--fg-space-5);
+  padding-left: calc(var(--fg-space-5) + 4px);
   border: 1px solid var(--fg-border);
+  border-left: 4px solid var(--fg-member-thread, var(--fg-border-strong));
   border-radius: var(--fg-radius);
   background: var(--fg-bg-card);
   text-decoration: none;
@@ -288,55 +332,147 @@
   transition: border-color 150ms ease, transform 150ms ease;
 }
 
-.fg-suite-card:hover,
-.fg-suite-card:focus-visible {
-  border-color: var(--fg-accent);
+.fg-member:hover,
+.fg-member:focus-visible {
+  border-color: var(--fg-member-thread, var(--fg-accent));
+  border-left-color: var(--fg-member-thread, var(--fg-accent));
   transform: translateY(-2px);
 }
 
-.fg-suite-card:focus-visible {
-  outline: 3px solid var(--fg-accent);
+.fg-member:focus-visible {
+  outline: 3px solid var(--fg-member-thread, var(--fg-accent));
   outline-offset: 2px;
 }
 
-.fg-suite-card h3 {
-  margin: 0 0 var(--fg-space-2);
+.fg-member__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--fg-space-2);
+  flex-wrap: wrap;
+}
+
+.fg-member__name {
+  margin: 0;
   font-family: var(--fg-font-mono);
   font-size: 1.1rem;
-  color: var(--fg-accent);
+  color: var(--fg-member-thread, var(--fg-text));
 }
 
-.fg-suite-card p {
-  margin: 0;
-  color: var(--fg-text-muted);
-  line-height: 1.5;
-}
-
-.fg-suite-card--current {
-  border-color: var(--fg-accent);
-  background: var(--fg-accent-soft);
-}
-
-.fg-suite-card--current h3 {
-  color: var(--fg-text);
-}
-
-.fg-suite-card__badge {
-  display: inline-block;
-  margin-top: var(--fg-space-3);
+.fg-member__lang {
   font-family: var(--fg-font-mono);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  color: var(--fg-text-muted);
+}
+
+.fg-member__domain {
+  margin: var(--fg-space-2) 0 0;
+  color: var(--fg-text-muted);
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.fg-member__repo {
+  display: inline-block;
+  margin-top: var(--fg-space-3);
+  font-family: var(--fg-font-mono);
+  font-size: 0.78rem;
+  color: var(--fg-text-muted);
+  word-break: break-all;
+}
+
+/* Per-member thread colour (drives left rule + name) */
+.fg-member--loomweave { --fg-member-thread: var(--fg-thread-loomweave); }
+.fg-member--filigree  { --fg-member-thread: var(--fg-thread-filigree); }
+.fg-member--wardline  { --fg-member-thread: var(--fg-thread-wardline); }
+.fg-member--legis     { --fg-member-thread: var(--fg-thread-legis); }
+.fg-member--charter   { --fg-member-thread: var(--fg-thread-charter); }
+
+/* You-are-here (Filigree) */
+.fg-member--current {
+  background: var(--fg-accent-soft);
+}
+
+.fg-member__badge {
+  display: inline-block;
+  margin-left: auto;
+  align-self: center;
+  font-family: var(--fg-font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--fg-on-accent);
-  background: var(--fg-accent);
-  padding: 0.15em 0.6em;
+  background: var(--fg-thread-filigree);
+  padding: 0.12em 0.55em;
   border-radius: 999px;
 }
 
+.fg-member__status {
+  display: inline-block;
+  margin-top: var(--fg-space-3);
+  margin-left: var(--fg-space-3);
+  font-family: var(--fg-font-mono);
+  font-size: 0.72rem;
+  color: var(--fg-text-muted);
+}
+
+/* Charter = planned/scaffold — dim it */
+.fg-member--planned {
+  opacity: 0.72;
+}
+
+/* Lacuna — adjacent, not a member */
+.fg-lacuna {
+  margin-top: var(--fg-space-5);
+  padding: var(--fg-space-4) var(--fg-space-5);
+  border: 1px dashed var(--fg-border-strong);
+  border-radius: var(--fg-radius);
+  background: transparent;
+  display: block;
+  text-decoration: none;
+  color: var(--fg-text);
+}
+.fg-lacuna:hover,
+.fg-lacuna:focus-visible {
+  border-color: var(--fg-accent);
+}
+.fg-lacuna__label {
+  font-family: var(--fg-font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-text-muted);
+}
+.fg-lacuna__body {
+  margin: var(--fg-space-1) 0 0;
+  color: var(--fg-text-muted);
+  line-height: 1.5;
+  font-size: 0.9rem;
+}
+.fg-lacuna__body strong {
+  color: var(--fg-text);
+}
+
+.fg-federation__more {
+  margin-top: var(--fg-space-5);
+  font-size: 0.95rem;
+  color: var(--fg-text-muted);
+}
+.fg-federation__more a {
+  color: var(--fg-accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+.fg-federation__more a:hover {
+  text-decoration: underline;
+}
+
 /* ==========================================================================
-   Footer Loom suite links (copyright partial override) — site-wide
+   Footer Weft suite links (copyright partial override) — site-wide
    ========================================================================== */
 .fg-footer-suite {
   display: flex;
@@ -374,7 +510,8 @@
    ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
   .fg-btn,
-  .fg-suite-card,
+  .fg-member,
+  .fg-lacuna,
   .fg-feature-card {
     transition: none;
   }

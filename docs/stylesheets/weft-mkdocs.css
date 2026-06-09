@@ -1,7 +1,7 @@
 /* ============================================================================
-   loom-mkdocs.css  ·  v1  ·  2026-06-05
+   weft-mkdocs.css  ·  v2  ·  2026-06-07
    ----------------------------------------------------------------------------
-   The Loom Federation shared docs theme for MkDocs Material.
+   The Weft Federation shared docs theme for MkDocs Material.
 
    DERIVED FROM the design system — do not hand-edit the token VALUES below;
    re-copy from `design-system/project/colors_and_type.css` on update and bump
@@ -16,8 +16,10 @@
      light-dark()/[data-theme]. We map the handoff tokens onto Material's own
      scheme selectors: [data-md-color-scheme="slate"]  = dark  (CANONICAL),
                        [data-md-color-scheme="default"] = light.
-   - Token VALUES are lifted verbatim from the design system (terminal-grade
-     dark-teal surfaces, sky accent, the per-member thread palette, radii).
+   - Token VALUES are lifted verbatim from the design system. This is the "Loom"
+     revision: the dark canonical scheme is a warm espresso ground with a dyed-
+     amber accent and the warmed per-member thread palette; the light scheme is
+     "Specimen" — a warm-paper field-ledger with oxblood-red ink.
    - Fonts: JetBrains Mono = product/body face; Space Grotesk = brand/headings.
      Bundled locally (OFL) so the site works fully offline; mkdocs.yml sets
      `font: false` so Material pulls no Google Fonts.
@@ -50,139 +52,141 @@
    (thread palette, radii, type families, motion).
    --------------------------------------------------------------------------- */
 :root {
-  --loom-font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
-  --loom-font-display: 'Space Grotesk', 'JetBrains Mono', ui-sans-serif, system-ui, sans-serif;
+  --weft-font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
+  --weft-font-display: 'Space Grotesk', 'JetBrains Mono', ui-sans-serif, system-ui, sans-serif;
 
   /* Radii (3 / 6 / 8) */
-  --loom-radius-sm: 3px;
-  --loom-radius:    6px;
-  --loom-radius-lg: 8px;
+  --weft-radius-sm: 3px;
+  --weft-radius:    6px;
+  --weft-radius-lg: 8px;
 
-  /* The Loom thread palette — one accent per member (legible on dark base). */
-  --thread-clarion:  #4ECDC4;
-  --thread-filigree: #38BDF8;
-  --thread-wardline: #F4845F;
-  --thread-legis:    #A78BFA;
-  --thread-charter:  #E3B341;
-  --thread-shuttle:  #6B7C8C;
-  --lacuna-accent:   #CE7AAE;
+  /* The Weft thread palette — one accent per member (warmed for "Loom"). */
+  --thread-loomweave:  #52C9B8;
+  --thread-filigree: #56B7E2;
+  --thread-wardline: #F0875E;
+  --thread-legis:    #B79BF2;
+  --thread-charter:  #E9B04A;
+  --thread-shuttle:  #8C7C68;
+  --lacuna-accent:   #C77FA6;
 
-  /* Wire Material's own font slots to the Loom faces (font:false in mkdocs.yml
+  /* Wire Material's own font slots to the Weft faces (font:false in mkdocs.yml
      means Material emits --md-text/code-font-family but loads no webfont). */
-  --md-text-font-family: var(--loom-font-mono);
-  --md-code-font-family: var(--loom-font-mono);
+  --md-text-font-family: var(--weft-font-mono);
+  --md-code-font-family: var(--weft-font-mono);
 }
 
 /* ===========================================================================
-   DARK / slate scheme — the CANONICAL DEFAULT
+   DARK / slate scheme — the CANONICAL DEFAULT ("Loom")
    Surfaces, text ramp, accent: design-system dark tokens.
    =========================================================================== */
 [data-md-color-scheme="slate"] {
-  /* hue used by Material to derive its own slate ramp; keep it teal-leaning */
-  --md-hue: 200;
+  /* hue used by Material to derive its own slate ramp; keep it warm/amber */
+  --md-hue: 35;
 
   /* Surfaces (design-system: base/raised/overlay/hover) */
-  --md-default-bg-color:          #0B1215;  /* surface-base   */
-  --md-default-bg-color--light:   #131E24;  /* surface-raised */
-  --md-default-bg-color--lighter: #1A2B34;  /* surface-overlay */
-  --md-default-bg-color--lightest:#243A45;  /* surface-hover  */
+  --md-default-bg-color:          #14110D;  /* surface-base   */
+  --md-default-bg-color--light:   #1E1A13;  /* surface-raised */
+  --md-default-bg-color--lighter: #2A2319;  /* surface-overlay */
+  --md-default-bg-color--lightest:#39301F;  /* surface-hover  */
 
   /* Text ramp (primary / secondary / muted) */
-  --md-default-fg-color:          #E2EEF2;  /* text-primary  */
-  --md-default-fg-color--light:   #8FAAB8;  /* text-secondary*/
-  --md-default-fg-color--lighter: #5A7D8C;  /* text-muted    */
-  --md-default-fg-color--lightest:#1E3340;  /* hairline tint */
+  --md-default-fg-color:          #F2E9D8;  /* text-primary  */
+  --md-default-fg-color--light:   #B6A78E;  /* text-secondary*/
+  --md-default-fg-color--lighter: #7F6F58;  /* text-muted    */
+  --md-default-fg-color--lightest:#332A1F;  /* hairline tint (border-default) */
 
-  /* Primary chrome (header/nav) = raised surface, sky accent for marks/links */
-  --md-primary-fg-color:        #131E24;
-  --md-primary-fg-color--light: #1A2B34;
-  --md-primary-fg-color--dark:  #0B1215;
-  --md-primary-bg-color:        #E2EEF2;
-  --md-primary-bg-color--light: #8FAAB8;
+  /* Primary chrome (header/nav) = raised surface, amber accent for marks/links */
+  --md-primary-fg-color:        #1E1A13;
+  --md-primary-fg-color--light: #2A2319;
+  --md-primary-fg-color--dark:  #14110D;
+  --md-primary-bg-color:        #F2E9D8;
+  --md-primary-bg-color--light: #B6A78E;
 
-  /* Accent — sky (the suite's interactive blue) */
-  --md-accent-fg-color:         #38BDF8;
-  --md-accent-fg-color--transparent: rgba(56, 189, 248, 0.10);
-  --md-accent-bg-color:         #0B1215;
-  --md-accent-bg-color--light:  #131E24;
+  /* Accent — dyed amber (the suite's interactive thread) */
+  --md-accent-fg-color:         #E9B04A;
+  --md-accent-fg-color--transparent: rgba(233, 176, 74, 0.10);
+  --md-accent-bg-color:         #14110D;
+  --md-accent-bg-color--light:  #1E1A13;
 
   /* Links resolve through the typeset link var below */
-  --md-typeset-a-color:         #38BDF8;
+  --md-typeset-a-color:         #E9B04A;
 
   /* Code surfaces */
-  --md-code-bg-color:           #131E24;
-  --md-code-fg-color:           #E2EEF2;
-  --md-code-hl-color:           rgba(56, 189, 248, 0.15);
+  --md-code-bg-color:           #1E1A13;
+  --md-code-fg-color:           #F2E9D8;
+  --md-code-hl-color:           rgba(233, 176, 74, 0.15);
 
-  /* Syntax highlight (Pygments) — dark, terminal-grade */
-  --md-code-hl-comment-color:   #5A7D8C;
-  --md-code-hl-keyword-color:   #A78BFA;  /* violet  */
-  --md-code-hl-string-color:    #4ECDC4;  /* aqua    */
-  --md-code-hl-number-color:    #E3B341;  /* gold    */
-  --md-code-hl-name-color:      #E2EEF2;
-  --md-code-hl-function-color:  #38BDF8;  /* sky     */
-  --md-code-hl-constant-color:  #F4845F;  /* coral   */
-  --md-code-hl-operator-color:  #8FAAB8;
-  --md-code-hl-punctuation-color:#8FAAB8;
-  --md-code-hl-variable-color:  #E2EEF2;
-  --md-code-hl-special-color:   #CE7AAE;
+  /* Syntax highlight (Pygments) — warm, terminal-grade */
+  --md-code-hl-comment-color:   #7F6F58;
+  --md-code-hl-keyword-color:   #B79BF2;  /* violet  */
+  --md-code-hl-string-color:    #52C9B8;  /* aqua    */
+  --md-code-hl-number-color:    #E9B04A;  /* gold    */
+  --md-code-hl-name-color:      #F2E9D8;
+  --md-code-hl-function-color:  #56B7E2;  /* sky     */
+  --md-code-hl-constant-color:  #F0875E;  /* coral   */
+  --md-code-hl-operator-color:  #B6A78E;
+  --md-code-hl-punctuation-color:#B6A78E;
+  --md-code-hl-variable-color:  #F2E9D8;
+  --md-code-hl-special-color:   #C77FA6;
 
   /* Selection / footer */
-  --md-typeset-mark-color:      rgba(227, 179, 65, 0.30);
-  --md-footer-bg-color:         #0B1215;
-  --md-footer-bg-color--dark:   #070D0F;
-  --md-footer-fg-color:         #E2EEF2;
-  --md-footer-fg-color--light:  #8FAAB8;
-  --md-footer-fg-color--lighter:#5A7D8C;
+  --md-typeset-mark-color:      rgba(233, 176, 74, 0.30);
+  --md-footer-bg-color:         #14110D;
+  --md-footer-bg-color--dark:   #0C0A07;
+  --md-footer-fg-color:         #F2E9D8;
+  --md-footer-fg-color--light:  #B6A78E;
+  --md-footer-fg-color--lighter:#7F6F58;
 }
 
 /* ===========================================================================
-   LIGHT / default scheme — the design system's documented alternate
+   LIGHT / default scheme — the design system's documented alternate ("Specimen")
+   Warm-paper field-ledger with oxblood-red ink.
    =========================================================================== */
 [data-md-color-scheme="default"] {
-  --md-default-bg-color:          #F0F6F8;  /* surface-base   (light) */
-  --md-default-bg-color--light:   #FFFFFF;  /* surface-raised */
-  --md-default-bg-color--lighter: #E8F1F4;  /* surface-overlay*/
-  --md-default-bg-color--lightest:#DCE9EE;  /* surface-hover  */
+  --md-default-bg-color:          #ECE3D1;  /* surface-base   (paper) */
+  --md-default-bg-color--light:   #F8F1E3;  /* surface-raised (stock) */
+  --md-default-bg-color--lighter: #E2D7BF;  /* surface-overlay*/
+  --md-default-bg-color--lightest:#D8CBB1;  /* surface-hover  */
 
-  --md-default-fg-color:          #0F2027;  /* text-primary  */
-  --md-default-fg-color--light:   #3D6070;  /* text-secondary*/
-  --md-default-fg-color--lighter: #6B8D9C;  /* text-muted    */
-  --md-default-fg-color--lightest:#C5D8E0;  /* hairline tint */
+  --md-default-fg-color:          #241E13;  /* text-primary  */
+  --md-default-fg-color--light:   #5C5238;  /* text-secondary*/
+  --md-default-fg-color--lighter: #897B5F;  /* text-muted    */
+  --md-default-fg-color--lightest:#CDBE9F;  /* hairline tint (border-default) */
 
-  --md-primary-fg-color:        #FFFFFF;
-  --md-primary-fg-color--light: #E8F1F4;
-  --md-primary-fg-color--dark:  #DCE9EE;
-  --md-primary-bg-color:        #0F2027;
-  --md-primary-bg-color--light: #3D6070;
+  --md-primary-fg-color:        #F8F1E3;
+  --md-primary-fg-color--light: #E2D7BF;
+  --md-primary-fg-color--dark:  #D8CBB1;
+  --md-primary-bg-color:        #241E13;
+  --md-primary-bg-color--light: #5C5238;
 
-  /* Accent — deeper sky for AA contrast on white */
-  --md-accent-fg-color:         #0284C7;
-  --md-accent-fg-color--transparent: rgba(2, 132, 199, 0.10);
-  --md-accent-bg-color:         #FFFFFF;
-  --md-accent-bg-color--light:  #F0F6F8;
+  /* Accent — oxblood / madder (the ruling-red ink) */
+  --md-accent-fg-color:         #A33B2C;
+  --md-accent-fg-color--transparent: rgba(163, 59, 44, 0.10);
+  --md-accent-bg-color:         #F8F1E3;
+  --md-accent-bg-color--light:  #ECE3D1;
 
-  --md-typeset-a-color:         #0284C7;
+  --md-typeset-a-color:         #A33B2C;
 
-  --md-code-bg-color:           #E8F1F4;
-  --md-code-fg-color:           #0F2027;
-  --md-code-hl-color:           rgba(2, 132, 199, 0.12);
+  --md-code-bg-color:           #E2D7BF;
+  --md-code-fg-color:           #241E13;
+  --md-code-hl-color:           rgba(163, 59, 44, 0.12);
 
-  --md-code-hl-comment-color:   #6B8D9C;
-  --md-code-hl-keyword-color:   #7C3AED;
-  --md-code-hl-string-color:    #0F766E;
-  --md-code-hl-number-color:    #B45309;
-  --md-code-hl-function-color:  #0284C7;
-  --md-code-hl-constant-color:  #C2410C;
-  --md-code-hl-operator-color:  #3D6070;
-  --md-code-hl-punctuation-color:#3D6070;
+  /* Syntax highlight (Pygments) — embroidery-floss threads on paper */
+  --md-code-hl-comment-color:   #897B5F;
+  --md-code-hl-keyword-color:   #6E4FC0;  /* violet  */
+  --md-code-hl-string-color:    #118C7E;  /* aqua    */
+  --md-code-hl-number-color:    #A9791F;  /* gold    */
+  --md-code-hl-function-color:  #1E7AB0;  /* sky     */
+  --md-code-hl-constant-color:  #CF5630;  /* coral   */
+  --md-code-hl-operator-color:  #5C5238;
+  --md-code-hl-punctuation-color:#5C5238;
 
-  --md-typeset-mark-color:      rgba(2, 132, 199, 0.18);
-  --md-footer-bg-color:         #0F2027;
-  --md-footer-bg-color--dark:   #0B1215;
-  --md-footer-fg-color:         #E2EEF2;
-  --md-footer-fg-color--light:  #8FAAB8;
-  --md-footer-fg-color--lighter:#5A7D8C;
+  --md-typeset-mark-color:      rgba(163, 59, 44, 0.18);
+  --md-footer-bg-color:         #241E13;
+  --md-footer-bg-color--dark:   #14110D;
+  --md-footer-fg-color:         #F2E9D8;
+  --md-footer-fg-color--light:  #B6A78E;
+  --md-footer-fg-color--lighter:#7F6F58;
 }
 
 /* ===========================================================================
@@ -190,14 +194,14 @@
    Sizes nudged up from the dashboard's dense chrome for long-form reading.
    =========================================================================== */
 .md-typeset {
-  font-family: var(--loom-font-mono);
+  font-family: var(--weft-font-mono);
   font-feature-settings: "liga" 1, "calt" 1;
   -webkit-font-smoothing: antialiased;
 }
 .md-typeset h1,
 .md-typeset h2,
 .md-typeset h3 {
-  font-family: var(--loom-font-display);
+  font-family: var(--weft-font-display);
   letter-spacing: -0.015em;
   font-weight: 600;
 }
@@ -206,7 +210,7 @@
 /* Brand wordmark in the header uses the display face */
 .md-header__title,
 .md-header__topic > .md-ellipsis {
-  font-family: var(--loom-font-display);
+  font-family: var(--weft-font-display);
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -218,36 +222,36 @@
 .md-typeset .admonition,
 .md-typeset details {
   border-left-width: 4px;
-  border-radius: var(--loom-radius);
+  border-radius: var(--weft-radius);
   font-size: 0.72rem;
 }
 .md-typeset blockquote {
   border-left: 4px solid var(--md-accent-fg-color);
 }
 
-/* note/info → sky */
+/* note/info → sky (status-wip, the cool pop) */
 .md-typeset .admonition.note,
-.md-typeset .admonition.info { border-left-color: #38BDF8; }
+.md-typeset .admonition.info { border-left-color: #56B7E2; }
 .md-typeset .note > .admonition-title,
-.md-typeset .info > .admonition-title { background-color: rgba(56,189,248,0.12); }
+.md-typeset .info > .admonition-title { background-color: rgba(86,183,226,0.12); }
 
 /* tip/success → emerald (ready) */
 .md-typeset .admonition.tip,
-.md-typeset .admonition.success { border-left-color: #10B981; }
+.md-typeset .admonition.success { border-left-color: #5FB98E; }
 .md-typeset .tip > .admonition-title,
-.md-typeset .success > .admonition-title { background-color: rgba(16,185,129,0.12); }
+.md-typeset .success > .admonition-title { background-color: rgba(95,185,142,0.12); }
 
 /* warning → amber (aging) */
-.md-typeset .admonition.warning { border-left-color: #F59E0B; }
-.md-typeset .warning > .admonition-title { background-color: rgba(245,158,11,0.12); }
+.md-typeset .admonition.warning { border-left-color: #E9B04A; }
+.md-typeset .warning > .admonition-title { background-color: rgba(233,176,74,0.12); }
 
 /* danger/bug/failure → red (stale) */
 .md-typeset .admonition.danger,
 .md-typeset .admonition.bug,
-.md-typeset .admonition.failure { border-left-color: #EF4444; }
+.md-typeset .admonition.failure { border-left-color: #E2604E; }
 .md-typeset .danger > .admonition-title,
 .md-typeset .bug > .admonition-title,
-.md-typeset .failure > .admonition-title { background-color: rgba(239,68,68,0.12); }
+.md-typeset .failure > .admonition-title { background-color: rgba(226,96,78,0.12); }
 
 /* ===========================================================================
    Radii — apply the 3/6/8 system to the surfaces Material rounds.
@@ -256,10 +260,10 @@
 .md-typeset .highlight,
 .md-typeset .tabbed-set,
 .md-typeset table:not([class]) {
-  border-radius: var(--loom-radius);
+  border-radius: var(--weft-radius);
 }
-.md-typeset code { border-radius: var(--loom-radius-sm); }
-.md-typeset .md-button { border-radius: var(--loom-radius); }
+.md-typeset code { border-radius: var(--weft-radius-sm); }
+.md-typeset .md-button { border-radius: var(--weft-radius); }
 
 /* Tables — hairline grid, raised header (terminal-grade, dense). */
 .md-typeset table:not([class]) {
@@ -281,7 +285,7 @@
    strand so a member page reads in its own identity colour. Portable: members
    that vendor this file inherit the same hook.
    =========================================================================== */
-.thread-clarion  { --md-accent-fg-color: var(--thread-clarion);  --md-typeset-a-color: var(--thread-clarion); }
+.thread-loomweave  { --md-accent-fg-color: var(--thread-loomweave);  --md-typeset-a-color: var(--thread-loomweave); }
 .thread-filigree { --md-accent-fg-color: var(--thread-filigree); --md-typeset-a-color: var(--thread-filigree); }
 .thread-wardline { --md-accent-fg-color: var(--thread-wardline); --md-typeset-a-color: var(--thread-wardline); }
 .thread-legis    { --md-accent-fg-color: var(--thread-legis);    --md-typeset-a-color: var(--thread-legis); }
