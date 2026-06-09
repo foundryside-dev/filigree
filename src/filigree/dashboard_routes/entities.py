@@ -125,7 +125,20 @@ def create_classic_router() -> APIRouter:
         key — re-attach refreshes ``content_hash_at_attach`` and ``attached_at``
         while preserving the original ``attached_by``.
 
-        Body: ``{"entity_id": str, "content_hash": str, "entity_kind": str?, "actor": str?}``.
+        Body: ``{"entity_id": str, "content_hash": str, "entity_kind": str?,
+        "actor": str?, "signature": str?, "signoff_seq": int?}``.
+
+        ``signature``/``signoff_seq`` carry Legis's governed sign-off (v25/B1).
+        This classic surface is transport-open (ADR-012: not enforced; transport
+        is the boundary — only ``/api/weft/*`` is loom-scoped). The sign-off is
+        stored **verbatim and never verified here** — Filigree holds no key; Legis
+        is the sole verifier. Their semantic effect is functional, not a security
+        gate: a *present* (non-null) ``signature`` flips the binding to
+        ``governed``, which makes it non-removable via the delete route and makes
+        a governed close fail closed when Legis is unreachable. A fabricated
+        sign-off therefore grants no privilege — it only makes the binding
+        stickier and closes stricter; deconfliction (cooperating callers) is the
+        boundary, which a route-level check could not improve.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):

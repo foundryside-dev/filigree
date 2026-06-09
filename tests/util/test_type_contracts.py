@@ -403,6 +403,8 @@ class TestFindingsSummaryShape:
         assert isinstance(result["open_findings"], int)
         assert isinstance(result["critical"], int)
         assert isinstance(result["high"], int)
+        assert isinstance(result["suppressed"], dict)
+        assert set(result["suppressed"].keys()) == {"critical", "high", "medium", "low", "info"}
 
 
 class TestGlobalFindingsStatsShape:
@@ -427,6 +429,7 @@ class TestGlobalFindingsStatsShape:
         assert isinstance(result["open_findings"], int)
         assert isinstance(result["files_with_findings"], int)
         assert isinstance(result["critical"], int)
+        assert isinstance(result["suppressed"], dict)
 
 
 class TestFileDetailShape:

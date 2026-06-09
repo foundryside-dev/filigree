@@ -2473,6 +2473,52 @@ class TestFileDetailCore:
         assert summary["total_findings"] == 2  # total includes all
         assert summary["open_findings"] == 1  # open excludes fixed
 
+    def test_summary_splits_suppressed_buckets(self, db: FiligreeDB) -> None:
+        # G4: a baselined HIGH keeps its non-terminal status, so it stays in the
+        # census `high` bucket — but the parallel `suppressed` breakdown must
+        # report it so a consumer can derive actionable = high - suppressed.high.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "high", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "high", "message": "baselined"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        findings = db.get_findings(f.id)
+        baselined = next(x for x in findings if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), baselined.id),
+        )
+        db.conn.commit()
+        summary = db.get_file_findings_summary(f.id)
+        assert summary["high"] == 2  # census unchanged — both open HIGH findings
+        assert summary["suppressed"]["high"] == 1  # one of them is accepted
+        # actionable = census - suppressed
+        assert summary["high"] - summary["suppressed"]["high"] == 1
+
+    def test_summary_suppressed_excludes_terminal(self, db: FiligreeDB) -> None:
+        # A finding that is BOTH fixed (terminal) AND baselined must not appear
+        # in either the open census or the suppressed breakdown — the open_filter
+        # gates the suppressed columns too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[{"path": "a.py", "rule_id": "W1", "severity": "high", "message": "m"}],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        findings = db.get_findings(f.id)
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'fixed', metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), findings[0].id),
+        )
+        db.conn.commit()
+        summary = db.get_file_findings_summary(f.id)
+        assert summary["high"] == 0
+        assert summary["suppressed"]["high"] == 0
+
     def test_get_file_detail_structure(self, db: FiligreeDB) -> None:
         f = db.register_file("src/main.py", language="python")
         detail = db.get_file_detail(f.id)
@@ -3122,6 +3168,27 @@ class TestListFilesEnrichment:
         assert s["critical"] == 0
         assert result["results"][0]["associations_count"] == 0
 
+    def test_list_summary_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the federation file-list (4th FindingsSummary producer) carries the split.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "high", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "high", "message": "baselined"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        baselined = next(x for x in db.get_findings(f.id) if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), baselined.id),
+        )
+        db.conn.commit()
+        s = db.list_files_paginated()["results"][0]["summary"]
+        assert s["high"] == 2
+        assert s["suppressed"]["high"] == 1
+
 
 class TestFileTimeline:
     """Tests for get_file_timeline() in core."""
@@ -3404,6 +3471,51 @@ class TestGlobalFindingsStats:
         assert stats["open_findings"] == 1
         assert stats["critical"] == 0
         assert stats["low"] == 1
+
+    def test_global_stats_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the global rollup must carry the suppressed split too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "critical", "message": "active"},
+                {"path": "b.py", "rule_id": "W2", "severity": "critical", "message": "waived"},
+            ],
+        )
+        fb = db.get_file_by_path("b.py")
+        assert fb is not None
+        waived = db.get_findings(fb.id)[0]
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "waived"}}), waived.id),
+        )
+        db.conn.commit()
+        stats = db.get_global_findings_stats()
+        assert stats["critical"] == 2
+        assert stats["suppressed"]["critical"] == 1
+
+    def test_files_summary_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the multi-file aggregate (scan-run posture echo) carries the split.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "medium", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "medium", "message": "judged"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        judged = next(x for x in db.get_findings(f.id) if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "judged"}}), judged.id),
+        )
+        db.conn.commit()
+        summary = db.get_files_findings_summary([f.id])
+        assert summary["medium"] == 2
+        assert summary["suppressed"]["medium"] == 1
+        # the empty-list early-return still carries the suppressed key (zero-filled)
+        empty = db.get_files_findings_summary([])
+        assert empty["suppressed"] == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
 
 class TestPaginationMetadata:

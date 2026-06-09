@@ -843,8 +843,13 @@ class FilesMixin(DBMixinProtocol):
                 raise ValueError(f'Invalid direction "{direction}". Must be "asc" or "desc".')
 
         _open = self._OPEN_FINDINGS_FILTER_SF
+        _supp = _wardline_suppressed_sql("sf")
         _sev_cols = " ".join(
             f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {_open} AND sf.severity='{s}') AS cnt_{s},"
+            for s in ("critical", "high", "medium", "low", "info")
+        )
+        _supp_cols = " ".join(
+            f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {_open} AND sf.severity='{s}' AND {_supp}) AS supp_{s},"
             for s in ("critical", "high", "medium", "low", "info")
         )
         enriched_sql = (
@@ -855,7 +860,7 @@ class FilesMixin(DBMixinProtocol):
             f"(SELECT COUNT(*) FROM scan_findings sf"
             f" WHERE sf.file_id = fr.id"
             f") AS total_findings, "
-            f"{_sev_cols} "
+            f"{_sev_cols} {_supp_cols} "
             f"(SELECT COUNT(*) FROM file_associations fa"
             f" WHERE fa.file_id = fr.id"
             f") AS associations_count, "
@@ -880,6 +885,13 @@ class FilesMixin(DBMixinProtocol):
                 "medium": r["cnt_medium"],
                 "low": r["cnt_low"],
                 "info": r["cnt_info"],
+                "suppressed": {
+                    "critical": r["supp_critical"],
+                    "high": r["supp_high"],
+                    "medium": r["supp_medium"],
+                    "low": r["supp_low"],
+                    "info": r["supp_info"],
+                },
             }
             d["associations_count"] = r["associations_count"]
             d["observation_count"] = r["observation_count"]
@@ -2148,6 +2160,27 @@ class FilesMixin(DBMixinProtocol):
         )
         return f"{parts} SUM(CASE WHEN severity='info' AND {open_filter} THEN 1 ELSE 0 END) AS info"
 
+    @staticmethod
+    def _suppressed_severity_bucket_sql(open_filter: str) -> str:
+        """Build ``SUM(...) AS supp_<severity>`` columns counting the wardline-suppressed
+        subset of each open severity bucket.
+
+        Parallel to :meth:`_severity_bucket_sql` but gated additionally on
+        :func:`_wardline_suppressed_sql`, so the rollup reports how many of the
+        open findings in each severity bucket are baselined/waived/judged
+        (accepted) rather than actionable. The shared classifier keeps this
+        identical to the row-level ``finding_list`` suppression filter — they
+        cannot drift. Columns are aliased ``supp_<severity>``; the ``FROM
+        scan_findings`` callers have no table alias, so ``severity`` and
+        ``metadata`` are referenced bare.
+        """
+        supp = _wardline_suppressed_sql()
+        parts = " ".join(
+            f"SUM(CASE WHEN severity='{s}' AND {open_filter} AND {supp} THEN 1 ELSE 0 END) AS supp_{s},"
+            for s in ("critical", "high", "medium", "low")
+        )
+        return f"{parts} SUM(CASE WHEN severity='info' AND {open_filter} AND {supp} THEN 1 ELSE 0 END) AS supp_info"
+
     def _findings_where(
         self,
         file_id: str,
@@ -2640,10 +2673,11 @@ class FilesMixin(DBMixinProtocol):
         """Get a severity-bucketed summary of findings for a file."""
         _open = self._OPEN_FINDINGS_FILTER
         _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
         row = self.conn.execute(
             f"SELECT COUNT(*) AS total_findings, "
             f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
-            f"{_sev} "
+            f"{_sev}, {_supp} "
             f"FROM scan_findings WHERE file_id = ?",
             (file_id,),
         ).fetchone()
@@ -2655,6 +2689,13 @@ class FilesMixin(DBMixinProtocol):
             "medium": row["medium"] or 0,
             "low": row["low"] or 0,
             "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
         }
 
     def get_files_findings_summary(self, file_ids: list[str]) -> FindingsSummary:
@@ -2665,14 +2706,24 @@ class FilesMixin(DBMixinProtocol):
         round-trip. An empty list returns the all-zero summary (no ``IN ()``).
         """
         if not file_ids:
-            return {"total_findings": 0, "open_findings": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+            return {
+                "total_findings": 0,
+                "open_findings": 0,
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+                "info": 0,
+                "suppressed": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            }
         _open = self._OPEN_FINDINGS_FILTER
         _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
         placeholders = ", ".join("?" for _ in file_ids)
         row = self.conn.execute(
             f"SELECT COUNT(*) AS total_findings, "
             f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
-            f"{_sev} "
+            f"{_sev}, {_supp} "
             f"FROM scan_findings WHERE file_id IN ({placeholders})",
             list(file_ids),
         ).fetchone()
@@ -2684,17 +2735,25 @@ class FilesMixin(DBMixinProtocol):
             "medium": row["medium"] or 0,
             "low": row["low"] or 0,
             "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
         }
 
     def get_global_findings_stats(self) -> GlobalFindingsStats:
         """Get project-wide severity-bucketed findings stats."""
         _open = self._OPEN_FINDINGS_FILTER
         _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
         row = self.conn.execute(
             f"SELECT COUNT(*) AS total_findings, "
             f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
             f"COUNT(DISTINCT CASE WHEN {_open} THEN file_id END) AS files_with_findings, "
-            f"{_sev} "
+            f"{_sev}, {_supp} "
             f"FROM scan_findings",
         ).fetchone()
         return {
@@ -2706,6 +2765,13 @@ class FilesMixin(DBMixinProtocol):
             "medium": row["medium"] or 0,
             "low": row["low"] or 0,
             "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
         }
 
     def unbridged_finding_stats(self) -> dict[str, int]:

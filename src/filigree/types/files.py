@@ -50,10 +50,22 @@ class SeverityBreakdown(TypedDict):
 
 
 class FindingsSummary(SeverityBreakdown):
-    """Shape returned by ``get_file_findings_summary()``."""
+    """Shape returned by ``get_file_findings_summary()``.
+
+    The top-level severity buckets (inherited from :class:`SeverityBreakdown`)
+    count every *open* (non-terminal-status) finding, suppression-agnostic —
+    their meaning is unchanged. ``suppressed`` is an additive parallel breakdown
+    of how many of those same open findings carry a wardline suppression verdict
+    (``baselined`` / ``waived`` / ``judged``), so a federation consumer can
+    derive actionable work as ``bucket - suppressed[bucket]`` without the rollup
+    silently counting already-accepted findings as actionable. This mirrors the
+    row-level orthogonality (status vs ``metadata.wardline.suppression_state``)
+    that ``finding_list`` already exposes.
+    """
 
     total_findings: int
     open_findings: int
+    suppressed: SeverityBreakdown
 
 
 class GlobalFindingsStats(FindingsSummary):
