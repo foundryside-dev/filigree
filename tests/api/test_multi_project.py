@@ -742,6 +742,43 @@ class TestServerModeFederationWriteScope:
         assert resp.headers.get("X-Filigree-Project") == "alpha"
 
 
+class TestServerModeClassicWriteScope:
+    """filigree-b62d865dad: the classic surface (``/api/issue...``) must name
+    the project it actually resolved to, just like the federation surface.
+
+    Unlike federation writes, classic writes do NOT fail closed when unscoped —
+    the dashboard's no-project default view legitimately writes to ``/api`` and
+    relies on default-project resolution. The honest-seams contract is therefore
+    satisfied by *echoing* the resolved project so a misroute is detectable,
+    not by rejecting the write.
+    """
+
+    async def test_unscoped_classic_write_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """An unscoped classic write resolves to the default project (alpha) and
+        must echo X-Filigree-Project so the silent default-resolution is
+        detectable — and the row must land in alpha, not bravo."""
+        resp = await multi_client.post("/api/issues", json={"title": "classic write"})
+        assert resp.status_code == 201, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        # Routing proof: the created issue carries the default project's prefix.
+        assert resp.json()["id"].startswith("alpha-"), resp.json()
+
+    async def test_scoped_classic_write_echoes_scoped_project(self, multi_client: AsyncClient) -> None:
+        """A path-scoped classic write names the scoped project in the header
+        and lands in that project."""
+        resp = await multi_client.post("/api/p/bravo/issues", json={"title": "scoped classic"})
+        assert resp.status_code == 201, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "bravo"
+        assert resp.json()["id"].startswith("bravo-"), resp.json()
+
+    async def test_unscoped_classic_read_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """An unscoped classic read also resolves to the default and echoes it,
+        uniform with the federation read seam."""
+        resp = await multi_client.get("/api/issues")
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+
+
 class TestServerModeCrossProjectReadBlocking:
     """2.1.0 §1.3: in multi-project server mode, read endpoints reject
     foreign-prefix IDs at the route boundary with 404/safe_message.

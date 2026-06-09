@@ -933,28 +933,33 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         class ProjectMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
                 path = request.url.path
+                is_mcp = path == "/mcp" or path.startswith("/mcp/")
                 key = extract_federation_scope(path, request.query_params.get("project"))
                 if key is not None:
                     token = dashboard_state.current_project_key.set(key)
                     try:
                         response = await call_next(request)
-                        # Name the project a federation request actually resolved
-                        # to, so a misroute (client scoped the wrong key) cannot
-                        # read as success. An unknown key 404s in _get_db before
-                        # any write, so a 2xx here means key == the written
-                        # project's prefix. Skip /mcp — its streaming transport
-                        # owns its own response headers.
-                        if is_loom_scoped_path(path) and not (path == "/mcp" or path.startswith("/mcp/")):
+                        # Name the project this request actually resolved to, so a
+                        # misroute (client scoped the wrong key) cannot read as
+                        # success. An unknown key 404s in _get_db before any write,
+                        # so a 2xx here means the row landed in `key`. Echoed across
+                        # BOTH the federation and classic surfaces — a scoped
+                        # classic write (/api/p/{key}/issues) is just as silent
+                        # about its destination otherwise (filigree-b62d865dad).
+                        # Skip /mcp — its streaming transport owns its own headers.
+                        if not is_mcp:
                             response.headers["X-Filigree-Project"] = key
                         return response
                     finally:
                         dashboard_state.current_project_key.reset(token)
                 # Unscoped. A federation WRITE must not silently fall back to the
                 # daemon's default project (the filigree-7a399b8124 contamination):
-                # fail closed. Reads stay lenient (keep the default-project
-                # fallback). /mcp is excluded — it carries protocol messages and
-                # self-scopes via ?project= at the transport.
-                is_federation = is_loom_scoped_path(path) and not (path == "/mcp" or path.startswith("/mcp/"))
+                # fail closed. The classic surface stays lenient — the dashboard's
+                # no-project default view legitimately writes to /api and relies on
+                # default-project resolution, so fail-closing it would break "close
+                # issue" from that view. /mcp is excluded — it carries protocol
+                # messages and self-scopes via ?project= at the transport.
+                is_federation = is_loom_scoped_path(path) and not is_mcp
                 if request.method not in ("GET", "HEAD", "OPTIONS") and is_federation:
                     return _error_response(
                         "Ambiguous federation write in server mode: scope to a project — use POST /api/p/{project_key}/weft/… or add ?project={key}.",
@@ -962,12 +967,15 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                         400,
                     )
                 response = await call_next(request)
-                # C-10(a) honest-seams: an unscoped federation READ silently
-                # resolves to the daemon's default project; echo which project it
-                # actually hit so a defaulted read is not silent about its
-                # destination (uniform with the scoped branch above). Writes never
-                # reach here — they fail closed — so this never masks a misroute.
-                if request.method in ("GET", "HEAD") and is_federation:
+                # C-10(a) honest-seams: an unscoped request silently resolves to
+                # the daemon's default project; echo which project it actually hit
+                # so a defaulted read OR classic write is not silent about its
+                # destination. filigree-b62d865dad extends this from the federation
+                # read seam to the whole classic surface (the unscoped classic
+                # write was previously invisible). Federation writes never reach
+                # here — they fail closed above — so this never masks a federation
+                # misroute. /mcp owns its own headers.
+                if not is_mcp:
                     store = dashboard_state.project_store
                     default_key = store.default_key if store is not None else ""
                     if default_key:
