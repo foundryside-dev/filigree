@@ -688,6 +688,12 @@ class ListFindingsArgs(TypedDict):
     scan_run_id: NotRequired[str]
     file_id: NotRequired[str]
     issue_id: NotRequired[str]
+    # FIL-2/X-5: nested wardline axes + rule_id, so an agent can filter to the
+    # real un-suppressed defects server-side instead of pulling everything.
+    rule_id: NotRequired[str]
+    kind: NotRequired[str]
+    qualname: NotRequired[str]
+    suppression: NotRequired[str]
     limit: NotRequired[int]
     offset: NotRequired[int]
 

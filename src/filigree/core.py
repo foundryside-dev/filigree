@@ -36,6 +36,8 @@ from filigree.db_files import (
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
     FilesMixin,
     _normalize_scan_path,
 )
@@ -93,6 +95,8 @@ __all__ = [
     "VALID_ASSOC_TYPES",
     "VALID_FINDING_STATUSES",
     "VALID_SEVERITIES",
+    "VALID_SUPPRESSION_FILTERS",
+    "VALID_WARDLINE_FINDING_KINDS",
     "_EMPTY_TS",
     "AssocType",
     "FileRecord",

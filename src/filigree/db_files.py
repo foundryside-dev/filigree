@@ -82,6 +82,42 @@ TERMINAL_FINDING_STATUSES: frozenset[str] = frozenset({"fixed", "false_positive"
 if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING_STATUSES):
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
+# FIL-2/X-5: the nested wardline axes ``finding_list`` can filter on. Mirror
+# wardline's own ``scan where:{kind, suppression}`` enums so the consumer's
+# grammar matches the producer's. ``kind``/``suppression_state`` live under
+# ``metadata.wardline.*`` (lifted onto the read surface in ``_build_scan_finding``).
+VALID_WARDLINE_FINDING_KINDS: frozenset[str] = frozenset({"defect", "fact", "classification", "metric", "suggestion"})
+# ``active`` is the unsuppressed population (no wardline suppression verdict);
+# the other three are wardline's repo-controlled suppression annotations.
+VALID_SUPPRESSION_FILTERS: frozenset[str] = frozenset({"active", "baselined", "waived", "judged"})
+
+
+def _wardline_suppressed_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a finding carries a wardline suppression
+    verdict (``metadata.wardline.suppression_state`` is present).
+
+    Shared verbatim by ``unbridged_finding_stats`` (its ``suppressed`` count)
+    and the ``finding_list`` ``suppression`` filter so the active/suppressed
+    *classification* is computed identically on both surfaces and cannot drift.
+    (This shares the predicate, not the base population: ``unbridged_finding_stats``
+    additionally restricts to open + un-bridged findings, so its ``actionable``
+    count is a subset of ``finding_list(suppression="active")`` — the latter
+    applies no open/unbridged filter of its own.) ``json_valid`` guards a single
+    corrupt-metadata row from raising ``OperationalError``; an absent/corrupt
+    verdict reads as un-suppressed (matches the promote-guard's "absent =>
+    active" contract). ``alias`` is an optional table qualifier (e.g. ``"sf"``)
+    for joined queries.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.suppression_state') IS NOT NULL)"
+
+
+def _wardline_field_eq_sql(field: str, alias: str = "") -> str:
+    """SQL predicate matching a nested ``metadata.wardline.<field>`` against a
+    bound ``?`` parameter, guarded by ``json_valid``. ``field`` is always a
+    fixed literal from this module's call sites (never user input)."""
+    col = f"{alias}.metadata" if alias else "metadata"
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.{field}') = ?)"
 
 
 def _validate_string(value: object, field_name: str) -> str:
@@ -2252,10 +2288,27 @@ class FilesMixin(DBMixinProtocol):
         file_id: str | None = None,
         issue_id: str | None = None,
         fingerprint: str | None = None,
+        rule_id: str | None = None,
+        kind: str | None = None,
+        qualname: str | None = None,
+        suppression: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Project-wide finding query with optional filters.
+
+        Beyond the flat column filters, ``kind``/``qualname``/``suppression``
+        reach into the nested ``metadata.wardline.*`` axes (FIL-2/X-5) so an
+        agent can answer "show me the real un-suppressed defects"
+        (``kind="defect", suppression="active"``) server-side rather than
+        pulling every finding and filtering nested metadata client-side.
+        ``suppression="active"`` selects the un-suppressed population, classified
+        by the same shared predicate ``unbridged_finding_stats`` uses to split
+        ``actionable`` vs ``suppressed`` (so the classification cannot drift).
+        Note this query applies no open/unbridged base filter, so its total is a
+        *superset* of that ``actionable`` count unless the caller also passes
+        ``status``/``issue_id``; ``baselined`` / ``waived`` / ``judged`` select
+        that specific wardline verdict.
 
         Returns ``{"findings": [...], "total": N, "limit": ..., "offset": ...}``.
         """
@@ -2265,7 +2318,13 @@ class FilesMixin(DBMixinProtocol):
         if status is not None and status not in VALID_FINDING_STATUSES:
             valid = ", ".join(sorted(VALID_FINDING_STATUSES))
             raise ValueError(f'Invalid status filter "{status}". Must be one of: {valid}')
-        # All filters are simple equality on identically-named columns.
+        if kind is not None and kind not in VALID_WARDLINE_FINDING_KINDS:
+            valid = ", ".join(sorted(VALID_WARDLINE_FINDING_KINDS))
+            raise ValueError(f'Invalid kind filter "{kind}". Must be one of: {valid}')
+        if suppression is not None and suppression not in VALID_SUPPRESSION_FILTERS:
+            valid = ", ".join(sorted(VALID_SUPPRESSION_FILTERS))
+            raise ValueError(f'Invalid suppression filter "{suppression}". Must be one of: {valid}')
+        # Flat filters are simple equality on identically-named columns.
         filters = {
             "severity": severity,
             "status": status,
@@ -2274,6 +2333,7 @@ class FilesMixin(DBMixinProtocol):
             "file_id": file_id,
             "issue_id": issue_id,
             "fingerprint": fingerprint,
+            "rule_id": rule_id,
         }
         # ``sf.`` qualifiers: the rows query LEFT JOINs ``issues`` (N6), where the
         # ``status`` filter would otherwise be ambiguous (both tables have it).
@@ -2284,6 +2344,21 @@ class FilesMixin(DBMixinProtocol):
             if val is not None:
                 clauses.append(f"sf.{col} = ?")
                 params.append(val)
+
+        # Nested wardline metadata axes (FIL-2/X-5). These clauses and their
+        # params join the SAME ``clauses``/``params`` lists the COUNT and the
+        # rows query share, so the two cannot count different populations.
+        if kind is not None:
+            clauses.append(_wardline_field_eq_sql("kind", "sf"))
+            params.append(kind)
+        if qualname is not None:
+            clauses.append(_wardline_field_eq_sql("qualname", "sf"))
+            params.append(qualname)
+        if suppression == "active":
+            clauses.append(f"NOT {_wardline_suppressed_sql('sf')}")
+        elif suppression is not None:
+            clauses.append(_wardline_field_eq_sql("suppression_state", "sf"))
+            params.append(suppression)
 
         where = " AND ".join(clauses) if clauses else "1=1"
 
@@ -2636,7 +2711,11 @@ class FilesMixin(DBMixinProtocol):
         """
         # Guard json_extract with json_valid: a single corrupt metadata row would
         # otherwise raise OperationalError and break session context entirely.
-        suppressed = "(json_valid(metadata) AND json_extract(metadata, '$.wardline.suppression_state') IS NOT NULL)"
+        # Shared verbatim with the ``finding_list`` ``suppression`` filter so the
+        # active/suppressed classification is computed identically on both
+        # surfaces (this restricts to open + un-bridged below, so ``actionable``
+        # is a subset of an unfiltered ``finding_list(suppression="active")``).
+        suppressed = _wardline_suppressed_sql()
         row = self.conn.execute(
             f"SELECT "
             f"SUM(CASE WHEN {suppressed} THEN 1 ELSE 0 END) AS suppressed, "

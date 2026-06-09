@@ -20,6 +20,8 @@ from filigree.core import (
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
     FiligreeDB,
 )
 from filigree.dashboard_routes.common import (
@@ -363,6 +365,10 @@ def create_classic_router() -> APIRouter:
             "valid_severities": sorted(VALID_SEVERITIES),
             "valid_finding_statuses": sorted(VALID_FINDING_STATUSES),
             "valid_association_types": sorted(VALID_ASSOC_TYPES),
+            # FIL-2/X-5: the nested wardline finding-filter axes, advertised so a
+            # federation consumer can discover them without reading source.
+            "valid_finding_kinds": sorted(VALID_WARDLINE_FINDING_KINDS),
+            "valid_suppression_filters": sorted(VALID_SUPPRESSION_FILTERS),
             "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
             "valid_finding_sort_fields": ["severity", "updated_at"],
             "config_flags": {
@@ -711,9 +717,11 @@ def create_weft_router() -> APIRouter:
 
         Weft-only (no classic dashboard counterpart at this path).
         Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
-        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``, plus
-        ``fingerprint`` (lets a scanner confirm a finding's issue link without
-        re-promoting). Drops MCP's ``total`` field per the unified envelope.
+        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``,
+        ``rule_id``, the nested wardline axes ``kind``/``qualname``/
+        ``suppression`` (FIL-2/X-5), plus ``fingerprint`` (lets a scanner
+        confirm a finding's issue link without re-promoting). Drops MCP's
+        ``total`` field per the unified envelope.
         """
         params = request.query_params
         pagination = _parse_pagination(params)
@@ -721,7 +729,19 @@ def create_weft_router() -> APIRouter:
             return pagination
         limit, offset = pagination
         filters: dict[str, Any] = {}
-        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "fingerprint"):
+        for key in (
+            "severity",
+            "status",
+            "scan_source",
+            "scan_run_id",
+            "file_id",
+            "issue_id",
+            "fingerprint",
+            "rule_id",
+            "kind",
+            "qualname",
+            "suppression",
+        ):
             val = params.get(key)
             if val is not None:
                 filters[key] = val

@@ -142,12 +142,15 @@ async def dashboard_surface(tmp_path_factory: pytest.TempPathFactory) -> AsyncIt
 
 
 @pytest.fixture
-def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> FiligreeDB:
+def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Generator[FiligreeDB, None, None]:
     """Isolated MCP surface for parity tests.
 
     Patches ``mcp_server.db`` and ``mcp_server._filigree_dir`` so the MCP
-    tool handlers see a fresh project. Returns the DB so tests can seed
-    issues before invoking handlers.
+    tool handlers see a fresh project. Yields the DB so tests can seed
+    issues before invoking handlers, and closes it on teardown so the sqlite
+    connection is not left open (an unclosed connection trips the suite's
+    ``-W error`` ResourceWarning gate non-deterministically when the GC later
+    finalises it — mirrors ``dashboard_surface`` above).
     """
     tmp = tmp_path_factory.mktemp("parity-mcp")
     filigree_dir = tmp / FILIGREE_DIR_NAME
@@ -158,7 +161,8 @@ def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mo
     db.initialize()
     monkeypatch.setattr(mcp_module, "db", db)
     monkeypatch.setattr(mcp_module, "_filigree_dir", filigree_dir)
-    return db
+    yield db
+    db.close()
 
 
 @pytest.fixture

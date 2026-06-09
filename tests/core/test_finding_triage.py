@@ -208,6 +208,169 @@ class TestListFindingsGlobal:
             db.list_findings_global(status="bogus")
 
 
+def _seed_wardline_mix(db: FiligreeDB) -> None:
+    """Seed the dogfood-3 shape: metric telemetry noise, a real defect, a
+    baselined defect, and a non-wardline finding with no ``wardline`` metadata.
+
+    Mirrors the live distribution (FIL-2/X-5): ``kind:metric`` rows drown the
+    handful of real ``kind:defect`` rows, and a baselined defect must be
+    excludable from the actionable view.
+    """
+    db.register_file("src/app.py", language="python")
+    db.process_scan_results(
+        scan_source="wardline",
+        findings=[
+            {
+                "path": "src/app.py",
+                "rule_id": "WLN-L3-LOW-RESOLUTION",
+                "severity": "info",
+                "message": "engine telemetry",
+                "line_start": 1,
+                "metadata": {"wardline": {"kind": "metric"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-101",
+                "severity": "high",
+                "message": "a real un-suppressed defect",
+                "line_start": 10,
+                "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-102",
+                "severity": "high",
+                "message": "a baselined (accepted) defect",
+                "line_start": 20,
+                "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+            },
+        ],
+    )
+    # A non-wardline, agent-reported finding: carries no ``wardline`` metadata.
+    db.process_scan_results(
+        scan_source="agent",
+        findings=[
+            {"path": "src/app.py", "rule_id": "api-misuse", "severity": "medium", "message": "agent finding", "line_start": 30},
+        ],
+    )
+
+
+class TestListFindingsGlobalKindSuppression:
+    """FIL-2/X-5: ``finding_list`` must filter on the nested wardline axes
+    (``kind``, ``suppression``) and on ``rule_id``/``qualname`` so an agent can
+    answer 'show me the real un-suppressed defects' server-side instead of
+    pulling everything and filtering nested metadata client-side."""
+
+    def test_filter_by_kind_defect(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="defect")
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        # Only the two wardline-classified defects; metric telemetry and the
+        # kind-less agent finding are excluded.
+        assert rules == ["PY-WL-101", "PY-WL-102"]
+        # The COUNT path must agree with the rows path under the metadata filter.
+        assert result["total"] == 2
+
+    def test_filter_by_kind_metric(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="metric")
+        assert [f["rule_id"] for f in result["findings"]] == ["WLN-L3-LOW-RESOLUTION"]
+        assert result["total"] == 1
+
+    def test_filter_by_suppression_active_excludes_baselined_and_keeps_metadata_less(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(suppression="active")
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        # Everything EXCEPT the baselined defect — including the metadata-less
+        # agent finding (absent suppression => active, per the promote-guard contract).
+        assert rules == ["PY-WL-101", "WLN-L3-LOW-RESOLUTION", "api-misuse"]
+        assert result["total"] == 3
+
+    def test_filter_by_suppression_baselined(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(suppression="baselined")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-102"]
+        assert result["total"] == 1
+
+    def test_filter_real_unsuppressed_defects_combined(self, db: FiligreeDB) -> None:
+        # The headline query the finding exists to enable.
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="defect", suppression="active")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_filter_by_rule_id(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(rule_id="PY-WL-101")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_filter_by_qualname(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(qualname="app.handler")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_invalid_kind_raises(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        with pytest.raises(ValueError, match="Invalid kind filter"):
+            db.list_findings_global(kind="bogus")
+
+    def test_invalid_suppression_raises(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        with pytest.raises(ValueError, match="Invalid suppression filter"):
+            db.list_findings_global(suppression="bogus")
+
+    def test_corrupt_metadata_row_survives_filters(self, db: FiligreeDB) -> None:
+        """A single malformed-metadata row must not raise OperationalError under
+        the json_extract filters (the json_valid guard contract) and must
+        classify as kind-less + active."""
+        _seed_wardline_mix(db)
+        db.conn.execute("UPDATE scan_findings SET metadata = ? WHERE rule_id = ?", ("{not json", "api-misuse"))
+        db.conn.commit()
+        # kind=defect must still run and must exclude the corrupt row.
+        defects = db.list_findings_global(kind="defect")
+        assert sorted(f["rule_id"] for f in defects["findings"]) == ["PY-WL-101", "PY-WL-102"]
+        # suppression=active must still run and must INCLUDE the corrupt row
+        # (corrupt/absent => active).
+        active = db.list_findings_global(suppression="active")
+        assert "api-misuse" in {f["rule_id"] for f in active["findings"]}
+
+    def test_active_classification_shared_with_unbridged_stats(self, db: FiligreeDB) -> None:
+        """``suppression=active`` and ``unbridged_finding_stats`` share the SAME
+        suppression predicate, so the suppressed/active *classification* is
+        identical. They do NOT share the base population: ``unbridged_finding_stats``
+        restricts to open + un-bridged, while ``finding_list(suppression="active")``
+        applies no such filter — so the latter's total is a *superset*. Pin both
+        facts so the docstrings can't quietly over- or under-claim."""
+        _seed_wardline_mix(db)
+        # When every finding is open + un-bridged, the only difference between the
+        # populations is the suppressed/active split — and that split is shared,
+        # so the counts coincide here.
+        stats = db.unbridged_finding_stats()
+        active = db.list_findings_global(suppression="active")
+        assert stats["actionable"] == active["total"]
+
+        # Now introduce a terminal (fixed) active finding and a bridged active
+        # finding — both EXCLUDED from ``actionable`` (terminal / has an issue)
+        # but still un-suppressed, so still counted by ``suppression="active"``.
+        # Create the issue first (it commits) before the raw UPDATEs so we don't
+        # open a nested transaction.
+        issue = db.create_issue("bridged", type="bug")
+        db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE rule_id = ?", ("PY-WL-101",))
+        db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE rule_id = ?", (issue.id, "api-misuse"))
+        db.conn.commit()
+        stats2 = db.unbridged_finding_stats()
+        active2 = db.list_findings_global(suppression="active")
+        # actionable shrinks (both rows leave the open+unbridged base); active is
+        # a strict superset (it never filtered them out).
+        assert active2["total"] > stats2["actionable"]
+        # The suppressed classification is unchanged on both surfaces: the
+        # baselined defect is the only suppressed row everywhere.
+        assert stats2["suppressed"] == 1
+        assert "PY-WL-102" not in {f["rule_id"] for f in active2["findings"]}
+
+
 class TestUpdateFinding:
     def test_update_status(self, db: FiligreeDB) -> None:
         ids = _seed_findings(db)

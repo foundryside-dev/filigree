@@ -1575,6 +1575,95 @@ class TestListFindingsCommand:
         assert "No findings" in result.output
 
 
+class TestListFindingsKindSuppression:
+    """FIL-2/X-5: the ``list-findings`` CLI exposes ``--kind``,
+    ``--suppression``, and ``--rule-id`` so an agent can filter to the real
+    un-suppressed defects on the command line."""
+
+    def _seed(self, project: Path) -> None:
+        from filigree.cli_common import get_db
+
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            with get_db() as db:
+                db.register_file("src/app.py", language="python")
+                db.process_scan_results(
+                    scan_source="wardline",
+                    findings=[
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "WLN-METRIC",
+                            "severity": "info",
+                            "message": "telemetry",
+                            "line_start": 1,
+                            "metadata": {"wardline": {"kind": "metric"}},
+                        },
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "PY-WL-101",
+                            "severity": "high",
+                            "message": "real defect",
+                            "line_start": 10,
+                            "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+                        },
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "PY-WL-102",
+                            "severity": "high",
+                            "message": "baselined",
+                            "line_start": 20,
+                            "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+                        },
+                    ],
+                )
+        finally:
+            os.chdir(original)
+
+    def _invoke(self, project: Path, *args: str) -> dict:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            result = runner.invoke(cli, ["list-findings", *args, "--json"])
+            assert result.exit_code == 0, result.output
+            return json.loads(result.output)
+        finally:
+            os.chdir(original)
+
+    def test_filter_real_unsuppressed_defects(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--kind", "defect", "--suppression", "active")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_filter_by_suppression_baselined(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--suppression", "baselined")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-102"]
+
+    def test_filter_by_rule_id(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--rule-id", "PY-WL-101")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_filter_by_qualname(self, initialized_project: Path) -> None:
+        # Guards the --qualname option + its pass-through (PY-WL-101 carries
+        # metadata.wardline.qualname='app.handler').
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--qualname", "app.handler")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_invalid_kind_rejected_by_choice(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["list-findings", "--kind", "bogus", "--json"])
+            assert result.exit_code != 0
+        finally:
+            os.chdir(original)
+
+
 # ---------------------------------------------------------------------------
 # TestGetFindingCommand
 # ---------------------------------------------------------------------------

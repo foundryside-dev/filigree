@@ -23,7 +23,14 @@ from typing import Any, cast
 import click
 
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
-from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES, find_filigree_anchor
+from filigree.core import (
+    VALID_ASSOC_TYPES,
+    VALID_FINDING_STATUSES,
+    VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
+    find_filigree_anchor,
+)
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import (
     file_assoc_to_mcp,
@@ -948,6 +955,20 @@ def delete_file_record_cmd(ctx: click.Context, file_id: str, force: bool, as_jso
 @click.option("--scan-run-id", default=None, help="Filter by scan run ID")
 @click.option("--file-id", default=None, help="Filter by file ID")
 @click.option("--issue-id", default=None, help="Filter by linked issue ID")
+@click.option("--rule-id", default=None, help="Filter by rule/check ID (exact match)")
+@click.option(
+    "--kind",
+    default=None,
+    type=click.Choice(sorted(VALID_WARDLINE_FINDING_KINDS)),
+    help="Filter by wardline finding kind; --kind defect excludes engine telemetry",
+)
+@click.option("--qualname", default=None, help="Filter by wardline qualified name (exact match)")
+@click.option(
+    "--suppression",
+    default=None,
+    type=click.Choice(sorted(VALID_SUPPRESSION_FILTERS)),
+    help="Filter by suppression: 'active' = un-suppressed (actionable), or baselined/waived/judged",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def list_findings_cmd(
     limit: int,
@@ -959,6 +980,10 @@ def list_findings_cmd(
     scan_run_id: str | None,
     file_id: str | None,
     issue_id: str | None,
+    rule_id: str | None,
+    kind: str | None,
+    qualname: str | None,
+    suppression: str | None,
     as_json: bool,
 ) -> None:
     """List scan findings across all files with optional filters."""
@@ -974,6 +999,10 @@ def list_findings_cmd(
                 scan_run_id=scan_run_id,
                 file_id=file_id,
                 issue_id=issue_id,
+                rule_id=rule_id,
+                kind=kind,
+                qualname=qualname,
+                suppression=suppression,
             )
         except ValueError as e:
             if as_json:

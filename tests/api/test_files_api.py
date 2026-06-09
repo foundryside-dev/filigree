@@ -40,6 +40,13 @@ class TestFilesSchemaAPI:
         assert "bug_in" in data["valid_association_types"]
         assert "scan_finding" in data["valid_association_types"]
 
+    async def test_schema_returns_finding_filter_axes(self, client: AsyncClient) -> None:
+        """FIL-2/X-5: the nested wardline filter vocabularies are discoverable."""
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+        assert set(data["valid_finding_kinds"]) == {"defect", "fact", "classification", "metric", "suggestion"}
+        assert set(data["valid_suppression_filters"]) == {"active", "baselined", "waived", "judged"}
+
     async def test_schema_returns_valid_sort_fields(self, client: AsyncClient) -> None:
         resp = await client.get("/api/files/_schema")
         data = resp.json()
@@ -371,6 +378,77 @@ class TestErrorMessagesIncludeValidOptions:
         body = resp.json()
         assert body["code"] == "NOT_FOUND"
         assert "nonexistent-id-xyz" in body["error"]
+
+
+class TestWeftFindingsKindSuppressionFilters:
+    """FIL-2/X-5: GET /api/weft/findings honours the nested wardline axes
+    (``kind``, ``suppression``) and ``rule_id``/``qualname`` so a federation
+    consumer can pull only the real un-suppressed defects."""
+
+    async def _seed(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "WLN-METRIC",
+                        "message": "telemetry",
+                        "severity": "info",
+                        "line_start": 1,
+                        "metadata": {"wardline": {"kind": "metric"}},
+                    },
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "PY-WL-101",
+                        "message": "real defect",
+                        "severity": "high",
+                        "line_start": 10,
+                        "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+                    },
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "PY-WL-102",
+                        "message": "baselined",
+                        "severity": "high",
+                        "line_start": 20,
+                        "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_filter_real_unsuppressed_defects(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?kind=defect&suppression=active")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-101"]
+
+    async def test_filter_by_suppression_baselined(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?suppression=baselined")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-102"]
+
+    async def test_filter_by_kind_excludes_metric(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?kind=defect")
+        assert resp.status_code == 200
+        assert sorted(i["rule_id"] for i in resp.json()["items"]) == ["PY-WL-101", "PY-WL-102"]
+
+    async def test_filter_by_qualname(self, client: AsyncClient) -> None:
+        # Guards the "qualname" key in the route's literal filter-key tuple.
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?qualname=app.handler")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-101"]
+
+    async def test_invalid_kind_returns_validation(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/findings?kind=bogus")
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
 
 
 class TestScanResultsFingerprintAPI:

@@ -90,6 +90,80 @@ class TestListFindingsTool:
         assert len(page2["items"]) == 1
 
 
+def _seed_wardline_mix(db: FiligreeDB) -> None:
+    """Metric noise + a real defect + a baselined defect (FIL-2/X-5 shape)."""
+    db.register_file("src/app.py", language="python")
+    db.process_scan_results(
+        scan_source="wardline",
+        findings=[
+            {
+                "path": "src/app.py",
+                "rule_id": "WLN-METRIC",
+                "severity": "info",
+                "message": "telemetry",
+                "line_start": 1,
+                "metadata": {"wardline": {"kind": "metric"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-101",
+                "severity": "high",
+                "message": "real defect",
+                "line_start": 10,
+                "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-102",
+                "severity": "high",
+                "message": "baselined",
+                "line_start": 20,
+                "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+            },
+        ],
+    )
+
+
+class TestListFindingsToolKindSuppression:
+    """FIL-2/X-5: the MCP ``finding_list`` tool forwards the nested wardline
+    axes (``kind``, ``suppression``) and ``rule_id`` to the core query."""
+
+    async def test_filter_by_kind(self, mcp_db: FiligreeDB) -> None:
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"kind": "defect"}))
+        assert sorted(i["rule_id"] for i in data["items"]) == ["PY-WL-101", "PY-WL-102"]
+
+    async def test_filter_real_unsuppressed_defects(self, mcp_db: FiligreeDB) -> None:
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"kind": "defect", "suppression": "active"}))
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    async def test_filter_by_suppression_baselined(self, mcp_db: FiligreeDB) -> None:
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"suppression": "baselined"}))
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-102"]
+
+    async def test_filter_by_rule_id(self, mcp_db: FiligreeDB) -> None:
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"rule_id": "PY-WL-101"}))
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    async def test_filter_by_qualname(self, mcp_db: FiligreeDB) -> None:
+        # Guards the hand-written "qualname" key string in the handler's forward
+        # loop: a typo there silently no-ops the filter (returns everything).
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"qualname": "app.handler"}))
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    async def test_invalid_kind_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("finding_list", {"kind": "bogus"}))
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_invalid_suppression_rejected(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("finding_list", {"suppression": "bogus"}))
+        assert data["code"] == ErrorCode.VALIDATION
+
+
 class TestReportFindingTool:
     async def test_report_finding_uses_registry_resolved_file_id(self, mcp_db: FiligreeDB) -> None:
         mcp_db.registry = FixedRegistry(file_id="core:file:report-target@src/report_target.py")

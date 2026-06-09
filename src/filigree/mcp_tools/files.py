@@ -9,7 +9,13 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
-from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES
+from filigree.core import (
+    VALID_ASSOC_TYPES,
+    VALID_FINDING_STATUSES,
+    VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
+)
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _MAX_SQLITE_OFFSET,
@@ -194,7 +200,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="list_findings",
-            description="List scan findings across all files with optional filters.",
+            description=(
+                "List scan findings across all files with optional filters. "
+                "Filter to the real un-suppressed defects with "
+                "kind='defect' + suppression='active' (excludes wardline's "
+                "kind='metric' engine telemetry and baselined/waived/judged rows)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -204,6 +215,21 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "scan_run_id": {"type": "string", "description": "Filter by scan run ID"},
                     "file_id": {"type": "string", "description": "Filter by file ID"},
                     "issue_id": {"type": "string", "description": "Filter by linked issue ID"},
+                    "rule_id": {"type": "string", "description": "Filter by rule/check ID (exact match)"},
+                    "kind": {
+                        "type": "string",
+                        "enum": sorted(VALID_WARDLINE_FINDING_KINDS),
+                        "description": "Filter by wardline finding kind (metadata.wardline.kind); kind='defect' excludes engine telemetry",
+                    },
+                    "qualname": {
+                        "type": "string",
+                        "description": "Filter by wardline qualified name (metadata.wardline.qualname, exact match)",
+                    },
+                    "suppression": {
+                        "type": "string",
+                        "enum": sorted(VALID_SUPPRESSION_FILTERS),
+                        "description": "Filter by suppression state: 'active' = un-suppressed (the actionable set), or 'baselined'/'waived'/'judged'",
+                    },
                     "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 10000},
                     "offset": {"type": "integer", "default": 0, "minimum": 0},
                 },
@@ -668,13 +694,14 @@ async def _handle_list_findings(arguments: dict[str, Any]) -> list[TextContent]:
             return err
 
     filters: dict[str, Any] = {}
-    for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id"):
+    for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "rule_id", "kind", "qualname", "suppression"):
         val = args.get(key)
         if val is not None:
             filters[key] = val
 
-    # Validate string-type filters from MCP input
-    for key in ("scan_source", "scan_run_id", "file_id", "issue_id"):
+    # Validate string-type filters from MCP input (enum values are validated by
+    # the core query, which raises ValueError -> VALIDATION below).
+    for key in ("scan_source", "scan_run_id", "file_id", "issue_id", "rule_id", "kind", "qualname", "suppression"):
         val = filters.get(key)
         if val is not None and not isinstance(val, str):
             return _text(ErrorResponse(error=f"{key} must be a string", code=ErrorCode.VALIDATION))
