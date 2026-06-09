@@ -359,6 +359,10 @@ def _git_tracks(project_root: Path, relpath: str) -> bool:
     """Return True if *relpath* is already tracked by git under *project_root*.
 
     Best-effort: no git, no repo, or any error → False (treated as not tracked).
+    An inconclusive probe (raised exception, or a non-{0,1} return code such as a
+    missing repo or index-lock contention) is logged at debug — it is otherwise
+    indistinguishable from a clean not-tracked answer (rc 1), which silences the
+    "already-tracked → git rm --cached" token warning the caller derives from it.
     """
     try:
         result = subprocess.run(
@@ -367,9 +371,28 @@ def _git_tracks(project_root: Path, relpath: str) -> bool:
             text=True,
             timeout=5,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        # Probe failed (no git binary, timeout, odd invocation). Degrade to
+        # "not tracked" so the install proceeds — but log it, because this is
+        # indistinguishable to the caller from a clean "not tracked" result, and
+        # a silent error here makes the "already-tracked → run git rm --cached"
+        # warning vanish on a slow/odd git, leaving a committed token unflagged.
+        logger.debug("git ls-files probe for %r failed; treating as untracked: %s", relpath, exc)
         return False
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    # rc 1 is the documented "cleanly not tracked" answer (silent). Any other
+    # code (e.g. 128: not a repo, or index-lock contention) means git ran but
+    # could not give a definitive answer — same blind spot as the exception
+    # path, so log it rather than let it pass as a clean negative.
+    if result.returncode != 1:
+        logger.debug(
+            "git ls-files probe for %r returned rc=%s; treating as untracked: %s",
+            relpath,
+            result.returncode,
+            result.stderr.strip(),
+        )
+    return False
 
 
 def _guard_mcp_json_gitignore(project_root: Path) -> str | None:

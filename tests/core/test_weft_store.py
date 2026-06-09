@@ -11,6 +11,7 @@ never hard-fails (C-9c).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -275,6 +276,31 @@ class TestMigrateStoreToWeft:
         # The secret is carried forward, NOT left behind in the auditable husk —
         # a tracked-husk project must not retain a (now-dead) federation_token.
         assert not (legacy / "federation_token").exists()
+
+    def test_husk_token_unlink_failure_warns_but_does_not_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A non-FileNotFound OSError unlinking the dead husk token (e.g. a
+        PermissionError) must not fail the migration — the live token was already
+        forwarded — but must WARN so the now-dead secret is not left behind in
+        silence (previously a blanket ``contextlib.suppress(OSError)``)."""
+        legacy = _make_legacy_install(tmp_path)
+        (legacy / "federation_token").write_text("tok-12345\n")
+
+        real_unlink = Path.unlink
+
+        def _unlink(self: Path, *args: object, **kwargs: object) -> None:
+            if self.name == "federation_token":
+                raise PermissionError("husk token is read-only")
+            return real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+        with caplog.at_level(logging.WARNING, logger="filigree.core"):
+            store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        # The forwarded copy still landed; only the husk cleanup failed.
+        assert (store / "federation_token").read_text() == "tok-12345\n"
+        assert any("federation_token" in rec.message and "husk" in rec.message for rec in caplog.records if rec.levelno == logging.WARNING)
 
     def test_resumed_confless_migration_re_copies_changed_metadata(self, tmp_path: Path) -> None:
         """M1: a resumed migration must ship CURRENT metadata, not a copy frozen at

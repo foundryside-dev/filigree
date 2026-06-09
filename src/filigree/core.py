@@ -946,8 +946,17 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # tracks .filigree/ as committed payload (root rule removed) would otherwise
     # leave a (now-dead) secret behind a nested-ignore that an old pre-rule install
     # may not carry. Same secret-hygiene class as the .mcp.json token guard.
-    with contextlib.suppress(OSError):
-        (legacy_dir / "federation_token").unlink(missing_ok=True)
+    husk_token = legacy_dir / "federation_token"
+    try:
+        husk_token.unlink(missing_ok=True)
+    except OSError as exc:
+        # Non-fatal: the live token was forwarded in step 2, so a copy left in
+        # the husk is a hygiene gap, not data loss — never fail the migration
+        # over it. But ``missing_ok=True`` already absorbs the absent-file case,
+        # so any OSError reaching here is a *real* failure (e.g. PermissionError)
+        # that leaves a now-dead per-machine secret behind with zero signal.
+        # Warn so the operator can clean it up.
+        logger.warning("Could not remove dead federation_token from legacy husk %s: %s", husk_token, exc)
     # Auditable, non-destructive breadcrumb — never delete the legacy dir.
     (legacy_dir / LEGACY_MOVED_BREADCRUMB).write_text(
         f"This store was migrated to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/.\n"

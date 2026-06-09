@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -708,6 +709,48 @@ class TestEnsureFiligreeDirGitignore:
         for body in (FILIGREE_DIR_GITIGNORE, WEFT_STORE_GITIGNORE):
             lines = {ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")}
             assert "federation_token" in lines
+
+
+class TestGitTracksProbe:
+    """`_git_tracks` degrades to ``False`` on a probe error, but the error path
+    is otherwise indistinguishable from a clean not-tracked result — which
+    silently drops the "already-tracked → git rm --cached" token warning. The
+    error case must be logged at debug to keep that distinguishable."""
+
+    def test_probe_error_returns_false_and_logs_debug(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from filigree.install_support import integrations
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise FileNotFoundError("git not on PATH")
+
+        monkeypatch.setattr(integrations.subprocess, "run", _boom)
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        assert any(".mcp.json" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records)
+
+    def test_clean_not_tracked_does_not_log(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        from filigree.install_support import integrations
+
+        subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        # A clean not-tracked result is silent — only probe *errors* log.
+        assert not any(rec.levelno == logging.DEBUG for rec in caplog.records)
+
+    def test_inconclusive_returncode_returns_false_and_logs_debug(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        # NOT a git repo: ``git ls-files`` runs but returns rc=128, which is
+        # inconclusive (not the clean rc=1 "not tracked"). That ambiguity is the
+        # same blind spot as a raised exception, so it must also log at debug.
+        from filigree.install_support import integrations
+
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        assert any("rc=" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records)
 
 
 class TestRunDoctor:
