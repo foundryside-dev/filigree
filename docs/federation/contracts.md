@@ -467,6 +467,26 @@ Pinned by
 and by the `success_wardline_sarif_adapter_fingerprint` example in
 `tests/fixtures/contracts/loom/scan-results.json`.
 
+## F7 — Finding suppression: surface-asymmetric defaults + first-class verdict (2026-06-10)
+
+Wardline stamps an accepted-defect verdict at `metadata.wardline.suppression_state ∈ {baselined, waived, judged}`; the key is **absent for an active finding** (absent ⇒ active). Filigree preserves it on ingest and refuses `finding_promote` on a suppressed finding without `force` (weft-171fc22a50). This section ratifies how the *read* surfaces treat that verdict — an asymmetry that is deliberate, and is a contract precisely because it is named here (filigree-2bdb878bd2).
+
+**1. The suppression default is surface-asymmetric — by design, not by accident.**
+
+| Surface | Default `suppression` | Rationale |
+|---|---|---|
+| **Agent** — MCP `finding_list`, CLI `list-findings` | `active` (suppressed rows hidden) | These are work-views an agent triages. An already-accepted defect is not fresh, open work; surfacing it manufactures false work (the promote-then-mint-a-P1 failure this ticket closed). Opt back in with `suppression=all` or a specific verdict. |
+| **Machine / federation** — `GET /api/weft/findings` | `all` (every row returned) | A federation consumer reads the *complete* finding population and applies its own policy. Silently narrowing a machine-read contract is itself a seam-leak. Consumers pass an explicit `suppression=` filter (`active` / `baselined` / `waived` / `judged` / `all`). |
+| **Human** — dashboard (per-file `/files/{id}/findings`) | inclusive (annotated, not hidden) | Findings render file-scoped with `suppression_state` shown; a human reviewing one file should see everything in context. |
+
+The default-hide lives **only at the agent surfaces**. The core `list_findings_global` primitive keeps an all-inclusive default (`suppression=None`), so internal callers are unaffected; `all` is an accepted no-op sentinel (identical to omitting the filter).
+
+**2. `suppression_state` is a first-class response field — never reach into `metadata.wardline`.** `GET /api/weft/findings` returns `suppression_state` (`str | None`) as a top-level field of each `ScanFindingWeft` item, lifted from the wardline metadata blob (mirroring the N6 `issue_status` lift). A consumer filters via the `?suppression=` query param or reads the top-level field; it must **not** parse the member-specific nested `metadata.wardline.suppression_state` to recover the verdict (that nested path is wardline's internal payload shape, not a cross-member contract). The advertised filter vocabulary is discoverable at `GET /api/files/_schema` → `valid_suppression_filters` (`{active, baselined, waived, judged, all}`).
+
+**3. Reversal trigger.** The machine surface stays inclusive-by-default **until a real federation consumer emerges that genuinely wants default-hide on `/api/weft/findings`.** If one does, revisit this decision (and align it with the agent-surface default) rather than letting consumers each reinvent the filter. Until then, inclusive holds. No consumer has requested it as of 2026-06-10.
+
+Pinned by `tests/api/test_files_api.py::TestWeftFindingsKindSuppressionFilters::test_default_stays_inclusive_unlike_agent_surfaces` (machine surface stays inclusive) and the agent-surface default-hide tests in `tests/mcp/test_finding_triage_tools.py` / `tests/cli/test_files_commands.py`.
+
 ## When a contract evolves
 
 **Non-breaking additions** (new optional response fields, new optional request parameters with safe defaults) may land in-place without a new generation. Fixtures are updated to reflect the new shape; the `_meta.updated` field moves.
