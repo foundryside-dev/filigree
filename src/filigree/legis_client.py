@@ -38,16 +38,61 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from http.client import HTTPMessage
+from typing import IO, Any
 
 logger = logging.getLogger(__name__)
 
 LEGIS_URL_ENV = "LEGIS_URL"
 LEGIS_TOKEN_ENV = "LEGIS_API_TOKEN"  # noqa: S105 - env var name, not a token value
 DEFAULT_TIMEOUT_SECONDS = 5.0
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+class _StripAuthOnRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Drop the ``Authorization`` header when following a redirect.
+
+    urllib's default redirect handler copies the request headers (minus
+    content-length/content-type) onto the redirect target with no same-origin
+    check, so a 302 from a compromised or open-redirecting Legis would re-send
+    the ``Bearer`` token to an attacker-chosen host. Benign redirects are still
+    followed — the bearer is simply never carried across one. (B3)
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            for store in (new.headers, new.unredirected_hdrs):
+                for key in [k for k in store if k.lower() == "authorization"]:
+                    del store[key]
+        return new
+
+
+# Built once: a custom opener whose redirect handler strips the bearer. Passing a
+# HTTPRedirectHandler subclass makes build_opener use ours in place of the default.
+_OPENER = urllib.request.build_opener(_StripAuthOnRedirectHandler())
+
+
+def _validate_legis_scheme(url: str) -> bool:
+    """True when *url* uses an http(s) scheme.
+
+    Refuse to attach a bearer to / make a request against a ``file://`` (or any
+    other) scheme — defense-in-depth against an operator-misconfigured
+    ``LEGIS_URL``. (B3)
+    """
+    return urllib.parse.urlparse(url).scheme in _ALLOWED_SCHEMES
 
 
 class LegisGateStatus(Enum):
@@ -102,6 +147,15 @@ def check_closure_gate(issue_id: str, *, timeout: float = DEFAULT_TIMEOUT_SECOND
     base = legis_base_url()
     if base is None:
         return LegisGateResult(LegisGateStatus.NOT_CONFIGURED)
+    if not _validate_legis_scheme(base):
+        # Refuse before attaching the bearer or making any request — a non-http(s)
+        # scheme (file://, ftp://, …) must never carry the token nor be handled by
+        # urllib. Fail closed so the caller's governed-close policy applies. (B3)
+        logger.warning("Legis URL scheme is not http(s); refusing closure-gate request for %s", issue_id)
+        return LegisGateResult(
+            LegisGateStatus.UNREACHABLE,
+            reason="Legis URL scheme is not http(s) (refusing to send closure-gate request)",
+        )
     url = f"{base.rstrip('/')}/filigree/issues/{issue_id}/closure-gate"
     headers = {"Accept": "application/json"}
     token = os.environ.get(LEGIS_TOKEN_ENV, "").strip()
@@ -109,7 +163,9 @@ def check_closure_gate(issue_id: str, *, timeout: float = DEFAULT_TIMEOUT_SECOND
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310 (URL is operator-configured)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (URL is operator-configured)
+        # _OPENER strips Authorization on redirect so a 302 cannot exfiltrate the
+        # bearer to an attacker-chosen host (B3). Benign redirects still follow.
+        with _OPENER.open(req, timeout=timeout) as resp:
             body = _read_json(resp.read())
             # Fail closed unless the 2xx body explicitly affirms allowed=true.
             # The wire contract is 200={"allowed": true}=allow / 409=blocked, so

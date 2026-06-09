@@ -11,7 +11,7 @@ import pytest
 
 from filigree import legis_client
 from filigree.legis_client import LegisGateStatus
-from tests._fakes.legis_http import legis_stub
+from tests._fakes.legis_http import legis_redirect_to_sink, legis_stub
 
 
 def _set_url(monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
@@ -19,6 +19,10 @@ def _set_url(monkeypatch: pytest.MonkeyPatch, url: str | None) -> None:
         monkeypatch.delenv(legis_client.LEGIS_URL_ENV, raising=False)
     else:
         monkeypatch.setenv(legis_client.LEGIS_URL_ENV, url)
+
+
+def _set_token(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    monkeypatch.setenv(legis_client.LEGIS_TOKEN_ENV, token)
 
 
 def test_unset_url_returns_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,3 +137,46 @@ def test_slow_legis_does_not_hang(monkeypatch: pytest.MonkeyPatch) -> None:
         _set_url(monkeypatch, url)
         result = legis_client.check_closure_gate("iss-1", timeout=0.3)
     assert result.status is LegisGateStatus.UNREACHABLE
+
+
+def test_non_redirecting_gate_still_sends_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bearer IS sent on a normal (non-redirecting) gate call — the redirect
+    hardening must not regress ordinary token auth. (B3)"""
+    with legis_stub() as (url, state):
+        state.status = 200
+        state.body = {"allowed": True, "reason": "ok"}
+        _set_url(monkeypatch, url)
+        _set_token(monkeypatch, "secret-token")
+        result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.ALLOWED
+    assert state.auth_headers == ["Bearer secret-token"]
+
+
+def test_redirect_does_not_leak_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 302 from Legis must NOT re-send the bearer to the redirect target.
+
+    urllib's default redirect handler copies request headers (minus
+    content-length/content-type) onto the redirect with no same-origin check,
+    so a malicious/open-redirecting Legis could 302-exfiltrate the bearer to an
+    attacker host. The redirect is still followed (no fail-closed regression),
+    but the Authorization header must be stripped. (B3)
+    """
+    with legis_redirect_to_sink() as (url, sink):
+        _set_url(monkeypatch, url)
+        _set_token(monkeypatch, "secret-token")
+        legis_client.check_closure_gate("iss-1")
+    # Redirect was followed (the request reached the sink)...
+    assert sink.requests == ["/filigree/issues/iss-1/closure-gate"]
+    # ...but the bearer was NOT carried across it.
+    assert sink.auth_headers == [None]
+
+
+def test_non_http_scheme_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-http(s) LEGIS_URL is refused before any request / bearer attach —
+    fail closed with a scheme-named reason rather than letting urllib handle a
+    file:// (or other) scheme. (B3)"""
+    _set_url(monkeypatch, "file:///etc/passwd")
+    _set_token(monkeypatch, "secret-token")
+    result = legis_client.check_closure_gate("iss-1")
+    assert result.status is LegisGateStatus.UNREACHABLE
+    assert "scheme" in result.reason.lower()

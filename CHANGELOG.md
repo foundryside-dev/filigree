@@ -476,6 +476,19 @@ checklist is complete and a coordinated consumer-migration window is published.
   which the governance layer maps to a fail-closed block. The wire contract is
   unchanged (`200 {"allowed": true}` = allow / `409` = blocked).
 
+- **Legis client strips the bearer across redirects + validates the URL scheme
+  (B3, PR #52).** `check_closure_gate` sent the `LEGIS_API_TOKEN` bearer on a
+  plain `urllib` request whose default redirect handler copies request headers
+  (minus content-length/content-type) onto the redirect target with no
+  same-origin check — so a `302` from a compromised or open-redirecting Legis
+  could re-send the token to an attacker-chosen host. The request now goes
+  through a custom opener whose redirect handler drops `Authorization` before
+  following a redirect (benign redirects are still followed; normal token auth
+  on a non-redirecting call is unchanged), and a non-`http(s)` `LEGIS_URL` is
+  refused before any request or bearer attach. Defense-in-depth: exploitation
+  requires a Legis-side open-redirect or a compromised Legis, not a critical on
+  its own.
+
 - **Bidirectional back-pointer verification for git-worktree discovery.**
   Worktree-aware anchor discovery previously redirected to a main worktree on
   the strength of a worktree's `.git` pointer alone. A spoofed `.git` file

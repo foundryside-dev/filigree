@@ -33,6 +33,9 @@ class LegisStubState:
     body: dict[str, Any] = field(default_factory=lambda: {"allowed": True, "reason": "ok"})
     delay_seconds: float = 0.0
     requests: list[str] = field(default_factory=list)
+    # Authorization header seen on each request (None when absent) — lets a test
+    # assert the bearer IS sent on a normal (non-redirecting) gate call. (B3)
+    auth_headers: list[str | None] = field(default_factory=list)
 
 
 def _build_handler(state: LegisStubState) -> type[BaseHTTPRequestHandler]:
@@ -42,6 +45,7 @@ def _build_handler(state: LegisStubState) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # stdlib BaseHTTPRequestHandler naming
             state.requests.append(self.path)
+            state.auth_headers.append(self.headers.get("Authorization"))
             if state.delay_seconds:
                 time.sleep(state.delay_seconds)
             payload = json.dumps(state.body).encode("utf-8")
@@ -68,3 +72,81 @@ def legis_stub() -> Iterator[tuple[str, LegisStubState]]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+
+@dataclass
+class RedirectSinkState:
+    """Records what the redirect TARGET (the 'sink' host) received.
+
+    Models a Legis that 302-redirects the closure-gate request to a different
+    host (an open-redirect on an honest Legis, or a compromised one). The sink
+    stands in for the attacker-chosen target: it records the ``Authorization``
+    header of anything that reaches it, so a test can prove the bearer was NOT
+    re-sent across the redirect. (B3)
+    """
+
+    auth_headers: list[str | None] = field(default_factory=list)
+    requests: list[str] = field(default_factory=list)
+
+
+def _build_sink_handler(state: RedirectSinkState) -> type[BaseHTTPRequestHandler]:
+    class _SinkHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:  # stdlib BaseHTTPRequestHandler naming
+            state.requests.append(self.path)
+            state.auth_headers.append(self.headers.get("Authorization"))
+            payload = json.dumps({"allowed": True, "reason": "sink"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    return _SinkHandler
+
+
+def _build_redirect_handler(sink_url: str) -> type[BaseHTTPRequestHandler]:
+    class _RedirectHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:  # stdlib BaseHTTPRequestHandler naming
+            self.send_response(302)
+            self.send_header("Location", f"{sink_url}{self.path}")
+            self.end_headers()
+
+    return _RedirectHandler
+
+
+@contextmanager
+def legis_redirect_to_sink() -> Iterator[tuple[str, RedirectSinkState]]:
+    """Yield ``(legis_base_url, sink_state)``.
+
+    The Legis server 302-redirects every closure-gate request to a separate
+    sink host. ``sink_state`` records whether the ``Authorization`` bearer was
+    re-sent across the redirect (it must not be) and whether the redirect was
+    followed at all (it should be — benign redirects are not blocked). (B3)
+    """
+    sink_state = RedirectSinkState()
+    sink_server = ThreadingHTTPServer(("127.0.0.1", 0), _build_sink_handler(sink_state))
+    sink_thread = threading.Thread(target=sink_server.serve_forever, daemon=True)
+    sink_thread.start()
+    try:
+        sink_host, sink_port = sink_server.server_address[:2]
+        sink_url = f"http://{sink_host}:{sink_port}"
+        legis_server = ThreadingHTTPServer(("127.0.0.1", 0), _build_redirect_handler(sink_url))
+        legis_thread = threading.Thread(target=legis_server.serve_forever, daemon=True)
+        legis_thread.start()
+        try:
+            legis_host, legis_port = legis_server.server_address[:2]
+            yield f"http://{legis_host}:{legis_port}", sink_state
+        finally:
+            legis_server.shutdown()
+            legis_server.server_close()
+            legis_thread.join(timeout=2.0)
+    finally:
+        sink_server.shutdown()
+        sink_server.server_close()
+        sink_thread.join(timeout=2.0)
