@@ -292,6 +292,69 @@ class TestListFindingsGlobalKindSuppression:
         assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-102"]
         assert result["total"] == 1
 
+    def test_no_arg_default_returns_everything_including_suppressed(self, db: FiligreeDB) -> None:
+        """Core-contract lock (filigree-2bdb878bd2): the core primitive's default
+        is 'return everything' — suppressed rows are NOT hidden here. The
+        default-hide lives only at the agent-facing surfaces (MCP/CLI), so
+        internal callers (e.g. scanner_reporting re-finding a just-ingested row)
+        keep seeing every row. If this ever flips, every internal caller silently
+        loses rows."""
+        _seed_wardline_mix(db)
+        result = db.list_findings_global()
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        assert "PY-WL-102" in rules  # the baselined defect is present by default
+        assert result["total"] == 4
+
+    def test_suppression_all_is_noop_returns_everything(self, db: FiligreeDB) -> None:
+        """``suppression='all'`` is the explicit 'no suppression filter' sentinel
+        the surfaces pass to opt back in to suppressed rows. It must behave
+        identically to omitting the filter."""
+        _seed_wardline_mix(db)
+        explicit_all = db.list_findings_global(suppression="all")
+        no_arg = db.list_findings_global()
+        assert sorted(f["rule_id"] for f in explicit_all["findings"]) == sorted(f["rule_id"] for f in no_arg["findings"])
+        assert explicit_all["total"] == no_arg["total"] == 4
+
+    @pytest.mark.parametrize("offcontract", ["baselined", ["baselined"], 42])
+    def test_offcontract_nondict_wardline_classifies_as_active(self, db: FiligreeDB, offcontract: object) -> None:
+        """``metadata.wardline`` is external payload stored verbatim and may be a
+        valid-JSON-but-non-dict value (string/list/int). ``json_extract`` of
+        ``$.wardline.suppression_state`` on a non-object node returns NULL, so the
+        row must read as active (present under ``suppression='active'``, absent
+        under ``suppression='baselined'``) and must NOT raise — mirroring the
+        promote-guard's 'absent => active' contract on the query side."""
+        db.register_file("src/oc.py", language="python")
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/oc.py",
+                    "rule_id": "OC-1",
+                    "severity": "high",
+                    "message": "off-contract",
+                    "metadata": {"wardline": offcontract},
+                }
+            ],
+        )
+        active = db.list_findings_global(suppression="active")
+        assert "OC-1" in {f["rule_id"] for f in active["findings"]}
+        baselined = db.list_findings_global(suppression="baselined")
+        assert "OC-1" not in {f["rule_id"] for f in baselined["findings"]}
+
+    def test_pagination_applies_after_suppression_filter(self, db: FiligreeDB) -> None:
+        """LIMIT/OFFSET apply to the already-suppression-filtered set (the clause
+        is part of the shared WHERE), so the baselined row never leaks onto any
+        page and the pages tile the active set with no gap or overlap."""
+        _seed_wardline_mix(db)
+        active_total = db.list_findings_global(suppression="active")["total"]  # 3 of the 4 rows
+        seen: list[str] = []
+        for offset in range(active_total):
+            page = db.list_findings_global(suppression="active", limit=1, offset=offset)
+            seen.extend(f["rule_id"] for f in page["findings"])
+            assert page["total"] == active_total  # total reflects the filtered population
+        assert "PY-WL-102" not in seen  # baselined never paged in
+        assert len(seen) == len(set(seen)) == active_total  # no overlap, no gap
+
     def test_filter_real_unsuppressed_defects_combined(self, db: FiligreeDB) -> None:
         # The headline query the finding exists to enable.
         _seed_wardline_mix(db)

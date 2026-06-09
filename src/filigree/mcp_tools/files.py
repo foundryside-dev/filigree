@@ -202,9 +202,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="list_findings",
             description=(
                 "List scan findings across all files with optional filters. "
-                "Filter to the real un-suppressed defects with "
-                "kind='defect' + suppression='active' (excludes wardline's "
-                "kind='metric' engine telemetry and baselined/waived/judged rows)."
+                "Defaults to suppression='active' — accepted (baselined/waived/judged) "
+                "findings are hidden from this work view so they don't read as fresh, "
+                "open work; pass suppression='all' to include them, or a specific "
+                "verdict (baselined/waived/judged) to triage them. Filter to the real "
+                "un-suppressed defects with kind='defect' (also excludes wardline's "
+                "kind='metric' engine telemetry)."
             ),
             inputSchema={
                 "type": "object",
@@ -228,7 +231,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "suppression": {
                         "type": "string",
                         "enum": sorted(VALID_SUPPRESSION_FILTERS),
-                        "description": "Filter by suppression state: 'active' = un-suppressed (the actionable set), or 'baselined'/'waived'/'judged'",
+                        "description": "Filter by suppression state. Defaults to 'active' (un-suppressed/actionable) when omitted; pass 'all' to include suppressed rows, or 'baselined'/'waived'/'judged' to select a specific accepted verdict.",
                     },
                     "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 10000},
                     "offset": {"type": "integer", "default": 0, "minimum": 0},
@@ -705,6 +708,13 @@ async def _handle_list_findings(arguments: dict[str, Any]) -> list[TextContent]:
         val = filters.get(key)
         if val is not None and not isinstance(val, str):
             return _text(ErrorResponse(error=f"{key} must be a string", code=ErrorCode.VALIDATION))
+
+    # Default this agent work-view to active-only so accepted (baselined/waived/
+    # judged) findings are not surfaced as fresh, open work (filigree-2bdb878bd2).
+    # The caller opts back in with suppression='all' (no-op == everything) or a
+    # specific verdict. The core primitive keeps its all-inclusive default, so
+    # this hides rows only at the surface — not for internal callers.
+    filters.setdefault("suppression", "active")
 
     try:
         result = tracker.list_findings_global(limit=limit, offset=offset, **filters)

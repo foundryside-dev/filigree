@@ -88,8 +88,13 @@ VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
 # ``metadata.wardline.*`` (lifted onto the read surface in ``_build_scan_finding``).
 VALID_WARDLINE_FINDING_KINDS: frozenset[str] = frozenset({"defect", "fact", "classification", "metric", "suggestion"})
 # ``active`` is the unsuppressed population (no wardline suppression verdict);
-# the other three are wardline's repo-controlled suppression annotations.
-VALID_SUPPRESSION_FILTERS: frozenset[str] = frozenset({"active", "baselined", "waived", "judged"})
+# ``baselined``/``waived``/``judged`` are wardline's repo-controlled suppression
+# annotations; ``all`` is the explicit no-filter sentinel (identical to omitting
+# the filter — returns every row). The agent-facing surfaces (MCP/CLI) default
+# to ``active`` and pass ``all`` to opt back in to suppressed rows
+# (filigree-2bdb878bd2); the core query keeps its all-inclusive default so
+# internal callers are unaffected.
+VALID_SUPPRESSION_FILTERS: frozenset[str] = frozenset({"all", "active", "baselined", "waived", "judged"})
 
 
 def _wardline_suppressed_sql(alias: str = "") -> str:
@@ -2308,7 +2313,12 @@ class FilesMixin(DBMixinProtocol):
         Note this query applies no open/unbridged base filter, so its total is a
         *superset* of that ``actionable`` count unless the caller also passes
         ``status``/``issue_id``; ``baselined`` / ``waived`` / ``judged`` select
-        that specific wardline verdict.
+        that specific wardline verdict. ``suppression="all"`` (and the default
+        ``None``) apply no suppression clause at all — every row is returned.
+        The agent-facing surfaces (MCP ``finding_list`` / CLI ``list-findings``)
+        default to ``active`` and pass ``all`` to opt back in (filigree-2bdb878bd2);
+        this primitive keeps its all-inclusive default so internal callers (e.g.
+        ``scanner_reporting`` re-finding a just-ingested row) never silently lose rows.
 
         Returns ``{"findings": [...], "total": N, "limit": ..., "offset": ...}``.
         """
@@ -2356,7 +2366,10 @@ class FilesMixin(DBMixinProtocol):
             params.append(qualname)
         if suppression == "active":
             clauses.append(f"NOT {_wardline_suppressed_sql('sf')}")
-        elif suppression is not None:
+        elif suppression not in (None, "all"):
+            # ``all`` is the explicit no-filter sentinel — like ``None`` it adds
+            # no clause, so it must not fall through to an equality on
+            # ``suppression_state = 'all'`` (which would match nothing).
             clauses.append(_wardline_field_eq_sql("suppression_state", "sf"))
             params.append(suppression)
 

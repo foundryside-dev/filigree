@@ -1047,8 +1047,16 @@ List code-health findings. Output: `ListResponse[T]` (`{items, has_more}`).
 | `--status` | string | Filter by status |
 | `--severity` | string | Filter by severity |
 | `--scan-source` | string | Filter by scanner |
+| `--scan-run-id` | string | Filter by scan run |
+| `--issue-id` | string | Filter by linked issue |
+| `--rule-id` | string | Filter by rule/check ID (exact) |
+| `--kind` | string | Filter by wardline finding kind (`defect`/`fact`/`classification`/`metric`/`suggestion`); `--kind defect` excludes engine telemetry |
+| `--qualname` | string | Filter by wardline qualified name (exact) |
+| `--suppression` | string | Filter by suppression. **Defaults to `active`** (un-suppressed/actionable) so accepted findings are hidden from the work view; pass `all` to include them, or `baselined`/`waived`/`judged` to select a specific accepted verdict |
 | `--limit` | integer | Max results |
 | `--offset` | integer | Skip first N results |
+
+By default `list-findings` shows only **active** (un-suppressed) findings — a wardline-baselined/waived/judged finding is an already-accepted defect, not open work, so it is hidden unless you pass `--suppression all` (or a specific verdict).
 
 ### `get-finding`
 

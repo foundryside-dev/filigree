@@ -122,6 +122,14 @@ def _seed_wardline_mix(db: FiligreeDB) -> None:
             },
         ],
     )
+    # A non-wardline (agent) finding: carries no wardline metadata, so it is
+    # active-by-absence and must stay visible under the active default (mirrors
+    # the core seed). Pins that the surface default-hide uses NOT-suppressed, not
+    # suppression_state IS NULL matching.
+    db.process_scan_results(
+        scan_source="agent",
+        findings=[{"path": "src/app.py", "rule_id": "agent-misuse", "severity": "medium", "message": "agent finding", "line_start": 30}],
+    )
 
 
 class TestListFindingsToolKindSuppression:
@@ -129,9 +137,42 @@ class TestListFindingsToolKindSuppression:
     axes (``kind``, ``suppression``) and ``rule_id`` to the core query."""
 
     async def test_filter_by_kind(self, mcp_db: FiligreeDB) -> None:
+        # The surface defaults to suppression='active', so to see BOTH defects
+        # (including the baselined one) the caller must opt in with
+        # suppression='all'. This keeps the test's intent — 'kind forwards to
+        # the core query and returns both defects' — under the new default.
         _seed_wardline_mix(mcp_db)
-        data = _parse(await call_tool("finding_list", {"kind": "defect"}))
+        data = _parse(await call_tool("finding_list", {"kind": "defect", "suppression": "all"}))
         assert sorted(i["rule_id"] for i in data["items"]) == ["PY-WL-101", "PY-WL-102"]
+
+    async def test_default_excludes_suppressed(self, mcp_db: FiligreeDB) -> None:
+        """filigree-2bdb878bd2: a plain ``finding_list`` work-query defaults to
+        active-only at the agent surface — the baselined defect is hidden so it
+        does not read as fresh, open work."""
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {}))
+        rules = {i["rule_id"] for i in data["items"]}
+        # metric (no suppression_state) + the active defect + the non-wardline
+        # agent finding (active-by-absence); NOT the baselined one.
+        assert rules == {"PY-WL-101", "WLN-METRIC", "agent-misuse"}
+        assert "PY-WL-102" not in rules
+
+    async def test_suppression_all_includes_suppressed(self, mcp_db: FiligreeDB) -> None:
+        """``suppression='all'`` opts back in to the full set including suppressed."""
+        _seed_wardline_mix(mcp_db)
+        data = _parse(await call_tool("finding_list", {"suppression": "all"}))
+        assert sorted(i["rule_id"] for i in data["items"]) == ["PY-WL-101", "PY-WL-102", "WLN-METRIC", "agent-misuse"]
+
+    async def test_ticket_repro_status_open_severity_high(self, mcp_db: FiligreeDB) -> None:
+        """The literal bug repro (filigree-2bdb878bd2): ``finding_list
+        status=open severity=high`` previously returned the baselined defect
+        mixed with the real one. The active default now excludes it; only
+        suppression='all' brings it back."""
+        _seed_wardline_mix(mcp_db)  # PY-WL-101 (active) + PY-WL-102 (baselined) are both open+high
+        default = _parse(await call_tool("finding_list", {"status": "open", "severity": "high"}))
+        assert [i["rule_id"] for i in default["items"]] == ["PY-WL-101"]  # baselined hidden
+        with_all = _parse(await call_tool("finding_list", {"status": "open", "severity": "high", "suppression": "all"}))
+        assert sorted(i["rule_id"] for i in with_all["items"]) == ["PY-WL-101", "PY-WL-102"]
 
     async def test_filter_real_unsuppressed_defects(self, mcp_db: FiligreeDB) -> None:
         _seed_wardline_mix(mcp_db)

@@ -45,7 +45,7 @@ class TestFilesSchemaAPI:
         resp = await client.get("/api/files/_schema")
         data = resp.json()
         assert set(data["valid_finding_kinds"]) == {"defect", "fact", "classification", "metric", "suggestion"}
-        assert set(data["valid_suppression_filters"]) == {"active", "baselined", "waived", "judged"}
+        assert set(data["valid_suppression_filters"]) == {"all", "active", "baselined", "waived", "judged"}
 
     async def test_schema_returns_valid_sort_fields(self, client: AsyncClient) -> None:
         resp = await client.get("/api/files/_schema")
@@ -431,6 +431,25 @@ class TestWeftFindingsKindSuppressionFilters:
         resp = await client.get("/api/weft/findings?suppression=baselined")
         assert resp.status_code == 200
         assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-102"]
+
+    async def test_default_stays_inclusive_unlike_agent_surfaces(self, client: AsyncClient) -> None:
+        """filigree-2bdb878bd2 scope guard: the default-hide of suppressed
+        findings lives ONLY at the agent surfaces (MCP/CLI). This federation
+        read API (like the dashboard) keeps the core default — return everything
+        — so changing a sibling tool's machine-read contract is never silent.
+        Federation consumers pass an explicit ``suppression=`` filter."""
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings")
+        assert resp.status_code == 200
+        rules = sorted(i["rule_id"] for i in resp.json()["items"])
+        assert rules == ["PY-WL-101", "PY-WL-102", "WLN-METRIC"]  # baselined present
+
+    async def test_suppression_all_accepted(self, client: AsyncClient) -> None:
+        """``suppression=all`` is an advertised filter value (no-op == default)."""
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?suppression=all")
+        assert resp.status_code == 200
+        assert sorted(i["rule_id"] for i in resp.json()["items"]) == ["PY-WL-101", "PY-WL-102", "WLN-METRIC"]
 
     async def test_filter_by_kind_excludes_metric(self, client: AsyncClient) -> None:
         await self._seed(client)

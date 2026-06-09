@@ -716,12 +716,18 @@ def create_weft_router() -> APIRouter:
         """Project-wide findings list — ``ListResponse[ScanFindingWeft]``.
 
         Weft-only (no classic dashboard counterpart at this path).
-        Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
+        Mirrors MCP ``list_findings`` filter *keys*: ``severity``, ``status``,
         ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``,
         ``rule_id``, the nested wardline axes ``kind``/``qualname``/
         ``suppression`` (FIL-2/X-5), plus ``fingerprint`` (lets a scanner
         confirm a finding's issue link without re-promoting). Drops MCP's
         ``total`` field per the unified envelope.
+
+        Unlike the agent surfaces (MCP/CLI), this federation read keeps the
+        core all-inclusive ``suppression`` default (returns suppressed rows
+        unless an explicit ``suppression=`` filter is passed) — a federation
+        consumer's machine-read contract is never silently narrowed
+        (filigree-2bdb878bd2).
         """
         params = request.query_params
         pagination = _parse_pagination(params)

@@ -1617,6 +1617,21 @@ class TestListFindingsKindSuppression:
                         },
                     ],
                 )
+                # A non-wardline (agent) finding: no wardline metadata, so
+                # active-by-absence — must stay visible under the active default
+                # (mirrors the core seed; pins NOT-suppressed semantics).
+                db.process_scan_results(
+                    scan_source="agent",
+                    findings=[
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "agent-misuse",
+                            "severity": "medium",
+                            "message": "agent finding",
+                            "line_start": 30,
+                        }
+                    ],
+                )
         finally:
             os.chdir(original)
 
@@ -1640,6 +1655,23 @@ class TestListFindingsKindSuppression:
         self._seed(initialized_project)
         data = self._invoke(initialized_project, "--suppression", "baselined")
         assert [i["rule_id"] for i in data["items"]] == ["PY-WL-102"]
+
+    def test_default_excludes_suppressed(self, initialized_project: Path) -> None:
+        """filigree-2bdb878bd2: ``list-findings`` with no ``--suppression``
+        defaults to active-only — the baselined defect is hidden from the default
+        work view."""
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project)
+        rules = {i["rule_id"] for i in data["items"]}
+        # active wardline rows + the non-wardline agent finding; NOT the baselined one.
+        assert rules == {"PY-WL-101", "WLN-METRIC", "agent-misuse"}
+        assert "PY-WL-102" not in rules
+
+    def test_suppression_all_includes_suppressed(self, initialized_project: Path) -> None:
+        """``--suppression all`` opts back in to the full set including suppressed."""
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--suppression", "all")
+        assert sorted(i["rule_id"] for i in data["items"]) == ["PY-WL-101", "PY-WL-102", "WLN-METRIC", "agent-misuse"]
 
     def test_filter_by_rule_id(self, initialized_project: Path) -> None:
         self._seed(initialized_project)

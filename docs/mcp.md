@@ -663,6 +663,9 @@ agent's artifacts.
    evidence, or intentionally dropped.
 4. Review scan scratch with `finding_list`; use `finding_promote`,
    `finding_dismiss`, or `finding_batch_update` before deleting file records.
+   Note `finding_list` defaults to `suppression='active'` — wardline-accepted
+   (baselined/waived/judged) findings are hidden; pass `suppression='all'` (or a
+   specific verdict) to review them.
 5. Remove synthetic file records with `file_delete`. Prefer the default
    refusal mode first; use `force=true` only after associated issues/findings
    are handled.
@@ -1044,7 +1047,7 @@ create a linked triage observation; full responses then include
 3. `prompt_pack_list` — choose an advisory review lens, if needed
 4. `scan_trigger` or `scan_trigger_batch` — fire-and-forget, get `scan_run_id`(s)
 5. `scan_status_get` — poll for completion / tail logs
-6. Check results via `finding_list` / `finding_get` or `GET /api/weft/files/{file_id}/findings`
+6. Check results via `finding_list` / `finding_get` or `GET /api/weft/files/{file_id}/findings` (note: `finding_list` defaults to active-only — pass `suppression='all'` to also see wardline-accepted findings; the `/api/weft/...` read is unfiltered by default)
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 

@@ -965,9 +965,14 @@ def delete_file_record_cmd(ctx: click.Context, file_id: str, force: bool, as_jso
 @click.option("--qualname", default=None, help="Filter by wardline qualified name (exact match)")
 @click.option(
     "--suppression",
-    default=None,
+    default="active",
+    show_default=True,
     type=click.Choice(sorted(VALID_SUPPRESSION_FILTERS)),
-    help="Filter by suppression: 'active' = un-suppressed (actionable), or baselined/waived/judged",
+    help=(
+        "Filter by suppression. Defaults to 'active' (un-suppressed/actionable) so "
+        "accepted findings are hidden from the work view; pass 'all' to include them, "
+        "or baselined/waived/judged to select a specific accepted verdict."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def list_findings_cmd(
