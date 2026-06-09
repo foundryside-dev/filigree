@@ -225,16 +225,32 @@ def register_project(filigree_dir: Path) -> None:
         config = read_server_config()
         project_key = str(filigree_dir)
         prefix = str(project_config.get("prefix", "filigree"))
+        new_root = _project_root_from_store_dir(filigree_dir).resolve()
 
+        # Entries are keyed by store-dir string, but a project's IDENTITY is its
+        # root. A store relocation (.filigree -> .weft/filigree) re-registers
+        # under a new store dir while the old key lingers with the same prefix —
+        # which the collision check below would otherwise read as a conflict and
+        # refuse the move (filigree-a4925b59bb). Dedup by root: any existing entry
+        # resolving to the same project root is the same project's stale key, so
+        # drop it instead of colliding. (A running daemon's in-memory
+        # project_store is not reconciled here — server.json is the durable record
+        # this fixes; the daemon picks the change up on its next reload.)
+        stale_keys: list[str] = []
         for existing_path, meta in config.projects.items():
             if existing_path == project_key:
-                continue  # idempotent re-register
+                continue  # idempotent re-register (exact same store dir)
+            if _project_root_from_store_dir(Path(existing_path)).resolve() == new_root:
+                stale_keys.append(existing_path)  # same project, relocated store
+                continue
             existing_prefix = str(meta.get("prefix", "filigree")) if isinstance(meta, dict) else "filigree"
             if existing_prefix == prefix:
                 raise ValueError(
                     f"Prefix collision: {prefix!r} already registered by {existing_path}. Choose a unique prefix in .filigree/config.json."
                 )
 
+        for stale_key in stale_keys:
+            del config.projects[stale_key]
         config.projects[project_key] = {"prefix": prefix}
         write_server_config(config)
 

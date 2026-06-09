@@ -165,6 +165,30 @@ class TestProjectRegistration:
         config = read_server_config()
         assert list(config.projects.keys()) == [str(filigree_dir.resolve())]
 
+    def test_register_project_relocation_dedups_by_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """filigree-a4925b59bb: a project that relocates its store from
+        ``.filigree`` to ``.weft/filigree`` must re-register cleanly. The stale
+        legacy store-dir key shares the project root, so it is deduped (dropped),
+        NOT treated as a same-prefix collision."""
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        root = tmp_path / "proj"
+        legacy = root / ".filigree"
+        federated = root / ".weft" / "filigree"
+        legacy.mkdir(parents=True)
+        federated.mkdir(parents=True)
+        (legacy / "config.json").write_text('{"prefix": "proj"}')
+        (federated / "config.json").write_text('{"prefix": "proj"}')
+
+        register_project(legacy)
+        register_project(federated)  # must NOT raise "Prefix collision"
+
+        config = read_server_config()
+        # The stale legacy key is gone; only the live federated store remains.
+        assert list(config.projects.keys()) == [str(federated.resolve())]
+
 
 class TestBatchUnregister:
     """``unregister_projects`` — single-locked-pass cleanup used by doctor --fix."""
