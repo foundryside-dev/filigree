@@ -12,6 +12,7 @@ never hard-fails (C-9c).
 from __future__ import annotations
 
 import logging
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -259,6 +260,49 @@ class TestMigrateStoreToWeft:
             assert db2.get_issue(created.id) is not None
         finally:
             db2.close()
+
+    def test_metadata_dir_copy_is_atomic_no_torn_partial(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A crash mid-copy of a metadata sub-tree (scanners/, templates/) must not
+        leave a PARTIAL directory at the destination that the copy-once existence
+        guard then mistakes for a finished copy and skips — the torn-then-skip
+        data-loss defect (filigree-197be8b501). The atomic copytree-to-temp +
+        ``os.replace`` means ``dest`` only ever appears complete; a crash leaves
+        only the temp (cleaned up), so a re-run RE-COPIES rather than publishing
+        the partial.
+        """
+        # Keep the assertion on the copytree crash deterministic (no live daemon).
+        monkeypatch.setattr("filigree.core._refuse_if_daemon_serving", lambda _root: None)
+        legacy = _make_legacy_install(tmp_path)
+        scanners = legacy / "scanners"
+        scanners.mkdir()
+        (scanners / "a.json").write_text('{"a": 1}')
+        (scanners / "b.json").write_text('{"b": 2}')
+
+        real_copytree = shutil.copytree
+        crashed = {"done": False}
+
+        def boom(src: str, dst: str, *args: object, **kwargs: object) -> object:
+            # Simulate a crash mid-copytree on the first metadata-dir copy.
+            if "scanners" in str(src) and not crashed["done"]:
+                crashed["done"] = True
+                raise RuntimeError("simulated crash mid-copytree")
+            return real_copytree(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("filigree.core.shutil.copytree", boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            migrate_store_to_weft(tmp_path)
+
+        # No torn partial published at the destination: the existence guard would
+        # otherwise skip it on re-run and ship the partial as if complete.
+        weft_scanners = _weft_store(tmp_path) / "scanners"
+        assert not weft_scanners.exists()
+
+        # Re-run (copytree now succeeds) completes and publishes the COMPLETE dir.
+        monkeypatch.setattr("filigree.core.shutil.copytree", real_copytree)
+        store, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+        assert (store / "scanners" / "a.json").read_text() == '{"a": 1}'
+        assert (store / "scanners" / "b.json").read_text() == '{"b": 2}'
 
     def test_migration_is_idempotent(self, tmp_path: Path) -> None:
         _make_legacy_install(tmp_path)

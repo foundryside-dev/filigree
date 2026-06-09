@@ -674,6 +674,35 @@ def _atomic_copy_file(src: Path, dest: Path) -> None:
         raise
 
 
+def _atomic_copy_tree(src: Path, dest: Path) -> None:
+    """Copy directory *src* → *dest* atomically (stage to a dest-dir temp, ``os.replace``).
+
+    The directory analogue of :func:`_atomic_copy_file` for the migration's metadata
+    sub-trees (``scanners/``, ``templates/``). ``shutil.copytree`` straight to the
+    final path is *non-atomic*: a crash (SIGKILL/power loss) mid-copy leaves a
+    *partial* directory at ``dest`` that a re-run's ``not dest.exists()`` existence
+    guard then mistakes for a finished copy and skips — publishing the partial
+    (filigree-197be8b501, the same torn-then-skip defect already fixed for the DB
+    and the metadata files). Instead copytree into a unique temp dir in the parent,
+    then ``os.replace`` to publish: ``dest`` only ever appears *complete*, and a
+    crash leaves only the temp (cleaned up), never a partial that the guard skips.
+
+    The caller keeps its copy-once guard (``not dest.exists()``) — durable config
+    sub-trees do not drift mid-migration — but that guard is now SAFE because a
+    present ``dest`` is always a finished copy, never a torn one.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(dir=dest.parent, prefix=dest.name + "."))
+    try:
+        # ``mkdtemp`` already created ``tmp`` (empty); ``dirs_exist_ok`` lets
+        # copytree populate it rather than refuse the existing target.
+        shutil.copytree(str(src), str(tmp), dirs_exist_ok=True)
+        os.replace(tmp, dest)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
 def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
     """Best-effort: the project's ephemeral dashboard port if one is bound, else ``None``.
 
@@ -909,9 +938,10 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     #    from legacy ONLY while legacy is still the resolved canonical store;
     #    otherwise weft may already hold fresher metadata (a write that resolved to
     #    weft) and an unconditional re-copy would clobber it (the exact data-loss
-    #    we must not introduce). Directories (scanners/templates) stay copy-once:
-    #    copytree cannot overwrite an existing dest, and durable config does not
-    #    drift mid-migration.
+    #    we must not introduce). Directories (scanners/templates) stay copy-once
+    #    (durable config does not drift mid-migration) but copy ATOMICALLY via
+    #    _atomic_copy_tree — a raw copytree to the final path is torn-then-skipped
+    #    by the existence guard on a crash mid-copy (filigree-197be8b501).
     legacy_canonical = resolve_store_dir(project_root).resolve() == legacy_dir.resolve()
     metadata_files = (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token")
     metadata_dirs = ("scanners", "templates")
@@ -928,7 +958,7 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
         src = legacy_dir / name
         dest = weft_store / name
         if src.is_dir() and not dest.exists():
-            shutil.copytree(str(src), str(dest))
+            _atomic_copy_tree(src, dest)
     # 3. Rewrite the conf to point at the destination — only now that a valid DB
     #    exists there. (Idempotent: skip if it already points at the weft DB.)
     #    Reuses `conf_data` from the strict pre-mutation read above: it is None
