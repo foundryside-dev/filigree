@@ -13,7 +13,7 @@ Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding ag
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
-Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Weft HTTP generation at `/api/weft/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
+Filigree is local-first. No cloud, no accounts. Each project gets a `.weft/filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary; legacy `.filigree/` stores keep working and migrate on the next `filigree init`. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). A named Weft HTTP generation at `/api/weft/*` serves federation-aware integrations while the classic HTTP surface stays supported for existing callers.
 
 Filigree is the work-state member of the **Weft federation** — a family of independently-useful code-governance tools woven together by narrow, additive contracts. Filigree runs fully standalone; the Weft surface is optional enrichment. The authoritative federation roster, axiom, and composition doctrine live at the Weft hub (`~/loom`, see `~/loom/doctrine.md`); Filigree owns its own HTTP/MCP/CLI surface and contracts (see [docs/federation/contracts.md](docs/federation/contracts.md)).
 
@@ -49,11 +49,11 @@ flowchart TD
     Human["You + scripts"]
     Browser["Browser"]
 
-    MCP["MCP server<br/>(115 namespaced tools, stdio)"]
+    MCP["MCP server<br/>(116 namespaced tools, stdio)"]
     CLI["filigree CLI<br/>(--json, --actor)"]
     Dash["Web dashboard<br/>(localhost:8377)"]
 
-    DB[("SQLite database<br/>.filigree/filigree.db")]
+    DB[("SQLite database<br/>.weft/filigree/filigree.db")]
     Ctx["context.md<br/>(pre-computed orientation)"]
     Weft["Weft HTTP /api/weft/*<br/>(optional federation)"]
 
@@ -79,7 +79,7 @@ do the work, close it — and the next orientation is already regenerated.
 sequenceDiagram
     participant Dev as You / AI agent
     participant Fg as Filigree
-    participant DB as .filigree/ (SQLite)
+    participant DB as .weft/filigree/ (SQLite)
 
     Note over Dev,Fg: Session start
     Dev->>Fg: filigree session-context
@@ -126,7 +126,7 @@ stateDiagram-v2
 ```bash
 pip install filigree        # or: uv add filigree
 cd my-project
-filigree init               # Create .filigree/ directory
+filigree init               # Create the .weft/filigree/ store
 filigree install             # Set up MCP, hooks, skills, CLAUDE.md, .gitignore
 filigree create "Set up CI pipeline" --type=task --priority=1
 filigree ready               # See what's ready to work on
@@ -171,14 +171,14 @@ The session hook runs `filigree session-context` at startup, giving the agent a 
 
 ### Dashboard Authentication Scope
 
-The dashboard is local-first and assumes loopback/local filesystem trust by default. Setting `WEFT_FEDERATION_TOKEN` enables bearer-token authentication only for federation and agent-ingest surfaces; the older `FILIGREE_FEDERATION_API_TOKEN` and `FILIGREE_API_TOKEN` names are still accepted as deprecated, backward-compatible fallbacks (removal scheduled post-1.0). This token is federation/deconfliction plumbing, not a security secret. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled.
+The dashboard is local-first and assumes loopback/local filesystem trust by default. The federation and MCP-over-HTTP surfaces are bearer-token gated **by default**: the daemon auto-mints a per-machine token at `<store_dir>/federation_token` (mode 0600, gitignored) on first serve, and `filigree install` / `doctor --fix` pre-seed it. The token resolves in three tiers — the `WEFT_FEDERATION_TOKEN` environment variable (operator override, the only tier that works across hosts), then the store-dir token file, then absent (auth off). The older `FILIGREE_FEDERATION_API_TOKEN` and `FILIGREE_API_TOKEN` names are still accepted as deprecated fallbacks and log a migration warning. This token is federation/deconfliction plumbing, not a security secret. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled. Rotate with `filigree rotate-federation-token` (effective at the next daemon restart).
 
 | Route class | Authentication |
 |-------------|----------------|
 | Dashboard UI (`/`) | Open under the local loopback trust boundary |
 | Classic dashboard API (`/api/issues`, `/api/issue/{id}`, `/api/health`) | Open under the local loopback trust boundary |
-| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `WEFT_FEDERATION_TOKEN` (or a deprecated `FILIGREE_*_API_TOKEN` alias) is set |
-| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `WEFT_FEDERATION_TOKEN` (or a deprecated `FILIGREE_*_API_TOKEN` alias) is set |
+| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`, `/api/v1/observations`) | Bearer token when one resolves (auto-minted by default; `WEFT_FEDERATION_TOKEN` overrides) |
+| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when one resolves (auto-minted by default; `WEFT_FEDERATION_TOKEN` overrides) |
 
 ## Why Filigree?
 
@@ -208,7 +208,7 @@ Filigree has no cloud sync, no accounts, and no network-accessible API beyond lo
 Filigree does not connect to CI pipelines, Slack, PagerDuty, or third-party services. If your workflow requires automated ticket creation from alerts or Slack-based triage, Filigree will not fit without custom scripting.
 
 **A persistent project record outlasting the repository.**
-Your `.filigree/` directory lives with your project. If you need an audit trail that survives repository deletion or is accessible after the project ends, use a hosted service.
+Your `.weft/filigree/` directory lives with your project. If you need an audit trail that survives repository deletion or is accessible after the project ends, use a hosted service.
 
 **Multi-project portfolio management.**
 The web dashboard supports switching between local projects, but Filigree has no cross-project reporting, resource allocation, or roadmap views. It tracks tasks, not portfolios.
