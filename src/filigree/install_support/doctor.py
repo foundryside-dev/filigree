@@ -799,36 +799,49 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     filigree_dir = anchor.store_dir
     results.append(CheckResult(".filigree/ directory", True, f"Found at {filigree_dir}"))
 
-    # 1b. Check .filigree.conf anchor (v2.0). Warn if missing — this means the
-    # project predates the conf anchor; running any filigree command will
-    # auto-backfill on first open, but flagging it lets users see it's pending.
+    # 1b. Legacy .filigree.conf anchor (retired by the 3.0 config-anchor
+    # cutover, filigree-4bf16e64b6). The anchor now lives in the store's
+    # config.json, so a missing conf is the intended end state — nothing
+    # backfills it. A conf still present means this install predates the
+    # cutover; it keeps working as a discovery anchor until `filigree init`
+    # imports its fields into config.json and retires it to *.imported.
     project_root = anchor.project_root
-    conf_path = project_root / CONF_FILENAME
-    # conf_db_path is the authoritative DB location when the conf declares it;
-    # falls back to .filigree/DB_FILENAME for legacy installs or unreadable confs.
+    conf_path = anchor.conf_path or (project_root / CONF_FILENAME)
+    store_config_path = filigree_dir / CONFIG_FILENAME
+    # conf_db_path is the conf-declared DB location for unmigrated legacy
+    # installs (v2.x let users relocate the DB); None once the conf is retired,
+    # in which case the DB check falls back to the canonical store path.
     conf_db_path: Path | None = None
     conf_data: dict[str, Any] | None = None
     if conf_path.exists():
         try:
             conf_data = read_conf(conf_path)
             conf_db_path = (conf_path.parent / conf_data["db"]).resolve()
-            results.append(CheckResult(".filigree.conf anchor", True, f"Found at {conf_path}"))
+            results.append(
+                CheckResult(
+                    ".filigree.conf anchor",
+                    False,
+                    f"Legacy anchor still present at {conf_path} — since 3.0 the anchor lives in {store_config_path}.",
+                    fix_hint="Run `filigree init` to import it into the store config and retire it.",
+                )
+            )
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             results.append(
                 CheckResult(
                     ".filigree.conf anchor",
                     False,
                     f"Found at {conf_path} but unreadable: {exc}",
-                    fix_hint=f"Fix or regenerate {conf_path}",
+                    fix_hint=f"Fix or regenerate {conf_path}, or run `filigree init` after fixing it to import and retire it",
                 )
             )
     else:
+        retired_conf = project_root / (CONF_FILENAME + ".imported")
+        retired_note = f" (retired conf preserved as {retired_conf.name})" if retired_conf.exists() else ""
         results.append(
             CheckResult(
                 ".filigree.conf anchor",
-                False,
-                f"Missing at {conf_path} — this v2.0 anchor will be auto-written on next use.",
-                fix_hint="No action required; run any filigree command to backfill.",
+                True,
+                f"Not present — anchor lives in {store_config_path}{retired_note}",
             )
         )
 
@@ -865,7 +878,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     f"Invalid JSON: {e}",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
         except ValueError:
@@ -874,7 +887,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     "Invalid JSON shape: expected an object",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
         except OSError as exc:
@@ -883,7 +896,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     f"Found at {config_path} but unreadable: {exc}",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
     else:
@@ -896,9 +909,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
             )
         )
 
-    # 3. Check filigree.db exists and is accessible. Prefer the DB path declared
-    # in .filigree.conf (v2.0 — users may relocate the DB); fall back to the
-    # legacy .filigree/filigree.db when no conf is present or it's unreadable.
+    # 3. Check filigree.db exists and is accessible. An unmigrated legacy conf
+    # may still declare a relocated DB path (v2.x back-compat); otherwise the
+    # DB lives at the canonical store path.
     db_path = conf_db_path if conf_db_path is not None else filigree_dir / DB_FILENAME
     if db_path.exists():
         conn: sqlite3.Connection | None = None

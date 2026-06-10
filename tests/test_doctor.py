@@ -452,6 +452,48 @@ class TestDoctorHonorsConfDbPath:
 
 
 # ---------------------------------------------------------------------------
+# run_doctor — .filigree.conf anchor cutover (filigree-4bf16e64b6)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorConfAnchorCutover:
+    """The 3.0 hard cut retired ``.filigree.conf``: the anchor lives in the
+    store's config.json and nothing backfills a missing conf. Doctor must
+    treat absence as the healthy end state and a lingering conf as the
+    not-yet-migrated state that ``filigree init`` resolves.
+    """
+
+    def test_missing_conf_is_healthy(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)  # confless — the post-cutover end state
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is True
+        assert CONFIG_FILENAME in anchor_result.message
+        # No stale promise of an auto-backfill that no longer exists
+        assert "auto-written" not in anchor_result.message
+
+    def test_missing_conf_notes_retired_import(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / (CONF_FILENAME + ".imported")).write_text("{}")
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is True
+        assert CONF_FILENAME + ".imported" in anchor_result.message
+
+    def test_present_conf_warns_and_points_at_init(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "tst", "prefix": "tst", "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"},
+        )
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is False
+        assert "Legacy anchor" in anchor_result.message
+        assert "filigree init" in anchor_result.fix_hint
+
+
+# ---------------------------------------------------------------------------
 # run_doctor — context.md freshness check
 # ---------------------------------------------------------------------------
 
