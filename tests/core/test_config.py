@@ -255,7 +255,7 @@ class TestFromFiligreeDir:
         filigree_dir.mkdir()
         (filigree_dir / "config.json").write_bytes(b"\xff\xfe")
 
-        with pytest.raises(ValueError, match="config.json"):
+        with pytest.raises(ValueError, match=r"config\.json"):
             FiligreeDB.from_filigree_dir(filigree_dir)
 
 
