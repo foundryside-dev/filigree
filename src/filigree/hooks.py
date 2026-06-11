@@ -158,7 +158,8 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
             lines.append(
                 f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
                 f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
-                f"— review with `finding_list`, bridge with `finding_promote`"
+                f"— review with `filigree finding list`, bridge with `filigree finding promote` "
+                f"(MCP: finding_list / finding_promote)"
             )
     except sqlite3.OperationalError:
         logger.debug("finding stats unavailable in session context", exc_info=True)
@@ -169,9 +170,14 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
         if obs_stats["count"] > 0:
             lines.append("")
             if obs_stats["stale_count"] > 0:
-                lines.append(f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h — run `observation_list` to triage")
+                lines.append(
+                    f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h "
+                    f"— run `filigree observation list` to triage (MCP: observation_list)"
+                )
             else:
-                lines.append(f"OBSERVATIONS: {obs_stats['count']} pending — run `observation_list` to review")
+                lines.append(
+                    f"OBSERVATIONS: {obs_stats['count']} pending — run `filigree observation list` to review (MCP: observation_list)"
+                )
     except sqlite3.OperationalError:
         logger.debug("observation stats unavailable in session context", exc_info=True)
 

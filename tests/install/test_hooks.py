@@ -142,6 +142,9 @@ class TestBuildContext:
         db.create_observation("Something to triage")
         result = _build_context(db)
         assert "OBSERVATION" in result.upper()
+        # N-4 (weft-993c1077e1): the runnable hint must be the CLI command;
+        # the MCP verb is named alongside, never backtick'd as a command.
+        assert "`filigree observation list`" in result
         assert "observation_list" in result
 
     def test_stale_observations_warning_in_context(self, db: FiligreeDB) -> None:
@@ -153,6 +156,7 @@ class TestBuildContext:
         db.conn.commit()
         result = _build_context(db)
         assert "STALE OBSERVATION" in result.upper()
+        assert "`filigree observation list`" in result
 
     def test_observation_stats_operational_error_silent_in_context(self, db: FiligreeDB) -> None:
         """If observation_stats() raises OperationalError, context still generates."""
@@ -200,6 +204,11 @@ class TestBuildContext:
         result = _build_context(db)
         # 3 un-bridged (2 actionable + 1 suppressed); fp4 bridged → excluded.
         assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
+        # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs
+        # are named alongside.
+        assert "`filigree finding list`" in result
+        assert "`filigree finding promote`" in result
+        assert "finding_list" in result
         assert "finding_promote" in result
 
     def test_all_bridged_no_analyzer_line(self, db: FiligreeDB) -> None:
@@ -211,6 +220,22 @@ class TestBuildContext:
         db.promote_finding_to_issue(f["id"], actor="t")
         result = _build_context(db)
         assert "ANALYZER FINDINGS" not in result
+
+    def test_backticked_commands_are_runnable_cli(self, db: FiligreeDB) -> None:
+        """N-4 (weft-993c1077e1): every backtick'd command in the banner must be
+        a runnable ``filigree ...`` CLI invocation. An agent in a CLI-first
+        session (no MCP) runs the backtick'd string verbatim — a bare MCP verb
+        there fails with 'No such command' as its first action of the session.
+        """
+        import re
+
+        db.create_observation("Something to triage")
+        db.process_scan_results(scan_source="wardline", findings=[self._wln("a.py", "fp1")])
+        result = _build_context(db)
+        snippets = re.findall(r"`([^`]+)`", result)
+        assert snippets, "expected backtick'd command hints in the banner"
+        for snippet in snippets:
+            assert snippet.startswith("filigree "), f"non-runnable backtick'd command in banner: {snippet!r}"
 
     def test_finding_stats_operational_error_silent_in_context(self, db: FiligreeDB) -> None:
         """A pre-findings DB (no scan_findings table) must not break orientation."""
