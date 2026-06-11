@@ -139,6 +139,33 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
 
 ### Added
 
+- **`filigree observation create` — visible alias of `filigree observe`
+  (dogfood N-7, filigree-ce3bfae865).** The natural first-try
+  `filigree observation create` previously failed with a hintless
+  `No such command 'create'`. The alias shares observe's callback and options
+  (no fork) and is marked as an alias in the group help; `observe` stays the
+  canonical flat verb.
+
+- **Priority range filters on the listing and ready surfaces (dogfood N-6,
+  filigree-7fe21777b6).** `--priority-min` / `--priority-max` on
+  `filigree list` and `filigree ready`, and `priority_min` / `priority_max`
+  on MCP `issue_list` and `work_ready` — the same range pattern the claim
+  verbs and `observation list` already had, applied SQL-side in
+  `list_issues` / `get_ready`. `--priority` stays exact-match sugar;
+  combining it with a range bound is a `VALIDATION` error.
+
+- **Claim verbs accept `actor` alone as the caller identity (dogfood FIL-3,
+  filigree-3028a8d0f8).** `work_claim` / `work_claim_next` / `work_start` /
+  `work_start_next` no longer hard-require `assignee`: when omitted it
+  defaults from `actor` (completing the existing actor-from-assignee
+  direction into bidirectional defaulting); omitting both is a handler-level
+  `VALIDATION` error naming both params. On the CLI, an *explicitly* passed
+  `--actor` fills an omitted `--assignee` on `claim` / `claim-next` /
+  `start-work` / `start-next-work`; the implicit `cli` default never claims
+  anonymously. `work_reclaim` is deliberately excluded — its assignee is the
+  transfer recipient, not the caller. Strictly additive: every pre-existing
+  call shape is byte-identical, pinned by regression tests.
+
 - **Federation auth is now on-by-default: the anchor auto-provisions the
   inbound token (3-tier resolution).** `filigree install` and `doctor --fix`
   pre-seed — and the daemon mints on first serve — a per-machine token at
@@ -307,6 +334,23 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
   fetch** (`db_issues`), removing a per-issue round trip from the batch path.
 
 ### Fixed
+
+- **Session-context banner named MCP verbs as if they were CLI commands
+  (dogfood N-4, weft-993c1077e1, filigree-4e64621f70).** The banner's
+  backtick'd hints (`finding_list`, `finding_promote`, `observation_list`)
+  were MCP verb names that fail as shell commands, so an agent in a CLI-first
+  session got `No such command` as its first action. Hints are now runnable
+  CLI commands with the MCP verb named in an `(MCP: …)` aside, and a
+  regression test pins every backtick'd banner hint to a `filigree …` form.
+
+- **Session-context "actionable" finding count no longer presents engine
+  telemetry as defect signal (dogfood FIL-1 residual, filigree-4d489560e0).**
+  `unbridged_finding_stats` now additionally splits the actionable bucket by
+  wardline kind (`actionable_defect` / `actionable_other`; kind-less findings
+  count defect-side so third-party scanner findings are never hidden as
+  telemetry), and the ANALYZER FINDINGS banner line surfaces the split and
+  steers triage to `filigree finding list --kind defect` when telemetry is
+  present.
 
 - **Server-mode `.mcp.json` no longer leaks the per-machine federation token
   into git, and `doctor` recognises file-sourced auth
