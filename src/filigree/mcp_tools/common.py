@@ -189,11 +189,11 @@ def _apply_has_more(items: list[Any], effective_limit: int) -> tuple[list[Any], 
 def _list_response(items: list[Any], *, has_more: bool, next_offset: int | None = None) -> ListResponse[Any]:
     """Build a unified ``ListResponse[T]`` envelope for MCP list tools.
 
-    Mirrors the loom HTTP ``list_response`` adapter:
+    Mirrors the weft HTTP ``list_response`` adapter:
     ``next_offset`` is present only when ``has_more`` is True. Defined here
-    rather than reusing the loom adapter to keep the MCP surface free of
+    rather than reusing the weft adapter to keep the MCP surface free of
     generation-layer dependencies (per the operating principle "MCP reflects
-    the living surface only", not "MCP imports loom").
+    the living surface only", not "MCP imports weft").
     """
     body: ListResponse[Any] = {"items": items, "has_more": has_more}
     if has_more and next_offset is not None:

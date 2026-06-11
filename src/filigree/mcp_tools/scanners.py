@@ -533,7 +533,7 @@ async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
     if load_errors:
         # Surface load errors via the logger now that the response envelope is
         # the strict ListResponse[T]. Drops the legacy ``errors`` and ``hint``
-        # siblings per the loom precedent.
+        # siblings per the weft precedent.
         for msg in load_errors:
             _logger.warning("list_scanners load error: %s", msg)
     items = [s.to_dict() for s in scanners]

@@ -32,6 +32,16 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
 
 ### Changed (BREAKING)
 
+- **Internal `loom` → `weft` naming sweep; `loom://` URI scheme retired
+  (filigree-73a2d91f5c).** The last Loom-era names are gone: handler/type/test
+  identifiers (`is_loom_scoped_path` → `is_weft_scoped_path`, `IssueLoom` →
+  `IssueWeft`, …), the contract-fixture tree
+  (`tests/fixtures/contracts/loom/` → `…/weft/`), and the bearer-token /
+  URI-scheme design docs. There is **no live federation URI scheme**: the
+  planned `loom://` scheme was formally closed by the hub's SEI standard, and
+  `weft://` is reserved for future federation-level resources, not active.
+  Wire shapes are unaffected (the `/api/loom/*` → `/api/weft/*` route flip
+  shipped earlier in this release).
 - **Machine store consolidation: `.filigree/` → `.weft/filigree/`
   (filigree-37e3f26145).** The machine-owned store (SQLite database,
   `config.json`, scanner/template metadata, runtime sidecars) moves from

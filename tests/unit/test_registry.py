@@ -98,7 +98,7 @@ def test_filigree_db_reads_loomweave_token_from_named_env_var(tmp_path: Path, mo
     token threads into ``LoomweaveRegistry.auth_token``."""
     from tests._fakes.clarion_http import clarion_stub
 
-    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "live-token-value")
+    monkeypatch.setenv("FILIGREE_TEST_WEFT_TOKEN", "live-token-value")
     with clarion_stub() as (base_url, state):
         state.required_token = "live-token-value"  # noqa: S105 — test fixture
         db = FiligreeDB(
@@ -109,7 +109,7 @@ def test_filigree_db_reads_loomweave_token_from_named_env_var(tmp_path: Path, mo
             loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,
-                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+                "token_env": "FILIGREE_TEST_WEFT_TOKEN",
             },
         )
         db.initialize()
@@ -131,7 +131,7 @@ def test_filigree_db_warns_when_loomweave_token_env_unset(
     WARN log, no header sent, Loomweave accepts on loopback."""
     from tests._fakes.clarion_http import clarion_stub
 
-    monkeypatch.delenv("FILIGREE_TEST_LOOM_TOKEN_MISSING", raising=False)
+    monkeypatch.delenv("FILIGREE_TEST_WEFT_TOKEN_MISSING", raising=False)
     with clarion_stub() as (base_url, state):
         # required_token stays None — Loomweave accepts unauthenticated on loopback.
         with caplog.at_level(logging.WARNING, logger="filigree.core"):
@@ -143,7 +143,7 @@ def test_filigree_db_warns_when_loomweave_token_env_unset(
                 loomweave_config={
                     "base_url": base_url,
                     "timeout_seconds": 1,
-                    "token_env": "FILIGREE_TEST_LOOM_TOKEN_MISSING",
+                    "token_env": "FILIGREE_TEST_WEFT_TOKEN_MISSING",
                 },
             )
             db.initialize()
@@ -996,14 +996,14 @@ def test_loomweave_registry_sends_bearer_authorization_when_token_provided() -> 
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, state):
-        state.required_token = "test-loom-token"  # noqa: S105 — test fixture
-        registry = LoomweaveRegistry(base_url, timeout_seconds=1, auth_token="test-loom-token")  # noqa: S106 — test fixture
+        state.required_token = "test-weft-token"  # noqa: S105 — test fixture
+        registry = LoomweaveRegistry(base_url, timeout_seconds=1, auth_token="test-weft-token")  # noqa: S106 — test fixture
 
         resolved = registry.resolve_file("src/x.py", language="python")
         registry.resolve_file("src/y.py", language="python")
 
     assert resolved["registry_backend"] == "loomweave"
-    assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
+    assert state.auth_headers_seen == ["Bearer test-weft-token", "Bearer test-weft-token"]
 
 
 def test_loomweave_registry_rejects_token_for_untrusted_origin_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1016,7 +1016,7 @@ def test_loomweave_registry_rejects_token_for_untrusted_origin_at_construction(m
         LoomweaveRegistry(
             "https://example.invalid",
             timeout_seconds=1,
-            auth_token="test-loom-token",  # noqa: S106 - test fixture
+            auth_token="test-weft-token",  # noqa: S106 - test fixture
         )
 
 
@@ -1038,7 +1038,7 @@ def test_filigree_db_skip_probe_still_rejects_loomweave_token_for_untrusted_orig
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "test-loom-token")
+    monkeypatch.setenv("FILIGREE_TEST_WEFT_TOKEN", "test-weft-token")
 
     with pytest.raises(ValueError, match="loopback Loomweave origins"):
         FiligreeDB(
@@ -1048,7 +1048,7 @@ def test_filigree_db_skip_probe_still_rejects_loomweave_token_for_untrusted_orig
             loomweave_config={
                 "base_url": "https://example.invalid",
                 "timeout_seconds": 1,
-                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+                "token_env": "FILIGREE_TEST_WEFT_TOKEN",
             },
             skip_loomweave_capability_probe=True,
         )
@@ -1077,7 +1077,7 @@ def test_loomweave_registry_rechecks_token_origin_for_concrete_request_urls(
     registry = LoomweaveRegistry(
         "http://127.0.0.1:1",
         timeout_seconds=1,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
     object.__setattr__(registry, "_http_client", FailClient())
     monkeypatch.setattr("filigree.registry." + url_builder_name, lambda *_args, **_kwargs: "https://example.invalid/api/v1/files")
@@ -1098,7 +1098,7 @@ def test_loomweave_registry_disables_redirects_when_auth_token_provided(monkeypa
     LoomweaveRegistry(
         "http://127.0.0.1:8765",
         timeout_seconds=1,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
 
     assert observed["trust_env"] is False
@@ -1115,7 +1115,7 @@ def test_loomweave_capability_probe_rejects_token_for_untrusted_origin(monkeypat
         probe_loomweave_capabilities(
             "https://attacker.example",
             timeout_seconds=1,
-            auth_token="test-loom-token",  # noqa: S106 - test fixture
+            auth_token="test-weft-token",  # noqa: S106 - test fixture
         )
 
 
@@ -1151,13 +1151,13 @@ def test_loomweave_capability_probe_uses_runtime_http_policy(monkeypatch: pytest
     capabilities = probe_loomweave_capabilities(
         "http://127.0.0.1:8765",
         timeout_seconds=2,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
 
     assert capabilities["registry_backend"] is True
     assert observed["trust_env"] is False
     assert observed["follow_redirects"] is False
-    assert observed["headers"] == {"Authorization": "Bearer test-loom-token"}
+    assert observed["headers"] == {"Authorization": "Bearer test-weft-token"}
     assert observed["timeout"] == 2
 
 

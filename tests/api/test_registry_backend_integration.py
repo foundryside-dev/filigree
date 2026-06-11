@@ -40,7 +40,7 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
 
 
 @pytest.mark.parametrize("registry_backend", ["local", "loomweave"])
-async def test_loom_scan_results_resolves_file_identity_over_registry_backends(tmp_path: Path, registry_backend: str) -> None:
+async def test_weft_scan_results_resolves_file_identity_over_registry_backends(tmp_path: Path, registry_backend: str) -> None:
     if registry_backend == "loomweave":
         with clarion_stub() as (base_url, state):
             db = FiligreeDB(
@@ -87,7 +87,7 @@ async def test_loom_scan_results_resolves_file_identity_over_registry_backends(t
         db.close()
 
 
-async def test_loom_scan_results_falls_back_to_local_when_loomweave_goes_down(
+async def test_weft_scan_results_falls_back_to_local_when_loomweave_goes_down(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -150,7 +150,7 @@ async def test_loom_scan_results_falls_back_to_local_when_loomweave_goes_down(
         db.close()
 
 
-async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tmp_path: Path) -> None:
+async def test_weft_scan_results_does_not_block_event_loop_for_other_handlers(tmp_path: Path) -> None:
     """CONTRACT-E: a slow scan-results POST must not block the event loop;
     OTHER endpoints (here ``GET /api/scan-runs``) must complete during the
     Loomweave HTTP wait.
@@ -158,7 +158,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
     This test verifies the responsiveness property by interleaving a fast read
     endpoint with a slow scan-results POST. Parallelism between two concurrent
     scan-results POSTs is verified separately by
-    ``test_concurrent_loom_scan_results_run_in_parallel``.
+    ``test_concurrent_weft_scan_results_run_in_parallel``.
     """
     import asyncio
     import http.server
@@ -257,7 +257,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
         thread.join(timeout=1)
 
 
-async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> None:
+async def test_concurrent_weft_scan_results_run_in_parallel(tmp_path: Path) -> None:
     """Two concurrent scan-results POSTs overlap their Loomweave HTTP round-trips
     instead of serialising.
 
@@ -537,7 +537,7 @@ async def test_concurrent_same_path_local_scan_results_do_not_raise(tmp_path: Pa
         db.close()
 
 
-async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_path: Path) -> None:
+async def test_weft_scan_results_makes_single_batch_call_for_300_findings(tmp_path: Path) -> None:
     """CONTRACT-1: a scan-results POST with 300 unfamiliar paths makes exactly
     ``ceil(300/256) = 2`` batch HTTP calls (not 300 GET calls)."""
     findings = [{"path": f"src/file_{i:04d}.py", "rule_id": "E501", "severity": "low", "message": "msg"} for i in range(300)]
@@ -569,7 +569,7 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             db.close()
 
 
-async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
+async def test_weft_scan_results_briefing_blocked_path_bypasses_fallback(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:

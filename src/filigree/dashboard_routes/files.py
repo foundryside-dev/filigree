@@ -234,10 +234,10 @@ def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONRes
 def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
     """Validate the scan-results request body.
 
-    Shared by the classic ``POST /api/v1/scan-results`` handler and the loom
+    Shared by the classic ``POST /api/v1/scan-results`` handler and the weft
     ``POST /api/weft/scan-results`` handler — both generations accept the
     same request shape; only the response envelope differs (per ADR-002 §6
-    and the loom contract fixture). Returns the kwargs dict to splat into
+    and the weft contract fixture). Returns the kwargs dict to splat into
     ``db.process_scan_results`` on success, or an error string on validation
     failure (caller wraps it in a 400 ``ErrorCode.VALIDATION`` response).
     """
@@ -621,12 +621,12 @@ def create_classic_router() -> APIRouter:
 
 
 def create_weft_router() -> APIRouter:
-    """Build the loom-generation APIRouter for file tracking and scan
+    """Build the weft-generation APIRouter for file tracking and scan
     findings endpoints.
 
     Phase C1 mounts ``POST /api/weft/scan-results`` per the fixture at
-    ``tests/fixtures/contracts/loom/scan-results.json``. Subsequent
-    Phase C tasks add the rest of the loom file/findings surface.
+    ``tests/fixtures/contracts/weft/scan-results.json``. Subsequent
+    Phase C tasks add the rest of the weft file/findings surface.
     """
     from fastapi import APIRouter, Depends
     from fastapi.responses import JSONResponse
@@ -644,8 +644,8 @@ def create_weft_router() -> APIRouter:
     router = APIRouter()
 
     @router.post("/scan-results")
-    async def api_loom_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Ingest scan results — loom envelope.
+    async def api_weft_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Ingest scan results — weft envelope.
 
         Equivalent to /api/scan-results as of 2026-04-26.
         """
@@ -675,7 +675,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(scan_ingest_result_to_weft(result))
 
     @router.get("/files")
-    async def api_loom_list_files(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_files(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List tracked files — ``ListResponse[FileRecordWeft]``.
 
         Classic ``GET /api/files`` returns ``PaginatedResult`` with
@@ -712,7 +712,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
     @router.get("/findings")
-    async def api_loom_list_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Project-wide findings list — ``ListResponse[ScanFindingWeft]``.
 
         Weft-only (no classic dashboard counterpart at this path).
@@ -759,7 +759,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
     @router.get("/findings/{finding_id}/dossier")
-    async def api_loom_finding_dossier(finding_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_finding_dossier(finding_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Return finding, file, linked issue, file associations, and entity bindings."""
         try:
             finding = db.get_finding(finding_id)
@@ -800,7 +800,7 @@ def create_weft_router() -> APIRouter:
         )
 
     @router.get("/session-evidence")
-    async def api_loom_session_evidence(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_session_evidence(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """V0 session evidence bundle by actor and optional time window."""
         params = request.query_params
         actor = params.get("actor", "")
@@ -881,7 +881,7 @@ def create_weft_router() -> APIRouter:
         )
 
     @router.post("/findings/promote")
-    async def api_loom_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Promote a finding to a tracked issue, keyed by ``(scan_source, fingerprint)``.
 
         This is the HTTP surface Wardline's ``file_finding`` posts to (A2): an
@@ -959,7 +959,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(result)
 
     @router.post("/findings/promote-and-attach")
-    async def api_loom_promote_finding_and_attach(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_promote_finding_and_attach(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Promote a finding by fingerprint and attach an opaque entity binding."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1014,7 +1014,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(result)
 
     @router.post("/findings/clean-stale")
-    async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Retention sweep — soft-archive stale ``unseen_in_latest`` findings.
 
         Federation surface over the existing core ``clean_stale_findings``
@@ -1098,7 +1098,7 @@ def create_weft_router() -> APIRouter:
                 "scan_source": scan_source,
                 "older_than_days": older_than_days,
                 # Degradation signal from the best-effort finding→issue cascade.
-                # Mirrors the loom scan-results envelope, which also lifts
+                # Mirrors the weft scan-results envelope, which also lifts
                 # ``warnings`` to the top level — so a federation consumer learns
                 # a cascade close partially failed instead of it dying in logs.
                 "warnings": result["warnings"],
@@ -1106,7 +1106,7 @@ def create_weft_router() -> APIRouter:
         )
 
     @router.get("/scanners")
-    async def api_loom_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List registered scanner configs — ``ListResponse[ScannerWeft]``.
 
         Weft-only (no classic dashboard counterpart). Drops MCP's
@@ -1135,12 +1135,12 @@ def create_living_surface_router() -> APIRouter:
 
     Per ``docs/federation/contracts.md``, the living surface at
     ``/api/*`` (no generation prefix) aliases the current recommended
-    generation — as of 2026-04-26 that is loom. Living-surface aliases
+    generation — as of 2026-04-26 that is weft. Living-surface aliases
     are added per-endpoint in Phase C wherever there is no classic
     counterpart at the same path (so no ambiguity is created for
     pre-2.0 callers).
 
-    Phase C1: ``POST /api/scan-results`` aliases the loom handler.
+    Phase C1: ``POST /api/scan-results`` aliases the weft handler.
     Classic publishes ``POST /api/v1/scan-results`` (different path), so
     the alias is unambiguous.
     """
@@ -1154,7 +1154,7 @@ def create_living_surface_router() -> APIRouter:
 
     @router.post("/scan-results")
     async def api_living_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Ingest scan results — living surface (loom envelope).
+        """Ingest scan results — living surface (weft envelope).
 
         Equivalent to /api/weft/scan-results as of 2026-04-26.
         """

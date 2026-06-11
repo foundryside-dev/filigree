@@ -364,21 +364,29 @@ A deployed config naming the registry backend `clarion` is migrated to
 `loomweave` on load via a one-shot rename-on-load shim — no manual edit is
 required, but new config should write `loomweave`.
 
-### What did **not** rename (do not "fix" these)
+### 3g. Registry error codes: `CLARION_*` → `LOOMWEAVE_*`
 
-Some Clarion/Loom-era names are intentionally **unchanged** in 3.0.0 because the
-federation hub has not locked their successors. Treat them as stable; do not
-migrate them:
+The registry error codes `CLARION_REGISTRY_VERSION_MISMATCH` and
+`CLARION_OUT_OF_SYNC` are emitted as **`LOOMWEAVE_REGISTRY_VERSION_MISMATCH`**
+and **`LOOMWEAVE_OUT_OF_SYNC`**. Consumers switching on error `code` must use
+the new names.
 
-- The registry error codes **`CLARION_REGISTRY_VERSION_MISMATCH`** and
-  **`CLARION_OUT_OF_SYNC`** — still emitted under these names.
-- The **`loom://`** URI scheme — unchanged.
+### 3h. URI scheme: `loom://` is gone; `weft://` is reserved, not live
+
+There is **no live federation URI scheme** in 3.0.0. The `loom://` scheme that
+2.x planning documents referenced was never implemented on the wire, and the
+federation hub formally closed the URI-scheme apparatus in favour of **SEI**
+(opaque stable entity identity) plus per-product association surfaces. The
+name **`weft://`** is reserved for future federation-level resources; do not
+parse or construct `loom://`/`weft://` URIs against this release. All internal
+`loom` naming (handler names, types, test fixtures under
+`tests/fixtures/contracts/weft/`) now reads `weft`.
 
 > A note on stored Legis signatures: rewriting the `loomweave:eid:` prefix
-> invalidated any Legis signature computed over the old `entity_ids`. Those
-> signatures are *stale-pending-reissue* until Legis re-signs. Filigree never
-> verifies them, so **reads do not break**; this is a Legis-side reconcile, not a
-> Filigree consumer action.
+> invalidates any Legis signature computed over old `entity_ids`. Nothing
+> pre-3.0.0 has shipped, so there is no released signature corpus to preserve —
+> signatures are cut fresh over the new IDs; no re-sign pass exists or is
+> needed. Filigree never verifies them, so **reads do not break** either way.
 
 ---
 

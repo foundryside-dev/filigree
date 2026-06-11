@@ -1,13 +1,13 @@
 """Weft-generation shape adapters.
 
 Adapters take internal domain results (from the ``filigree.db_*`` core
-layer) and produce the loom-generation wire shape. Per ADR-002 §6,
+layer) and produce the weft-generation wire shape. Per ADR-002 §6,
 adapters are **thin, data-only transformations**: they rename keys, move
 fields between nesting levels, and wrap results in the unified
 envelopes. They do not contain business logic.
 
-If a loom handler would need to branch on generation state (``if
-generation == "loom": ...``), the branch belongs in the handler layer,
+If a weft handler would need to branch on generation state (``if
+generation == "weft": ...``), the branch belongs in the handler layer,
 not here.
 """
 
@@ -42,11 +42,11 @@ from filigree.types.planning import CommentRecord
 
 
 def slim_issue_to_weft(issue: Issue) -> SlimIssueWeft:
-    """Project an ``Issue`` into the loom slim shape.
+    """Project an ``Issue`` into the weft slim shape.
 
     Renames ``id`` to ``issue_id`` per the Phase D vocabulary shift and
     keeps the same five-field projection as classic ``SlimIssue`` (title,
-    status, priority, type). Used by every loom batch handler whose
+    status, priority, type). Used by every weft batch handler whose
     ``succeeded`` and ``newly_unblocked`` lists return slim issues.
     """
     return SlimIssueWeft(
@@ -59,15 +59,15 @@ def slim_issue_to_weft(issue: Issue) -> SlimIssueWeft:
 
 
 def issue_to_weft(issue: Issue) -> IssueWeft:
-    """Project an ``Issue`` into the full loom-vocab issue shape.
+    """Project an ``Issue`` into the full weft-vocab issue shape.
 
     Mirrors ``Issue.to_dict()`` (returning ``IssueDict``) except the
     issue's own primary key is renamed ``id`` → ``issue_id``. Reference
     fields holding other issues' ids (``parent_id``, ``blocks``,
     ``blocked_by``, ``children``) keep their existing names per the
-    loom-vocabulary scope (only the entity's own primary key is renamed).
+    weft-vocabulary scope (only the entity's own primary key is renamed).
 
-    Used by every single-issue loom endpoint that returns a full issue
+    Used by every single-issue weft endpoint that returns a full issue
     projection (GET, PATCH, close, reopen, claim, release, claim-next,
     create).
     """
@@ -100,7 +100,7 @@ def issue_to_weft(issue: Issue) -> IssueWeft:
 
 
 def comment_record_to_weft(record: CommentRecord, *, created_at: ISOTimestamp | None = None) -> CommentRecordWeft:
-    """Project a classic ``CommentRecord`` (``id``) into the loom shape
+    """Project a classic ``CommentRecord`` (``id``) into the weft shape
     (``comment_id``).
 
     The ``created_at`` override exists because the dashboard's
@@ -117,7 +117,7 @@ def comment_record_to_weft(record: CommentRecord, *, created_at: ISOTimestamp | 
 
 
 def blocked_issue_to_weft(issue: Issue) -> BlockedIssueWeft:
-    """Project a blocked ``Issue`` into the loom shape with ``blocked_by``.
+    """Project a blocked ``Issue`` into the weft shape with ``blocked_by``.
 
     Used by ``GET /api/weft/blocked``. Mirrors classic ``BlockedIssue``
     (which extends ``SlimIssue``) but renames ``id`` → ``issue_id``.
@@ -133,7 +133,7 @@ def blocked_issue_to_weft(issue: Issue) -> BlockedIssueWeft:
 
 
 def file_record_to_weft(record: EnrichedFileItem) -> FileRecordWeft:
-    """Project an ``EnrichedFileItem`` into the loom file shape.
+    """Project an ``EnrichedFileItem`` into the weft file shape.
 
     Renames the file's primary key ``id`` → ``file_id`` and preserves the
     enriched fields (summary, associations_count, observation_count).
@@ -155,7 +155,7 @@ def file_record_to_weft(record: EnrichedFileItem) -> FileRecordWeft:
 
 
 def file_assoc_to_weft(record: IssueFileAssociation) -> FileAssocWeft:
-    """Project an ``IssueFileAssociation`` into the loom assoc shape.
+    """Project an ``IssueFileAssociation`` into the weft assoc shape.
 
     Renames the association row's primary key ``id`` → ``assoc_id``.
     Cross-entity refs ``file_id`` and ``issue_id`` keep their names.
@@ -173,7 +173,7 @@ def file_assoc_to_weft(record: IssueFileAssociation) -> FileAssocWeft:
 
 
 def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
-    """Project a ``ScanFindingDict`` into the loom finding shape.
+    """Project a ``ScanFindingDict`` into the weft finding shape.
 
     Renames the finding's primary key ``id`` → ``finding_id``. Used by
     ``GET /api/weft/findings``.
@@ -207,7 +207,7 @@ def scan_finding_to_weft(record: ScanFindingDict) -> ScanFindingWeft:
 
 
 def observation_to_weft(record: ObservationDict) -> ObservationWeft:
-    """Project an ``ObservationDict`` into the loom observation shape.
+    """Project an ``ObservationDict`` into the weft observation shape.
 
     Renames the observation's primary key ``id`` → ``observation_id``.
     Used by ``GET /api/weft/observations``.
@@ -228,7 +228,7 @@ def observation_to_weft(record: ObservationDict) -> ObservationWeft:
 
 
 def scanner_config_to_weft(config: ScannerConfig) -> ScannerWeft:
-    """Project a ``ScannerConfig`` into the loom scanner shape.
+    """Project a ``ScannerConfig`` into the weft scanner shape.
 
     Mirrors ``ScannerConfig.to_dict()`` exactly. ``name`` is the
     scanner's primary key but is already string-named, so no rename
@@ -242,7 +242,7 @@ def scanner_config_to_weft(config: ScannerConfig) -> ScannerWeft:
 
 
 def pack_to_weft(pack: WorkflowPack) -> PackWeft:
-    """Project a ``WorkflowPack`` into the loom packs-list shape.
+    """Project a ``WorkflowPack`` into the weft packs-list shape.
 
     Mirrors MCP's ``PackListItem``. ``pack`` is the entity's logical
     primary key; not renamed. Used by ``GET /api/weft/packs``.
@@ -258,7 +258,7 @@ def pack_to_weft(pack: WorkflowPack) -> PackWeft:
 
 
 def type_template_to_weft(template: TypeTemplate) -> TypeSummaryWeft:
-    """Project a ``TypeTemplate`` into the loom types-list shape.
+    """Project a ``TypeTemplate`` into the weft types-list shape.
 
     Matches the classic ``/api/types`` projection (4 keys). Used by
     ``GET /api/weft/types``.
@@ -272,7 +272,7 @@ def type_template_to_weft(template: TypeTemplate) -> TypeSummaryWeft:
 
 
 def issue_event_to_weft(record: EventRecord) -> IssueEventWeft:
-    """Project an ``EventRecord`` into the loom event shape.
+    """Project an ``EventRecord`` into the weft event shape.
 
     Renames the event row's primary key ``id`` → ``event_id``. Used by
     ``GET /api/weft/issues/{issue_id}/events``. The ``issue_id`` field
@@ -291,7 +291,7 @@ def issue_event_to_weft(record: EventRecord) -> IssueEventWeft:
 
 
 def change_record_to_weft(record: EventRecordWithTitle) -> ChangeRecordWeft:
-    """Project an ``EventRecordWithTitle`` into the loom change shape.
+    """Project an ``EventRecordWithTitle`` into the weft change shape.
 
     Same as ``issue_event_to_weft`` but includes the joined
     ``issue_title``. Used by ``GET /api/weft/changes``.
@@ -340,10 +340,10 @@ def list_response(items: list[Any], *, limit: int, offset: int, total: int | Non
 
 
 def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWeft:
-    """Transform an internal ``ScanIngestResult`` into the loom response shape.
+    """Transform an internal ``ScanIngestResult`` into the weft response shape.
 
     - ``new_finding_ids`` → ``succeeded`` (the generic batch wrapper's
-      success list; loom's succeeded type is ``list[str]``).
+      success list; weft's succeeded type is ``list[str]``).
     - ``files_created`` / ``files_updated`` / ``findings_created`` /
       ``findings_updated`` / ``observations_created`` /
       ``observations_failed`` → ``stats`` sibling.

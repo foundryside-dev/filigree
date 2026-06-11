@@ -1,18 +1,18 @@
-"""Opt-in bearer-token authentication for the loom federation surface.
+"""Opt-in bearer-token authentication for the weft federation surface.
 
 Filigree's HTTP API is loopback-only and historically performs no inbound
 auth (ADR-012: the transport is the trust boundary). When an operator sets
 ``WEFT_FEDERATION_TOKEN`` (or the deprecated aliases ``FILIGREE_FEDERATION_API_TOKEN``
-/ ``FILIGREE_API_TOKEN``), this module gates the **loom federation surface** (``/api/weft/*`` plus the
+/ ``FILIGREE_API_TOKEN``), this module gates the **weft federation surface** (``/api/weft/*`` plus the
 living-surface federation aliases), scanner ingest aliases, and dashboard MCP
 HTTP endpoint behind a bearer token, while leaving the classic dashboard API
 and the local dashboard UI open.
 
-Design: docs/superpowers/specs/2026-06-03-loom-bearer-token-auth-design.md
+Design: docs/superpowers/specs/2026-06-03-weft-bearer-token-auth-design.md
 ADR-018 (the decision); ADR-012 (the threat model this partially lifts).
 
-The loom-route enforcement is **opt-in**: with the env var unset, ``create_app``
-does not install the middleware for loom routes. The high-privilege MCP HTTP
+The weft-route enforcement is **opt-in**: with the env var unset, ``create_app``
+does not install the middleware for weft routes. The high-privilege MCP HTTP
 transport is stricter: it is only mounted when this bearer token exists.
 """
 
@@ -27,17 +27,17 @@ if TYPE_CHECKING:
     from starlette.middleware.base import BaseHTTPMiddleware
 
 #: Living-surface paths (trailing segment, no ``/api`` prefix) that route to the
-#: loom generation and must be enforced alongside ``/api/weft/*``. Add new
+#: weft generation and must be enforced alongside ``/api/weft/*``. Add new
 #: federation-write aliases here when living-surface routers grow.
 LIVING_FEDERATION_ALIASES: frozenset[str] = frozenset({"scan-results", "observations"})
 CLASSIC_FEDERATION_ALIASES: frozenset[str] = frozenset({"v1/scan-results", "v1/observations"})
 
 
-def is_loom_scoped_path(path: str) -> bool:
-    """Return True when *path* is part of the loom federation surface.
+def is_weft_scoped_path(path: str) -> bool:
+    """Return True when *path* is part of the weft federation surface.
 
     Strips the ``/api`` root and an optional server-mode ``/p/{key}`` segment,
-    then matches the loom prefix or a living federation alias. The classic
+    then matches the weft prefix or a living federation alias. The classic
     surface (``/api/issue/...``), the root dashboard, and ``/api/health`` are
     out of scope. Scanner callback aliases and the dashboard-mounted MCP HTTP
     endpoint are gated by the same token because they accept agent/federation
@@ -59,7 +59,7 @@ def extract_federation_scope(path: str, project_query: str | None) -> str | None
     """Resolve the project key a federation request is scoped to, or ``None``.
 
     Returns the ``/api/p/{key}`` path segment when present; otherwise the
-    ``?project=`` query value when *path* is part of the loom federation surface
+    ``?project=`` query value when *path* is part of the weft federation surface
     (uniform with how ``/mcp`` is scoped by its ASGI wrapper); otherwise ``None``
     (unscoped → falls back to the daemon's default project for reads, or fails
     closed for writes). Used to scope routing (the request ContextVar) and auth
@@ -70,7 +70,7 @@ def extract_federation_scope(path: str, project_query: str | None) -> str | None
         if len(parts) >= 4 and parts[3]:
             return parts[3]
         return None
-    if project_query and is_loom_scoped_path(path):
+    if project_query and is_weft_scoped_path(path):
         key = project_query.strip()
         return key or None
     return None
@@ -107,11 +107,11 @@ def build_auth_middleware(
     env_pin: str = "",
     project_token_resolver: Callable[[str], str] | None = None,
 ) -> type[BaseHTTPMiddleware]:
-    """Build a middleware class that gates the loom surface behind a bearer token.
+    """Build a middleware class that gates the weft surface behind a bearer token.
 
     Only called when an operator has configured a non-empty token, so the
     middleware always has a real secret to compare against. Comparisons are
-    constant-time (``hmac.compare_digest``). Non-loom paths and CORS preflight
+    constant-time (``hmac.compare_digest``). Non-weft paths and CORS preflight
     (``OPTIONS``) pass straight through.
 
     Scope-aware validation (server mode). A request carrying an explicit project
@@ -146,7 +146,7 @@ def build_auth_middleware(
 
     class BearerTokenAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-            if request.method == "OPTIONS" or not is_loom_scoped_path(request.url.path):
+            if request.method == "OPTIONS" or not is_weft_scoped_path(request.url.path):
                 return await call_next(request)
             provided = _extract_bearer(request.headers.get("Authorization"))
             if provided is None:

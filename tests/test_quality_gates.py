@@ -82,7 +82,7 @@ def test_ci_has_required_loomweave_contract_lane() -> None:
     assert "tests/unit/test_registry.py" in workflow
     assert "tests/api/test_registry_backend_integration.py" in workflow
     assert "tests/core/test_registry_backend_matrix.py" in workflow
-    assert "tests/api/test_loom_auth.py" in workflow
+    assert "tests/api/test_weft_auth.py" in workflow
     assert "tests/federation/test_sei_conformance_oracle.py" in workflow
 
 

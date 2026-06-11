@@ -115,7 +115,7 @@ ADR-012 would blur a stable record with an in-flight one.
 ## Related Decisions
 
 - **Extends**: [ADR-012: Actor Identity Threat Model](./ADR-012-actor-identity-threat-model.md) — ADR-012 is the threat model; this ADR records the 3.0.0 decision to defer verification and surface the posture.
-- **Related to**: [ADR-018: Loom Bearer-Token Auth](./ADR-018-loom-bearer-token-auth.md) — the federation token (`WEFT_FEDERATION_TOKEN`) authenticates the *transport*; transport-bound *actor* identity (this ADR) is the next layer up and depends on it settling.
+- **Related to**: [ADR-018: Loom Bearer-Token Auth](./ADR-018-weft-bearer-token-auth.md) — the federation token (`WEFT_FEDERATION_TOKEN`) authenticates the *transport*; transport-bound *actor* identity (this ADR) is the next layer up and depends on it settling.
 
 ## References
 

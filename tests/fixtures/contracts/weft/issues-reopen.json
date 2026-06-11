@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "contract": "filigree-weft",
+    "stability": "Frozen for the weft-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
+    "authority": [
+      "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md",
+      "docs/plans/2026-04-24-2.0-federation-work-package.md"
+    ],
+    "pinning_discipline": "shape reference; see docs/federation/contracts.md",
+    "updated": "2026-04-26",
+    "endpoint": "POST /api/weft/issues/{issue_id}/reopen",
+    "status": "live as of Phase C3.",
+    "relation_to_classic": "Same request shape; response shape changes from IssueDict to IssueWeft."
+  },
+  "shape_decl": {
+    "request_type": "{actor?: str}",
+    "response_type": "IssueWeft",
+    "rationale": "Re-opens a closed issue and returns the post-transition projection."
+  },
+  "examples": [
+    {
+      "name": "error_not_found",
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/issues/genp-deadbeef00/reopen",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {}
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "error": "Issue not found: genp-deadbeef00",
+          "code": "NOT_FOUND"
+        }
+      }
+    }
+  ]
+}

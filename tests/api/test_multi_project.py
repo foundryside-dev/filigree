@@ -805,8 +805,8 @@ class TestServerModeCrossProjectReadBlocking:
         assert "bravo" not in body["error"]
         assert "alpha" not in body["error"]
 
-    async def test_dashboard_server_mode_blocks_cross_project_loom_read(self, multi_client: AsyncClient) -> None:
-        """The loom mirror enforces the same guard."""
+    async def test_dashboard_server_mode_blocks_cross_project_weft_read(self, multi_client: AsyncClient) -> None:
+        """The weft mirror enforces the same guard."""
         from filigree.core import WrongProjectError
 
         resp = await multi_client.get("/api/p/alpha/weft/issues/bravo-deadbeef00")

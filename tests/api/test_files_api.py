@@ -16,8 +16,8 @@ from tests.conftest import PopulatedDB
 
 _OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
 
-_CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "findings-clean-stale.json"
-_SCAN_RESULTS_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "scan-results.json"
+_CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "weft" / "findings-clean-stale.json"
+_SCAN_RESULTS_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "weft" / "scan-results.json"
 
 
 class TestFilesSchemaAPI:
@@ -249,7 +249,7 @@ class TestUnknownScanRunIdContract:
     not only at the core-method level (TestScanRunsAPI / TestGetScanRunsCore).
 
     If this class ever needs to change, the federation contract changed: update
-    docs/federation/contracts.md §F6 and notify Loom consumers before merging.
+    docs/federation/contracts.md §F6 and notify Weft consumers before merging.
     """
 
     async def test_unknown_scan_run_id_ingests_with_200(self, client: AsyncClient) -> None:
@@ -471,7 +471,7 @@ class TestWeftFindingsKindSuppressionFilters:
 
 
 class TestScanResultsFingerprintAPI:
-    """Wardline-supplied fingerprint over the wire (Loom §3.B).
+    """Wardline-supplied fingerprint over the wire (Weft §3.B).
 
     Exercises the native-emitter contract path — POST /api/weft/scan-results —
     rather than only the in-process db call, so the body parser and dedup wire
@@ -479,7 +479,7 @@ class TestScanResultsFingerprintAPI:
     resolution works with no Loomweave present (brief §3.C composability).
     """
 
-    async def test_fingerprint_dedup_over_loom_endpoint(self, client: AsyncClient) -> None:
+    async def test_fingerprint_dedup_over_weft_endpoint(self, client: AsyncClient) -> None:
         body = {
             "scan_source": "wardline",
             "findings": [
@@ -634,10 +634,10 @@ class TestScanResultsFingerprintAPI:
         assert wardline_example["response"]["body"]["stats"]["findings_created"] == 1
 
 
-class TestLoomCleanStaleFindingsAPI:
+class TestWeftCleanStaleFindingsAPI:
     """POST /api/weft/findings/clean-stale — federation retention surface.
 
-    Thin loom HTTP adapter over the core ``clean_stale_findings`` (ADR-015).
+    Thin weft HTTP adapter over the core ``clean_stale_findings`` (ADR-015).
     Soft retention: stale ``unseen_in_latest`` findings move to ``fixed``,
     scoped to a single ``scan_source``. Reuses the existing core method —
     these tests assert the wire contract and the scan_source-isolation /
@@ -848,7 +848,7 @@ class TestLoomCleanStaleFindingsAPI:
         assert set(body.keys()) >= {"error", "code"}
 
 
-class TestLoomPromoteFindingAPI:
+class TestWeftPromoteFindingAPI:
     """POST /api/weft/findings/promote — Wardline A2 promote-by-fingerprint.
 
     HTTP surface over the idempotent core ``promote_finding_to_issue``, keyed on

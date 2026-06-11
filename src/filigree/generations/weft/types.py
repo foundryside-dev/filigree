@@ -1,13 +1,13 @@
 """Weft-generation response types.
 
-Per ADR-002 §6, loom wraps internal results in the unified envelopes
+Per ADR-002 §6, weft wraps internal results in the unified envelopes
 defined in ``filigree.types.api``. Endpoint-specific response types that
 extend those envelopes (e.g. scan-results, which adds a counts sibling
 and top-level warnings on top of the batch wrapper) are declared here.
 
 Kept intentionally small: each TypedDict maps 1:1 to a fixture in
-``tests/fixtures/contracts/loom/`` and is the single source of truth for
-that endpoint's loom wire shape. If a type has no fixture companion, it
+``tests/fixtures/contracts/weft/`` and is the single source of truth for
+that endpoint's weft wire shape. If a type has no fixture companion, it
 does not belong here.
 """
 
@@ -28,11 +28,11 @@ from filigree.types.files import FindingsSummary
 
 
 class SlimIssueWeft(TypedDict):
-    """Slim issue projection for the loom generation.
+    """Slim issue projection for the weft generation.
 
     Key difference from ``filigree.types.api.SlimIssue``: ``issue_id``
     replaces ``id`` per the Phase D vocabulary shift. Populated by the
-    loom issue adapters in Phase C3 and later.
+    weft issue adapters in Phase C3 and later.
     """
 
     issue_id: str
@@ -66,10 +66,10 @@ class BatchCloseResponseWeft(TypedDict):
     both projections the handler may emit (see C5 in
     ``docs/federation/contracts.md``). ``newly_unblocked`` stays
     ``SlimIssueWeft`` regardless of ``response_detail`` per the locked
-    C5 rule, and uses the loom vocabulary (``issue_id``) like every
-    other loom-shaped issue.
+    C5 rule, and uses the weft vocabulary (``issue_id``) like every
+    other weft-shaped issue.
 
-    Pinned by ``tests/fixtures/contracts/loom/batch-close.json`` and
+    Pinned by ``tests/fixtures/contracts/weft/batch-close.json`` and
     the contract test in ``tests/api/test_envelope_types.py``.
     """
 
@@ -86,18 +86,18 @@ class IssueWeft(TypedDict):
     ``id``. Reference fields that hold *other* issues' ids
     (``parent_id``, ``blocks``, ``blocked_by``, ``children``) keep
     their existing names — only the entity's own primary key is
-    renamed per the loom vocabulary.
+    renamed per the weft vocabulary.
 
     ``data_warnings`` contains non-fatal response warnings, including
     soft-transition advisories returned by mutation endpoints.
 
-    Used as the canonical response shape for every single-issue loom
+    Used as the canonical response shape for every single-issue weft
     endpoint in Phase C3 (GET, PATCH, close, reopen, claim, release,
     claim-next, create). Endpoints with optional enrichment use the
     ``WithFiles`` / ``WithUnblocked`` subtypes below; otherwise
     consumers see exactly this 23-field projection.
 
-    Pinned by ``tests/fixtures/contracts/loom/issues-*.json``.
+    Pinned by ``tests/fixtures/contracts/weft/issues-*.json``.
     """
 
     issue_id: str
@@ -125,20 +125,20 @@ class IssueWeft(TypedDict):
     data_warnings: list[str]
 
 
-class IssueLoomWithFiles(IssueWeft):
+class IssueWeftWithFiles(IssueWeft):
     """``IssueWeft`` + ``files``: the response shape returned when
     ``GET /api/weft/issues/{issue_id}?include_files=true``.
 
     The ``files`` payload mirrors what ``db.get_issue_files()`` returns —
     a list of file-association rows. Weft does not yet declare a
     dedicated ``FileAssocWeft`` TypedDict; phase D may tighten this
-    when the file surface is loom-ified.
+    when the file surface is weft-ified.
     """
 
     files: list[dict[str, Any]]
 
 
-class IssueLoomWithUnblocked(IssueWeft):
+class IssueWeftWithUnblocked(IssueWeft):
     """``IssueWeft`` + ``newly_unblocked``: returned by close-issue
     when at least one issue became ready as a result. Mirrors MCP's
     ``IssueWithUnblocked`` semantics but uses ``SlimIssueWeft``
@@ -149,10 +149,10 @@ class IssueLoomWithUnblocked(IssueWeft):
 
 
 class CommentRecordWeft(TypedDict):
-    """Comment row in the loom vocabulary.
+    """Comment row in the weft vocabulary.
 
     Classic ``CommentRecord`` uses ``id`` for the comment's own primary
-    key; loom renames it to ``comment_id`` for the same reason
+    key; weft renames it to ``comment_id`` for the same reason
     ``SlimIssue.id`` becomes ``SlimIssueWeft.issue_id`` — entity
     primary keys are typed by entity name.
     """
@@ -167,11 +167,11 @@ class BlockedIssueWeft(SlimIssueWeft):
     """SlimIssueWeft + ``blocked_by`` for ``GET /api/weft/blocked``.
 
     Mirrors classic ``BlockedIssue`` (which extends ``SlimIssue``) but uses
-    the loom ``issue_id`` vocabulary for the entity primary key. Reference
-    ids in ``blocked_by`` keep their existing names per the loom-vocabulary
+    the weft ``issue_id`` vocabulary for the entity primary key. Reference
+    ids in ``blocked_by`` keep their existing names per the weft-vocabulary
     scope (only the entity's own primary key is renamed).
 
-    Pinned by ``tests/fixtures/contracts/loom/blocked.json``.
+    Pinned by ``tests/fixtures/contracts/weft/blocked.json``.
     """
 
     blocked_by: list[str]
@@ -184,10 +184,10 @@ class FileRecordWeft(TypedDict):
     associations_count + observation_count) except the file's own primary
     key is renamed ``id`` → ``file_id``. Defined independently rather than
     extending ``FileRecordDict`` because TypedDict inheritance cannot drop
-    the inherited ``id`` key — the loom wire shape must contain
+    the inherited ``id`` key — the weft wire shape must contain
     ``file_id`` exclusively.
 
-    Pinned by ``tests/fixtures/contracts/loom/files.json``.
+    Pinned by ``tests/fixtures/contracts/weft/files.json``.
     """
 
     file_id: str
@@ -209,9 +209,9 @@ class FileAssocWeft(TypedDict):
     Mirrors classic ``IssueFileAssociation`` except the association row's
     own primary key is renamed ``id`` → ``assoc_id``. The cross-entity
     references (``file_id``, ``issue_id``) keep their existing names per
-    the loom-vocabulary scope.
+    the weft-vocabulary scope.
 
-    Pinned by ``tests/fixtures/contracts/loom/issue-files.json``.
+    Pinned by ``tests/fixtures/contracts/weft/issue-files.json``.
     """
 
     assoc_id: int
@@ -235,7 +235,7 @@ class ScanFindingWeft(TypedDict):
     consumers reading this surface can tell a finding whose issue was dismissed
     (``not_a_bug``) from open work.
 
-    Pinned by ``tests/fixtures/contracts/loom/findings.json``.
+    Pinned by ``tests/fixtures/contracts/weft/findings.json``.
     """
 
     finding_id: str
@@ -272,7 +272,7 @@ class ObservationWeft(TypedDict):
     primary key is renamed ``id`` → ``observation_id``. Cross-entity refs
     (``file_id``, ``source_issue_id``) keep their existing names.
 
-    Pinned by ``tests/fixtures/contracts/loom/observations.json``.
+    Pinned by ``tests/fixtures/contracts/weft/observations.json``.
     """
 
     observation_id: str
@@ -293,9 +293,9 @@ class ScannerWeft(TypedDict):
 
     Mirrors the dict produced by ``ScannerConfig.to_dict()``. ``name`` is
     the scanner's primary key but is already a string-name (not a uuid),
-    so no rename is needed for the loom vocabulary.
+    so no rename is needed for the weft vocabulary.
 
-    Pinned by ``tests/fixtures/contracts/loom/scanners.json``.
+    Pinned by ``tests/fixtures/contracts/weft/scanners.json``.
     """
 
     name: str
@@ -310,9 +310,9 @@ class PackWeft(TypedDict):
     primary key; renaming it would harm readability (federation consumers
     branching on pack name still want to see ``pack``), so it is kept.
     Defined here rather than reused from ``filigree.types.api`` so the
-    loom surface owns its wire shape independently.
+    weft surface owns its wire shape independently.
 
-    Pinned by ``tests/fixtures/contracts/loom/packs.json``.
+    Pinned by ``tests/fixtures/contracts/weft/packs.json``.
     """
 
     pack: str
@@ -328,9 +328,9 @@ class TypeSummaryWeft(TypedDict):
 
     Mirrors the classic ``/api/types`` shape. ``type`` is the entity's
     logical primary key (a string name like ``task``); no rename per the
-    loom scope.
+    weft scope.
 
-    Pinned by ``tests/fixtures/contracts/loom/types.json``.
+    Pinned by ``tests/fixtures/contracts/weft/types.json``.
     """
 
     type: str
@@ -346,7 +346,7 @@ class IssueEventWeft(TypedDict):
     is renamed ``id`` → ``event_id``. ``issue_id`` is a cross-entity
     reference and keeps its name.
 
-    Pinned by ``tests/fixtures/contracts/loom/issue-events.json``.
+    Pinned by ``tests/fixtures/contracts/weft/issue-events.json``.
     """
 
     event_id: int
@@ -366,7 +366,7 @@ class ChangeRecordWeft(IssueEventWeft):
     matches the structural difference between ``EventRecord`` and
     ``EventRecordWithTitle`` in ``filigree.types.events``.
 
-    Pinned by ``tests/fixtures/contracts/loom/changes.json``.
+    Pinned by ``tests/fixtures/contracts/weft/changes.json``.
     """
 
     issue_title: str
@@ -386,7 +386,7 @@ class ScanIngestResponseWeft(TypedDict):
     findings (classic called this ``new_finding_ids``). ``failed`` is
     always present as an empty list in 2.0; populated once per-finding
     ingest failure tracking lands (non-breaking addition). ``stats`` and
-    ``warnings`` are loom-specific additions on top of the batch
+    ``warnings`` are weft-specific additions on top of the batch
     envelope.
 
     Declared as a concrete ``TypedDict`` rather than subclassing
@@ -397,7 +397,7 @@ class ScanIngestResponseWeft(TypedDict):
     a required key. Scan ingestion never unblocks issues, so
     ``newly_unblocked`` is omitted entirely.
 
-    Pinned by ``tests/fixtures/contracts/loom/scan-results.json`` and the
+    Pinned by ``tests/fixtures/contracts/weft/scan-results.json`` and the
     contract test in ``tests/api/test_envelope_types.py``.
     """
 

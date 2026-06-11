@@ -1,6 +1,6 @@
 """Federation §5 audit for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
-The Loom federation doctrine (``loomweave/docs/suite/loom.md`` §5) names
+The Weft federation doctrine (``loomweave/docs/suite/weft.md`` §5) names
 three failure modes that the enrich-only rule must rule out:
 
   1. **Semantic coupling** — does Filigree depend on Loomweave to function?

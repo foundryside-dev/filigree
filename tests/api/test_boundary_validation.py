@@ -157,7 +157,7 @@ class TestPaginationOverflowBoundary:
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
-    async def test_loom_files_rejects_huge_min_findings_with_400(self, client: AsyncClient) -> None:
+    async def test_weft_files_rejects_huge_min_findings_with_400(self, client: AsyncClient) -> None:
         resp = await client.get("/api/weft/files", params={"min_findings": "9223372036854775808"})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"

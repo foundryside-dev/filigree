@@ -182,7 +182,7 @@ def test_invalid_transition_details_omits_uncomputed_transitions() -> None:
     }
 
 
-def test_scan_ingest_response_loom_concrete_shape() -> None:
+def test_scan_ingest_response_weft_concrete_shape() -> None:
     """Regression: subclassing ``BatchResponse[str]`` did two bad things at
     runtime — it (1) left ``succeeded`` as ``list[~_T]`` instead of
     ``list[str]`` because TypedDict + ``Generic`` substitution is not
@@ -212,7 +212,7 @@ def test_scan_ingest_response_loom_concrete_shape() -> None:
     assert ScanIngestResponseWeft.__optional_keys__ == frozenset()
 
 
-def test_batch_close_response_loom_succeeded_supports_full() -> None:
+def test_batch_close_response_weft_succeeded_supports_full() -> None:
     """Regression: ``BatchCloseResponseWeft.succeeded`` was pinned to
     ``list[SlimIssueWeft]`` even though the C5 contract (and the handler
     in ``dashboard_routes/issues.py``) returns full ``IssueWeft`` items

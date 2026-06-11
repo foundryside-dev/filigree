@@ -13,7 +13,7 @@ has its own subpackage here:
 Each subpackage contains:
 
 - ``types.py`` — generation-specific TypedDicts (classic may re-export
-  from ``filigree.types.api``; loom declares its own).
+  from ``filigree.types.api``; weft declares its own).
 - ``adapters.py`` — thin, data-only shape transformations from internal
   domain objects to the generation's wire shape. Adapters have no
   business logic; if you find yourself writing an ``if generation ==``

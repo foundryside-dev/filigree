@@ -156,7 +156,7 @@ def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_
     governed issue into a done-category status. Those surfaces historically
     skipped the gate — an ungated close-equivalent. This mirrors
     :func:`evaluate_closure_gate` for them, and is the single decision every
-    status-write surface (MCP/HTTP/loom/CLI, single and batch) routes through
+    status-write surface (MCP/HTTP/weft/CLI, single and batch) routes through
     so the policy cannot drift per verb.
 
     Returns ``PROCEED`` — making no network call and (beyond governance-off)

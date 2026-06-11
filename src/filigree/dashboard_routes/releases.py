@@ -176,10 +176,10 @@ def create_classic_router() -> APIRouter:
 
 
 def create_weft_router() -> APIRouter:
-    """Build the loom-generation APIRouter for release endpoints.
+    """Build the weft-generation APIRouter for release endpoints.
 
     Empty in Phase B of the 2.0 federation work package; Phase C fills
-    loom release endpoints as they are implemented. See ADR-002 for the
+    weft release endpoints as they are implemented. See ADR-002 for the
     generation framing and docs/federation/contracts.md for the stability
     guarantee.
     """

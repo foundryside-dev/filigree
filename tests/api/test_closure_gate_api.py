@@ -1,7 +1,7 @@
 """HTTP route tests for the Legis closure-gate (B5).
 
-Covers all four HTTP close surfaces — classic single, loom single, classic
-batch, loom batch. The Legis client is faked via
+Covers all four HTTP close surfaces — classic single, weft single, classic
+batch, weft batch. The Legis client is faked via
 ``filigree.governance.check_closure_gate``; no live Legis is contacted. An
 issue is made *governed* by attaching an entity-association with a non-null
 signature (the B1 column).
@@ -82,7 +82,7 @@ class TestClosureGateSingleClose:
         assert resp.status_code == 502, resp.text
         assert resp.json()["code"] == ErrorCode.INTERNAL
 
-    async def test_loom_single_close_governed_blocked_returns_409(
+    async def test_weft_single_close_governed_blocked_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
@@ -109,7 +109,7 @@ class TestClosureGateBatchClose:
         assert gov in error_ids
         assert next(e for e in body["errors"] if e["id"] == gov)["code"] == ErrorCode.CONFLICT
 
-    async def test_loom_batch_reports_blocked_in_failed(
+    async def test_weft_batch_reports_blocked_in_failed(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]
@@ -170,7 +170,7 @@ class TestClosureGateBatchClose:
 class TestStatusChangeGate:
     """C1: ``update_issue``/``batch_update`` reach the same data-layer close as
     ``close_issue`` (open→closed is a valid task transition), so the update
-    surfaces must consult the same gate. Covers classic + loom, single + batch."""
+    surfaces must consult the same gate. Covers classic + weft, single + batch."""
 
     async def test_classic_update_to_done_governed_blocked_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
@@ -222,7 +222,7 @@ class TestStatusChangeGate:
         assert resp.status_code == 502, resp.text
         assert resp.json()["code"] == ErrorCode.INTERNAL
 
-    async def test_loom_update_to_done_governed_blocked_returns_409(
+    async def test_weft_update_to_done_governed_blocked_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
@@ -248,7 +248,7 @@ class TestStatusChangeGate:
         assert gov in error_ids
         assert dashboard_db.db.get_issue(gov).status != "closed"
 
-    async def test_loom_batch_update_to_done_reports_blocked_in_failed(
+    async def test_weft_batch_update_to_done_reports_blocked_in_failed(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]

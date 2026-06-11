@@ -1,6 +1,6 @@
 """Inbound federation bearer token: 3-tier resolution + anchor-minted persistence.
 
-The federation bearer gates the loom federation surface (``/api/weft/*``, the
+The federation bearer gates the weft federation surface (``/api/weft/*``, the
 federation scanner/observation aliases) and the dashboard ``/mcp`` transport. It
 resolves in three tiers (highest precedence first):
 

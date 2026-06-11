@@ -231,7 +231,7 @@ def _validate_body_string_field(
 def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     """Validate the batch-update request body.
 
-    Shared by classic ``POST /api/batch/update`` and loom
+    Shared by classic ``POST /api/batch/update`` and weft
     ``POST /api/weft/batch/update``; both generations accept the same
     request shape (``issue_ids``, ``status``, ``priority``, ``assignee``,
     ``fields``, ``actor``). Returns the kwargs dict for
@@ -281,7 +281,7 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
 def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = None) -> dict[str, Any] | JSONResponse:
     """Validate the batch-close request body.
 
-    Shared by classic ``POST /api/batch/close`` and loom
+    Shared by classic ``POST /api/batch/close`` and weft
     ``POST /api/weft/batch/close``. Returns kwargs for ``db.batch_close``
     on success, or a 400 ``JSONResponse`` on error.
 
@@ -338,7 +338,7 @@ def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = N
 
 
 def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-    """Validate optional release-claim body fields shared by classic and loom."""
+    """Validate optional release-claim body fields shared by classic and weft."""
     if_held = body.get("if_held", False)
     if not isinstance(if_held, bool):
         return _error_response("if_held must be a boolean", ErrorCode.VALIDATION, 400)
@@ -1005,21 +1005,21 @@ def create_classic_router() -> APIRouter:
 
 
 def create_weft_router() -> APIRouter:
-    """Build the loom-generation APIRouter for issue, workflow, and
+    """Build the weft-generation APIRouter for issue, workflow, and
     dependency endpoints.
 
     Phase C2 mounts the batch endpoints (``/batch/update``,
     ``/batch/close``); Phase C3 adds the single-issue surface (GET,
     create, update, close, reopen, claim, release, claim-next,
     comments, dependencies). See ADR-002 for the generation framing
-    and ``tests/fixtures/contracts/loom/`` for the response-shape
+    and ``tests/fixtures/contracts/weft/`` for the response-shape
     pins.
 
-    Path conventions: loom uses ``/issues/{issue_id}`` (plural,
+    Path conventions: weft uses ``/issues/{issue_id}`` (plural,
     symmetric with the ``/issues`` collection); classic uses
     ``/issue/{issue_id}`` (singular). The two never collide so
     living-surface aliases at ``/api/issues/{issue_id}`` could land
-    later — they are deliberately not added in C3 to keep the loom
+    later — they are deliberately not added in C3 to keep the weft
     surface as the single recommended entry point until federation
     consumers stabilise.
     """
@@ -1044,12 +1044,12 @@ def create_weft_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/issues")
-    async def api_loom_list_issues(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_issues(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List issues — ``ListResponse[IssueWeft]`` with real pagination.
 
         Weft adds ``?limit=&offset=`` (default limit=100). Classic
         ``GET /api/issues`` returns every row in one shot and stays
-        unchanged. The loom variant overfetches by 1 to detect
+        unchanged. The weft variant overfetches by 1 to detect
         ``has_more`` without a separate COUNT query.
         """
         params = request.query_params
@@ -1068,7 +1068,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/ready")
-    async def api_loom_ready(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_ready(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Issues ready to work (no open blockers) — ``ListResponse[IssueWeft]``.
 
         Returns the full result set — ``get_ready()`` is unbounded today
@@ -1079,7 +1079,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/blocked")
-    async def api_loom_blocked(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_blocked(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Issues with at least one open blocker — ``ListResponse[BlockedIssueWeft]``.
 
         Weft-only (no classic counterpart). Returns the full result set
@@ -1091,7 +1091,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/search")
-    async def api_loom_search(
+    async def api_weft_search(
         request: Request,
         db: FiligreeDB = Depends(_get_db),
     ) -> JSONResponse:
@@ -1129,14 +1129,14 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=total))
 
     @router.get("/types")
-    async def api_loom_list_types(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_types(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List registered issue types — ``ListResponse[TypeSummaryWeft]``."""
         types = db.templates.list_types()
         items = [type_template_to_weft(t) for t in types]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/packs")
-    async def api_loom_list_packs(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_packs(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List enabled workflow packs — ``ListResponse[PackWeft]``.
 
         Weft-only (no classic dashboard counterpart). Mirrors MCP's
@@ -1147,7 +1147,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/comments")
-    async def api_loom_get_comments(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_get_comments(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Comments for an issue — ``ListResponse[CommentRecordWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) so missing
@@ -1168,7 +1168,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/events")
-    async def api_loom_get_issue_events(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_get_issue_events(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Event history for an issue — ``ListResponse[IssueEventWeft]``.
 
         ``db.get_issue_events`` validates the issue exists (raises
@@ -1194,7 +1194,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/issues/{issue_id}/files")
-    async def api_loom_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """File associations for an issue — ``ListResponse[FileAssocWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) — the
@@ -1213,8 +1213,8 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.post("/batch/update")
-    async def api_loom_batch_update(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Batch update issues — loom envelope.
+    async def api_weft_batch_update(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Batch update issues — weft envelope.
 
         ``response_detail=slim`` (default) keeps the historical C2 shape
         (``BatchResponse[SlimIssueWeft]``); ``response_detail=full``
@@ -1250,8 +1250,8 @@ def create_weft_router() -> APIRouter:
         )
 
     @router.post("/batch/close")
-    async def api_loom_batch_close(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Batch close issues — loom envelope.
+    async def api_weft_batch_close(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Batch close issues — weft envelope.
 
         ``response_detail=slim`` (default) returns ``SlimIssueWeft`` in
         ``succeeded[]``; ``response_detail=full`` returns ``IssueWeft``.
@@ -1297,8 +1297,8 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(response)
 
     @router.get("/issues/{issue_id}")
-    async def api_loom_get_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Get a single issue — IssueWeft (or IssueLoomWithFiles when
+    async def api_weft_get_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Get a single issue — IssueWeft (or IssueWeftWithFiles when
         ``include_files=true``).
 
         Weft defaults ``include_files`` to ``False`` (federation
@@ -1323,7 +1323,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(body)
 
     @router.post("/issues", status_code=201)
-    async def api_loom_create_issue(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_create_issue(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Create an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1373,7 +1373,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue), status_code=201)
 
     @router.patch("/issues/{issue_id}")
-    async def api_loom_update_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_update_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Update issue fields — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1438,9 +1438,9 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/close")
-    async def api_loom_close_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_close_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Close an issue — returns ``IssueWeft`` (or
-        ``IssueLoomWithUnblocked`` when at least one issue became ready
+        ``IssueWeftWithUnblocked`` when at least one issue became ready
         as a result, mirroring MCP ``close_issue``).
         """
         body = await _parse_json_body(request)
@@ -1494,7 +1494,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(result)
 
     @router.post("/issues/{issue_id}/reopen")
-    async def api_loom_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Reopen a closed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1514,7 +1514,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/claim")
-    async def api_loom_claim_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_claim_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Claim an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1541,7 +1541,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/release")
-    async def api_loom_release_claim(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_release_claim(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Release a claimed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
@@ -1573,7 +1573,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/claim-next")
-    async def api_loom_claim_next(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_claim_next(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Claim the highest-priority ready issue — returns ``IssueWeft``,
         or 404 ``ErrorCode.NOT_FOUND`` when nothing is ready (matching
         classic).
@@ -1601,7 +1601,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/comments", status_code=201)
-    async def api_loom_add_comment(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_add_comment(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Add a comment — returns ``CommentRecordWeft`` (``comment_id``
         replaces classic's ``id``).
         """
@@ -1647,9 +1647,9 @@ def create_weft_router() -> APIRouter:
         )
 
     @router.post("/issues/{issue_id}/dependencies")
-    async def api_loom_add_dependency(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_add_dependency(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Add a dependency. Body: ``{depends_on: str}``. Response:
-        ``{added: bool}`` (matches classic; the loom envelope adds no
+        ``{added: bool}`` (matches classic; the weft envelope adds no
         rename here because there are no entity primary keys to relabel).
         """
         body = await _parse_json_body(request)
@@ -1672,25 +1672,25 @@ def create_weft_router() -> APIRouter:
         return JSONResponse({"added": added})
 
     @router.delete("/issues/{issue_id}/dependencies/{dep_issue_id}")
-    async def api_loom_remove_dependency(
+    async def api_weft_remove_dependency(
         issue_id: str,
         dep_issue_id: str,
         actor: str = "dashboard",
         db: FiligreeDB = Depends(_get_db),
     ) -> JSONResponse:
-        """Remove a dependency. Path uses ``dep_issue_id`` (loom
+        """Remove a dependency. Path uses ``dep_issue_id`` (weft
         vocabulary); classic ``DELETE /api/issue/{id}/dependencies/{dep_id}``
         keeps its ``dep_id`` parameter name unchanged.
 
         Response: ``{removed: bool, issue_found: bool}``. ``removed`` is the
         classic boolean (an edge was actually deleted). ``issue_found`` is a
-        loom-only addition (wire-compatible per the contract's stability
+        weft-only addition (wire-compatible per the contract's stability
         clause): ``false`` exactly when a referenced issue does not exist, so
         a caller can distinguish a typo'd id from a genuinely-absent edge
         without parsing the server log.
 
-        Idempotent at the wire layer per the loom contract
-        (tests/fixtures/contracts/loom/issues-dep-remove.json). Two distinct
+        Idempotent at the wire layer per the weft contract
+        (tests/fixtures/contracts/weft/issues-dep-remove.json). Two distinct
         cases both reach 200 ``{"removed": false}``, and they differ in kind:
 
         - **Edge absent, both issues exist:** ``remove_dependency`` returns

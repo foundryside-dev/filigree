@@ -130,7 +130,7 @@ def create_classic_router() -> APIRouter:
 
         ``signature``/``signoff_seq`` carry Legis's governed sign-off (v25/B1).
         This classic surface is transport-open (ADR-012: not enforced; transport
-        is the boundary — only ``/api/weft/*`` is loom-scoped). The sign-off is
+        is the boundary — only ``/api/weft/*`` is weft-scoped). The sign-off is
         stored **verbatim and never verified here** — Filigree holds no key; Legis
         is the sole verifier. Their semantic effect is functional, not a security
         gate: a *present* (non-null) ``signature`` flips the binding to

@@ -112,14 +112,16 @@ In brief:
   from the inbound `WEFT_FEDERATION_TOKEN` that gates this server's
   `/api/weft/*` + `/mcp` surface).
 - `registry_backend` config value `clarion` → `loomweave` (migrated on load).
-
-**Not renamed in 3.0.0** (intentionally — do not migrate these): the registry
-error codes `CLARION_REGISTRY_VERSION_MISMATCH` / `CLARION_OUT_OF_SYNC` and the
-`loom://` URI scheme.
+- Registry error codes `CLARION_REGISTRY_VERSION_MISMATCH` /
+  `CLARION_OUT_OF_SYNC` → `LOOMWEAVE_REGISTRY_VERSION_MISMATCH` /
+  `LOOMWEAVE_OUT_OF_SYNC`.
+- The `loom://` URI scheme is gone; **there is no live federation URI scheme**
+  (the hub closed it in favour of SEI). `weft://` is reserved, not active.
 
 ### What you must do
 
 - Repoint federation consumers from `/api/loom/*` to `/api/weft/*`.
+- Switch error-code handling from `CLARION_*` to `LOOMWEAVE_*`.
 - Export `WEFT_TOKEN` where a deployment previously set `CLARION_LOOM_TOKEN`.
 - No manual database or config edit is required — the v26 migration and the
   config rename-on-load shim handle the stored data.

@@ -640,8 +640,8 @@ class TestDashboardRoutesStructure:
             assert mod is not None
 
     def test_router_modules_expose_generation_factories(self) -> None:
-        """Each route module must expose both classic and loom router factories
-        per ADR-002's named-generations model. Phase B lands both; loom
+        """Each route module must expose both classic and weft router factories
+        per ADR-002's named-generations model. Phase B lands both; weft
         factories return empty APIRouters until Phase C fills them.
         """
         from filigree.dashboard_routes import analytics, files, issues, releases

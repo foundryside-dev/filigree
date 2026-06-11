@@ -55,7 +55,7 @@ class SlimIssue(TypedDict):
     """Reduced 5-key issue shape for search results and unblocked lists.
 
     Per Phase D3 of the 2.0 federation work package, the entity's own
-    primary key is named ``issue_id`` (matching the loom vocabulary used
+    primary key is named ``issue_id`` (matching the weft vocabulary used
     by ``SlimIssueWeft`` since Phase C). Cross-entity references inside
     response payloads (``parent_id``, ``blocks``, ``blocked_by``,
     ``children``) keep their existing names — only the entity's own

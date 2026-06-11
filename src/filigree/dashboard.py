@@ -185,7 +185,7 @@ def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) ->
             "note": "The local dashboard UI remains open under the loopback trust boundary.",
         },
         # ADR-012 actor-verification posture for the HTTP transport. Writes via any
-        # dashboard/loom HTTP route are unverified: the `actor` field is a
+        # dashboard/weft HTTP route are unverified: the `actor` field is a
         # self-asserted claim and verified_actor/verified_author land NULL (only
         # CLI / MCP-stdio stamp a transport-verified actor). Surfaced here — the
         # canonical posture surface — so the dropped verification is discoverable
@@ -679,12 +679,12 @@ def _create_project_router() -> APIRouter:
     - **classic** — every currently-existing endpoint at its existing
       path (mostly unprefixed, with the ``POST /v1/scan-results``
       outlier). Frozen; no URL moves, no shape changes.
-    - **loom** — new in 2.0, attached under a ``/loom`` sub-prefix so
+    - **weft** — new in 2.0, attached under a ``/weft`` sub-prefix so
       the full path becomes ``/api/weft/<endpoint>`` after the
       app-level ``/api`` prefix. Empty in Phase B of the federation
       work package; Phase C fills it endpoint-by-endpoint.
     - **living surface** — un-prefixed ``/api/<endpoint>`` aliases of
-      the current recommended generation (loom as of 2026-04-26), per
+      the current recommended generation (weft as of 2026-04-26), per
       ``docs/federation/contracts.md``. Added per-endpoint in Phase C
       where the path does not collide with classic. Each module
       contributes only the aliases it owns; only ``files`` participates
@@ -714,7 +714,7 @@ def _create_project_router() -> APIRouter:
     router.include_router(files.create_weft_router(), prefix="/weft")
     router.include_router(releases.create_weft_router(), prefix="/weft")
 
-    # Living surface — un-prefixed loom aliases; per-endpoint adoption.
+    # Living surface — un-prefixed weft aliases; per-endpoint adoption.
     router.include_router(files.create_living_surface_router())
     router.include_router(analytics.create_living_surface_router())
 
@@ -863,12 +863,12 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         allow_headers=["*"],
     )
 
-    # Opt-in bearer-token auth for the loom federation surface (ADR-018).
+    # Opt-in bearer-token auth for the weft federation surface (ADR-018).
     # Active only when WEFT_FEDERATION_TOKEN (or a deprecated FILIGREE_*_API_TOKEN
     # alias) is set; otherwise the middleware is not installed for
-    # loom routes. The MCP HTTP transport is never mounted without this token.
+    # weft routes. The MCP HTTP transport is never mounted without this token.
     # Added after CORS so CORS remains inner and still decorates
-    # classic/dashboard responses; loom OPTIONS preflight passes through.
+    # classic/dashboard responses; weft OPTIONS preflight passes through.
     app.state.auth_scope = _dashboard_auth_scope(federation_enabled=bool(_api_token), token_env=_api_token_env)
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
@@ -926,7 +926,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         # whole federation API makes /api/weft/… scope the same way /mcp does.
         from starlette.middleware.base import BaseHTTPMiddleware
 
-        from filigree.dashboard_auth import extract_federation_scope, is_loom_scoped_path
+        from filigree.dashboard_auth import extract_federation_scope, is_weft_scoped_path
         from filigree.dashboard_routes.common import _error_response
         from filigree.types.api import ErrorCode
 
@@ -959,7 +959,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                 # default-project resolution, so fail-closing it would break "close
                 # issue" from that view. /mcp is excluded — it carries protocol
                 # messages and self-scopes via ?project= at the transport.
-                is_federation = is_loom_scoped_path(path) and not is_mcp
+                is_federation = is_weft_scoped_path(path) and not is_mcp
                 if request.method not in ("GET", "HEAD", "OPTIONS") and is_federation:
                     return _error_response(
                         "Ambiguous federation write in server mode: scope to a project — use POST /api/p/{project_key}/weft/… or add ?project={key}.",

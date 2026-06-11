@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "contract": "filigree-weft",
+    "stability": "Frozen for the weft-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
+    "authority": [
+      "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md",
+      "docs/plans/2026-04-24-2.0-federation-work-package.md"
+    ],
+    "pinning_discipline": "shape reference; see docs/federation/contracts.md",
+    "updated": "2026-04-26",
+    "endpoint": "POST /api/weft/issues",
+    "status": "live as of Phase C3.",
+    "relation_to_classic": "Same request shape as classic POST /api/issues. Response shape changes from IssueDict to IssueWeft (issue_id replaces id)."
+  },
+  "shape_decl": {
+    "request_type": "{title: str, type?: str, priority?: int, parent_id?: str|null, assignee?: str, description?: str, notes?: str, fields?: dict, labels?: list[str], deps?: list[str], actor?: str}",
+    "response_type": "IssueWeft",
+    "rationale": "Returns the freshly created issue projected through issue_to_weft. Status 201 matches classic."
+  },
+  "examples": [
+    {
+      "name": "error_title_not_string",
+      "note": "Validation: title must be a string.",
+      "request": {
+        "method": "POST",
+        "path": "/api/weft/issues",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "title": 42
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "error": "title must be a string",
+          "code": "VALIDATION"
+        }
+      }
+    }
+  ]
+}

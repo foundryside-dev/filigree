@@ -1,4 +1,4 @@
-"""Wardline-supplied fingerprint as cross-run finding identity (Loom §3.B).
+"""Wardline-supplied fingerprint as cross-run finding identity (Weft §3.B).
 
 When a finding carries a non-empty ``fingerprint``, Filigree keys its
 lifecycle/seen_count on ``(scan_source, fingerprint)`` instead of the

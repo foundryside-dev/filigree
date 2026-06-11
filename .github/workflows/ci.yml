@@ -95,7 +95,7 @@ jobs:
           tests/unit/test_registry.py
           tests/api/test_registry_backend_integration.py
           tests/core/test_registry_backend_matrix.py
-          tests/api/test_loom_auth.py
+          tests/api/test_weft_auth.py
           tests/federation/test_sei_conformance_oracle.py
 
   live-loomweave:

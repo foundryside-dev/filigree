@@ -257,24 +257,24 @@ class TestClassicGenerationParityScanResults:
 
 
 # ---------------------------------------------------------------------------
-# Loom generation — scan-results (skip-placeholders until Phase C1)
+# Weft generation — scan-results (skip-placeholders until Phase C1)
 # ---------------------------------------------------------------------------
 
 
-_LOOM_SCAN_RESULTS_EXAMPLES = _examples_for("loom", "scan-results")
+_WEFT_SCAN_RESULTS_EXAMPLES = _examples_for("weft", "scan-results")
 
 
 @pytest.mark.asyncio
-class TestLoomGenerationParityScanResults:
-    """Loom scan-results parity. Mounted in Phase C1; each example in
-    ``tests/fixtures/contracts/loom/scan-results.json`` is replayed
+class TestWeftGenerationParityScanResults:
+    """Weft scan-results parity. Mounted in Phase C1; each example in
+    ``tests/fixtures/contracts/weft/scan-results.json`` is replayed
     against the live dashboard.
     """
 
     @pytest.mark.parametrize(
         "example",
-        _LOOM_SCAN_RESULTS_EXAMPLES,
-        ids=[e["name"] for e in _LOOM_SCAN_RESULTS_EXAMPLES],
+        _WEFT_SCAN_RESULTS_EXAMPLES,
+        ids=[e["name"] for e in _WEFT_SCAN_RESULTS_EXAMPLES],
     )
     async def test_example_matches_fixture(
         self,
@@ -304,19 +304,19 @@ class TestLoomGenerationParityScanResults:
 # ---------------------------------------------------------------------------
 
 
-_LIVING_SURFACE_EQUIV_EXAMPLES = [e for e in _LOOM_SCAN_RESULTS_EXAMPLES if e["response"]["status"] < 400]
+_LIVING_SURFACE_EQUIV_EXAMPLES = [e for e in _WEFT_SCAN_RESULTS_EXAMPLES if e["response"]["status"] < 400]
 
 
 @pytest.mark.asyncio
 class TestLivingSurfaceEquivalenceScanResults:
     """Pin that ``/api/scan-results`` (living-surface alias) and
     ``/api/weft/scan-results`` return the same response shape for the
-    same request body. Phase C1 living-surface decision per the loom
+    same request body. Phase C1 living-surface decision per the weft
     fixture — see ``docs/federation/contracts.md``.
 
     Equivalence is *structural* between the two live responses, not
     against the fixture (the fixture is already pinned by
-    ``TestLoomGenerationParityScanResults``). The shared-state caveat:
+    ``TestWeftGenerationParityScanResults``). The shared-state caveat:
     scan-results is state-mutating, so the second call sees the dedup
     result of the first; ``succeeded`` length and ``stats`` counters
     legitimately differ between the two calls even though the wire shape
@@ -332,38 +332,38 @@ class TestLivingSurfaceEquivalenceScanResults:
         _LIVING_SURFACE_EQUIV_EXAMPLES,
         ids=[e["name"] for e in _LIVING_SURFACE_EQUIV_EXAMPLES],
     )
-    async def test_living_matches_loom(
+    async def test_living_matches_weft(
         self,
         dashboard_surface: AsyncClient,
         example: dict[str, Any],
     ) -> None:
         body = example["request"]["body"]
-        loom_resp = await dashboard_surface.post("/api/weft/scan-results", json=body)
+        weft_resp = await dashboard_surface.post("/api/weft/scan-results", json=body)
         living_resp = await dashboard_surface.post("/api/scan-results", json=body)
-        assert loom_resp.status_code == living_resp.status_code, (
-            f"{example['name']}: loom={loom_resp.status_code} living={living_resp.status_code}"
+        assert weft_resp.status_code == living_resp.status_code, (
+            f"{example['name']}: weft={weft_resp.status_code} living={living_resp.status_code}"
         )
-        _assert_structural_equivalence(living_resp.json(), loom_resp.json(), path=example["name"])
+        _assert_structural_equivalence(living_resp.json(), weft_resp.json(), path=example["name"])
 
 
 # ---------------------------------------------------------------------------
-# Loom generation — batch/update (Phase C2)
+# Weft generation — batch/update (Phase C2)
 # ---------------------------------------------------------------------------
 
 
-_LOOM_BATCH_UPDATE_EXAMPLES = _examples_for("loom", "batch-update")
+_WEFT_BATCH_UPDATE_EXAMPLES = _examples_for("weft", "batch-update")
 
 
-_SLIM_ISSUE_LOOM_KEYS = frozenset({"issue_id", "title", "status", "priority", "type"})
+_SLIM_ISSUE_WEFT_KEYS = frozenset({"issue_id", "title", "status", "priority", "type"})
 
 
-def _assert_slim_issue_loom(item: Any, path: str = "$") -> None:
+def _assert_slim_issue_weft(item: Any, path: str = "$") -> None:
     """Assert ``item`` is a SlimIssueWeft (5 keys, all the expected types)."""
     assert isinstance(item, dict), f"{path}: expected dict, got {type(item).__name__}"
-    assert set(item.keys()) == _SLIM_ISSUE_LOOM_KEYS, (
+    assert set(item.keys()) == _SLIM_ISSUE_WEFT_KEYS, (
         f"{path}: SlimIssueWeft key-set mismatch; "
-        f"missing={_SLIM_ISSUE_LOOM_KEYS - set(item.keys())} "
-        f"extra={set(item.keys()) - _SLIM_ISSUE_LOOM_KEYS}"
+        f"missing={_SLIM_ISSUE_WEFT_KEYS - set(item.keys())} "
+        f"extra={set(item.keys()) - _SLIM_ISSUE_WEFT_KEYS}"
     )
     assert isinstance(item["issue_id"], str), f"{path}: issue_id must be str"
     assert isinstance(item["title"], str), f"{path}: title must be str"
@@ -374,8 +374,8 @@ def _assert_slim_issue_loom(item: Any, path: str = "$") -> None:
 
 
 @pytest.mark.asyncio
-class TestLoomGenerationParityBatchUpdate:
-    """Loom batch/update parity. Phase C2 mounts
+class TestWeftGenerationParityBatchUpdate:
+    """Weft batch/update parity. Phase C2 mounts
     ``POST /api/weft/batch/update`` returning ``BatchResponse[SlimIssueWeft]``.
 
     Fixture replay covers error envelopes and the all-missing 200 case
@@ -386,8 +386,8 @@ class TestLoomGenerationParityBatchUpdate:
 
     @pytest.mark.parametrize(
         "example",
-        _LOOM_BATCH_UPDATE_EXAMPLES,
-        ids=[e["name"] for e in _LOOM_BATCH_UPDATE_EXAMPLES],
+        _WEFT_BATCH_UPDATE_EXAMPLES,
+        ids=[e["name"] for e in _WEFT_BATCH_UPDATE_EXAMPLES],
     )
     async def test_example_matches_fixture(
         self,
@@ -416,7 +416,7 @@ class TestLoomGenerationParityBatchUpdate:
 
         Fixture replay can't populate ``succeeded`` (the fixture body uses
         non-existent ids), so this test seeds a real issue and asserts
-        the loom slim shape end-to-end.
+        the weft slim shape end-to-end.
         """
         create = await dashboard_surface.post("/api/issues", json={"title": "C2 batch update seed"})
         assert create.status_code in (200, 201), create.text
@@ -432,7 +432,7 @@ class TestLoomGenerationParityBatchUpdate:
         assert body["failed"] == []
         assert isinstance(body["succeeded"], list)
         assert len(body["succeeded"]) == 1
-        _assert_slim_issue_loom(body["succeeded"][0], path="succeeded[0]")
+        _assert_slim_issue_weft(body["succeeded"][0], path="succeeded[0]")
         assert body["succeeded"][0]["issue_id"] == issue_id
         assert body["succeeded"][0]["priority"] == 1
 
@@ -453,7 +453,7 @@ class TestLoomGenerationParityBatchUpdate:
         assert set(body.keys()) == {"succeeded", "failed"}, body
         assert body["failed"] == []
         assert len(body["succeeded"]) == 1
-        _assert_issue_loom_shape(body["succeeded"][0], path="succeeded[0]")
+        _assert_issue_weft_shape(body["succeeded"][0], path="succeeded[0]")
         assert body["succeeded"][0]["issue_id"] == issue_id
         assert body["succeeded"][0]["priority"] == 1
 
@@ -471,20 +471,20 @@ class TestLoomGenerationParityBatchUpdate:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert len(body["succeeded"]) == 1
-        _assert_slim_issue_loom(body["succeeded"][0], path="succeeded[0]")
+        _assert_slim_issue_weft(body["succeeded"][0], path="succeeded[0]")
 
 
 # ---------------------------------------------------------------------------
-# Loom generation — batch/close (Phase C2)
+# Weft generation — batch/close (Phase C2)
 # ---------------------------------------------------------------------------
 
 
-_LOOM_BATCH_CLOSE_EXAMPLES = _examples_for("loom", "batch-close")
+_WEFT_BATCH_CLOSE_EXAMPLES = _examples_for("weft", "batch-close")
 
 
 @pytest.mark.asyncio
-class TestLoomGenerationParityBatchClose:
-    """Loom batch/close parity. Phase C2 mounts
+class TestWeftGenerationParityBatchClose:
+    """Weft batch/close parity. Phase C2 mounts
     ``POST /api/weft/batch/close`` returning ``BatchCloseResponseWeft``
     (BatchResponse[SlimIssueWeft] plus optional ``newly_unblocked``).
 
@@ -495,8 +495,8 @@ class TestLoomGenerationParityBatchClose:
 
     @pytest.mark.parametrize(
         "example",
-        _LOOM_BATCH_CLOSE_EXAMPLES,
-        ids=[e["name"] for e in _LOOM_BATCH_CLOSE_EXAMPLES],
+        _WEFT_BATCH_CLOSE_EXAMPLES,
+        ids=[e["name"] for e in _WEFT_BATCH_CLOSE_EXAMPLES],
     )
     async def test_example_matches_fixture(
         self,
@@ -538,7 +538,7 @@ class TestLoomGenerationParityBatchClose:
         assert set(body.keys()) == {"succeeded", "failed"}
         assert body["failed"] == []
         assert len(body["succeeded"]) == 1
-        _assert_slim_issue_loom(body["succeeded"][0], path="succeeded[0]")
+        _assert_slim_issue_weft(body["succeeded"][0], path="succeeded[0]")
         assert body["succeeded"][0]["issue_id"] == issue_id
 
     async def test_newly_unblocked_populated_shape(self, dashboard_surface: AsyncClient) -> None:
@@ -566,7 +566,7 @@ class TestLoomGenerationParityBatchClose:
         assert isinstance(body["newly_unblocked"], list)
         assert len(body["newly_unblocked"]) == 1
         unblocked = body["newly_unblocked"][0]
-        _assert_slim_issue_loom(unblocked, path="newly_unblocked[0]")
+        _assert_slim_issue_weft(unblocked, path="newly_unblocked[0]")
         assert unblocked["issue_id"] == b_id
 
     async def test_force_bypasses_transition_check(self, dashboard_surface: AsyncClient) -> None:
@@ -630,7 +630,7 @@ class TestLoomGenerationParityBatchClose:
         body = resp.json()
         assert "newly_unblocked" not in body, "no dependents → newly_unblocked omitted"
         assert len(body["succeeded"]) == 1
-        _assert_issue_loom_shape(body["succeeded"][0], path="succeeded[0]")
+        _assert_issue_weft_shape(body["succeeded"][0], path="succeeded[0]")
         assert body["succeeded"][0]["status"] == "closed"
         assert body["succeeded"][0]["issue_id"] == issue_id
 
@@ -661,23 +661,23 @@ class TestLoomGenerationParityBatchClose:
         body = resp.json()
         assert set(body.keys()) == {"succeeded", "failed", "newly_unblocked"}, body
         assert len(body["succeeded"]) == 1
-        _assert_issue_loom_shape(body["succeeded"][0], path="succeeded[0]")
+        _assert_issue_weft_shape(body["succeeded"][0], path="succeeded[0]")
         assert body["succeeded"][0]["issue_id"] == a_id
 
         assert isinstance(body["newly_unblocked"], list)
         assert len(body["newly_unblocked"]) == 1
         unblocked = body["newly_unblocked"][0]
         # Locked C5 rule: newly_unblocked stays slim regardless of response_detail.
-        _assert_slim_issue_loom(unblocked, path="newly_unblocked[0]")
+        _assert_slim_issue_weft(unblocked, path="newly_unblocked[0]")
         assert unblocked["issue_id"] == b_id
 
 
 # ---------------------------------------------------------------------------
-# Loom generation — single-issue CRUD (Phase C3)
+# Weft generation — single-issue CRUD (Phase C3)
 # ---------------------------------------------------------------------------
 
 
-_LOOM_ISSUE_FIXTURE_SLUGS: list[str] = [
+_WEFT_ISSUE_FIXTURE_SLUGS: list[str] = [
     "issues-get",
     "issues-create",
     "issues-patch",
@@ -692,12 +692,12 @@ _LOOM_ISSUE_FIXTURE_SLUGS: list[str] = [
 ]
 
 
-_LOOM_ISSUE_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
-    (slug, ex) for slug in _LOOM_ISSUE_FIXTURE_SLUGS for ex in _examples_for("loom", slug)
+_WEFT_ISSUE_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
+    (slug, ex) for slug in _WEFT_ISSUE_FIXTURE_SLUGS for ex in _examples_for("weft", slug)
 ]
 
 
-_ISSUE_LOOM_KEYS: frozenset[str] = frozenset(
+_ISSUE_WEFT_KEYS: frozenset[str] = frozenset(
     {
         "issue_id",
         "title",
@@ -726,17 +726,17 @@ _ISSUE_LOOM_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _assert_issue_loom_shape(body: Any, *, path: str = "$") -> None:
+def _assert_issue_weft_shape(body: Any, *, path: str = "$") -> None:
     """Assert ``body`` is an ``IssueWeft`` (23 keys, types match the TypedDict).
 
     Allows extra keys to support the ``WithFiles`` / ``WithUnblocked`` subtypes
     (the test bodies that hit those paths assert the extra keys themselves).
     """
     assert isinstance(body, dict), f"{path}: expected dict, got {type(body).__name__}"
-    missing = _ISSUE_LOOM_KEYS - set(body.keys())
+    missing = _ISSUE_WEFT_KEYS - set(body.keys())
     assert not missing, f"{path}: IssueWeft missing keys {missing}; got {sorted(body.keys())}"
     assert isinstance(body["issue_id"], str), f"{path}: issue_id must be str"
-    assert "id" not in body, f"{path}: classic 'id' leaked into loom shape"
+    assert "id" not in body, f"{path}: classic 'id' leaked into weft shape"
     assert isinstance(body["title"], str), f"{path}: title must be str"
     assert isinstance(body["status"], str), f"{path}: status must be str"
     assert isinstance(body["status_category"], str), f"{path}: status_category must be str"
@@ -755,9 +755,9 @@ def _assert_issue_loom_shape(body: Any, *, path: str = "$") -> None:
 
 
 @pytest.mark.asyncio
-class TestLoomGenerationParityIssues:
+class TestWeftGenerationParityIssues:
     """Phase C3 single-issue CRUD parity. Each fixture in
-    ``tests/fixtures/contracts/loom/issues-*.json`` is replayed against
+    ``tests/fixtures/contracts/weft/issues-*.json`` is replayed against
     the live dashboard; status code + body shape (or error envelope)
     must match the fixture declaration.
 
@@ -765,14 +765,14 @@ class TestLoomGenerationParityIssues:
     that exercise the path/validation surface without seeded state.
     The populated-success ``IssueWeft`` shape and the
     ``newly_unblocked`` cascade are pinned by
-    ``test_full_lifecycle_pins_issue_loom_shape`` below, which seeds
+    ``test_full_lifecycle_pins_issue_weft_shape`` below, which seeds
     real issues and exercises the entire surface in one test.
     """
 
     @pytest.mark.parametrize(
         ("slug", "example"),
-        _LOOM_ISSUE_EXAMPLES,
-        ids=[f"{s}::{e['name']}" for s, e in _LOOM_ISSUE_EXAMPLES],
+        _WEFT_ISSUE_EXAMPLES,
+        ids=[f"{s}::{e['name']}" for s, e in _WEFT_ISSUE_EXAMPLES],
     )
     async def test_example_matches_fixture(
         self,
@@ -800,11 +800,11 @@ class TestLoomGenerationParityIssues:
         else:
             _assert_shape_matches(body, expected_resp["body"], path=f"{slug}::{example['name']}")
 
-    async def test_full_lifecycle_pins_issue_loom_shape(
+    async def test_full_lifecycle_pins_issue_weft_shape(
         self,
         dashboard_surface: AsyncClient,
     ) -> None:
-        """Seed two issues + a dependency, then exercise every loom CRUD
+        """Seed two issues + a dependency, then exercise every weft CRUD
         endpoint that returns an ``IssueWeft`` and assert the shape pin
         on each response. Covers what fixture replay can't seed.
         """
@@ -812,7 +812,7 @@ class TestLoomGenerationParityIssues:
         c_resp = await dashboard_surface.post("/api/weft/issues", json={"title": "blocker", "priority": 2})
         assert c_resp.status_code == 201, c_resp.text
         a_body = c_resp.json()
-        _assert_issue_loom_shape(a_body, path="create")
+        _assert_issue_weft_shape(a_body, path="create")
         a_id = a_body["issue_id"]
 
         c2 = await dashboard_surface.post("/api/weft/issues", json={"title": "blocked", "priority": 1})
@@ -822,33 +822,33 @@ class TestLoomGenerationParityIssues:
         # GET (default include_files=False)
         g = await dashboard_surface.get(f"/api/weft/issues/{a_id}")
         assert g.status_code == 200
-        _assert_issue_loom_shape(g.json(), path="get")
+        _assert_issue_weft_shape(g.json(), path="get")
         assert "files" not in g.json(), "include_files=false must omit files"
 
         # GET with include_files=true
         gf = await dashboard_surface.get(f"/api/weft/issues/{a_id}?include_files=true")
         assert gf.status_code == 200
         gf_body = gf.json()
-        _assert_issue_loom_shape(gf_body, path="get_with_files")
+        _assert_issue_weft_shape(gf_body, path="get_with_files")
         assert "files" in gf_body
         assert isinstance(gf_body["files"], list)
 
         # PATCH
         p = await dashboard_surface.patch(f"/api/weft/issues/{a_id}", json={"priority": 0})
         assert p.status_code == 200, p.text
-        _assert_issue_loom_shape(p.json(), path="patch")
+        _assert_issue_weft_shape(p.json(), path="patch")
         assert p.json()["priority"] == 0
 
         # CLAIM
         cl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/claim", json={"assignee": "tester"})
         assert cl.status_code == 200, cl.text
-        _assert_issue_loom_shape(cl.json(), path="claim")
+        _assert_issue_weft_shape(cl.json(), path="claim")
         assert cl.json()["assignee"] == "tester"
 
         # RELEASE
         rl = await dashboard_surface.post(f"/api/weft/issues/{a_id}/release", json={})
         assert rl.status_code == 200, rl.text
-        _assert_issue_loom_shape(rl.json(), path="release")
+        _assert_issue_weft_shape(rl.json(), path="release")
 
         # COMMENT (CommentRecordWeft shape)
         cm = await dashboard_surface.post(
@@ -873,39 +873,39 @@ class TestLoomGenerationParityIssues:
         cl2 = await dashboard_surface.post(f"/api/weft/issues/{a_id}/close", json={"reason": "done"})
         assert cl2.status_code == 200, cl2.text
         cl2_body = cl2.json()
-        _assert_issue_loom_shape(cl2_body, path="close")
+        _assert_issue_weft_shape(cl2_body, path="close")
         assert cl2_body["status"] == "closed"
         assert "newly_unblocked" in cl2_body, "newly_unblocked must be present when an issue was unblocked"
         assert isinstance(cl2_body["newly_unblocked"], list)
         assert len(cl2_body["newly_unblocked"]) == 1
-        _assert_slim_issue_loom(cl2_body["newly_unblocked"][0], path="close.newly_unblocked[0]")
+        _assert_slim_issue_weft(cl2_body["newly_unblocked"][0], path="close.newly_unblocked[0]")
         assert cl2_body["newly_unblocked"][0]["issue_id"] == b_id
 
         # REOPEN (no newly_unblocked since reopen is the inverse)
         ro = await dashboard_surface.post(f"/api/weft/issues/{a_id}/reopen", json={})
         assert ro.status_code == 200, ro.text
-        _assert_issue_loom_shape(ro.json(), path="reopen")
+        _assert_issue_weft_shape(ro.json(), path="reopen")
         assert ro.json()["status"] == "open"
 
         # CLAIM-NEXT (a is now ready again after reopen+release; expect IssueWeft)
         cn = await dashboard_surface.post("/api/weft/claim-next", json={"assignee": "tester2"})
         assert cn.status_code == 200, cn.text
-        _assert_issue_loom_shape(cn.json(), path="claim_next")
+        _assert_issue_weft_shape(cn.json(), path="claim_next")
         assert cn.json()["assignee"] == "tester2"
 
         # DEPENDENCY REMOVE (b → a) — both issues exist, edge exists, so
-        # removed=true and issue_found=true (the loom-only field).
+        # removed=true and issue_found=true (the weft-only field).
         dr = await dashboard_surface.delete(f"/api/weft/issues/{b_id}/dependencies/{a_id}")
         assert dr.status_code == 200, dr.text
         assert dr.json() == {"removed": True, "issue_found": True}
 
 
 # ---------------------------------------------------------------------------
-# Loom generation — list endpoints (Phase C4)
+# Weft generation — list endpoints (Phase C4)
 # ---------------------------------------------------------------------------
 
 
-_LOOM_LIST_FIXTURE_SLUGS: list[str] = [
+_WEFT_LIST_FIXTURE_SLUGS: list[str] = [
     "blocked",
     "issues",
     "ready",
@@ -923,8 +923,8 @@ _LOOM_LIST_FIXTURE_SLUGS: list[str] = [
 ]
 
 
-_LOOM_LIST_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
-    (slug, ex) for slug in _LOOM_LIST_FIXTURE_SLUGS for ex in _examples_for("loom", slug)
+_WEFT_LIST_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
+    (slug, ex) for slug in _WEFT_LIST_FIXTURE_SLUGS for ex in _examples_for("weft", slug)
 ]
 
 
@@ -951,16 +951,16 @@ def _assert_list_response_shape(body: Any, *, path: str = "$") -> None:
         assert "next_offset" not in body, f"{path}: next_offset must be omitted when has_more is False"
 
 
-_BLOCKED_ISSUE_LOOM_KEYS: frozenset[str] = frozenset({"issue_id", "title", "status", "priority", "type", "blocked_by"})
+_BLOCKED_ISSUE_WEFT_KEYS: frozenset[str] = frozenset({"issue_id", "title", "status", "priority", "type", "blocked_by"})
 
 
-def _assert_blocked_issue_loom(item: Any, *, path: str = "$") -> None:
+def _assert_blocked_issue_weft(item: Any, *, path: str = "$") -> None:
     """Assert ``item`` is a BlockedIssueWeft (SlimIssueWeft + blocked_by)."""
     assert isinstance(item, dict), f"{path}: expected dict, got {type(item).__name__}"
-    assert set(item.keys()) == _BLOCKED_ISSUE_LOOM_KEYS, (
+    assert set(item.keys()) == _BLOCKED_ISSUE_WEFT_KEYS, (
         f"{path}: BlockedIssueWeft key-set mismatch; "
-        f"missing={_BLOCKED_ISSUE_LOOM_KEYS - set(item.keys())} "
-        f"extra={set(item.keys()) - _BLOCKED_ISSUE_LOOM_KEYS}"
+        f"missing={_BLOCKED_ISSUE_WEFT_KEYS - set(item.keys())} "
+        f"extra={set(item.keys()) - _BLOCKED_ISSUE_WEFT_KEYS}"
     )
     assert isinstance(item["issue_id"], str), f"{path}: issue_id must be str"
     assert "id" not in item, f"{path}: classic 'id' leaked into BlockedIssueWeft"
@@ -970,9 +970,9 @@ def _assert_blocked_issue_loom(item: Any, *, path: str = "$") -> None:
 
 
 @pytest.mark.asyncio
-class TestLoomGenerationParityLists:
+class TestWeftGenerationParityLists:
     """Phase C4 list-endpoint parity. Each fixture in
-    ``tests/fixtures/contracts/loom/<list-endpoint>.json`` is replayed
+    ``tests/fixtures/contracts/weft/<list-endpoint>.json`` is replayed
     against the live dashboard; status code + body shape (or error
     envelope) must match the fixture declaration.
 
@@ -983,8 +983,8 @@ class TestLoomGenerationParityLists:
 
     @pytest.mark.parametrize(
         ("slug", "example"),
-        _LOOM_LIST_EXAMPLES,
-        ids=[f"{s}::{e['name']}" for s, e in _LOOM_LIST_EXAMPLES],
+        _WEFT_LIST_EXAMPLES,
+        ids=[f"{s}::{e['name']}" for s, e in _WEFT_LIST_EXAMPLES],
     )
     async def test_example_matches_fixture(
         self,
@@ -1034,7 +1034,7 @@ class TestLoomGenerationParityLists:
         blocked_ids = [item["issue_id"] for item in body["items"]]
         assert b_id in blocked_ids, f"expected {b_id} in blocked items, got {blocked_ids}"
         b_item = next(item for item in body["items"] if item["issue_id"] == b_id)
-        _assert_blocked_issue_loom(b_item, path="blocked.items[B]")
+        _assert_blocked_issue_weft(b_item, path="blocked.items[B]")
         assert b_item["blocked_by"] == [a_id]
 
     async def test_issues_pagination_and_shape(self, dashboard_surface: AsyncClient) -> None:
@@ -1054,7 +1054,7 @@ class TestLoomGenerationParityLists:
         assert body["has_more"] is True
         assert body["next_offset"] == 1
         assert len(body["items"]) == 1
-        _assert_issue_loom_shape(body["items"][0], path="issues.page1.items[0]")
+        _assert_issue_weft_shape(body["items"][0], path="issues.page1.items[0]")
 
     async def test_search_drops_total(self, dashboard_surface: AsyncClient) -> None:
         """Pin that the search response wraps in ListResponse and does
@@ -1065,15 +1065,15 @@ class TestLoomGenerationParityLists:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         _assert_list_response_shape(body, path="search")
-        assert "total" not in body, "loom search must drop classic 'total' field"
-        assert "results" not in body, "loom search must use 'items' not 'results'"
+        assert "total" not in body, "weft search must drop classic 'total' field"
+        assert "results" not in body, "weft search must use 'items' not 'results'"
         assert len(body["items"]) >= 1
-        _assert_issue_loom_shape(body["items"][0], path="search.items[0]")
+        _assert_issue_weft_shape(body["items"][0], path="search.items[0]")
 
     async def test_files_findings_observations_populated(self, dashboard_surface: AsyncClient) -> None:
         """One seeded scan-results ingest populates files, findings, and
         observations in a single shot — exercise the three list endpoints
-        and pin the loom item shape on each.
+        and pin the weft item shape on each.
         """
         # Ingest a scan with one finding + create_observations=true so we
         # populate three tables in one POST.
@@ -1144,8 +1144,8 @@ class TestLoomGenerationParityLists:
         assert "observation_id" in ob0, f"ObservationWeft must use observation_id, got keys: {sorted(ob0.keys())}"
         assert "id" not in ob0, "classic 'id' leaked into ObservationWeft"
         assert isinstance(ob0["observation_id"], str)
-        # Pin that loom drops MCP's 'stats' sibling.
-        assert "stats" not in obs_body, "loom observations must drop MCP's 'stats' field"
+        # Pin that weft drops MCP's 'stats' sibling.
+        assert "stats" not in obs_body, "weft observations must drop MCP's 'stats' field"
 
     async def test_per_issue_endpoints_populated(self, dashboard_surface: AsyncClient) -> None:
         """Seed an issue + comment + event, then hit the per-issue

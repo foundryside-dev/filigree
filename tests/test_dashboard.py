@@ -808,7 +808,7 @@ class TestSafeBoundedIntReexport:
 # ---------------------------------------------------------------------------
 
 
-class TestLoomScannersRelocatedDB:
+class TestWeftScannersRelocatedDB:
     """``GET /api/weft/scanners`` must resolve scanner TOMLs from
     ``project_root / ".filigree" / "scanners"``, not ``db.db_path.parent /
     "scanners"`` — otherwise ``.filigree.conf`` projects with a relocated

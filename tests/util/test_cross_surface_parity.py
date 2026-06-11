@@ -602,7 +602,7 @@ class TestBatchMixedValidityParity:
         mcp_missing = "mcp-ffffffffff"
         from filigree.mcp_tools.issues import _handle_batch_update
 
-        # MCP batch_update uses "issue_ids" matching the loom HTTP /api/weft/batch/update
+        # MCP batch_update uses "issue_ids" matching the weft HTTP /api/weft/batch/update
         # vocabulary (Phase D1 alignment). This test focuses on envelope shape only.
         mcp_body = _mcp_envelope(await _handle_batch_update({"issue_ids": [mcp_real, mcp_missing], "priority": 1}))
         # Container-key pin: MCP uses "failed" pre-2b.1. Paired with the
@@ -644,18 +644,18 @@ class TestBatchMixedValidityParity:
         # Classic frozen shape: {updated, errors}. ADR-002 §8.
         assert "updated" in dash_keys, f"classic dashboard missing 'updated': {dash_keys!r}"
         assert "errors" in dash_keys, f"classic dashboard missing 'errors': {dash_keys!r}"
-        # And MUST NOT carry the unified-envelope keys (that's the loom
+        # And MUST NOT carry the unified-envelope keys (that's the weft
         # surface's job; leakage here would mean the frozen contract
         # changed).
-        assert "succeeded" not in dash_keys, f"classic dashboard leaked loom 'succeeded': {dash_keys!r}"
-        assert "failed" not in dash_keys, f"classic dashboard leaked loom 'failed': {dash_keys!r}"
+        assert "succeeded" not in dash_keys, f"classic dashboard leaked weft 'succeeded': {dash_keys!r}"
+        assert "failed" not in dash_keys, f"classic dashboard leaked weft 'failed': {dash_keys!r}"
 
-    async def test_loom_container_keys_unified(
+    async def test_weft_container_keys_unified(
         self,
         dashboard_surface: AsyncClient,
         mcp_surface: FiligreeDB,
     ) -> None:
-        """Loom-side positive-shape pin: ``/api/weft/batch/update`` and
+        """Weft-side positive-shape pin: ``/api/weft/batch/update`` and
         MCP ``batch_update`` both expose ``{succeeded, failed}``
         (``BatchResponse[SlimIssueWeft]`` on the dashboard side,
         ``BatchResponse[SlimIssue]`` on the MCP side after Phase D1).
@@ -663,7 +663,7 @@ class TestBatchMixedValidityParity:
         and that NEITHER publishes the classic-only
         ``updated``/``errors`` keys. Paired with
         ``test_classic_container_keys_frozen`` to codify ADR-002's
-        "classic is frozen, loom is the new wire shape" stance.
+        "classic is frozen, weft is the new wire shape" stance.
         """
         dash_create = await dashboard_surface.post("/api/issues", json={"title": "Real"})
         dash_real = dash_create.json()["id"]
@@ -682,13 +682,13 @@ class TestBatchMixedValidityParity:
         mcp_keys = set(mcp_body.keys())
 
         # Both surfaces publish the unified container keys.
-        assert "succeeded" in dash_keys, f"loom dashboard missing 'succeeded': {dash_keys!r}"
-        assert "failed" in dash_keys, f"loom dashboard missing 'failed': {dash_keys!r}"
+        assert "succeeded" in dash_keys, f"weft dashboard missing 'succeeded': {dash_keys!r}"
+        assert "failed" in dash_keys, f"weft dashboard missing 'failed': {dash_keys!r}"
         assert "succeeded" in mcp_keys, f"mcp missing 'succeeded': {mcp_keys!r}"
         assert "failed" in mcp_keys, f"mcp missing 'failed': {mcp_keys!r}"
         # And neither emits the classic-only keys (which would indicate drift).
-        assert "updated" not in dash_keys, f"loom dashboard leaked classic 'updated': {dash_keys!r}"
-        assert "errors" not in dash_keys, f"loom dashboard leaked classic 'errors': {dash_keys!r}"
+        assert "updated" not in dash_keys, f"weft dashboard leaked classic 'updated': {dash_keys!r}"
+        assert "errors" not in dash_keys, f"weft dashboard leaked classic 'errors': {dash_keys!r}"
         assert "updated" not in mcp_keys, f"mcp emitted unexpected 'updated': {mcp_keys!r}"
         assert "errors" not in mcp_keys, f"mcp emitted unexpected 'errors': {mcp_keys!r}"
 
@@ -808,14 +808,14 @@ class TestScanResultsEnvelope:
 #
 # Three scenarios verifying that the new E2 CLI commands and the E4
 # start-work command emit the same envelope shapes as the MCP tools and
-# (where applicable) the loom HTTP endpoints. Each test asserts:
+# (where applicable) the weft HTTP endpoints. Each test asserts:
 #   (a) the envelope keys are correct for the surface,
 #   (b) the shapes agree across surfaces,
 #   (c) error envelopes use a valid ErrorCode.
 #
 # Only surfaces where the command exists are compared:
-#   list-observations: CLI ↔ MCP  (no loom HTTP route)
-#   list-files:        CLI ↔ loom HTTP  (no MCP list-files wrapper)
+#   list-observations: CLI ↔ MCP  (no weft HTTP route)
+#   list-files:        CLI ↔ weft HTTP  (no MCP list-files wrapper)
 #   start-work:        CLI ↔ MCP  (no HTTP composed-op route)
 # ---------------------------------------------------------------------------
 
@@ -888,24 +888,24 @@ class TestListObservationsEnvelopeParity:
 
 @pytest.mark.asyncio
 class TestListFilesEnvelopeParity:
-    """CLI ``list-files --json`` and loom HTTP ``GET /api/weft/files`` agree on
+    """CLI ``list-files --json`` and weft HTTP ``GET /api/weft/files`` agree on
     ``ListResponse[T]`` shape: ``{items, has_more}`` with no legacy siblings."""
 
-    async def test_cli_loom_http_envelope_parity(
+    async def test_cli_weft_http_envelope_parity(
         self,
         dashboard_surface: AsyncClient,
         cli_surface: Callable[..., Any],
     ) -> None:
-        # Loom HTTP: empty project → zero items.
+        # Weft HTTP: empty project → zero items.
         resp = await dashboard_surface.get("/api/weft/files")
         assert resp.status_code == 200, resp.text
         http_body = resp.json()
-        assert "items" in http_body, f"loom-http list-files missing 'items': {http_body!r}"
-        assert "has_more" in http_body, f"loom-http list-files missing 'has_more': {http_body!r}"
+        assert "items" in http_body, f"weft-http list-files missing 'items': {http_body!r}"
+        assert "has_more" in http_body, f"weft-http list-files missing 'has_more': {http_body!r}"
         assert isinstance(http_body["items"], list)
         assert isinstance(http_body["has_more"], bool)
         for legacy_key in ("results", "total", "limit", "offset", "errors"):
-            assert legacy_key not in http_body, f"loom-http emitted legacy key '{legacy_key}': {http_body!r}"
+            assert legacy_key not in http_body, f"weft-http emitted legacy key '{legacy_key}': {http_body!r}"
 
         # CLI surface: empty project → zero items; exit 0.
         def cli_action(runner: CliRunner, _: Path) -> Any:
@@ -921,7 +921,7 @@ class TestListFilesEnvelopeParity:
 
         # Shape parity: both have the same top-level keys.
         assert set(http_body.keys()) == set(cli_body.keys()), (
-            f"list-files key set mismatch: loom-http={set(http_body.keys())} cli={set(cli_body.keys())}"
+            f"list-files key set mismatch: weft-http={set(http_body.keys())} cli={set(cli_body.keys())}"
         )
 
 

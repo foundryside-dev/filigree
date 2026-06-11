@@ -8,6 +8,6 @@ enum, the ``issue_id`` vocabulary, and composed operations like
 
 Phase B lands the scaffolding (this package + the first concrete
 adapter for scan-results). Phase C1-C5 fills in the HTTP endpoints
-that consume the adapters. Phase D forward-migrates MCP to the loom
+that consume the adapters. Phase D forward-migrates MCP to the weft
 vocabulary.
 """

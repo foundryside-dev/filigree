@@ -1574,7 +1574,7 @@ class FilesMixin(DBMixinProtocol):
         # reopen owns its own BEGIN IMMEDIATE) and is best-effort — a transition
         # that the issue's workflow forbids must not fail the whole scan ingest.
         # A failure appends to ``stats["warnings"]``, which IS surfaced on the
-        # wire (the classic envelope is a passthrough of this dict and the loom
+        # wire (the classic envelope is a passthrough of this dict and the weft
         # adapter lifts ``warnings`` to the top level), and is now also logged
         # per-failure below so a systemic "every cascade is failing" is visible
         # in operator logs. The ``logger.info`` further down fires only for

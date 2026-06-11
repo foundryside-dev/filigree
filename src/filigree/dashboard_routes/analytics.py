@@ -550,11 +550,11 @@ def create_classic_router() -> APIRouter:
 
 
 def create_weft_router() -> APIRouter:
-    """Build the loom-generation APIRouter for analytics, graph, and
+    """Build the weft-generation APIRouter for analytics, graph, and
     metrics endpoints.
 
     Phase C4 mounts the cross-issue ``GET /changes`` and project-wide
-    ``GET /observations`` list endpoints; both are loom-only (no
+    ``GET /observations`` list endpoints; both are weft-only (no
     classic dashboard counterpart) and live behind ``/api/weft/`` plus
     living-surface aliases at ``/api/changes`` and ``/api/observations``
     per the C4 aliasing rule (no classic counterpart → alias).
@@ -573,7 +573,7 @@ def create_weft_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/changes")
-    async def api_loom_changes(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_changes(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Cross-issue events since a timestamp — ``ListResponse[ChangeRecordWeft]``.
 
         Weft-only (no classic dashboard counterpart). Mirrors MCP's
@@ -663,7 +663,7 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(body)
 
     @router.get("/observations")
-    async def api_loom_list_observations(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_list_observations(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """List pending observations — ``ListResponse[ObservationWeft]``.
 
         Weft-only (no classic dashboard counterpart). Drops MCP's
@@ -691,8 +691,8 @@ def create_weft_router() -> APIRouter:
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.post("/observations")
-    async def api_loom_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Create a new observation or return an existing duplicate (loom generation)."""
+    async def api_weft_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Create a new observation or return an existing duplicate (weft generation)."""
         return await _create_observation_handler(request, db)
 
     return router
@@ -703,7 +703,7 @@ def create_living_surface_router() -> APIRouter:
 
     Per ``docs/federation/contracts.md``, the living surface at
     ``/api/*`` (no generation prefix) aliases the current recommended
-    generation — as of 2026-04-26 that is loom. Living-surface aliases
+    generation — as of 2026-04-26 that is weft. Living-surface aliases
     are added per-endpoint in Phase C wherever there is no classic
     counterpart at the same path.
     """
@@ -715,7 +715,7 @@ def create_living_surface_router() -> APIRouter:
 
     @router.post("/observations")
     async def api_living_create_observation(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Ingest observation — living surface (loom envelope).
+        """Ingest observation — living surface (weft envelope).
 
         Equivalent to /api/weft/observations as of 2026-04-26.
         """

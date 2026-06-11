@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "contract": "filigree-weft",
+    "stability": "Frozen for the weft-generation lifetime per ADR-002. Shape additions that preserve wire compatibility (new optional response fields) are allowed; breaking changes require a new generation.",
+    "authority": [
+      "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md",
+      "docs/plans/2026-04-24-2.0-federation-work-package.md"
+    ],
+    "pinning_discipline": "shape reference; see docs/federation/contracts.md",
+    "updated": "2026-05-30",
+    "endpoint": "DELETE /api/weft/issues/{issue_id}/dependencies/{dep_issue_id}",
+    "status": "live as of Phase C3.",
+    "relation_to_classic": "Path parameter renamed dep_id → dep_issue_id (weft vocabulary at the URL level). The removed:bool field is unchanged from classic. Idempotent: removing a non-existent dependency between two valid-prefix ids returns 200 {removed: false}, not 404. That edge-absent idempotency is shared with classic; this handler ADDITIONALLY absorbs the KeyError raised when a referenced issue is wholly missing (classic and the CLI/MCP surfaces convert that to NOT_FOUND) — a deliberate retry-safety tradeoff that can mask a typo'd id. The weft-only issue_found:bool field (added 2026-05-30, wire-compatible per the stability clause) is false exactly in that missing-issue case, so callers can tell a typo from a genuinely-absent edge."
+  },
+  "shape_decl": {
+    "request_type": "DELETE (no body); optional ?actor= query string",
+    "response_type": "{removed: bool, issue_found: bool}",
+    "rationale": "removed is the classic boolean (an edge was deleted). issue_found is a weft-only optional addition: false exactly when a referenced issue does not exist, distinguishing a typo'd id from an absent edge under the idempotent 200. Path uses dep_issue_id since the path parameter denotes another issue's primary key. Idempotent semantics inherited from db.remove_dependency()."
+  },
+  "examples": [
+    {
+      "name": "success_idempotent_no_dep",
+      "note": "Removing a non-existent dependency between two valid-prefix ids returns 200 with removed=false. This is the only fixture-replayable case (the populated success path requires seeded issues + a real dependency); see the seeded full-lifecycle test for that. Note these ids are non-existent ISSUES, not merely a missing edge between existing issues: the weft handler absorbs the resulting KeyError to stay idempotent here, whereas classic and the CLI/MCP surfaces convert a missing issue to NOT_FOUND. That divergence is weft-specific and intentional; see the handler docstring.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/weft/issues/genp-deadbeef00/dependencies/genp-deadbeef01",
+        "headers": {},
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"removed": false, "issue_found": false}
+      }
+    }
+  ]
+}
