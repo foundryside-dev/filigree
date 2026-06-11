@@ -434,6 +434,106 @@ class TestListFindingsGlobalKindSuppression:
         assert "PY-WL-102" not in {f["rule_id"] for f in active2["findings"]}
 
 
+class TestUnbridgedFindingStatsKindSplit:
+    """FIL-1: ``unbridged_finding_stats`` additively splits the actionable
+    bucket by wardline kind so engine telemetry (kind:metric etc.) does not
+    read as defect-signal in session orientation. Classification rule: a
+    finding counts as telemetry (``actionable_other``) ONLY when its kind is a
+    KNOWN non-defect kind; missing, corrupt, and unknown kinds all count
+    defect-side (``actionable_defect``) — a third-party finding without a kind
+    must never be hidden as telemetry."""
+
+    def test_split_buckets(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        stats = db.unbridged_finding_stats()
+        # Existing keys unchanged.
+        assert stats["total"] == 4
+        assert stats["actionable"] == 3
+        assert stats["suppressed"] == 1
+        # New split: the kind:metric row is telemetry; kind:defect PY-WL-101
+        # and the kind-less agent 'api-misuse' row are defect-signal.
+        assert stats["actionable_other"] == 1
+        assert stats["actionable_defect"] == 2
+        assert stats["actionable"] == stats["actionable_defect"] + stats["actionable_other"]
+
+    def test_unknown_kind_counts_as_defect(self, db: FiligreeDB) -> None:
+        """An unknown kind value (not in the known enum) must land defect-side,
+        not be hidden as telemetry."""
+        db.register_file("src/unk.py", language="python")
+        db.process_scan_results(
+            scan_source="thirdparty",
+            findings=[
+                {
+                    "path": "src/unk.py",
+                    "rule_id": "TP-1",
+                    "severity": "high",
+                    "message": "unknown kind",
+                    "line_start": 1,
+                    "metadata": {"wardline": {"kind": "anomaly"}},
+                }
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable"] == 1
+        assert stats["actionable_defect"] == 1
+        assert stats["actionable_other"] == 0
+
+    def test_all_known_non_defect_kinds_count_as_other(self, db: FiligreeDB) -> None:
+        db.register_file("src/nd.py", language="python")
+        kinds = ["classification", "fact", "metric", "suggestion"]
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/nd.py",
+                    "rule_id": f"ND-{k}",
+                    "severity": "info",
+                    "message": k,
+                    "line_start": i + 1,
+                    "metadata": {"wardline": {"kind": k}},
+                }
+                for i, k in enumerate(kinds)
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable"] == 4
+        assert stats["actionable_other"] == 4
+        assert stats["actionable_defect"] == 0
+
+    def test_corrupt_metadata_counts_defect_side(self, db: FiligreeDB) -> None:
+        """A malformed-metadata row must not raise OperationalError and must
+        classify defect-side (corrupt => not provably telemetry)."""
+        _seed_wardline_mix(db)
+        db.conn.execute("UPDATE scan_findings SET metadata = ? WHERE rule_id = ?", ("{not json", "api-misuse"))
+        db.conn.commit()
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable_defect"] == 2  # PY-WL-101 + the corrupt row
+        assert stats["actionable_other"] == 1  # the metric row, unchanged
+
+    def test_suppressed_metric_counts_suppressed_only(self, db: FiligreeDB) -> None:
+        """A baselined telemetry row increments ``suppressed`` only — it must
+        not leak into either actionable_* bucket."""
+        db.register_file("src/sm.py", language="python")
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/sm.py",
+                    "rule_id": "SM-1",
+                    "severity": "info",
+                    "message": "suppressed telemetry",
+                    "line_start": 1,
+                    "metadata": {"wardline": {"kind": "metric", "suppression_state": "baselined"}},
+                }
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["suppressed"] == 1
+        assert stats["actionable"] == 0
+        assert stats["actionable_defect"] == 0
+        assert stats["actionable_other"] == 0
+
+
 class TestUpdateFinding:
     def test_update_status(self, db: FiligreeDB) -> None:
         ids = _seed_findings(db)

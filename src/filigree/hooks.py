@@ -155,12 +155,28 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
         fstats = db.unbridged_finding_stats()
         if fstats["total"] > 0:
             lines.append("")
-            lines.append(
-                f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
-                f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
-                f"— review with `filigree finding list`, bridge with `filigree finding promote` "
-                f"(MCP: finding_list / finding_promote)"
-            )
+            if fstats["actionable_other"] > 0:
+                # FIL-1: split the actionable bucket so engine telemetry
+                # (kind:metric etc.) does not read as defect-signal; steer
+                # triage to the defect view.
+                lines.append(
+                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
+                    f"({fstats['actionable']} actionable: {fstats['actionable_defect']} defect-signal, "
+                    f"{fstats['actionable_other']} telemetry/info; {fstats['suppressed']} baselined/suppressed) "
+                    f"— review with `filigree finding list --kind defect`, bridge with `filigree finding promote` "
+                    f"(MCP: finding_list / finding_promote)"
+                )
+            else:
+                # No telemetry to filter out — keep the simple form. Steering
+                # to `--kind defect` here would hide exactly the kind-less
+                # third-party findings the defect-side rule protects (the
+                # filter is strict kind == 'defect'; the count is inclusive).
+                lines.append(
+                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
+                    f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
+                    f"— review with `filigree finding list`, bridge with `filigree finding promote` "
+                    f"(MCP: finding_list / finding_promote)"
+                )
     except sqlite3.OperationalError:
         logger.debug("finding stats unavailable in session context", exc_info=True)
 

@@ -95,6 +95,17 @@ VALID_WARDLINE_FINDING_KINDS: frozenset[str] = frozenset({"defect", "fact", "cla
 # (filigree-2bdb878bd2); the core query keeps its all-inclusive default so
 # internal callers are unaffected.
 VALID_SUPPRESSION_FILTERS: frozenset[str] = frozenset({"all", "active", "baselined", "waived", "judged"})
+# FIL-1: the wardline kinds that are NOT defect-signal — engine telemetry and
+# informational output. Derived from VALID_WARDLINE_FINDING_KINDS (never a
+# parallel literal) so a kind added to the enum is defect-side by default
+# until explicitly classified here. Used by ``unbridged_finding_stats`` to
+# split the actionable bucket; a finding with a missing, corrupt, or unknown
+# kind must NEVER be hidden as telemetry.
+NON_DEFECT_WARDLINE_FINDING_KINDS: frozenset[str] = VALID_WARDLINE_FINDING_KINDS - {"defect"}
+# Safety: these values are interpolated into SQL string literals
+# (see ``_wardline_non_defect_kind_sql``).
+if not all(s.isalpha() for s in NON_DEFECT_WARDLINE_FINDING_KINDS):
+    raise ValueError(f"NON_DEFECT_WARDLINE_FINDING_KINDS values must be simple identifiers, got: {NON_DEFECT_WARDLINE_FINDING_KINDS}")
 
 
 def _wardline_suppressed_sql(alias: str = "") -> str:
@@ -115,6 +126,24 @@ def _wardline_suppressed_sql(alias: str = "") -> str:
     """
     col = f"{alias}.metadata" if alias else "metadata"
     return f"(json_valid({col}) AND json_extract({col}, '$.wardline.suppression_state') IS NOT NULL)"
+
+
+def _wardline_non_defect_kind_sql(alias: str = "") -> str:
+    """SQL predicate that is true when ``metadata.wardline.kind`` is a KNOWN
+    non-defect kind (``NON_DEFECT_WARDLINE_FINDING_KINDS``).
+
+    Same ``json_valid``-guarded ``$.wardline.kind`` extraction path as the
+    ``finding_list`` ``kind`` filter (``_wardline_field_eq_sql("kind")``), so
+    the two surfaces classify identically. Classifying by membership in the
+    known non-defect set — not ``kind != 'defect'`` — is what makes a missing
+    kind (``json_extract`` → NULL), corrupt metadata (``json_valid`` → false),
+    and unknown kind values all fall to the defect side automatically: a
+    third-party finding without a kind is never hidden as telemetry.
+    ``alias`` is an optional table qualifier (e.g. ``"sf"``) for joined queries.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.kind') IN ({kinds}))"
 
 
 def _wardline_field_eq_sql(field: str, alias: str = "") -> str:
@@ -2779,14 +2808,23 @@ class FilesMixin(DBMixinProtocol):
 
         "Un-bridged" = a non-terminal (``_OPEN_FINDINGS_FILTER``) scan finding
         with ``issue_id IS NULL`` — i.e. a live defect that has not been promoted
-        to a tracked issue. Returns ``{"total", "actionable", "suppressed"}``,
-        splitting the un-bridged set by the wardline ``suppression_state`` that
-        survives the emit: a baselined/waived/judged finding is an already-accepted
-        defect, *not* actionable work, so it must not read as a unit of work in
-        session orientation. Off-contract / absent metadata counts as actionable
+        to a tracked issue. Returns ``{"total", "actionable", "suppressed",
+        "actionable_defect", "actionable_other"}``, splitting the un-bridged set
+        by the wardline ``suppression_state`` that survives the emit: a
+        baselined/waived/judged finding is an already-accepted defect, *not*
+        actionable work, so it must not read as a unit of work in session
+        orientation. Off-contract / absent metadata counts as actionable
         (matches the promote-guard's "absent => active" contract). Terminal
         findings (fixed/false_positive) and already-bridged ones are excluded —
         only hidden work is counted.
+
+        FIL-1: the actionable bucket is additionally split by wardline kind so
+        engine telemetry does not read as defect-signal:
+        ``actionable_defect`` counts ``kind == "defect"`` plus every finding
+        whose kind is missing, corrupt, or unknown (a third-party finding
+        without a kind is never hidden as telemetry); ``actionable_other``
+        counts the known non-defect kinds (``NON_DEFECT_WARDLINE_FINDING_KINDS``).
+        Invariant: ``actionable == actionable_defect + actionable_other``.
         """
         # Guard json_extract with json_valid: a single corrupt metadata row would
         # otherwise raise OperationalError and break session context entirely.
@@ -2795,16 +2833,25 @@ class FilesMixin(DBMixinProtocol):
         # surfaces (this restricts to open + un-bridged below, so ``actionable``
         # is a subset of an unfiltered ``finding_list(suppression="active")``).
         suppressed = _wardline_suppressed_sql()
+        non_defect = _wardline_non_defect_kind_sql()
         row = self.conn.execute(
             f"SELECT "
             f"SUM(CASE WHEN {suppressed} THEN 1 ELSE 0 END) AS suppressed, "
-            f"SUM(CASE WHEN NOT {suppressed} THEN 1 ELSE 0 END) AS actionable "
+            f"SUM(CASE WHEN NOT {suppressed} THEN 1 ELSE 0 END) AS actionable, "
+            f"SUM(CASE WHEN NOT {suppressed} AND {non_defect} THEN 1 ELSE 0 END) AS actionable_other "
             f"FROM scan_findings "
             f"WHERE issue_id IS NULL AND {self._OPEN_FINDINGS_FILTER}"
         ).fetchone()
         actionable = row["actionable"] or 0
         suppressed_count = row["suppressed"] or 0
-        return {"total": actionable + suppressed_count, "actionable": actionable, "suppressed": suppressed_count}
+        actionable_other = row["actionable_other"] or 0
+        return {
+            "total": actionable + suppressed_count,
+            "actionable": actionable,
+            "suppressed": suppressed_count,
+            "actionable_defect": actionable - actionable_other,
+            "actionable_other": actionable_other,
+        }
 
     def get_file_detail(self, file_id: str) -> FileDetail:
         """Get a structured file detail response with separated data layers."""

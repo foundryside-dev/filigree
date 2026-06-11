@@ -186,8 +186,10 @@ class TestBuildContext:
         assert "ANALYZER FINDINGS" not in _build_context(db)
 
     def test_unbridged_findings_shown_with_split(self, db: FiligreeDB) -> None:
-        """F2: un-bridged findings surface, split so a baselined defect does not
-        read as actionable work. A promoted (bridged) finding is excluded."""
+        """F2 + FIL-1: un-bridged findings surface, split so a baselined defect
+        does not read as actionable work and engine telemetry (kind:metric)
+        does not read as defect-signal. A promoted (bridged) finding is
+        excluded; kind-less findings count as defect-signal."""
         db.process_scan_results(
             scan_source="wardline",
             findings=[
@@ -195,6 +197,7 @@ class TestBuildContext:
                 self._wln("b.py", "fp2"),
                 self._wln("c.py", "fp3", wardline={"suppression_state": "baselined"}),
                 self._wln("d.py", "fp4"),  # will be bridged
+                self._wln("e.py", "fp5", wardline={"kind": "metric"}),  # telemetry
             ],
         )
         bridged = db.find_finding_by_fingerprint("wardline", "fp4")
@@ -202,14 +205,35 @@ class TestBuildContext:
         db.promote_finding_to_issue(bridged["id"], actor="t")
 
         result = _build_context(db)
-        # 3 un-bridged (2 actionable + 1 suppressed); fp4 bridged → excluded.
-        assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
+        # 4 un-bridged (3 actionable: 2 kind-less → defect-signal, 1 metric →
+        # telemetry; 1 suppressed); fp4 bridged → excluded.
+        assert (
+            "ANALYZER FINDINGS: 4 not yet bridged to the tracker "
+            "(3 actionable: 2 defect-signal, 1 telemetry/info; 1 baselined/suppressed)" in result
+        )
         # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs
-        # are named alongside.
-        assert "`filigree finding list`" in result
+        # are named alongside. The split form steers triage to the defect view.
+        assert "`filigree finding list --kind defect`" in result
         assert "`filigree finding promote`" in result
         assert "finding_list" in result
         assert "finding_promote" in result
+
+    def test_unbridged_findings_simple_form_when_no_telemetry(self, db: FiligreeDB) -> None:
+        """FIL-1: when there is no telemetry to filter out, the simple form is
+        kept verbatim — steering to ``--kind defect`` would hide exactly the
+        kind-less third-party findings the defect-side rule protects."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                self._wln("a.py", "fp1"),
+                self._wln("b.py", "fp2"),
+                self._wln("c.py", "fp3", wardline={"suppression_state": "baselined"}),
+            ],
+        )
+        result = _build_context(db)
+        assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
+        assert "defect-signal" not in result
+        assert "`filigree finding list`" in result
 
     def test_all_bridged_no_analyzer_line(self, db: FiligreeDB) -> None:
         """Honest-empty: when every finding is bridged, no misleading absence — the
@@ -230,7 +254,12 @@ class TestBuildContext:
         import re
 
         db.create_observation("Something to triage")
-        db.process_scan_results(scan_source="wardline", findings=[self._wln("a.py", "fp1")])
+        # Include a metric-kind finding so the sweep covers the FIL-1 split-form
+        # hint (`filigree finding list --kind defect`) too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[self._wln("a.py", "fp1"), self._wln("b.py", "fp2", wardline={"kind": "metric"})],
+        )
         result = _build_context(db)
         snippets = re.findall(r"`([^`]+)`", result)
         assert snippets, "expected backtick'd command hints in the banner"
