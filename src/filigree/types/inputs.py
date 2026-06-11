@@ -50,6 +50,8 @@ class ListIssuesArgs(TypedDict):
     status_category: NotRequired[StatusCategory]
     type: NotRequired[str]
     priority: NotRequired[int]
+    priority_min: NotRequired[int]
+    priority_max: NotRequired[int]
     parent_issue_id: NotRequired[str]
     assignee: NotRequired[str]
     label: NotRequired[str | list[str]]
@@ -121,7 +123,7 @@ class SearchIssuesArgs(TypedDict):
 
 class ClaimIssueArgs(TypedDict):
     issue_id: str
-    assignee: str
+    assignee: NotRequired[str]
     actor: NotRequired[str]
 
 
@@ -166,7 +168,7 @@ class ReclaimIssueArgs(TypedDict):
 
 
 class ClaimNextArgs(TypedDict):
-    assignee: str
+    assignee: NotRequired[str]
     type: NotRequired[str]
     priority_min: NotRequired[int]
     priority_max: NotRequired[int]
@@ -175,14 +177,14 @@ class ClaimNextArgs(TypedDict):
 
 class StartWorkArgs(TypedDict):
     issue_id: str
-    assignee: str
+    assignee: NotRequired[str]
     target_status: NotRequired[str]
     actor: NotRequired[str]
     advance: NotRequired[bool]
 
 
 class StartNextWorkArgs(TypedDict):
-    assignee: str
+    assignee: NotRequired[str]
     type: NotRequired[str]
     priority_min: NotRequired[int]
     priority_max: NotRequired[int]
@@ -462,6 +464,8 @@ class RemoveDependencyArgs(TypedDict):
 
 class GetReadyArgs(TypedDict):
     include_context: NotRequired[bool]
+    priority_min: NotRequired[int]
+    priority_max: NotRequired[int]
 
 
 class GetBlockedArgs(TypedDict):

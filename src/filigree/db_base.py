@@ -416,6 +416,8 @@ class DBMixinProtocol(Protocol):
         status: str | None = None,
         type: str | None = None,
         priority: int | None = None,
+        priority_min: int | None = None,
+        priority_max: int | None = None,
         parent_id: str | None = None,
         assignee: str | None = None,
         label: str | list[str] | None = None,
@@ -463,7 +465,7 @@ class DBMixinProtocol(Protocol):
 
     # -- PlanningMixin -------------------------------------------------------
 
-    def get_ready(self) -> list[Issue]: ...
+    def get_ready(self, *, priority_min: int | None = None, priority_max: int | None = None) -> list[Issue]: ...
     def label_subtree(self, parent_id: str, *, label: str) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
     def _resolve_open_blocker_predicates(
         self,

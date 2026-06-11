@@ -157,6 +157,29 @@ class TestListAndSearch:
 
         assert [item["issue_id"] for item in data["items"]] == [newer.id, older.id]
 
+    async def test_list_issues_priority_range(self, mcp_db: FiligreeDB) -> None:
+        """N-6: priority_min/priority_max range filters on issue_list."""
+        mcp_db.create_issue("Critical", priority=0)
+        mid = mcp_db.create_issue("Mid", priority=2)
+        result = await call_tool("issue_list", {"priority_min": 1, "priority_max": 3})
+        data = _parse(result)
+        assert [item["issue_id"] for item in data["items"]] == [mid.id]
+
+    async def test_list_issues_priority_max_zero_includes_p0(self, mcp_db: FiligreeDB) -> None:
+        """Priority 0 is valid — max=0 must not be treated as unset."""
+        p0 = mcp_db.create_issue("Critical", priority=0)
+        mcp_db.create_issue("Normal", priority=2)
+        result = await call_tool("issue_list", {"priority_max": 0})
+        data = _parse(result)
+        assert [item["issue_id"] for item in data["items"]] == [p0.id]
+
+    async def test_list_issues_priority_min_gt_max_returns_empty(self, mcp_db: FiligreeDB) -> None:
+        """min > max is not an error — it matches nothing (claim-verb semantics)."""
+        mcp_db.create_issue("Mid", priority=2)
+        result = await call_tool("issue_list", {"priority_min": 3, "priority_max": 1})
+        data = _parse(result)
+        assert data["items"] == []
+
     async def test_list_issues_rejects_invalid_sort_by(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("issue_list", {"sort_by": "title"})
         data = _parse(result)
@@ -561,6 +584,28 @@ class TestReadyAndBlocked:
         item = next(i for i in data["items"] if i["issue_id"] == bug.id)
         assert item["startable"] is False
         assert item["next_action"] == "confirmed"
+
+    async def test_get_ready_priority_range(self, mcp_db: FiligreeDB) -> None:
+        """N-6: priority_min/priority_max range filters on work_ready."""
+        mcp_db.create_issue("Critical", priority=0)
+        mid = mcp_db.create_issue("Mid", priority=2)
+        result = await call_tool("work_ready", {"priority_min": 1, "priority_max": 3})
+        data = _parse(result)
+        assert [item["issue_id"] for item in data["items"]] == [mid.id]
+
+    async def test_get_ready_priority_max_zero_includes_p0(self, mcp_db: FiligreeDB) -> None:
+        """Priority 0 is valid — max=0 must not be treated as unset."""
+        p0 = mcp_db.create_issue("Critical", priority=0)
+        mcp_db.create_issue("Normal", priority=2)
+        result = await call_tool("work_ready", {"priority_max": 0})
+        data = _parse(result)
+        assert [item["issue_id"] for item in data["items"]] == [p0.id]
+
+    async def test_get_ready_priority_min_gt_max_returns_empty(self, mcp_db: FiligreeDB) -> None:
+        mcp_db.create_issue("Mid", priority=2)
+        result = await call_tool("work_ready", {"priority_min": 3, "priority_max": 1})
+        data = _parse(result)
+        assert data["items"] == []
 
     async def test_get_ready_include_context_adds_parent_context(self, mcp_db: FiligreeDB) -> None:
         parent = mcp_db.create_issue("Parent epic", type="epic")
@@ -1553,6 +1598,126 @@ class TestClaimIssue:
         result = await call_tool("work_claim", {"issue_id": "mcp-nonexistent", "assignee": "agent-1"})
         data = _parse(result)
         assert data["code"] == ErrorCode.NOT_FOUND
+
+
+class TestClaimIdentityDefaulting:
+    """FIL-3 (filigree-3028a8d0f8): claim-shaped verbs accept actor as the sole caller identity.
+
+    assignee defaults from actor when omitted (and actor keeps defaulting from
+    assignee); with neither, the handler returns VALIDATION naming both params.
+    assignee-only behaviour must stay byte-identical.
+    """
+
+    async def _claimed_event_actors(self, issue_id: str) -> list[str]:
+        data = _parse(await call_tool("issue_event_list", {"issue_id": issue_id}))
+        return [e["actor"] for e in data["items"] if e["event_type"] == "claimed"]
+
+    # --- work_claim -------------------------------------------------------
+
+    async def test_work_claim_actor_only_sets_assignee(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Actor-only claim")
+        data = _parse(await call_tool("work_claim", {"issue_id": issue.id, "actor": "agent-x"}))
+        assert data["assignee"] == "agent-x"
+        assert await self._claimed_event_actors(issue.id) == ["agent-x"]
+
+    async def test_work_claim_neither_identity_is_validation(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("No identity claim")
+        data = _parse(await call_tool("work_claim", {"issue_id": issue.id}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "assignee" in data["error"]
+        assert "actor" in data["error"]
+
+    async def test_work_claim_blank_actor_only_is_validation(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Blank actor claim")
+        data = _parse(await call_tool("work_claim", {"issue_id": issue.id, "actor": "   "}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "assignee" in data["error"]
+        assert "actor" in data["error"]
+
+    async def test_work_claim_assignee_only_unchanged(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Assignee-only claim")
+        data = _parse(await call_tool("work_claim", {"issue_id": issue.id, "assignee": "agent-a"}))
+        assert data["assignee"] == "agent-a"
+        assert await self._claimed_event_actors(issue.id) == ["agent-a"]
+
+    # --- work_start -------------------------------------------------------
+
+    async def test_work_start_actor_only_sets_assignee(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Actor-only start", type="task")
+        data = _parse(await call_tool("work_start", {"issue_id": issue.id, "actor": "agent-x"}))
+        assert data["assignee"] == "agent-x"
+        assert data["status"] == "in_progress"
+        assert await self._claimed_event_actors(issue.id) == ["agent-x"]
+
+    async def test_work_start_neither_identity_is_validation(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("No identity start", type="task")
+        data = _parse(await call_tool("work_start", {"issue_id": issue.id}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "assignee" in data["error"]
+        assert "actor" in data["error"]
+        current = mcp_db.get_issue(issue.id)
+        assert current.assignee == ""
+        assert current.status == "open"
+
+    async def test_work_start_assignee_only_unchanged(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Assignee-only start", type="task")
+        data = _parse(await call_tool("work_start", {"issue_id": issue.id, "assignee": "agent-a"}))
+        assert data["assignee"] == "agent-a"
+        assert data["status"] == "in_progress"
+        assert await self._claimed_event_actors(issue.id) == ["agent-a"]
+
+    # --- work_claim_next --------------------------------------------------
+
+    async def test_work_claim_next_actor_only_sets_assignee(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Actor-only claim-next", type="task", priority=0)
+        data = _parse(await call_tool("work_claim_next", {"actor": "agent-x", "type": "task"}))
+        assert data["issue_id"] == issue.id
+        assert data["assignee"] == "agent-x"
+        assert await self._claimed_event_actors(issue.id) == ["agent-x"]
+
+    async def test_work_claim_next_neither_identity_is_validation(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("work_claim_next", {}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "assignee" in data["error"]
+        assert "actor" in data["error"]
+
+    async def test_work_claim_next_assignee_only_unchanged(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Assignee-only claim-next", type="task", priority=0)
+        data = _parse(await call_tool("work_claim_next", {"assignee": "agent-a", "type": "task"}))
+        assert data["issue_id"] == issue.id
+        assert data["assignee"] == "agent-a"
+        assert await self._claimed_event_actors(issue.id) == ["agent-a"]
+
+    # --- work_start_next --------------------------------------------------
+
+    async def test_work_start_next_actor_only_sets_assignee(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Actor-only start-next", type="task", priority=0)
+        data = _parse(await call_tool("work_start_next", {"actor": "agent-x", "type": "task"}))
+        assert data["issue_id"] == issue.id
+        assert data["assignee"] == "agent-x"
+        assert data["status"] == "in_progress"
+        assert await self._claimed_event_actors(issue.id) == ["agent-x"]
+
+    async def test_work_start_next_neither_identity_is_validation(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(await call_tool("work_start_next", {}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "assignee" in data["error"]
+        assert "actor" in data["error"]
+
+    async def test_work_start_next_assignee_only_unchanged(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Assignee-only start-next", type="task", priority=0)
+        data = _parse(await call_tool("work_start_next", {"assignee": "agent-a", "type": "task"}))
+        assert data["issue_id"] == issue.id
+        assert data["assignee"] == "agent-a"
+        assert data["status"] == "in_progress"
+        assert await self._claimed_event_actors(issue.id) == ["agent-a"]
+
+    async def test_explicit_empty_assignee_still_schema_rejected(self, mcp_db: FiligreeDB) -> None:
+        """minLength:1 stays on assignee — explicit '' is rejected at the schema gate, byte-identically."""
+        issue = mcp_db.create_issue("Empty-string assignee", type="task")
+        data = _parse(await call_tool("work_start", {"issue_id": issue.id, "assignee": ""}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "assignee length must be >= 1"
 
 
 class TestClaimLeaseTools:

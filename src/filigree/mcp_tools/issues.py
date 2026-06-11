@@ -239,6 +239,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Filter by type (use type_list for available types)",
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Filter by priority"},
+                    "priority_min": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Minimum priority (0=critical)",
+                    },
+                    "priority_max": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Maximum priority"},
                     "parent_issue_id": {"type": "string", "description": "Filter by parent issue ID"},
                     "assignee": {"type": "string", "description": "Filter by assignee"},
                     "label": {
@@ -507,19 +514,24 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Atomically claim an open-category issue, or an unassigned wip-category issue released for handoff, "
                 "by setting assignee (optimistic locking). "
-                "Does NOT change status — use issue_update to advance through workflow after claiming."
+                "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to claim"},
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is claiming (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is claiming (agent name); defaults to actor when omitted",
+                    },
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
                     },
                 },
-                "required": ["issue_id", "assignee"],
+                "required": ["issue_id"],
             },
         ),
         Tool(
@@ -692,11 +704,19 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="claim_next",
-            description="Claim the highest-priority open-category ready issue by setting assignee. Does NOT change status — use issue_update to advance through workflow after claiming.",
+            description=(
+                "Claim the highest-priority open-category ready issue by setting assignee. "
+                "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is claiming (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is claiming (agent name); defaults to actor when omitted",
+                    },
                     "type": {"type": "string", "description": "Filter by issue type"},
                     "priority_min": {
                         "type": "integer",
@@ -710,7 +730,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
                     },
                 },
-                "required": ["assignee"],
             },
         ),
         Tool(
@@ -721,13 +740,18 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "AmbiguousTransitionError surfaces if the current status has multiple reachable wip targets "
                 "(specify target_status explicitly). Issues with no single-hop wip target (e.g. triage bugs) "
                 "raise INVALID_TRANSITION with the intermediate status to move through first, unless advance=true. "
-                "On transition failure the claim is rolled back."
+                "On transition failure the claim is rolled back. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to claim and transition"},
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is starting work (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is starting work (agent name); defaults to actor when omitted",
+                    },
                     "target_status": {
                         "type": "string",
                         "description": (
@@ -748,7 +772,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                 },
-                "required": ["issue_id", "assignee"],
+                "required": ["issue_id"],
             },
         ),
         Tool(
@@ -758,12 +782,17 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Tie-break ordering: priority asc, created_at asc, issue_id asc (same as work_claim_next). "
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
-                "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches."
+                "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is starting work (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is starting work (agent name); defaults to actor when omitted",
+                    },
                     "type": {"type": "string", "description": "Filter by issue type"},
                     "priority_min": {
                         "type": "integer",
@@ -791,7 +820,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                 },
-                "required": ["assignee"],
             },
         ),
         Tool(
@@ -962,6 +990,21 @@ async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
+    priority_min = args.get("priority_min")
+    pmin_err = _validate_int_range(priority_min, "priority_min", min_val=0, max_val=4)
+    if pmin_err:
+        return pmin_err
+    priority_max = args.get("priority_max")
+    pmax_err = _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4)
+    if pmax_err:
+        return pmax_err
+    if priority is not None and (priority_min is not None or priority_max is not None):
+        return _text(
+            ErrorResponse(
+                error="priority is exact-match and cannot be combined with priority_min/priority_max",
+                code=ErrorCode.VALIDATION,
+            )
+        )
     tracker = get_db()
     status_filter = args.get("status")
     status_category = args.get("status_category")
@@ -986,6 +1029,8 @@ async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
             status=status_filter,
             type=args.get("type"),
             priority=priority,
+            priority_min=priority_min,
+            priority_max=priority_max,
             parent_id=args.get("parent_issue_id"),
             assignee=args.get("assignee"),
             label=args.get("label"),
@@ -1216,11 +1261,36 @@ async def _handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
     return _text(_list_response(items, has_more=has_more, next_offset=next_offset))
 
 
+_CLAIM_IDENTITY_MISSING = "Provide 'assignee' or 'actor': claim verbs need a caller identity (whichever is omitted defaults from the other)"
+
+
+def _resolve_claim_assignee(args: dict[str, Any]) -> tuple[str, list[TextContent] | None]:
+    """Resolve the caller identity for claim-shaped verbs (FIL-3, filigree-3028a8d0f8).
+
+    ``assignee`` is the claim holder; when omitted it defaults from a non-blank
+    ``actor`` (sanitized through the same validator actor itself uses). The
+    existing actor-defaults-from-assignee direction is preserved by the
+    ``_validate_actor(args.get("actor", assignee))`` call each handler keeps,
+    so the defaulting is bidirectional. An explicitly supplied assignee keeps
+    its historical non-empty-string check byte-identically; with neither param
+    (or a blank actor and no assignee) a VALIDATION error names both.
+    """
+    if "assignee" in args:
+        assignee = args.get("assignee")
+        if not isinstance(assignee, str) or not assignee.strip():
+            return "", _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+        return assignee, None
+    actor = args.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return "", _text(ErrorResponse(error=_CLAIM_IDENTITY_MISSING, code=ErrorCode.VALIDATION))
+    return _validate_actor(actor)
+
+
 async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, ClaimIssueArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1465,9 +1535,9 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, ClaimNextArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1610,9 +1680,9 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, StartWorkArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1655,9 +1725,9 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, StartNextWorkArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err

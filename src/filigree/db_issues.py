@@ -2599,6 +2599,8 @@ class IssuesMixin(DBMixinProtocol):
         status: str | None = None,
         type: str | None = None,
         priority: int | None = None,
+        priority_min: int | None = None,
+        priority_max: int | None = None,
         parent_id: str | None = None,
         assignee: str | None = None,
         label: str | list[str] | None = None,
@@ -2664,6 +2666,14 @@ class IssuesMixin(DBMixinProtocol):
         if priority is not None:
             conditions.append("i.priority = ?")
             params.append(priority)
+        # Range bounds mirror the claim-verb semantics (N-6): each bound is
+        # independent, and min > max simply matches nothing — no error.
+        if priority_min is not None:
+            conditions.append("i.priority >= ?")
+            params.append(priority_min)
+        if priority_max is not None:
+            conditions.append("i.priority <= ?")
+            params.append(priority_max)
         if parent_id is not None:
             conditions.append("i.parent_id = ?")
             params.append(parent_id)

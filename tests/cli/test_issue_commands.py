@@ -788,6 +788,48 @@ class TestClaimCli:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION"
 
+    def test_claim_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: `filigree --actor X claim <id>` works without --assignee."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Group actor claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-g", "claim", issue_id, "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-g"
+
+    def test_claim_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: the ActorCommand post-verb --actor also satisfies the identity."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Post-verb actor claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["claim", issue_id, "--actor", "agent-p", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-p"
+
+    def test_claim_no_identity_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: omitting both flags fails, naming --assignee and --actor (json + plain)."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "No identity claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["claim", issue_id, "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
+
+        plain = runner.invoke(cli, ["claim", issue_id])
+        assert plain.exit_code == 1
+        assert "--assignee" in plain.output
+        assert "--actor" in plain.output
+
     def test_heartbeat_work_json_refreshes_claim(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Heartbeat CLI"])
@@ -953,6 +995,38 @@ class TestClaimNextCli:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "empty"
+
+    def test_claim_next_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: `filigree --actor X claim-next` works without --assignee."""
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Actor-only claim-next", "--type", "task", "-p", "0"])
+
+        result = runner.invoke(cli, ["--actor", "agent-g", "claim-next", "--type", "task", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-g"
+
+    def test_claim_next_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Post-verb claim-next", "--type", "task", "-p", "0"])
+
+        result = runner.invoke(cli, ["claim-next", "--type", "task", "--actor", "agent-p", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-p"
+
+    def test_claim_next_no_identity_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["claim-next", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
 
     def test_claim_next_json_empty_includes_reason(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """filigree-0e8dadbfcc: empty --json must mirror MCP ClaimNextEmptyResponse.

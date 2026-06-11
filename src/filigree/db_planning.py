@@ -345,23 +345,38 @@ class PlanningMixin(DBMixinProtocol):
         )
         return open_pred, blocker_done_pred
 
-    def get_ready(self) -> list[Issue]:
-        """Unassigned issues in open-category states with no open blockers."""
+    def get_ready(self, *, priority_min: int | None = None, priority_max: int | None = None) -> list[Issue]:
+        """Unassigned issues in open-category states with no open blockers.
+
+        ``priority_min`` / ``priority_max`` optionally bound the result by
+        priority (claim-verb semantics, N-6): each bound is independent and
+        ``min > max`` simply matches nothing — no error.
+        """
         preds = self._resolve_open_blocker_predicates()
         if preds is None:
             return []
         (open_sql, open_params), (blocker_done_sql, blocker_done_params) = preds
 
+        range_sql = ""
+        range_params: list[int] = []
+        if priority_min is not None:
+            range_sql += "AND i.priority >= ? "
+            range_params.append(priority_min)
+        if priority_max is not None:
+            range_sql += "AND i.priority <= ? "
+            range_params.append(priority_max)
+
         rows = self.conn.execute(
             f"SELECT i.id FROM issues i "
             f"WHERE {open_sql} "
             f"AND (i.assignee = '' OR i.assignee IS NULL) "
+            f"{range_sql}"
             f"AND NOT EXISTS ("
             f"  SELECT 1 FROM dependencies d "
             f"  JOIN issues blocker ON d.depends_on_id = blocker.id "
             f"  WHERE d.issue_id = i.id AND NOT ({blocker_done_sql})"
             f") ORDER BY i.priority ASC, i.created_at ASC, i.id ASC",
-            [*open_params, *blocker_done_params],
+            [*open_params, *range_params, *blocker_done_params],
         ).fetchall()
 
         return self._build_issues_batch([r["id"] for r in rows])

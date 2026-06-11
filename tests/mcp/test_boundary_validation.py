@@ -34,13 +34,15 @@ class TestMCPUnknownParameterValidation:
         assert "priority_min" in data["error"]
 
     async def test_multiple_unknown_parameters_are_named(self, mcp_db: FiligreeDB) -> None:
-        result = await call_tool("issue_list", {"limit": 5, "priority_min": 1, "include_files": True})
+        # priority_min became a real issue_list parameter (N-6), so the second
+        # unknown here must stay genuinely unknown to the schema.
+        result = await call_tool("issue_list", {"limit": 5, "bogus_filter": 1, "include_files": True})
 
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
         assert "list_issues" in data["error"]
         assert "include_files" in data["error"]
-        assert "priority_min" in data["error"]
+        assert "bogus_filter" in data["error"]
 
     async def test_unknown_parameter_does_not_mask_unknown_tool(self, mcp_db: FiligreeDB) -> None:
         result = await call_tool("not_a_tool", {"surprise": True})
@@ -214,6 +216,44 @@ class TestMCPPriorityValidation:
     async def test_batch_update_priority_out_of_range(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Target")
         result = await call_tool("issue_batch_update", {"issue_ids": [issue.id], "priority": 5})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_list_issues_priority_min_out_of_range(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("issue_list", {"priority_min": -1})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_list_issues_priority_max_out_of_range(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("issue_list", {"priority_max": 5})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_list_issues_priority_min_bool_rejected(self, mcp_db: FiligreeDB) -> None:
+        """bool is a subclass of int — True must be rejected, not silently become 1."""
+        result = await call_tool("issue_list", {"priority_min": True})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_list_issues_exact_priority_plus_range_conflict(self, mcp_db: FiligreeDB) -> None:
+        """Exact priority combined with a range bound is ambiguous → VALIDATION."""
+        result = await call_tool("issue_list", {"priority": 2, "priority_min": 1})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "priority" in data["error"]
+
+    async def test_list_issues_exact_priority_plus_max_conflict(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("issue_list", {"priority": 2, "priority_max": 3})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_get_ready_priority_min_out_of_range(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("work_ready", {"priority_min": 5})
+        data = _parse(result)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    async def test_get_ready_priority_max_out_of_range(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool("work_ready", {"priority_max": -1})
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
 

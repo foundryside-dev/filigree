@@ -61,6 +61,26 @@ class TestCLIPriorityValidation:
         result = runner.invoke(cli, ["claim-next", "--assignee", "bot", "--priority-max", "5"])
         assert result.exit_code != 0
 
+    def test_list_priority_min_too_low(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--priority-min", "-1"])
+        assert result.exit_code != 0
+
+    def test_list_priority_max_too_high(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--priority-max", "5"])
+        assert result.exit_code != 0
+
+    def test_ready_priority_min_too_low(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["ready", "--priority-min", "-1"])
+        assert result.exit_code != 0
+
+    def test_ready_priority_max_too_high(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["ready", "--priority-max", "5"])
+        assert result.exit_code != 0
+
     def test_batch_update_priority_too_high(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         create_result = runner.invoke(cli, ["create", "Target"])
@@ -231,6 +251,26 @@ class TestIssuePriorityFilterEnvelopeEmission:
     def test_start_next_work_priority_max_high_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["start-next-work", "--assignee", "bot", "--priority-max", "5", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_priority_min_neg1_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--priority-min", "-1", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_list_priority_max_high_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--priority-max", "5", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_ready_priority_min_neg1_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["ready", "--priority-min", "-1", "--json"])
+        self._assert_validation_envelope(result)
+
+    def test_ready_priority_max_high_json_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["ready", "--priority-max", "5", "--json"])
         self._assert_validation_envelope(result)
 
 

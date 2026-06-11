@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import click
+from click.core import ParameterSource
 
 from filigree import __version__
 from filigree.cli_commands import admin, files, issues, meta, observations, planning, scanners, sei, server, workflow
@@ -95,6 +96,10 @@ def cli(ctx: click.Context, actor: str) -> None:
             ctx.exit(1)
         raise click.BadParameter(err, param_hint="'--actor'")
     ctx.obj["actor"] = cleaned
+    # FIL-3 (filigree-3028a8d0f8): record whether --actor was explicitly
+    # provided (vs the implicit "cli" default) so claim-shaped verbs can
+    # default an omitted --assignee from an *explicit* actor identity only.
+    ctx.obj["actor_explicit"] = ctx.get_parameter_source("actor") != ParameterSource.DEFAULT
 
     # ADR-012: surface a non-blocking warning when the claimed --actor disagrees
     # with the transport-verified OS identity. Resolution + warning never raise

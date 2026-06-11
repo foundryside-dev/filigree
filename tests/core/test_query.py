@@ -123,6 +123,96 @@ class TestListIssuesFilters:
         assert all(i.type == "bug" and i.priority == 0 for i in results)
 
 
+class TestListIssuesPriorityRange:
+    """N-6: list_issues priority_min/priority_max range filters (claim-verb pattern)."""
+
+    def test_priority_min_excludes_lower(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        p2 = db.create_issue("Medium", priority=2)
+        results = db.list_issues(priority_min=2)
+        ids = {i.id for i in results}
+        assert p2.id in ids
+        assert p0.id not in ids
+        assert all(i.priority >= 2 for i in results)
+
+    def test_priority_max_excludes_higher(self, db: FiligreeDB) -> None:
+        p1 = db.create_issue("High", priority=1)
+        p3 = db.create_issue("Low", priority=3)
+        results = db.list_issues(priority_max=1)
+        ids = {i.id for i in results}
+        assert p1.id in ids
+        assert p3.id not in ids
+        assert all(i.priority <= 1 for i in results)
+
+    def test_p0_included_with_zero_bounds(self, db: FiligreeDB) -> None:
+        """Priority 0 is valid — `is not None` semantics, never truthiness."""
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("High", priority=1)
+        results = db.list_issues(priority_min=0, priority_max=0)
+        assert [i.id for i in results] == [p0.id]
+
+    def test_min_and_max_combined(self, db: FiligreeDB) -> None:
+        db.create_issue("P0", priority=0)
+        p1 = db.create_issue("P1", priority=1)
+        p3 = db.create_issue("P3", priority=3)
+        db.create_issue("P4", priority=4)
+        results = db.list_issues(priority_min=1, priority_max=3)
+        ids = {i.id for i in results}
+        assert ids == {p1.id, p3.id}
+
+    def test_min_greater_than_max_returns_empty(self, db: FiligreeDB) -> None:
+        """min > max yields an empty list, no error (claim-verb semantics)."""
+        db.create_issue("P2", priority=2)
+        assert db.list_issues(priority_min=3, priority_max=1) == []
+
+    def test_exact_priority_filter_unchanged(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("Normal", priority=2)
+        results = db.list_issues(priority=0)
+        assert any(i.id == p0.id for i in results)
+        assert all(i.priority == 0 for i in results)
+
+
+class TestGetReadyPriorityRange:
+    """N-6: get_ready priority_min/priority_max range filters."""
+
+    def test_priority_range_filters(self, db: FiligreeDB) -> None:
+        db.create_issue("P0", priority=0)
+        p1 = db.create_issue("P1", priority=1)
+        p2 = db.create_issue("P2", priority=2)
+        db.create_issue("P4", priority=4)
+        ready = db.get_ready(priority_min=1, priority_max=2)
+        assert {i.id for i in ready} == {p1.id, p2.id}
+
+    def test_p0_included_at_max_zero(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("Medium", priority=2)
+        ready = db.get_ready(priority_max=0)
+        assert [i.id for i in ready] == [p0.id]
+
+    def test_min_greater_than_max_returns_empty(self, db: FiligreeDB) -> None:
+        db.create_issue("P2", priority=2)
+        assert db.get_ready(priority_min=3, priority_max=1) == []
+
+    def test_range_still_excludes_assigned(self, db: FiligreeDB) -> None:
+        claimed = db.create_issue("Claimed", priority=1)
+        db.claim_issue(claimed.id, assignee="agent")
+        free = db.create_issue("Free", priority=1)
+        ready = db.get_ready(priority_min=1, priority_max=1)
+        ids = {i.id for i in ready}
+        assert free.id in ids
+        assert claimed.id not in ids
+
+    def test_range_still_excludes_blocked(self, db: FiligreeDB) -> None:
+        blocker = db.create_issue("Blocker", priority=1)
+        blocked = db.create_issue("Blocked", priority=1)
+        db.add_dependency(blocked.id, blocker.id)
+        ready = db.get_ready(priority_min=1, priority_max=1)
+        ids = {i.id for i in ready}
+        assert blocker.id in ids
+        assert blocked.id not in ids
+
+
 class TestListIssuesSorting:
     """list_issues supports explicit sort fields and directions."""
 

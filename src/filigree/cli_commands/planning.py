@@ -12,6 +12,11 @@ from typing import Any, NoReturn, get_args
 
 import click
 
+# Cross-module private import is precedented (admin.py reuses a private helper
+# from server.py); sharing _range_check_int keeps the validation error wording
+# identical across list/ready/claim-next. No cycle: issues.py does not import
+# this module.
+from filigree.cli_commands.issues import _range_check_int
 from filigree.cli_common import get_db, refresh_summary
 from filigree.db_planning import NotAMilestoneError
 from filigree.issue_payloads import issue_to_ready
@@ -98,10 +103,12 @@ def _parent_titles_by_id(db: Any, issues: list[Any]) -> dict[str, str]:
     return titles
 
 
-def _ready_impl(as_json: bool, include_context: bool) -> None:
+def _ready_impl(as_json: bool, include_context: bool, priority_min: int | None = None, priority_max: int | None = None) -> None:
+    _range_check_int(priority_min, "priority_min", min_val=0, max_val=4, as_json=as_json)
+    _range_check_int(priority_max, "priority_max", min_val=0, max_val=4, as_json=as_json)
     with get_db() as db:
         try:
-            issues = db.get_ready()
+            issues = db.get_ready(priority_min=priority_min, priority_max=priority_max)
         except sqlite3.Error as e:
             _emit_error(f"Database error: {e}", ErrorCode.IO, as_json)
 
@@ -147,17 +154,21 @@ def _ready_impl(as_json: bool, include_context: bool) -> None:
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--include-context", is_flag=True, help="Include parent_issue_id and parent_title in JSON output")
-def ready(as_json: bool, include_context: bool) -> None:
+@click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
+@click.option("--priority-max", default=None, type=int, help="Maximum priority")
+def ready(as_json: bool, include_context: bool, priority_min: int | None, priority_max: int | None) -> None:
     """Show issues ready to work on (no blockers)."""
-    _ready_impl(as_json, include_context)
+    _ready_impl(as_json, include_context, priority_min, priority_max)
 
 
 @click.command("get-ready")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--include-context", is_flag=True, help="Include parent_issue_id and parent_title in JSON output")
-def get_ready(as_json: bool, include_context: bool) -> None:
+@click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
+@click.option("--priority-max", default=None, type=int, help="Maximum priority")
+def get_ready(as_json: bool, include_context: bool, priority_min: int | None, priority_max: int | None) -> None:
     """Show issues ready to work on (no blockers). Alias for `ready`."""
-    _ready_impl(as_json, include_context)
+    _ready_impl(as_json, include_context, priority_min, priority_max)
 
 
 def _blocked_issue_item(issue: Any, blockers_by_id: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
