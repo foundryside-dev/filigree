@@ -752,24 +752,46 @@ def _atomic_copy_tree(src: Path, dest: Path) -> None:
 
 
 def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
-    """Best-effort: the project's ephemeral dashboard port if one is bound, else ``None``.
+    """Best-effort: the project's ephemeral dashboard port if one is live, else ``None``.
 
     A session-scoped ephemeral dashboard (``filigree dashboard`` without
     ``--server-mode``) binds the project's deterministic port and holds a
     ``FiligreeDB`` connection on the legacy store. An *idle* such process holds no
     DB lock at migration time, so a lock/checkpoint probe cannot see it — we probe
-    its deterministic port instead. The probe is portable (a localhost bind-attempt,
-    no ``lsof``/procfs) and BEST-EFFORT: a bound port is a strong but not certain
-    signal (something unrelated could own it), so it only ever *contributes* a
-    refusal; any error returns ``None`` and never blocks migration.
+    its deterministic port instead. The probe is portable (a localhost bind-attempt
+    plus one HTTP GET, no ``lsof``/procfs) and BEST-EFFORT: it only ever
+    *contributes* a refusal; any error returns ``None`` and never blocks migration.
+
+    A bound port alone is NOT enough: ``compute_port`` hashes into a 1000-port
+    window shared with whatever else runs on the box, and treating any listener
+    as a dashboard false-refused real migrations when an unrelated daemon held
+    the colliding port (filigree-d5aa3bfe3d). So the listener must positively
+    identify itself: ``GET /api/health`` (ungated, see ``dashboard_auth``) must
+    answer ``mode == "ethereal"`` — the ephemeral dashboard's self-identification
+    since v1.3.0. ``mode == "server"`` is a server-mode daemon that happens to
+    sit in the window; whether it serves *this* project is the registry tier's
+    decision (:func:`_live_filigree_daemon_for_project`), not the port probe's.
+    A pre-1.3.0 dashboard (no ``mode``) reads as unidentified → proceed; the
+    migration's write-fence + quiesce backstops cover that residual.
     """
+    import urllib.request
+
     from filigree import ephemeral
 
     port = ephemeral.compute_port(project_root / FILIGREE_DIR_NAME)
     # A *free* (bindable) port means nothing is listening → no ephemeral dashboard.
     if ephemeral._is_port_free(port):
         return None
-    return port
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as resp:
+            payload = json.loads(resp.read(4096))
+    except Exception:
+        # Non-HTTP listener, connection refused at HTTP level, timeout, or
+        # garbage body: not identifiable as a filigree dashboard → proceed.
+        return None
+    if isinstance(payload, dict) and payload.get("mode") == "ethereal":
+        return port
+    return None
 
 
 def _live_filigree_daemon_for_project(project_root: Path) -> int | None:
@@ -781,7 +803,8 @@ def _live_filigree_daemon_for_project(project_root: Path) -> int | None:
     connection, so we consult the daemon registry + a deterministic port probe:
       * server-mode (B1): the shared daemon is alive (PID-verified ``daemon_status``)
         AND ``server.json`` registers a store dir whose project root is *project_root*.
-      * ephemeral (B2): the project's deterministic dashboard port is bound.
+      * ephemeral (B2): the project's deterministic dashboard port is bound AND
+        the listener answers ``/api/health`` as a filigree ethereal dashboard.
 
     A still-open in-session MCP/stdio connection (B3) cannot be detected from here;
     that residual is documented in the upgrade notes.

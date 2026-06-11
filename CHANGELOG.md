@@ -335,6 +335,20 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
 
 ### Fixed
 
+- **Migration daemon-liveness probe no longer false-refuses on a
+  deterministic-port collision with an unrelated listener
+  (filigree-d5aa3bfe3d).** The ephemeral-dashboard tier of the migration's
+  busy-detection treated *any* listener on the project's deterministic port as
+  a live dashboard — but `compute_port` hashes into a 1000-port window shared
+  with whatever else runs on the box, so an unrelated daemon on the colliding
+  port aborted real migrations with a spurious `StoreMigrationBusyError`. The
+  probe now requires the listener to positively identify itself: `GET
+  /api/health` must answer `mode == "ethereal"`. Non-HTTP listeners,
+  non-filigree services, and server-mode daemons (the registry tier's call)
+  no longer contribute a refusal; a pre-1.3.0 dashboard (no `mode` field)
+  reads as unidentified and falls through to the write-fence + quiesce
+  backstops.
+
 - **Session-context banner named MCP verbs as if they were CLI commands
   (dogfood N-4, weft-993c1077e1, filigree-4e64621f70).** The banner's
   backtick'd hints (`finding_list`, `finding_promote`, `observation_list`)

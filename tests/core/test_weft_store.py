@@ -11,10 +11,15 @@ never hard-fails (C-9c).
 
 from __future__ import annotations
 
+import contextlib
+import http.server
 import logging
 import os
 import shutil
+import socket
 import sqlite3
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -32,6 +37,7 @@ from filigree.core import (
     StoreMigrationBusyError,
     StoreMigrationConfUnreadableError,
     WeftConfigUnreadableError,
+    _ephemeral_dashboard_port_if_live,
     _migration_write_fence,
     _snapshot_copy_sqlite_locked,
     find_filigree_anchor,
@@ -1176,3 +1182,94 @@ class TestMigrationDaemonQuiesce:
         monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
         monkeypatch.setattr(server, "daemon_status", lambda: server.DaemonStatus(running=False))
         assert _live_filigree_daemon_for_project(tmp_path) is None
+
+
+class TestEphemeralProbeIdentity:
+    """The deterministic-port probe must positively identify the listener.
+
+    ``compute_port`` hashes the project path into a 1000-port window shared
+    with whatever else runs on the box, so a bound port alone is NOT an
+    ephemeral dashboard — treating it as one false-refuses real migrations
+    (filigree-d5aa3bfe3d: an unrelated daemon on the colliding port aborted
+    ``filigree init`` with StoreMigrationBusyError). The probe must confirm
+    the listener answers ``/api/health`` as a filigree *ethereal* dashboard
+    before contributing a refusal; anything else — non-HTTP, non-filigree,
+    server-mode (the registry tier's call), or unresponsive — means proceed.
+
+    These tests call the real probe (module-level import predates the
+    suite-wide conftest stub) and pin ``compute_port`` to a listener we own.
+    """
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _health_server(body: bytes, *, status: int = 200) -> Iterator[int]:
+        """Serve *body* for GET /api/health on an OS-assigned localhost port."""
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # http.server handler API name
+                if self.path == "/api/health":
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, *_args: object) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server.server_address[1]
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_unrelated_http_listener_does_not_read_as_dashboard(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A neighbouring service with its own JSON health endpoint (the
+        # observed false-positive shape: sibling daemons in the port window).
+        with self._health_server(b'{"status": "ok", "service": "loomweave"}') as port:
+            monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+            assert _ephemeral_dashboard_port_if_live(tmp_path) is None
+
+    def test_non_http_listener_does_not_read_as_dashboard(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        try:
+            port = sock.getsockname()[1]
+            monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+            assert _ephemeral_dashboard_port_if_live(tmp_path) is None
+        finally:
+            sock.close()
+
+    def test_ethereal_dashboard_is_detected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        body = b'{"status": "ok", "mode": "ethereal", "version": "3.0.0", "auth": "off"}'
+        with self._health_server(body) as port:
+            monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+            assert _ephemeral_dashboard_port_if_live(tmp_path) == port
+
+    def test_server_mode_daemon_on_colliding_port_is_not_ephemeral(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A server-mode daemon in the port window: whether it serves THIS
+        # project is the registry tier's decision, not the port probe's.
+        body = b'{"status": "ok", "mode": "server", "projects": 3, "version": "3.0.0", "auth": "weft"}'
+        with self._health_server(body) as port:
+            monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+            assert _ephemeral_dashboard_port_if_live(tmp_path) is None
+
+    def test_garbage_health_body_does_not_read_as_dashboard(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        with self._health_server(b"<html>not json</html>") as port:
+            monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+            assert _ephemeral_dashboard_port_if_live(tmp_path) is None
+
+    def test_free_port_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()  # release: port is free again
+        monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
+        assert _ephemeral_dashboard_port_if_live(tmp_path) is None

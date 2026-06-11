@@ -70,20 +70,20 @@ def _isolate_federation_token(monkeypatch: pytest.MonkeyPatch) -> None:
 def _isolate_ephemeral_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make migration busy-detection hermetic across the whole suite.
 
-    ``_ephemeral_dashboard_port_if_live`` treats ANY listener on the project's
-    deterministic port (``8400 + sha256(store path) % 1000``) as a live
-    ephemeral dashboard — by design it cannot verify the listener's identity.
-    A developer (or agent) box runs real daemons inside that 1000-port window,
-    and each pytest tmp project draws a fresh path hash, so every
-    ``migrate_store_to_weft`` call site rolls a ~1%-per-bound-listener chance
-    of colliding with an unrelated service and aborting with a spurious
-    ``StoreMigrationBusyError`` (measured ~30% of full-suite runs with ~10
-    listeners bound across the ~38 migration call sites) — so the suite passes
-    or fails by accident of what happens to be listening. Stub the probe to
-    "no dashboard"; the server-registry detection tier stays live but is
-    deterministic for tmp projects (the real registry never contains them).
-    Tests exercising the probe's contract monkeypatch over this (sharing this
-    test's monkeypatch instance, their later setattr wins).
+    ``_ephemeral_dashboard_port_if_live`` probes the project's deterministic
+    port (``8400 + sha256(store path) % 1000``), a window shared with whatever
+    real daemons run on a developer (or agent) box. Since filigree-d5aa3bfe3d
+    it verifies the listener's identity via ``/api/health``, so an unrelated
+    service can no longer trigger a spurious ``StoreMigrationBusyError``
+    (pre-fix: ~30% of full-suite runs with ~10 listeners bound across the ~38
+    migration call sites) — but the probe still performs a live bind-attempt
+    and HTTP GET against ports derived from each tmp project's fresh path
+    hash. Stub it to "no dashboard" so the suite neither depends on nor pokes
+    whatever happens to be listening; the server-registry detection tier stays
+    live but is deterministic for tmp projects (the real registry never
+    contains them). Tests exercising the probe's contract monkeypatch over
+    this (sharing this test's monkeypatch instance, their later setattr wins)
+    or call the real function directly via a module-level import.
     """
     monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
 
