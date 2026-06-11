@@ -157,6 +157,67 @@ class TestObserveCommand:
 
 
 # ---------------------------------------------------------------------------
+# TestObservationCreateAlias — `filigree observation create` is a visible alias
+# of the canonical flat `filigree observe` verb (filigree-ce3bfae865).
+# ---------------------------------------------------------------------------
+
+
+class TestObservationCreateAlias:
+    def test_create_alias_happy_path_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["observation", "create", "spotted via alias", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == _OBSERVE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _OBSERVE_KEYS}"
+        assert data["summary"] == "spotted via alias"
+        assert data["priority"] == 2  # CLI default, same as observe
+
+        # The observation was really created — visible via the list verb.
+        listed = runner.invoke(cli, ["observation", "list", "--json"])
+        assert listed.exit_code == 0, listed.output
+        envelope = json.loads(listed.output)
+        assert any(item["observation_id"] == data["observation_id"] for item in envelope["items"])
+
+    def test_create_alias_with_all_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """The alias accepts the full observe option set (shared params, not a fork)."""
+        runner, _ = cli_in_project
+        result = runner.invoke(
+            cli,
+            [
+                "observation",
+                "create",
+                "suspicious loop",
+                "--detail",
+                "may be O(n^2)",
+                "--file-path",
+                "src/foo.py",
+                "--line",
+                "42",
+                "--source-issue-id",
+                "test-abc",
+                "--priority",
+                "1",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["summary"] == "suspicious loop"
+        assert data["detail"] == "may be O(n^2)"
+        assert data["line"] == 42
+        assert data["priority"] == 1
+        assert data["source_issue_id"] == "test-abc"
+
+    def test_observe_still_works_alongside_alias(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["observe", "still canonical", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == _OBSERVE_KEYS
+        assert data["summary"] == "still canonical"
+
+
+# ---------------------------------------------------------------------------
 # TestListObservationsCommand
 # ---------------------------------------------------------------------------
 

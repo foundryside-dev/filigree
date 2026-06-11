@@ -77,6 +77,12 @@ _GROUP_MAP: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# Visible in-group aliases whose flat counterpart is itself visible — they do
+# NOT belong in _GROUP_MAP, whose rows also drive the flat-name-must-be-hidden
+# assertions (which would wrongly require the visible ``observe`` to be hidden).
+# ``observation create`` is a visible alias of ``observe`` (filigree-ce3bfae865).
+_VISIBLE_GROUP_ALIASES: dict[str, set[str]] = {"observation": {"create"}}
+
 _FLAT_NAMES = [(g, flat) for g, members in _GROUP_MAP.items() for _sub, flat in members]
 _GROUPED = [(g, sub) for g, members in _GROUP_MAP.items() for sub, _flat in members]
 
@@ -146,5 +152,27 @@ def test_mapping_matches_source() -> None:
         grp = cli.commands.get(group)
         assert grp is not None
         registered = {n for n, c in grp.commands.items() if not c.hidden}  # type: ignore[attr-defined]
-        expected = {sub for sub, _flat in members}
+        expected = {sub for sub, _flat in members} | _VISIBLE_GROUP_ALIASES.get(group, set())
         assert registered == expected, f"{group}: source has {registered}, table has {expected}"
+
+
+def test_observation_create_alias_visible_and_shares_callback() -> None:
+    """``observation create`` is a visible alias of ``observe`` (filigree-ce3bfae865).
+
+    Same callback (no fork), distinct Command object (alias-specific help), and
+    visible in ``filigree observation --help`` with alias-of-observe wording.
+    """
+    result = CliRunner().invoke(cli, ["observation", "create", "--help"])
+    assert result.exit_code == 0, f"filigree observation create --help failed: {result.output}"
+    assert "observe" in result.output, "alias help should mention the canonical observe verb"
+
+    group_help = CliRunner().invoke(cli, ["observation", "--help"]).output
+    assert "\n  create " in group_help, "create should be visible in 'observation --help'"
+    create_line = next(line for line in group_help.splitlines() if line.startswith("  create "))
+    assert "observe" in create_line, f"create's short help should mark it as an alias of observe: {create_line!r}"
+
+    observe = cli.commands["observe"]
+    grp = cli.commands["observation"]
+    create = grp.commands["create"]  # type: ignore[attr-defined]
+    assert create.callback is observe.callback, "alias must share observe's callback — no fork"
+    assert create is not observe, "alias must be a clone, not the shared observe object (help differs)"
