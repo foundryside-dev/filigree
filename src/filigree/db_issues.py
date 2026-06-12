@@ -2735,8 +2735,9 @@ class IssuesMixin(DBMixinProtocol):
         if not fts_query:
             pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
-                (pattern, pattern),
+                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                "OR id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\')",
+                (pattern, pattern, pattern),
             ).fetchone()
             return int(row["cnt"]) if row else 0
         try:
@@ -2753,8 +2754,9 @@ class IssuesMixin(DBMixinProtocol):
             )
             pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
-                (pattern, pattern),
+                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                "OR id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\')",
+                (pattern, pattern, pattern),
             ).fetchone()
         return int(row["cnt"]) if row else 0
 
@@ -2798,8 +2800,16 @@ class IssuesMixin(DBMixinProtocol):
         rows: list[Any]
         if not fts_query:
             pattern = _escape_like(query)
-            where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
-            params: list[Any] = [pattern, pattern]
+            # The substring arm also searches LABELS: label vocabulary is
+            # kebab-case, so a label query always lands here — and a 0-result
+            # search that silently never looked at labels is a miss an agent
+            # cannot recover from (dogfood-4 B5: two issues carried the exact
+            # label searched for).
+            where = (
+                "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' "
+                "OR i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\'))"
+            )
+            params: list[Any] = [pattern, pattern, pattern]
             if category_sql:
                 where = f"{where} AND ({category_sql})"
                 params.extend(category_params)
@@ -2831,8 +2841,11 @@ class IssuesMixin(DBMixinProtocol):
                     exc,
                 )
                 pattern = _escape_like(query)
-                where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
-                params = [pattern, pattern]
+                where = (
+                    "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' "
+                    "OR i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\'))"
+                )
+                params = [pattern, pattern, pattern]
                 if category_sql:
                     where = f"{where} AND ({category_sql})"
                     params.extend(category_params)

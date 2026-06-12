@@ -701,6 +701,19 @@ class TestFTS5SpecialCharacters:
         results = db.search_issues("Scratch")
         assert any(i.id == target.id for i in results), "plain word query stays on FTS path"
 
+    def test_search_substring_arm_matches_labels(self, db: FiligreeDB) -> None:
+        """Dogfood-4 B5: two issues carried the exact label searched for and
+        search returned 0 — the substring arm never looked at labels. Label
+        vocabulary is kebab-case so a label query always lands on the LIKE arm;
+        that arm now searches labels too."""
+        tagged = db.create_issue("Throwaway probe", type="task")
+        db.add_label(tagged.id, "dogfood-exercise")
+        db.create_issue("Unrelated", type="task")
+
+        results = db.search_issues("dogfood-exercise")
+        assert any(i.id == tagged.id for i in results), "label-only match must surface on the LIKE arm"
+        assert db.count_search_results("dogfood-exercise") >= 1
+
     def test_search_status_category_filter_excludes_done(self, db: FiligreeDB) -> None:
         """Senior-user MCP review run e P2.7: status_category filter scopes search.
 

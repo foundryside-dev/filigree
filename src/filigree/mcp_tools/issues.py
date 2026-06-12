@@ -473,9 +473,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Search issues by title and description. Pure word-token queries use FTS5 "
                 "with prefix matching for ranked relevance. Queries containing punctuation "
                 "(hyphens, brackets, etc.) — e.g. 'mcp-review-e' or '[cluster-foo]' — fall "
-                "back to a LIKE substring search on the raw query so agents can find their "
-                "own self-tagged work without splitting it manually. Pass status_category "
-                "to scope results to live work (open/wip) and exclude archived/closed rows."
+                "back to a LIKE substring search on the raw query, which ALSO matches labels "
+                "(label vocabulary is kebab-case, so searching a label lands here). Word-token "
+                "FTS does not search labels — for precise label filtering use "
+                "list_issues(label=...). Pass status_category to scope results to live work "
+                "(open/wip) and exclude archived/closed rows."
             ),
             inputSchema={
                 "type": "object",
