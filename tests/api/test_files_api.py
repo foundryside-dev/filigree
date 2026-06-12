@@ -873,9 +873,69 @@ class TestWeftPromoteFindingAPI:
         body = resp.json()
         assert body["created"] is True
         assert body["issue_id"]
-        assert set(body.keys()) == {"issue_id", "created"}
+        assert set(body.keys()) == {"issue_id", "created", "entity_attachment"}
+        # C-10: a finding with no entity identity says so — never a silent skip.
+        assert body["entity_attachment"]["attached"] is False
+        assert "no entity identity on finding" in body["entity_attachment"]["reason"]
         issue = dashboard_db.db.get_issue(body["issue_id"])
         assert issue.fields["severity"] == "major"
+
+    async def test_promote_attaches_entity_by_default(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """B9 (weft-4a46553503): the plain promote attaches the finding's own
+        entity identity (metadata.loomweave.entity_id) when resolvable."""
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "loomweave",
+                "findings": [
+                    {
+                        "path": "src/ent_http.py",
+                        "rule_id": "LMWV-R1",
+                        "message": "entity-bearing finding",
+                        "severity": "high",
+                        "fingerprint": "fp-entity",
+                        "metadata": {"loomweave": {"entity_id": "loomweave:eid:http-default"}},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        # Simulate the loomweave-registry-mode file record (content hash from resolve).
+        dashboard_db.db.conn.execute("UPDATE file_records SET content_hash = 'hash-http-1' WHERE path = 'src/ent_http.py'")
+        dashboard_db.db.conn.commit()
+
+        promoted = await client.post("/api/weft/findings/promote", json={"scan_source": "loomweave", "fingerprint": "fp-entity"})
+
+        assert promoted.status_code == 200
+        body = promoted.json()
+        assert body["created"] is True
+        assert body["entity_attachment"]["attached"] is True
+        assert body["entity_attachment"]["entity_id"] == "loomweave:eid:http-default"
+        assert body["association"]["entity_id"] == "loomweave:eid:http-default"
+        rows = dashboard_db.db.list_entity_associations(body["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == "hash-http-1"
+
+    async def test_promote_attach_entity_opt_out(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "attach_entity": False},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["entity_attachment"]["attached"] is False
+        assert "attach_entity" in body["entity_attachment"]["reason"]
+        assert dashboard_db.db.list_entity_associations(body["issue_id"]) == []
+
+    async def test_promote_rejects_non_bool_attach_entity(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "attach_entity": "yes"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
 
     async def test_promote_is_idempotent(self, client: AsyncClient) -> None:
         await self._ingest(client)

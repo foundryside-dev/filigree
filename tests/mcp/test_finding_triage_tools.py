@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 from filigree.core import FiligreeDB
 from filigree.mcp_server import call_tool
 from filigree.registry import (
@@ -21,7 +23,7 @@ from filigree.registry import (
     resolve_files_batch_via_loop,
 )
 from filigree.types.api import ErrorCode
-from filigree.types.core import make_entity_id
+from filigree.types.core import make_entity_id, make_issue_id
 from tests._fakes.registry import FixedRegistry
 from tests.mcp._helpers import _parse
 
@@ -643,6 +645,84 @@ class TestPromoteFindingTool:
         assert data["association"]["entity_id"] == "loomweave:eid:mcp"
         assert data["association"]["entity_kind"] == "function"
         assert mcp_db.list_entity_associations(data["issue_id"])[0]["content_hash_at_attach"] == "hash-v1"
+
+    @staticmethod
+    def _seed_entity_finding(db: FiligreeDB, entity_id: str, *, content_hash: str = "hash-ent-1") -> str:
+        """Seed one loomweave finding carrying its own entity identity, with a
+        file-record content hash as the loomweave-registry mode would leave it."""
+        result = db.process_scan_results(
+            scan_source="loomweave",
+            findings=[
+                {
+                    "path": "src/ent.py",
+                    "rule_id": "LMWV-R1",
+                    "severity": "high",
+                    "message": "entity-bearing finding",
+                    "metadata": {"loomweave": {"entity_id": entity_id}},
+                }
+            ],
+        )
+        if content_hash:
+            db.conn.execute("UPDATE file_records SET content_hash = ? WHERE path = 'src/ent.py'", (content_hash,))
+            db.conn.commit()
+        return cast(str, result["new_finding_ids"][0])
+
+    async def test_promote_attaches_entity_by_default(self, mcp_db: FiligreeDB) -> None:
+        """B9 (weft-4a46553503): a finding carrying metadata.loomweave.entity_id
+        gets its entity association created as part of the plain promote."""
+        fid = self._seed_entity_finding(mcp_db, "loomweave:eid:mcp-default")
+
+        data = _parse(await call_tool("finding_promote", {"finding_id": fid}))
+
+        assert data["entity_attachment"]["attached"] is True
+        assert data["entity_attachment"]["entity_id"] == "loomweave:eid:mcp-default"
+        assert data["association"]["entity_id"] == "loomweave:eid:mcp-default"
+        rows = mcp_db.list_entity_associations(make_issue_id(data["issue_id"]))
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == "hash-ent-1"
+
+    async def test_promote_reports_why_nothing_attached(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["sqli"]}))
+
+        assert data["entity_attachment"]["attached"] is False
+        assert "no entity identity on finding" in data["entity_attachment"]["reason"]
+        assert "association" not in data
+
+    async def test_promote_attach_entity_opt_out(self, mcp_db: FiligreeDB) -> None:
+        fid = self._seed_entity_finding(mcp_db, "loomweave:eid:mcp-optout")
+
+        data = _parse(await call_tool("finding_promote", {"finding_id": fid, "attach_entity": False}))
+
+        assert data["entity_attachment"]["attached"] is False
+        assert "attach_entity" in data["entity_attachment"]["reason"]
+        assert mcp_db.list_entity_associations(make_issue_id(data["issue_id"])) == []
+
+    async def test_promote_rejects_non_bool_attach_entity(self, mcp_db: FiligreeDB) -> None:
+        ids = _seed_findings(mcp_db)
+        data = _parse(await call_tool("finding_promote", {"finding_id": ids["obo"], "attach_entity": "yes"}))
+        assert data["code"] == ErrorCode.VALIDATION
+        assert data["error"] == "attach_entity must be a boolean"
+        assert mcp_db.get_finding(ids["obo"])["issue_id"] is None
+
+    async def test_promote_attach_failure_is_in_band_warning(self, mcp_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed attach never fails the promote: the issue is created and the
+        failure is reported in-band (warnings + entity_attachment.reason)."""
+        fid = self._seed_entity_finding(mcp_db, "loomweave:eid:mcp-fail")
+
+        def boom(*args: object, **kwargs: object) -> object:
+            msg = "simulated attach failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(mcp_db, "add_entity_association", boom)
+        data = _parse(await call_tool("finding_promote", {"finding_id": fid}))
+
+        assert data["issue_id"]
+        assert mcp_db.get_finding(fid)["issue_id"] == data["issue_id"]
+        assert data["entity_attachment"]["attached"] is False
+        assert "attach failed: simulated attach failure" in data["entity_attachment"]["reason"]
+        assert any("simulated attach failure" in w for w in data["warnings"])
+        assert mcp_db.list_entity_associations(make_issue_id(data["issue_id"])) == []
 
     async def test_promote_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(await call_tool("finding_promote", {"finding_id": "nonexistent"}))

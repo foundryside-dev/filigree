@@ -1147,6 +1147,17 @@ def update_finding_cmd(
 )
 @click.option("--label", "labels", multiple=True, help="Label to add to the created issue (repeatable)")
 @click.option("--actor", default=None, help="Actor identity (defaults to global --actor)")
+@click.option(
+    "--attach-entity/--no-attach-entity",
+    "attach_entity",
+    default=True,
+    show_default=True,
+    help=(
+        "Attach the finding's own entity identity (metadata.loomweave.entity_id) as an entity "
+        "association on the promoted issue when resolvable. The attach is enrichment: a failure "
+        "is reported as a warning, never a promote failure."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def promote_finding_cmd(
@@ -1155,9 +1166,15 @@ def promote_finding_cmd(
     priority: int | None,
     labels: tuple[str, ...],
     actor: str | None,
+    attach_entity: bool,
     as_json: bool,
 ) -> None:
-    """Promote a scan finding directly to a tracked issue."""
+    """Promote a scan finding directly to a tracked issue.
+
+    When the finding carries an entity identity in its own metadata, the
+    ADR-029 entity association is attached by default (B9, weft-4a46553503);
+    the output always says what was attached or why not.
+    """
     if actor is None:
         resolved_actor = ctx.obj["actor"]
     else:
@@ -1176,6 +1193,7 @@ def promote_finding_cmd(
                 priority=priority,
                 actor=resolved_actor,
                 labels=list(labels) or None,
+                attach_entity=attach_entity,
             )
         except KeyError:
             if as_json:
@@ -1196,14 +1214,25 @@ def promote_finding_cmd(
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
+        attachment = promoted.get("entity_attachment")
         if as_json:
             payload: dict[str, Any] = dict(issue_to_public(promoted["issue"]))
+            # C-10 honesty: always say what the default entity attach did (or
+            # exactly why it did nothing) — never a silent skip.
+            payload["entity_attachment"] = attachment
+            if promoted.get("association") is not None:
+                payload["association"] = dict(promoted["association"])
             if promoted.get("warnings"):
                 payload["warnings"] = promoted["warnings"]
             click.echo(json_mod.dumps(payload, indent=2, default=str))
         else:
             issue = promoted["issue"]
             click.echo(f"Promoted finding {finding_id} → issue {issue.id}: {issue.title}")
+            if attachment is not None:
+                if attachment.get("attached"):
+                    click.echo(f"Attached entity {attachment['entity_id']} (content hash {attachment['content_hash']})")
+                else:
+                    click.echo(f"No entity attached: {attachment.get('reason', '')}")
         refresh_summary(db)
 
 

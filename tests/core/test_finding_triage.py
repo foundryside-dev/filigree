@@ -773,6 +773,172 @@ class TestPromoteFindingAndAttachEntity:
         assert assoc[0]["content_hash_at_attach"] == "hash-v1"
 
 
+def _seed_entity_finding(
+    db: FiligreeDB,
+    *,
+    metadata: dict[str, Any] | None = None,
+    file_content_hash: str = "",
+    path: str = "src/entity_mod.py",
+) -> str:
+    """Ingest one finding (optionally carrying federation metadata) and return its id.
+
+    ``file_content_hash`` simulates the loomweave-registry-mode file record,
+    where ``file_records.content_hash`` is populated by the registry resolve
+    (it stays the empty sentinel in local mode).
+    """
+    finding: dict[str, Any] = {
+        "path": path,
+        "rule_id": "LMWV-PY-UNSAFE-EVAL",
+        "severity": "high",
+        "message": "Use of eval() on untrusted input",
+        "line_start": 42,
+    }
+    if metadata is not None:
+        finding["metadata"] = metadata
+    result = db.process_scan_results(scan_source="loomweave", findings=[finding])
+    if file_content_hash:
+        db.conn.execute("UPDATE file_records SET content_hash = ? WHERE path = ?", (file_content_hash, path))
+        db.conn.commit()
+    return cast(str, result["new_finding_ids"][0])
+
+
+class TestPromoteFindingDefaultEntityAttach:
+    """B9 (weft-4a46553503): promotion attaches the finding's own entity identity by default.
+
+    A finding that carries a resolvable entity identity in its own metadata
+    (``metadata.loomweave.entity_id``) gets an entity association created as
+    part of the promote — the binding is enrichment, never load-bearing, and
+    the result always says what was attached or why not (C-10 honesty).
+    """
+
+    def test_promote_attaches_entity_from_loomweave_metadata(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:0123abcd"}},
+            file_content_hash="blake3-aaa",
+        )
+        result = db.promote_finding_to_issue(fid)
+
+        assert result["created"] is True
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is True
+        assert attachment["entity_id"] == "loomweave:eid:0123abcd"
+        assert attachment["content_hash"] == "blake3-aaa"
+        assert result["association"]["entity_id"] == "loomweave:eid:0123abcd"
+        assocs = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert len(assocs) == 1
+        assert assocs[0]["entity_id"] == "loomweave:eid:0123abcd"
+        assert assocs[0]["content_hash_at_attach"] == "blake3-aaa"
+
+    def test_promote_without_identity_behaves_as_today(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        result = db.promote_finding_to_issue(ids["sqli"])
+
+        assert result["created"] is True
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "no entity identity on finding" in attachment["reason"]
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+        # The no-identity case is the normal path for non-federated scanners —
+        # it must not mint a warning.
+        assert not result.get("warnings")
+
+    def test_promote_attach_failure_warns_but_promote_succeeds(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:feedface"}},
+            file_content_hash="blake3-bbb",
+        )
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            msg = "simulated attach failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(db, "add_entity_association", boom)
+        result = db.promote_finding_to_issue(fid)
+
+        assert result["created"] is True
+        assert db.get_finding(fid)["issue_id"] == result["issue"].id
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "attach failed: simulated attach failure" in attachment["reason"]
+        assert any("simulated attach failure" in w for w in result["warnings"])
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_identity_without_content_hash_reports_reason(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(db, metadata={"loomweave": {"entity_id": "loomweave:eid:nohash"}})
+        result = db.promote_finding_to_issue(fid)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert attachment["entity_id"] == "loomweave:eid:nohash"
+        assert "content hash" in attachment["reason"]
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_wardline_qualname_only_reports_unresolvable(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"wardline": {"qualname": "pkg.mod.fn", "kind": "defect"}},
+            file_content_hash="blake3-ccc",
+        )
+        result = db.promote_finding_to_issue(fid)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "pkg.mod.fn" in attachment["reason"]
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_opt_out_skips_attach(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:optout"}},
+            file_content_hash="blake3-ddd",
+        )
+        result = db.promote_finding_to_issue(fid, attach_entity=False)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "attach_entity" in attachment["reason"]
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_retry_reattaches_and_refreshes_hash(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:retry"}},
+            file_content_hash="blake3-v1",
+        )
+        first = db.promote_finding_to_issue(fid)
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-v2' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        second = db.promote_finding_to_issue(fid)
+
+        assert second["created"] is False
+        assert second["issue"].id == first["issue"].id
+        assert second["entity_attachment"]["attached"] is True
+        assocs = db.list_entity_associations(make_issue_id(first["issue"].id))
+        assert len(assocs) == 1
+        assert assocs[0]["content_hash_at_attach"] == "blake3-v2"
+
+    def test_explicit_promote_and_attach_does_not_double_attach(self, db: FiligreeDB) -> None:
+        """The explicit form stays caller-driven: the metadata-derived default
+        attach must not also fire, or a divergent caller-supplied entity would
+        leave two associations."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:meta"}},
+            file_content_hash="blake3-eee",
+        )
+        result = db.promote_finding_and_attach_entity(fid, "loomweave:eid:explicit", "hash-explicit")
+
+        assocs = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert [a["entity_id"] for a in assocs] == ["loomweave:eid:explicit"]
+        assert "entity_attachment" not in result
+
+
 class TestProcessScanResultsBreakingChange:
     """The old create_issues parameter was removed — callers must use create_observations."""
 

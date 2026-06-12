@@ -126,20 +126,24 @@ def _promote_finding_on_private_conn(
     labels: list[str] | None,
     actor: str,
     force: bool = False,
+    attach_entity: bool = True,
 ) -> dict[str, Any] | None:
     """Resolve ``(scan_source, fingerprint)`` → finding and promote it.
 
     Runs on a private worker-thread connection (CONTRACT-E) — the resolve and
     the promote (an issue write) share the SAME borrowed connection so it is
-    never used cross-thread. Returns ``{"issue_id", "created"}`` or ``None``
-    when no finding matches the fingerprint.
+    never used cross-thread. Returns ``{"issue_id", "created",
+    "entity_attachment", ...}`` or ``None`` when no finding matches the
+    fingerprint.
     """
     with db.borrow_for_worker_thread() as worker_db:
         finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
         if finding is None:
             return None
         try:
-            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor, force=force)
+            result = worker_db.promote_finding_to_issue(
+                finding["id"], priority=priority, labels=labels, actor=actor, force=force, attach_entity=attach_entity
+            )
         except KeyError:
             # promote_finding_to_issue re-reads the finding (``get_finding``)
             # before it writes. A concurrent hard-delete in the window between
@@ -154,7 +158,15 @@ def _promote_finding_on_private_conn(
             if worker_db.find_finding_by_fingerprint(scan_source, fingerprint) is None:
                 return None
             raise
-        response: dict[str, Any] = {"issue_id": result["issue"].id, "created": result["created"]}
+        response: dict[str, Any] = {
+            "issue_id": result["issue"].id,
+            "created": result["created"],
+            # C-10 honesty: always say what the default entity attach did (or
+            # exactly why it did nothing) — never a silent skip.
+            "entity_attachment": result.get("entity_attachment"),
+        }
+        if result.get("association") is not None:
+            response["association"] = dict(result["association"])
         if result.get("warnings"):
             response["warnings"] = result["warnings"]
         return response
@@ -891,12 +903,20 @@ def create_weft_router() -> APIRouter:
         duplicate). Returns 404 when the fingerprint was never ingested under
         ``scan_source``. See the 2026-06-02 promote-by-fingerprint brief.
 
-        Request: ``{scan_source (req), fingerprint (req), priority?, labels?, force?}``.
+        Request: ``{scan_source (req), fingerprint (req), priority?, labels?,
+        force?, attach_entity?}``.
         ``priority`` accepts ``"P2"``/``2``; omit to derive from severity.
         ``force`` (default false) overrides the suppression guard: a finding
         wardline marked baselined/waived/judged is otherwise refused (VALIDATION
         400) as an already-accepted defect.
-        Response: ``{"issue_id": "<id>", "created": true|false}``.
+        ``attach_entity`` (default true) attaches the finding's own entity
+        identity (``metadata.loomweave.entity_id``) as an ADR-029 entity
+        association on the promoted issue when resolvable (B9,
+        weft-4a46553503); the attach is enrichment — a failure is reported
+        in-band via ``warnings``, never a promote failure.
+        Response: ``{"issue_id": "<id>", "created": true|false,
+        "entity_attachment": {...}, "association"?: {...}}`` —
+        ``entity_attachment`` always says what was attached or why not.
 
         Concurrency: promote is a WRITE (issue create + finding link), so it
         runs via ``asyncio.to_thread`` on a PRIVATE worker-thread connection
@@ -921,6 +941,9 @@ def create_weft_router() -> APIRouter:
         force = body.get("force", False)
         if not isinstance(force, bool):
             return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
+        attach_entity = body.get("attach_entity", True)
+        if not isinstance(attach_entity, bool):
+            return _error_response("attach_entity must be a boolean", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -934,6 +957,7 @@ def create_weft_router() -> APIRouter:
                 labels=labels,
                 actor=actor,
                 force=force,
+                attach_entity=attach_entity,
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)

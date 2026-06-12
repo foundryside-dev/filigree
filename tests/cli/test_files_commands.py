@@ -48,6 +48,7 @@ from click.testing import CliRunner
 
 from filigree.cli import cli
 from filigree.registry import RegistryUnavailableError, ResolvedFile
+from filigree.types.core import make_issue_id
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -1830,12 +1831,97 @@ class TestPromoteFindingCommand:
             result = runner.invoke(cli, ["promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert set(data.keys()) == _PUBLIC_ISSUE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _PUBLIC_ISSUE_KEYS}"
+            expected_keys = _PUBLIC_ISSUE_KEYS | {"entity_attachment"}
+            assert set(data.keys()) == expected_keys, f"Shape mismatch: {set(data.keys()) ^ expected_keys}"
             assert "id" not in data
             assert data["issue_id"]
             assert "Test finding" in data["title"] or data["title"]
             assert "from-finding" in data["labels"]
             assert data["fields"]["severity"] == "major"
+            # C-10: a finding with no entity identity says so — never a silent skip.
+            assert data["entity_attachment"]["attached"] is False
+            assert "no entity identity on finding" in data["entity_attachment"]["reason"]
+        finally:
+            os.chdir(original)
+
+    def _seed_entity_finding(self, project: Path, entity_id: str, *, content_hash: str = "hash-cli-1") -> str:
+        """Seed one loomweave finding carrying its own entity identity, with a
+        file-record content hash as the loomweave-registry mode would leave it."""
+        from filigree.cli_common import get_db
+
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            with get_db() as db:
+                result = db.process_scan_results(
+                    scan_source="loomweave",
+                    findings=[
+                        {
+                            "path": "src/ent_cli.py",
+                            "rule_id": "LMWV-R1",
+                            "severity": "high",
+                            "message": "entity-bearing finding",
+                            "metadata": {"loomweave": {"entity_id": entity_id}},
+                        }
+                    ],
+                )
+                if content_hash:
+                    db.conn.execute("UPDATE file_records SET content_hash = ? WHERE path = 'src/ent_cli.py'", (content_hash,))
+                    db.conn.commit()
+                return cast(str, result["new_finding_ids"][0])
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_attaches_entity_by_default(self, initialized_project: Path) -> None:
+        """B9 (weft-4a46553503): the plain promote attaches the finding's own
+        entity identity (metadata.loomweave.entity_id) when resolvable."""
+        from filigree.cli_common import get_db
+
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-default")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id, "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["entity_attachment"]["attached"] is True
+            assert data["entity_attachment"]["entity_id"] == "loomweave:eid:cli-default"
+            assert data["association"]["entity_id"] == "loomweave:eid:cli-default"
+            with get_db() as db:
+                rows = db.list_entity_associations(make_issue_id(data["issue_id"]))
+            assert len(rows) == 1
+            assert rows[0]["content_hash_at_attach"] == "hash-cli-1"
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_attach_outcome_in_plain_text(self, initialized_project: Path) -> None:
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-text")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id])
+            assert result.exit_code == 0, result.output
+            assert "Attached entity loomweave:eid:cli-text" in result.output
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_no_attach_entity_opt_out(self, initialized_project: Path) -> None:
+        from filigree.cli_common import get_db
+
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-optout")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id, "--no-attach-entity", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["entity_attachment"]["attached"] is False
+            assert "attach_entity" in data["entity_attachment"]["reason"]
+            with get_db() as db:
+                assert db.list_entity_associations(make_issue_id(data["issue_id"])) == []
         finally:
             os.chdir(original)
 

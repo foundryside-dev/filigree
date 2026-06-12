@@ -282,11 +282,27 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="promote_finding",
-            description="Promote a scan finding directly to a tracked issue and link the finding to it.",
+            description=(
+                "Promote a scan finding directly to a tracked issue and link the finding to it. "
+                "When the finding carries an entity identity in its own metadata "
+                "(metadata.loomweave.entity_id) and a content hash is available, the ADR-029 "
+                "entity association is attached by default; the response's entity_attachment "
+                "field says what was attached or why not. Pass attach_entity=false to opt out."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "finding_id": {"type": "string", "description": "Finding ID"},
+                    "attach_entity": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Attach the finding's own entity identity (metadata.loomweave.entity_id) "
+                            "as an entity association on the promoted issue when resolvable. The attach "
+                            "is enrichment: a failure is reported as a warning, never fails the promote. "
+                            "Set false to opt out."
+                        ),
+                    },
                     "priority": {
                         "type": "integer",
                         "minimum": 0,
@@ -823,10 +839,17 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     force = arguments.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+    # Same raw-arguments idiom for the default-entity-attach opt-out (B9,
+    # weft-4a46553503).
+    attach_entity = arguments.get("attach_entity", True)
+    if not isinstance(attach_entity, bool):
+        return _text(ErrorResponse(error="attach_entity must be a boolean", code=ErrorCode.VALIDATION))
 
     tracker = get_db()
     try:
-        result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels, force=force)
+        result = tracker.promote_finding_to_issue(
+            finding_id, priority=priority, actor=actor, labels=labels, force=force, attach_entity=attach_entity
+        )
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
@@ -837,6 +860,11 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=f"Database error promoting finding: {exc}", code=ErrorCode.IO))
     refresh_summary()
     response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    # C-10 honesty: always say what the default entity attach did (or exactly
+    # why it did nothing) — never a silent skip.
+    response["entity_attachment"] = result.get("entity_attachment")
+    if result.get("association") is not None:
+        response["association"] = dict(result["association"])
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
     return _text(response)

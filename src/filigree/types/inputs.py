@@ -721,6 +721,7 @@ class PromoteFindingArgs(TypedDict):
     priority: NotRequired[int]
     labels: NotRequired[list[str]]
     force: NotRequired[bool]
+    attach_entity: NotRequired[bool]
     actor: NotRequired[str]
 
 

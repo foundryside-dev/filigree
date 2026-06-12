@@ -1080,12 +1080,21 @@ Records the global `--actor` in the finding's `updated_by` field.
 
 ### `promote-finding`
 
-Promote a finding to an observation.
+Promote a finding directly to a tracked issue and link the finding to it.
+When the finding carries an entity identity in its own metadata
+(`metadata.loomweave.entity_id`) and its file record carries a content hash,
+the ADR-029 entity association is attached by default (dogfood-4 B9); the
+output always says what was attached or why not (`entity_attachment`). The
+attach is enrichment — a failure is reported as a warning, never a promote
+failure.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `finding-id` | string | Finding ID (positional) |
-| `--priority` | 0-4 | Priority for the created observation |
+| `--priority` | 0-4 | Priority for the created issue (default: inferred from severity) |
+| `--label` | string | Label to add to the created issue (repeatable) |
+| `--attach-entity/--no-attach-entity` | flag | Attach the finding's own entity identity as an entity association (default: on) |
+| `--actor` | string | Actor identity (defaults to global `--actor`) |
 
 ### `dismiss-finding`
 

@@ -799,7 +799,16 @@ enrich-only rule is preserved.
 | `entity_association_remove` | Remove the binding identified by `(issue_id, entity_id)` |
 | `entity_association_list` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
 | `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given opaque external entity ID |
-| `finding_promote_and_attach_entity` | Promote a scan finding to an issue and attach an opaque external entity binding |
+| `finding_promote_and_attach_entity` | Promote a scan finding to an issue and attach an opaque external entity binding (explicit, caller-resolved form) |
+
+Plain `finding_promote` also attaches by default (dogfood-4 B9): when the
+finding carries `metadata.loomweave.entity_id` and its file record carries a
+content hash, the association is created as part of the promote, and the
+response's `entity_attachment` field says what was attached or exactly why
+not. Pass `attach_entity=false` to opt out;
+`finding_promote_and_attach_entity` remains the explicit form for a
+caller-resolved `entity_id`/`content_hash` (e.g. a Wardline qualname resolved
+through Loomweave).
 
 #### `entity_association_add`
 

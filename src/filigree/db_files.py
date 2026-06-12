@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
@@ -2495,8 +2495,140 @@ class FilesMixin(DBMixinProtocol):
         actor: str = "",
         labels: list[str] | None = None,
         force: bool = False,
+        attach_entity: bool = True,
     ) -> dict[str, Any]:
-        """Promote a finding directly to a tracked issue.
+        """Promote a finding to a tracked issue, attaching its entity binding by default.
+
+        Default entity attach (dogfood-4 B9, weft-4a46553503): when the finding
+        itself carries an entity identity (``metadata.loomweave.entity_id``) and
+        its file record carries a content hash to snapshot as the drift
+        baseline, the promote also creates the ADR-029 entity association — so
+        a promoted federation finding is visible from Loomweave's entity
+        surfaces without a second opt-in call. The attach is *enrichment, never
+        load-bearing*: any attach failure is reported in-band (a ``warnings``
+        entry plus ``entity_attachment.reason``) and the promote still
+        succeeds. Pass ``attach_entity=False`` to opt out.
+
+        The result always carries an ``entity_attachment`` dict saying what was
+        attached (``attached=True`` with ``entity_id``/``content_hash``/
+        ``source``, plus a top-level ``association`` row) or exactly why not
+        (``attached=False`` with ``reason``) — never a silent skip (C-10).
+        Re-promoting an already-promoted finding re-runs the attach, which
+        upserts on ``(issue_id, entity_id)`` and refreshes the stored hash, so
+        a promote that failed mid-attach converges on retry.
+        """
+        result = self._promote_finding_to_issue_unattached(finding_id, priority=priority, actor=actor, labels=labels, force=force)
+        if not attach_entity:
+            result["entity_attachment"] = {"attached": False, "reason": "entity attach disabled by caller (attach_entity=false)"}
+            return result
+
+        finding = self.get_finding(finding_id)
+        entity_id, source, no_identity_reason = self._entity_identity_from_finding(finding)
+        if entity_id is None:
+            result["entity_attachment"] = {"attached": False, "reason": no_identity_reason}
+            return result
+
+        content_hash = self._file_content_hash_for_finding(finding["file_id"])
+        if not content_hash:
+            result["entity_attachment"] = {
+                "attached": False,
+                "entity_id": entity_id,
+                "reason": (
+                    f"resolution failed: file record for file_id={finding['file_id']} carries no "
+                    "content hash to snapshot as the drift baseline (local-registry file); pass "
+                    "an explicit content_hash via finding_promote_and_attach_entity"
+                ),
+            }
+            return result
+
+        issue_id = result["issue"].id
+        try:
+            association = self.add_entity_association(
+                make_issue_id(issue_id),
+                make_loomweave_entity_id(entity_id),
+                make_content_hash(content_hash),
+                actor=actor,
+            )
+        except Exception as exc:  # enrichment must never sink the promote
+            logger.warning("Default entity attach failed for finding %s (entity %r): %s", finding_id, entity_id, exc)
+            result["entity_attachment"] = {
+                "attached": False,
+                "entity_id": entity_id,
+                "reason": f"attach failed: {exc}",
+            }
+            result.setdefault("warnings", []).append(
+                f"Issue {issue_id} promoted, but the default entity attach of {entity_id!r} failed: {exc}"
+            )
+            return result
+
+        result["association"] = association
+        result["entity_attachment"] = {
+            "attached": True,
+            "entity_id": entity_id,
+            "content_hash": content_hash,
+            "source": source,
+        }
+        return result
+
+    @staticmethod
+    def _entity_identity_from_finding(finding: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+        """Extract the entity identity a finding carries in its own metadata.
+
+        Returns ``(entity_id, source, reason_when_absent)``. The only identity
+        filigree can use without a network resolve is
+        ``metadata.loomweave.entity_id`` — an opaque Loomweave-owned id (SEI or
+        legacy locator). A wardline finding carries only
+        ``metadata.wardline.qualname``, which filigree deliberately does not
+        resolve locally (resolution is Loomweave's authority); the returned
+        reason names the qualname and points at the explicit attach form.
+        Metadata is external scanner payload stored verbatim, so every level is
+        type-guarded.
+        """
+        raw_metadata = finding.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        loomweave_meta = metadata.get("loomweave")
+        if isinstance(loomweave_meta, dict):
+            entity_id = loomweave_meta.get("entity_id")
+            if isinstance(entity_id, str) and entity_id.strip():
+                return entity_id, "metadata.loomweave.entity_id", None
+        wardline_meta = metadata.get("wardline")
+        if isinstance(wardline_meta, dict):
+            qualname = wardline_meta.get("qualname")
+            if isinstance(qualname, str) and qualname.strip():
+                return None, None, (
+                    f"resolution failed: finding carries qualname {qualname!r} "
+                    "(metadata.wardline.qualname) but no entity id; filigree does not resolve "
+                    "qualnames locally — resolve it via Loomweave and call "
+                    "finding_promote_and_attach_entity"
+                )
+        return None, None, "no entity identity on finding (no metadata.loomweave.entity_id or metadata.wardline.qualname)"
+
+    def _file_content_hash_for_finding(self, file_id: str) -> str:
+        """The finding's file-record content hash, or empty string when absent.
+
+        Populated by the Loomweave registry resolve in ``loomweave`` registry
+        mode; the empty sentinel in local mode (where no drift baseline exists).
+        """
+        row = self.conn.execute("SELECT content_hash FROM file_records WHERE id = ?", (file_id,)).fetchone()
+        if row is None:
+            return ""
+        return str(row["content_hash"] or "")
+
+    def _promote_finding_to_issue_unattached(
+        self,
+        finding_id: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+        labels: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Promote a finding directly to a tracked issue (no entity attach).
+
+        The promote core. Public surfaces go through
+        :meth:`promote_finding_to_issue`, which layers the default entity
+        attach on top; :meth:`promote_finding_and_attach_entity` calls this
+        directly so the caller-supplied binding stays the only one created.
 
         The older ``promote_finding_to_observation`` helper remains available
         for explicit scratchpad triage. This method backs public
@@ -2671,8 +2803,13 @@ class FilesMixin(DBMixinProtocol):
         hash. Re-issuing the same request after a mid-operation failure
         therefore returns the existing issue with the association now present
         (see ``test_promote_and_attach_retry_converges_after_attach_failure``).
+
+        This explicit form remains caller-driven: it promotes via the
+        unattached core, so the default metadata-derived attach (see
+        :meth:`promote_finding_to_issue`) never fires alongside the
+        caller-supplied binding.
         """
-        result = self.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels, force=force)
+        result = self._promote_finding_to_issue_unattached(finding_id, priority=priority, actor=actor, labels=labels, force=force)
         issue = result["issue"]
         association = self.add_entity_association(
             make_issue_id(issue.id),
