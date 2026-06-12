@@ -381,7 +381,10 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "current status must have a defined transition to the target done state. When status is "
                 "omitted, defaults to the first done-category state for the type (e.g. 'closed'); pass "
                 "status explicitly to land in an alternate done state (e.g. 'wont_fix', 'not_a_bug', "
-                "'cancelled'). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
+                "'cancelled'). NOTE: the default can be legitimately unreachable from a mid-workflow "
+                "state — e.g. a bug in 'fixing' must walk fixing→verifying before closing (the "
+                "verify-before-close gate; close never silently picks a different done state on your "
+                "behalf). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
                 "defined — walk the workflow with issue_update, pass a reachable status, or pass "
                 "force=true to use the declared reverse/escape edge for cleanup."
             ),

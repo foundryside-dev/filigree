@@ -441,12 +441,22 @@ class MetaMixin(DBMixinProtocol):
                 f")",
                 [*open_params, *blocker_done_params],
             ).fetchone()["cnt"]
+            # blocked_count matches get_blocked()'s definition exactly — ONE
+            # definition of "blocked" across surfaces (dogfood-4 B3: stats said 0
+            # while work_blocked returned a wip-category issue). Blocked = any
+            # NOT-done issue (open or wip — a claimed in_progress dead-end is
+            # still stuck) with at least one not-done blocker. ready_count keeps
+            # the open-only predicate: readiness is claim-eligibility, blockedness
+            # is not.
+            not_done_sql, not_done_params = self._category_predicate_sql(
+                "done", type_col="i.type", status_col="i.status", include_archived=True
+            )
             blocked_count = self.conn.execute(
                 f"SELECT COUNT(DISTINCT i.id) as cnt FROM issues i "
                 f"JOIN dependencies d ON d.issue_id = i.id "
                 f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-                f"WHERE {open_sql} AND NOT ({blocker_done_sql})",
-                [*open_params, *blocker_done_params],
+                f"WHERE NOT ({not_done_sql}) AND NOT ({blocker_done_sql})",
+                [*not_done_params, *blocker_done_params],
             ).fetchone()["cnt"]
 
         dep_count = self.conn.execute("SELECT COUNT(*) as cnt FROM dependencies").fetchone()["cnt"]

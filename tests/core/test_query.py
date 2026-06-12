@@ -478,6 +478,21 @@ class TestStats:
         assert stats["blocked_count"] == 0
         assert stats["ready_count"] == len(ready_ids)
 
+    def test_wip_blocked_issue_counts_in_stats_blocked_count(self, db: FiligreeDB) -> None:
+        # Dogfood-4 B3: stats_get said blocked_count 0 while work_blocked returned
+        # a claimed wip-category issue — two definitions of "blocked". There is
+        # ONE now: stats must agree with get_blocked, wip included.
+        blocker = db.create_issue("Blocker", type="task")
+        blocked = db.create_issue("Blocked", type="task")
+        db.update_issue(blocked.id, status="in_progress")
+        db.add_dependency(blocked.id, blocker.id)
+
+        stats = db.get_stats()
+        blocked_ids = {i.id for i in db.get_blocked()}
+
+        assert blocked.id in blocked_ids
+        assert stats["blocked_count"] == len(blocked_ids)
+
 
 class TestGetStatsByCategory:
     """Verify get_stats() includes category-level counts (WFT-FR-060)."""
