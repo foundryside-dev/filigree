@@ -476,7 +476,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "back to a LIKE substring search on the raw query, which ALSO matches labels "
                 "(label vocabulary is kebab-case, so searching a label lands here). Word-token "
                 "FTS does not search labels — for precise label filtering use "
-                "list_issues(label=...). Pass status_category to scope results to live work "
+                "issue_list(label=...). Pass status_category to scope results to live work "
                 "(open/wip) and exclude archived/closed rows."
             ),
             inputSchema={
