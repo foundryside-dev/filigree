@@ -649,6 +649,39 @@ class TestGetStatsEmptyDoneStates:
             # With no done states, B blocks A, so A is blocked and B is ready
             assert stats["blocked_count"] >= 1
 
+    def test_get_stats_no_open_states_still_counts_blocked(self, db: FiligreeDB) -> None:
+        """F2 corner: when NO open-category states are registered,
+        _resolve_open_blocker_predicates() returns None and get_stats used to
+        short-circuit blocked_count to 0. But blocked_count/get_blocked() no
+        longer depend on open states (blocked = any not-done issue with a
+        not-done blocker, wip included), so the two surfaces diverged for a
+        wip/done-only template. get_stats must compute blocked_count from the
+        same not-done predicate get_blocked() uses and agree with it."""
+        blocker = db.create_issue("Blocker", type="task")
+        blocked = db.create_issue("Blocked", type="task")
+        db.update_issue(blocked.id, status="in_progress")  # wip-category, not done
+        db.add_dependency(blocked.id, blocker.id)
+
+        original_method = db._get_type_states_for_category
+
+        def mock_get_states(category: str) -> list[tuple[str, str]]:
+            if category == "open":
+                return []  # no open-category (type, state) pairs registered
+            return original_method(category)
+
+        with patch.object(db, "_get_type_states_for_category", side_effect=mock_get_states):
+            # Sanity: this configuration drives _resolve_open_blocker_predicates
+            # to return None, exercising the short-circuit branch.
+            assert db._resolve_open_blocker_predicates() is None
+            stats = db.get_stats()
+            blocked_ids = {i.id for i in db.get_blocked()}
+            # The wip issue blocked by a not-done blocker must be surfaced by
+            # get_blocked AND counted by stats — the two must agree.
+            assert blocked.id in blocked_ids
+            assert stats["blocked_count"] == len(blocked_ids)
+            assert stats["blocked_count"] >= 1
+            assert stats["ready_count"] == 0  # readiness is still open-only
+
 
 class TestFTS5SpecialCharacters:
     """FTS5 search should handle special characters gracefully."""
@@ -713,6 +746,39 @@ class TestFTS5SpecialCharacters:
         results = db.search_issues("dogfood-exercise")
         assert any(i.id == tagged.id for i in results), "label-only match must surface on the LIKE arm"
         assert db.count_search_results("dogfood-exercise") >= 1
+
+    def test_search_bareword_label_only_match_surfaces(self, db: FiligreeDB) -> None:
+        """No-dead-by-design: a SINGLE-WORD label (no punctuation) routes to the
+        FTS arm, which indexes only title/description — so a bareword query that
+        exactly names a label used to silently miss it, while kebab-case labels
+        (which carry a hyphen, landing on the LIKE arm) matched. The FTS arm now
+        UNIONs label-LIKE hits, and count_search_results stays in lockstep."""
+        tagged = db.create_issue("Throwaway probe with no matching words", type="task")
+        db.add_label(tagged.id, "backend")
+        # A decoy whose title/description never mentions 'backend'.
+        db.create_issue("Unrelated frontend styling", type="task")
+
+        results = db.search_issues("backend")
+        assert any(i.id == tagged.id for i in results), "single-word label-only match must surface even though it routes to FTS"
+        # search and count stay in lockstep.
+        assert db.count_search_results("backend") >= 1
+
+    def test_search_bareword_fts_and_label_both_surface(self, db: FiligreeDB) -> None:
+        """A bareword query must surface BOTH title/description FTS hits and
+        label-only hits in one result set (union), deduped."""
+        by_title = db.create_issue("urgent triage required", type="task")
+        by_label = db.create_issue("Routine cleanup", type="task")
+        db.add_label(by_label.id, "urgent")
+        both = db.create_issue("urgent regression", type="task")
+        db.add_label(both.id, "urgent")
+        db.create_issue("calm unrelated work", type="task")
+
+        ids = {i.id for i in db.search_issues("urgent")}
+        assert {by_title.id, by_label.id, both.id}.issubset(ids)
+        # 'both' must appear exactly once despite matching FTS and label.
+        result_ids = [i.id for i in db.search_issues("urgent")]
+        assert result_ids.count(both.id) == 1
+        assert db.count_search_results("urgent") == 3
 
     def test_search_status_category_filter_excludes_done(self, db: FiligreeDB) -> None:
         """Senior-user MCP review run e P2.7: status_category filter scopes search.

@@ -2741,9 +2741,17 @@ class IssuesMixin(DBMixinProtocol):
             ).fetchone()
             return int(row["cnt"]) if row else 0
         try:
+            # Lockstep with search_issues' FTS arm: count FTS title/description
+            # hits UNION label-LIKE hits so a bareword label-only query is
+            # counted, not silently zero. DISTINCT id dedupes rows matching both.
+            label_pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid WHERE issues_fts MATCH ?",
-                (fts_query,),
+                "SELECT COUNT(*) AS cnt FROM ("
+                "  SELECT i.id FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid WHERE issues_fts MATCH ? "
+                "  UNION "
+                "  SELECT issue_id AS id FROM labels WHERE label LIKE ? ESCAPE '\\'"
+                ")",
+                (fts_query, label_pattern),
             ).fetchone()
         except sqlite3.OperationalError as exc:
             if not _is_fts_unavailable_error(exc):
@@ -2820,18 +2828,38 @@ class IssuesMixin(DBMixinProtocol):
             ).fetchall()
         else:
             try:
-                where = "issues_fts MATCH ?"
-                params = [fts_query]
-                if category_sql:
-                    where = f"{where} AND ({category_sql})"
-                    params.extend(category_params)
-                params.extend([limit, offset])
+                # The FTS index covers only title/description (db_schema.py),
+                # never labels — so a bareword query that exactly names a label
+                # (``backend``, ``urgent``) would route here and silently miss
+                # label-only matches, while kebab-case labels (which carry a
+                # hyphen) land in the LIKE arm and DO match. Closing that
+                # asymmetry (no-dead-by-design): UNION the FTS hits with rows
+                # whose labels LIKE the raw query. FTS hits keep their relevance
+                # ordering (match_rank=0, ordered by issues_fts.rank); label-only
+                # hits (no FTS row) come after (match_rank=1), ordered by
+                # priority. Rows that are BOTH appear once via the FTS branch.
+                label_pattern = _escape_like(query)
+                cat_clause = f" AND ({category_sql})" if category_sql else ""
+                fts_params: list[Any] = [fts_query, *category_params]
+                label_params: list[Any] = [label_pattern, fts_query, *category_params]
+                where_params: list[Any] = [*fts_params, *label_params, limit, offset]
                 rows = self.conn.execute(
-                    "SELECT i.id, i.type, i.status FROM issues i "
-                    "JOIN issues_fts ON issues_fts.rowid = i.rowid "
-                    f"WHERE {where} "
-                    "ORDER BY issues_fts.rank LIMIT ? OFFSET ?",
-                    params,
+                    "SELECT id, type, status FROM ("
+                    "  SELECT i.id AS id, i.type AS type, i.status AS status, "
+                    "         0 AS match_rank, issues_fts.rank AS fts_rank, i.priority AS priority, i.created_at AS created_at "
+                    "  FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid "
+                    f"  WHERE issues_fts MATCH ?{cat_clause} "
+                    "  UNION ALL "
+                    "  SELECT i.id AS id, i.type AS type, i.status AS status, "
+                    "         1 AS match_rank, 0 AS fts_rank, i.priority AS priority, i.created_at AS created_at "
+                    "  FROM issues i "
+                    "  WHERE i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\') "
+                    "    AND i.id NOT IN ("
+                    "      SELECT i2.id FROM issues i2 JOIN issues_fts ON issues_fts.rowid = i2.rowid WHERE issues_fts MATCH ?"
+                    "    )"
+                    f"{cat_clause} "
+                    ") ORDER BY match_rank, fts_rank, priority, created_at LIMIT ? OFFSET ?",
+                    where_params,
                 ).fetchall()
             except sqlite3.OperationalError as exc:
                 if not _is_fts_unavailable_error(exc):
