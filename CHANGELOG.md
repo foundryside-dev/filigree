@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.0.0] - 2026-06-11
+## [3.0.0] - 2026-06-13
 
 3.0.0 is a **major release** — the SemVer-major boundary that lands the
 breaking changes deferred through 2.x because they could not ship without
@@ -146,6 +146,18 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
   removed keys (confirmed by full call-site enumeration, filigree-034931a584).
 
 ### Added
+
+- **Heddle reverify-worklist consumer — `heddle_worklist_ingest` (federation
+  Seam 2A, weft-74f1e0c331).** The write-capable half of the heddle↔filigree
+  seam: consumes a `heddle.reverify_worklist.v1` worklist and files-or-links its
+  items as work. Per item, keyed on the entity SEI — already-tracked-by-an-open-
+  issue → `linked`; untracked → `filed` (a task carrying the `heddle`/`federation`
+  producer labels plus an ADR-029 entity association on the SEI, the same surface
+  heddle reads back via `entity_association_list_by_entity`, so a filed item shows
+  as tracked on the next worklist); no SEI → `skipped`. Explicit-action only:
+  previews by default (`apply=false`, pure reads), `apply=true` performs the
+  writes. heddle never auto-files. MCP-only, matching the ADR-029 federation
+  surface precedent.
 
 - **`filigree observation create` — visible alias of `filigree observe`
   (dogfood N-7, filigree-ce3bfae865).** The natural first-try
