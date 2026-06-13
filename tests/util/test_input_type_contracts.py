@@ -33,6 +33,7 @@ _MCP_MODULES = [
     "filigree.mcp_tools.observations",
     "filigree.mcp_tools.scanners",
     "filigree.mcp_tools.entities",
+    "filigree.mcp_tools.federation",
 ]
 
 

@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 117 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 118 tools, 1 resource, and 1 prompt.
 
 !!! note "3.0.0 tool names"
     The tool names below are the subsystem-namespaced `<entity>_<verb>` names
@@ -852,6 +852,32 @@ is required (or accepted).
 |-----------|------|----------|-------------|
 | `entity_id` | string | yes | Opaque external entity ID; not parsed |
 | `current_content_hash` | string | no | Caller-supplied current hash; response `freshness_status` is `fresh`, `stale`, or `unknown` |
+
+### Federation Consumer Bindings
+
+The write-capable half of the heddle↔filigree seam (Seam 2A of the
+2026-06-13 heddle interface lock). heddle produces a reverify worklist and
+never auto-files; Filigree consumes it on explicit action.
+
+| Tool | Description |
+|------|-------------|
+| `heddle_worklist_ingest` | File-or-link a `heddle.reverify_worklist.v1` worklist as work — per item: an entity already tracked by an open issue is `linked`, an untracked entity is `filed` (task + ADR-029 affected-entity association on the SEI), a no-SEI item is `skipped` |
+
+#### `heddle_worklist_ingest`
+
+Each filed item carries the `heddle` + `federation` producer labels and an
+entity association on the item's SEI — the same surface heddle reads back via
+`entity_association_list_by_entity`, so a filed item shows up as tracked on the
+next worklist (the loop closes). Previews by default; `apply=true` performs the
+writes.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `worklist` | object | yes | A `heddle.reverify_worklist.v1` success envelope or its bare `data` payload (must contain an `items` array) |
+| `apply` | boolean | no | `false` (default) previews with pure reads; `true` files/links for real |
+| `actor` | string | no | Identity recorded as issue creator / association `attached_by` (default `heddle`) |
+| `priority` | integer | no | Priority override for every filed item (`0`=P0 … `4`=P4) |
+| `content_hash` | string | no | Default hash stamped on filed associations when an item carries none; absent → a documented `unverified` sentinel |
 
 ### Agent Context Notes
 

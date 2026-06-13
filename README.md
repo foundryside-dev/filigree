@@ -9,7 +9,7 @@ Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, n
 
 ## What Is Filigree?
 
-Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 117 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
+Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 118 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
@@ -21,7 +21,7 @@ Filigree is the work-state member of the **Weft federation** — a family of ind
 
 ### Key Features
 
-- **MCP server** with 117 tools — agents interact natively without parsing text
+- **MCP server** with 118 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
 - **Weft HTTP generation** — stable `/api/weft/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
@@ -49,7 +49,7 @@ flowchart TD
     Human["You + scripts"]
     Browser["Browser"]
 
-    MCP["MCP server<br/>(117 namespaced tools, stdio)"]
+    MCP["MCP server<br/>(118 namespaced tools, stdio)"]
     CLI["filigree CLI<br/>(--json, --actor)"]
     Dash["Web dashboard<br/>(localhost:8377)"]
 
@@ -258,7 +258,7 @@ Nothing in Filigree is encrypted or secured beyond ordinary local filesystem pro
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
-| [MCP Server Reference](docs/mcp.md) | 117 MCP tools for agent-native interaction |
+| [MCP Server Reference](docs/mcp.md) | 118 MCP tools for agent-native interaction |
 | [Federation Contracts](docs/federation/contracts.md) | Classic and Weft HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |

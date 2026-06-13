@@ -344,6 +344,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
 from filigree.mcp_tools import (  # noqa: E402, I001  — must come after globals
     annotations as _annotations_mod,
     entities as _entities_mod,
+    federation as _federation_mod,
     files as _files_mod,
     issues as _issues_mod,
     meta as _meta_mod,
@@ -380,6 +381,7 @@ for _mod in (
     _meta_mod,
     _observations_mod,
     _entities_mod,
+    _federation_mod,
 ):
     _tools, _handlers = _mod.register()
     _record_subsystem(_tools, _mod)

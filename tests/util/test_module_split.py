@@ -49,17 +49,18 @@ def test_mcp_tools_register_shape() -> None:
 
 
 def test_mcp_tools_total_count() -> None:
-    """All 117 tools are registered across domain modules.
+    """All 118 tools are registered across domain modules.
 
     Count includes the structured observation triage surfaces, the
-    four entity-association tools (ADR-029), and the reconciliation-debt
-    list (B2), and the explicit DB checkpoint verb so the split-module
+    four entity-association tools (ADR-029), the reconciliation-debt
+    list (B2), the explicit DB checkpoint verb, and the heddle
+    reverify-worklist consumer (federation, Seam 2A) so the split-module
     registry test notices dropped tool registrations.
     """
-    from filigree.mcp_tools import annotations, entities, files, issues, meta, observations, planning, scanners, workflow
+    from filigree.mcp_tools import annotations, entities, federation, files, issues, meta, observations, planning, scanners, workflow
 
     total = 0
-    for mod in (issues, planning, files, workflow, meta, observations, annotations, entities):
+    for mod in (issues, planning, files, workflow, meta, observations, annotations, entities, federation):
         tools, _ = mod.register()
         total += len(tools)
     # Scanner module needs include_legacy=True to include all legacy aliases.
@@ -67,7 +68,8 @@ def test_mcp_tools_total_count() -> None:
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
     # +4 for entity_associations (ADR-029): add/remove/list-by-issue/list-by-entity.
-    assert total == 117, f"Expected 117 tools total, got {total}"
+    # +1 for the heddle reverify-worklist consumer (federation).
+    assert total == 118, f"Expected 118 tools total, got {total}"
 
 
 def test_issue_and_file_mcp_tools_do_not_import_mcp_server_private_globals() -> None:
