@@ -25,6 +25,8 @@ from filigree.hooks import (
     generate_session_context,
 )
 from filigree.install import (
+    FILIGREE_INSTRUCTIONS,
+    FILIGREE_WRITER_MARKER,
     _instructions_hash,
     inject_instructions,
     install_codex_skills,
@@ -674,6 +676,9 @@ class TestTerminateOrphanDashboard:
 
 
 class TestExtractMarkerHash:
+    def test_instruction_block_records_writer_identity(self) -> None:
+        assert "<!-- filigree:last-writer:filigree install -->" in FILIGREE_INSTRUCTIONS.splitlines()[1]
+
     def test_extracts_hash_from_versioned_marker(self) -> None:
         content = "before\n<!-- filigree:instructions:v1.2.0:abc12345 -->\nstuff\n<!-- /filigree:instructions -->"
         assert _extract_marker_hash(content) == "abc12345"
@@ -713,6 +718,16 @@ class TestCheckInstructionsFreshness:
         assert not any("CLAUDE.md" in m for m in messages)
         assert claude_md.stat().st_mtime == mtime_before
 
+    def test_updates_current_hash_missing_writer_identity(self, tmp_path: Path) -> None:
+        """A pre-stamp block with the current body hash should be refreshed."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            f"<!-- filigree:instructions:v0.0.0:{_instructions_hash()} -->\n## Filigree Issue Tracker\n<!-- /filigree:instructions -->\n"
+        )
+        messages = _check_instructions_freshness(tmp_path)
+        assert any("CLAUDE.md" in m for m in messages)
+        assert "<!-- filigree:last-writer:filigree install -->" in claude_md.read_text()
+
     def test_updates_old_format_marker(self, tmp_path: Path) -> None:
         """CLAUDE.md with the old marker format (no hash) should be updated."""
         claude_md = tmp_path / "CLAUDE.md"
@@ -741,6 +756,18 @@ class TestCheckInstructionsFreshness:
         messages = _check_instructions_freshness(tmp_path)
         assert messages == []
         assert "filigree" not in claude_md.read_text().lower() or "No filigree here" in claude_md.read_text()
+
+    def test_restores_existing_empty_instruction_file(self, tmp_path: Path) -> None:
+        """An empty managed-doc file should be repaired during SessionStart."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert "Restored filigree instructions in empty CLAUDE.md" in messages
+        content = claude_md.read_text()
+        assert FILIGREE_INSTRUCTIONS in content
+        assert FILIGREE_WRITER_MARKER in content
 
     def test_updates_stale_skill_pack(self, tmp_path: Path) -> None:
         """Skill pack with different content should be overwritten."""

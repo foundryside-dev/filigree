@@ -30,6 +30,7 @@ from filigree.core import (
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
+    FILIGREE_WRITER_MARKER,
     _instructions_hash,
     inject_instructions,
     install_codex_skills,
@@ -229,10 +230,14 @@ def _check_instructions_freshness(project_root: Path) -> list[str]:
         if not md_path.exists():
             continue
         content = md_path.read_text()
+        if not content.strip():
+            inject_instructions(md_path)
+            messages.append(f"Restored filigree instructions in empty {filename}")
+            continue
         if FILIGREE_INSTRUCTIONS_MARKER not in content:
             continue
         embedded_hash = _extract_marker_hash(content)
-        if embedded_hash == current_hash:
+        if embedded_hash == current_hash and FILIGREE_WRITER_MARKER in content:
             continue
         # Stale or old-format marker — update
         inject_instructions(md_path)

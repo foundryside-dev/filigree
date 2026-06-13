@@ -85,6 +85,7 @@ __all__ = [
     "ENSURE_DASHBOARD_COMMAND",
     "FILIGREE_INSTRUCTIONS",
     "FILIGREE_INSTRUCTIONS_MARKER",
+    "FILIGREE_WRITER_MARKER",
     "SESSION_CONTEXT_COMMAND",
     "SKILL_MARKER",
     "SKILL_NAME",
@@ -121,6 +122,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _END_MARKER = "<!-- /filigree:instructions -->"
+FILIGREE_WRITER_MARKER = "<!-- filigree:last-writer:filigree install -->"
 
 # Recognises ANY tool's instruction-block fence (open or close) by its vendor
 # namespace, so filigree can bound its own rewrite at a *foreign* fence and never
@@ -177,7 +179,7 @@ def _build_instructions_block() -> str:
     version = _instructions_version()
     h = _instructions_hash()
     opening = f"<!-- filigree:instructions:v{version}:{h} -->"
-    return f"{opening}\n{text}{_END_MARKER}"
+    return f"{opening}\n{FILIGREE_WRITER_MARKER}\n{text}{_END_MARKER}"
 
 
 FILIGREE_INSTRUCTIONS = _build_instructions_block()
