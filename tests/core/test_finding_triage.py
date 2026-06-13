@@ -923,6 +923,69 @@ class TestPromoteFindingDefaultEntityAttach:
         assert len(assocs) == 1
         assert assocs[0]["content_hash_at_attach"] == "blake3-v2"
 
+    def test_repromote_of_dismissed_issue_does_not_rewrite_attach(self, db: FiligreeDB) -> None:
+        """Dismissed-issue guard (F1): when a finding is promoted, the issue is
+        dismissed as not_a_bug, then re-promoted by fingerprint, the idempotency
+        path returns the dismissed issue (created=False). The DEFAULT entity
+        attach must NOT run on it — re-writing content_hash_at_attach would
+        silently mutate the ADR-029 drift baseline on work meant to be left
+        untouched (now the default on every promote surface). The prior triage
+        stands; the stored hash is frozen at its dismissal-time value."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:dismissed"}},
+            file_content_hash="blake3-orig",
+        )
+        first = db.promote_finding_to_issue(fid)
+        assert first["created"] is True
+        assert first["entity_attachment"]["attached"] is True
+        issue_id = first["issue"].id
+
+        # Human dismisses the issue as not_a_bug — terminal triage decision.
+        db.close_issue(issue_id, status="not_a_bug", reason="by-design", actor="human")
+
+        # The underlying file content drifts (a later rescan would carry a new
+        # hash). If the default attach fired, it would overwrite the baseline.
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-drifted' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        again = db.promote_finding_to_issue(fid)
+
+        assert again["created"] is False
+        assert again["issue"].id == issue_id
+        assert again["issue"].status == "not_a_bug"
+        # The default attach was SKIPPED, with a named reason (C-10 honesty).
+        attachment = again["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "done-category" in attachment["reason"] or "not_a_bug" in attachment["reason"]
+        assert "association" not in again
+        # The stored drift baseline is UNCHANGED — frozen at the dismissal value,
+        # not refreshed to the drifted hash.
+        assocs = db.list_entity_associations(make_issue_id(issue_id))
+        assert len(assocs) == 1
+        assert assocs[0]["content_hash_at_attach"] == "blake3-orig"
+
+    def test_repromote_of_open_issue_still_reattaches(self, db: FiligreeDB) -> None:
+        """Convergence-on-open is preserved by the F1 guard: a created=False
+        re-promote whose issue is still OPEN/wip DOES re-attach and refresh the
+        hash — only done-category early-returns are skipped."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:stillopen"}},
+            file_content_hash="blake3-v1",
+        )
+        first = db.promote_finding_to_issue(fid)
+        assert first["created"] is True
+        # Issue stays open; content drifts.
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-v2' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        again = db.promote_finding_to_issue(fid)
+        assert again["created"] is False
+        assert again["entity_attachment"]["attached"] is True
+        assocs = db.list_entity_associations(make_issue_id(first["issue"].id))
+        assert assocs[0]["content_hash_at_attach"] == "blake3-v2"
+
     def test_explicit_promote_and_attach_does_not_double_attach(self, db: FiligreeDB) -> None:
         """The explicit form stays caller-driven: the metadata-derived default
         attach must not also fire, or a divergent caller-supplied entity would

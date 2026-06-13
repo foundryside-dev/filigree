@@ -2523,6 +2523,35 @@ class FilesMixin(DBMixinProtocol):
             result["entity_attachment"] = {"attached": False, "reason": "entity attach disabled by caller (attach_entity=false)"}
             return result
 
+        # Dismissed-issue guard (weft, N6 continuation): when the idempotency
+        # path returned an existing issue (``created=False``) that is now
+        # done-category — e.g. a human dismissal as ``not_a_bug`` — the prior
+        # triage stands and the work is meant to be left untouched. Running the
+        # default entity attach here would re-write that dismissed issue's
+        # ADR-029 drift baseline (``content_hash_at_attach``), silently mutating
+        # governance state on work nobody asked to reopen. So we skip the
+        # default attach for a done-category early-return, naming exactly why
+        # (C-10, never a silent skip). Convergence-on-open is preserved: a
+        # ``created=False`` early-return whose issue is still open/wip DOES
+        # re-attach, so a promote that failed mid-attach still converges on
+        # retry while the issue remains live.
+        existing_issue = result.get("issue")
+        if (
+            not result.get("created", False)
+            and existing_issue is not None
+            and self._resolve_status_category(existing_issue.type, existing_issue.status) == "done"
+        ):
+            result["entity_attachment"] = {
+                "attached": False,
+                "reason": (
+                    f"default entity attach skipped: finding already linked to issue {existing_issue.id}, "
+                    f"which is done-category ('{existing_issue.status}'); its ADR-029 drift baseline is "
+                    "left untouched so the prior triage stands. Re-attach explicitly via "
+                    "finding_promote_and_attach_entity if intentional."
+                ),
+            }
+            return result
+
         finding = self.get_finding(finding_id)
         entity_id, source, no_identity_reason = self._entity_identity_from_finding(finding)
         if entity_id is None:
