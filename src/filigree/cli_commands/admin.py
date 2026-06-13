@@ -50,7 +50,7 @@ from filigree.install_support.version_marker import (
     write_install_version,
 )
 from filigree.summary import write_summary
-from filigree.types.api import SchemaVersionMismatchError
+from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 
 
 def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
@@ -1030,6 +1030,36 @@ def import_data(input_file: str, merge: bool, allow_foreign_ids: bool) -> None:
                 click.echo(f"  Warning: skipped {rcount} record(s) with unknown type {rtype!r}", err=True)
 
 
+@click.group("db")
+def db_group() -> None:
+    """Database maintenance commands."""
+
+
+@db_group.command("checkpoint")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def db_checkpoint(as_json: bool) -> None:
+    """Run PRAGMA wal_checkpoint(TRUNCATE) on the current project store."""
+    with get_db() as db:
+        try:
+            result = db.checkpoint_wal()
+        except (ValueError, sqlite3.Error) as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Checkpoint failed: {e}", err=True)
+            sys.exit(1)
+    if as_json:
+        click.echo(json_mod.dumps(result, indent=2))
+        return
+
+    status = "busy" if result["busy"] else "checkpointed"
+    click.echo(
+        f"Database WAL {status}: {result['database']} "
+        f"(busy={result['checkpoint_busy']}, frames={result['checkpointed_frames']}/{result['log_frames']}, "
+        f"wal_bytes={result['wal_size_before']}->{result['wal_size_after']})"
+    )
+
+
 @click.command("archive")
 @click.option("--days", default=30, type=click.IntRange(min=0), help="Archive issues closed more than N days ago (default: 30)")
 @click.option("--label", default=None, type=str, help="Only archive closed issues currently carrying this label")
@@ -1114,6 +1144,7 @@ def register(cli: click.Group) -> None:
     cli.add_command(metrics)
     cli.add_command(export_data)
     cli.add_command(import_data)
+    cli.add_command(db_group)
     cli.add_command(archive)
     cli.add_command(compact)
     # clean-stale-findings: canonical grouped form ``finding clean-stale``; the

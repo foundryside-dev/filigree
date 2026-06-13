@@ -122,6 +122,7 @@ _NICHE: frozenset[str] = frozenset(
         # admin / maintenance
         "archive_closed",
         "compact_events",
+        "checkpoint_db",
         "export_jsonl",
         "import_jsonl",
         "undo_last",

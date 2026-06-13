@@ -374,6 +374,15 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             },
         ),
         Tool(
+            name="checkpoint_db",
+            description=(
+                "Run PRAGMA wal_checkpoint(TRUNCATE) on the current project store and return "
+                "SQLite's busy/frame counts plus WAL byte sizes. Busy checkpoints return "
+                "status='busy' instead of raising."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
             name="archive_closed",
             description=(
                 "Archive old closed issues (>N days). Reduces active issue count for better performance. "
@@ -503,6 +512,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "get_metrics": _handle_get_metrics,
         "export_jsonl": _handle_export_jsonl,
         "import_jsonl": _handle_import_jsonl,
+        "checkpoint_db": _handle_checkpoint_db,
         "archive_closed": _handle_archive_closed,
         "compact_events": _handle_compact_events,
         "undo_last": _handle_undo_last,
@@ -943,6 +953,14 @@ async def _handle_import_jsonl(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.VALIDATION))
     except (OSError, sqlite3.Error) as e:
         logging.getLogger(__name__).warning("import_jsonl failed: %s", e, exc_info=True)
+        return _text(ErrorResponse(error=str(e), code=ErrorCode.IO))
+
+
+async def _handle_checkpoint_db(arguments: dict[str, Any]) -> list[TextContent]:
+    tracker = get_db()
+    try:
+        return _text(tracker.checkpoint_wal())
+    except (ValueError, sqlite3.Error) as e:
         return _text(ErrorResponse(error=str(e), code=ErrorCode.IO))
 
 

@@ -2391,6 +2391,50 @@ class FiligreeDB(
         """Return the current schema version from PRAGMA user_version."""
         return read_schema_version(self.conn)
 
+    def checkpoint_wal(self, *, busy_timeout_ms: int = 250) -> dict[str, int | bool | str]:
+        """Run an explicit ``PRAGMA wal_checkpoint(TRUNCATE)`` on this store.
+
+        SQLite reports checkpoint contention as a non-zero ``busy`` result row
+        for this pragma, not necessarily as an exception. Preserve that signal
+        in the returned payload so operator/MCP surfaces can be busy-tolerant
+        and still report the partial checkpoint result.
+        """
+        if busy_timeout_ms < 0:
+            msg = "busy_timeout_ms must be non-negative"
+            raise ValueError(msg)
+
+        wal_path = self.db_path.with_name(self.db_path.name + "-wal")
+
+        def _wal_size() -> int:
+            try:
+                return wal_path.stat().st_size
+            except FileNotFoundError:
+                return 0
+
+        wal_size_before = _wal_size()
+        old_timeout = int(self.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        try:
+            self.conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            row = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            self.conn.execute(f"PRAGMA busy_timeout={old_timeout}")
+
+        checkpoint_busy = int(row[0])
+        log_frames = int(row[1])
+        checkpointed_frames = int(row[2])
+        wal_size_after = _wal_size()
+        busy = checkpoint_busy != 0
+        return {
+            "status": "busy" if busy else "checkpointed",
+            "busy": busy,
+            "checkpoint_busy": checkpoint_busy,
+            "log_frames": log_frames,
+            "checkpointed_frames": checkpointed_frames,
+            "wal_size_before": wal_size_before,
+            "wal_size_after": wal_size_after,
+            "database": str(self.db_path),
+        }
+
     def reconnect(self, *, check_same_thread: bool = True) -> None:
         """Close the current connection so the next access reopens it with a new ``check_same_thread`` setting.
 

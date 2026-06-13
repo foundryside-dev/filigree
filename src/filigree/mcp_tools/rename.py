@@ -165,9 +165,10 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "get_metrics": "metrics_get",
     "get_mcp_status": "mcp_status_get",
     "session_context": "session_context_get",
-    # admin — mutating maintenance (7)
+    # admin / db — mutating maintenance (8)
     "archive_closed": "admin_archive_closed",
     "compact_events": "admin_compact_events",
+    "checkpoint_db": "db_checkpoint",
     "export_jsonl": "admin_export_jsonl",
     "import_jsonl": "admin_import_jsonl",
     "undo_last": "admin_undo_last",
