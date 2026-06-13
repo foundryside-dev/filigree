@@ -426,8 +426,30 @@ class MetaMixin(DBMixinProtocol):
 
         preds = self._resolve_open_blocker_predicates()
         if preds is None:
+            # No open-category states registered => nothing can be *ready*
+            # (readiness is claim-eligibility, which is open-only). But
+            # blockedness is NOT open-gated: get_blocked() surfaces any
+            # not-done issue (wip included) waiting on a not-done blocker, so a
+            # wip/done-only template can still have blocked issues. Compute
+            # blocked_count from the same not-done predicate get_blocked() uses,
+            # or the two surfaces disagree (dogfood-4 B3 corner).
             ready_count = 0
-            blocked_count = 0
+            not_done_sql, not_done_params = self._category_predicate_sql(
+                "done", type_col="i.type", status_col="i.status", include_archived=True
+            )
+            blocker_done_sql, blocker_done_params = self._category_predicate_sql(
+                "done", type_col="blocker.type", status_col="blocker.status", include_archived=True
+            )
+            if not not_done_params and not blocker_done_params:
+                blocked_count = 0
+            else:
+                blocked_count = self.conn.execute(
+                    f"SELECT COUNT(DISTINCT i.id) as cnt FROM issues i "
+                    f"JOIN dependencies d ON d.issue_id = i.id "
+                    f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                    f"WHERE NOT ({not_done_sql}) AND NOT ({blocker_done_sql})",
+                    [*not_done_params, *blocker_done_params],
+                ).fetchone()["cnt"]
         else:
             (open_sql, open_params), (blocker_done_sql, blocker_done_params) = preds
             ready_count = self.conn.execute(
