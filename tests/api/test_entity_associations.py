@@ -7,11 +7,24 @@ tests live in ``tests/test_entity_associations_federation.py``.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from httpx import AsyncClient, Response
 
 from filigree.core import WrongProjectError
 from filigree.types.api import ErrorCode
 from tests.conftest import PopulatedDB
+
+_CONTRACT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "entity-associations-response.json"
+
+
+def _fixture_example_body(example_name: str) -> dict:
+    fixture = json.loads(_CONTRACT_FIXTURE.read_text())
+    for example in fixture["examples"]:
+        if example["name"] == example_name:
+            return example["response"]["body"]
+    raise AssertionError(f"missing fixture example {example_name}")
 
 
 def _assert_wrong_project_response(resp: Response) -> None:
@@ -53,6 +66,44 @@ class TestListEntityAssociationsHTTP:
         WrongProjectError, not a misleading NOT_FOUND."""
         resp = await client.get("/api/issue/other-1234567890/entity-associations")
         _assert_wrong_project_response(resp)
+
+    async def test_reverse_lookup_emits_canonical_conformance_fixture(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch,
+    ) -> None:
+        import filigree.db_entity_associations as entity_associations
+
+        expected = _fixture_example_body("live_v27_reverse_lookup_200")
+        expected_row = expected["associations"][0]
+        monkeypatch.setattr(entity_associations, "_now_iso", lambda: expected_row["attached_at"])
+        dashboard_db.db.conn.execute(
+            "INSERT INTO issues (id, title, status, priority, type, created_at, updated_at, fields) "
+            "VALUES (?, ?, 'open', 2, 'task', ?, ?, '{}')",
+            (
+                expected_row["issue_id"],
+                "G15 EntityAssociation oracle",
+                expected_row["attached_at"],
+                expected_row["attached_at"],
+            ),
+        )
+        dashboard_db.db.conn.commit()
+
+        create = await client.post(
+            f"/api/issue/{expected_row['issue_id']}/entity-associations",
+            json={
+                "entity_id": expected_row["entity_id"],
+                "entity_kind": expected_row["entity_kind"],
+                "content_hash": expected_row["content_hash_at_attach"],
+                "actor": expected_row["attached_by"],
+            },
+        )
+        assert create.status_code == 201, create.text
+
+        resp = await client.get("/api/entity-associations", params={"entity_id": expected_row["entity_id"]})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == expected
 
 
 class TestAddEntityAssociationHTTP:
