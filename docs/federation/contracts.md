@@ -485,7 +485,7 @@ The default-hide lives **only at the agent surfaces**. The core `list_findings_g
 
 **3. Reversal trigger.** The machine surface stays inclusive-by-default **until a real federation consumer emerges that genuinely wants default-hide on `/api/weft/findings`.** If one does, revisit this decision (and align it with the agent-surface default) rather than letting consumers each reinvent the filter. Until then, inclusive holds. No consumer has requested it as of 2026-06-10.
 
-Pinned by `tests/api/test_files_api.py::TestWeftFindingsKindSuppressionFilters::test_default_stays_inclusive_unlike_agent_surfaces` (machine surface stays inclusive) and the agent-surface default-hide tests in `tests/mcp/test_finding_triage_tools.py` / `tests/cli/test_files_commands.py`.
+Pinned by `tests/api/test_files_api.py::TestWeftFindingsKindSuppressionFilters::test_default_stays_inclusive_unlike_agent_surfaces` (machine surface stays inclusive) and the agent-surface default-hide tests in `tests/mcp/test_finding_triage_tools.py` / `tests/cli/test_files_commands.py`. The filter vocabulary itself is pinned by the Wardline-owned conformance vector `tests/fixtures/contracts/wardline-suppression-filter-contract.json`, loaded by `tests/contracts/test_wardline_suppression_filter_contract.py`.
 
 ## When a contract evolves
 

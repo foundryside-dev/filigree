@@ -9,7 +9,7 @@ Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, n
 
 ## What Is Filigree?
 
-Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 116 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
+Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 117 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
@@ -21,7 +21,7 @@ Filigree is the work-state member of the **Weft federation** — a family of ind
 
 ### Key Features
 
-- **MCP server** with 116 tools — agents interact natively without parsing text
+- **MCP server** with 117 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
 - **Weft HTTP generation** — stable `/api/weft/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
@@ -49,7 +49,7 @@ flowchart TD
     Human["You + scripts"]
     Browser["Browser"]
 
-    MCP["MCP server<br/>(116 namespaced tools, stdio)"]
+    MCP["MCP server<br/>(117 namespaced tools, stdio)"]
     CLI["filigree CLI<br/>(--json, --actor)"]
     Dash["Web dashboard<br/>(localhost:8377)"]
 
@@ -129,10 +129,41 @@ cd my-project
 filigree init               # Create the .weft/filigree/ store
 filigree install             # Set up MCP, hooks, skills, CLAUDE.md, .gitignore
 filigree create "Set up CI pipeline" --type=task --priority=1
-filigree ready               # See what's ready to work on
-filigree update <id> --status=in_progress
+filigree ready               # See ready work, including startability hints
+filigree start-next-work --assignee "$USER" --advance
+# ...do the work and commit...
 filigree close <id>
 ```
+
+Use `start-next-work` or `start-work` to claim and transition work in one
+atomic step. The older pattern of claiming and then manually updating status can
+race another agent. Pass `--advance` when you want Filigree to walk safe
+pre-workflow transitions first, such as moving a bug from `triage` through
+`confirmed` into its working state.
+
+## 3.0 Migration Snapshot
+
+Filigree 3.0 is a hard-break release for existing federation consumers and older
+local stores. New projects start directly in the current layout. Existing
+projects should follow this operator checklist before resuming agent work:
+
+1. Stop all writers for the project: dashboard daemons, stdio MCP sessions, and
+   any scripts holding the legacy database open.
+2. Run `filigree init` from the project root. It migrates `.filigree/` into
+   `.weft/filigree/`, imports `.filigree.conf` into
+   `.weft/filigree/config.json`, and leaves an imported-conf breadcrumb.
+3. Update MCP consumers to namespaced tool names such as `issue_get`,
+   `finding_list`, and `work_start`. CLI verbs such as `start-next-work` and
+   `close` are unchanged.
+4. Repoint federation HTTP clients from `/api/loom/*` to `/api/weft/*`. Use
+   `WEFT_TOKEN` for the outbound registry token and `WEFT_FEDERATION_TOKEN` for
+   Filigree's inbound `/api/weft/*` and `/mcp` bearer token.
+5. Expect finding work views to default to active findings only. Pass
+   `--suppression all` on the CLI or `suppression="all"` through MCP when you
+   need baselined, waived, or judged findings too.
+
+Full migration details live in [UPGRADING.md](docs/UPGRADING.md) and
+[MIGRATION-3.0.md](docs/MIGRATION-3.0.md).
 
 ## Installation
 
@@ -227,7 +258,7 @@ Nothing in Filigree is encrypted or secured beyond ordinary local filesystem pro
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
-| [MCP Server Reference](docs/mcp.md) | 116 MCP tools for agent-native interaction |
+| [MCP Server Reference](docs/mcp.md) | 117 MCP tools for agent-native interaction |
 | [Federation Contracts](docs/federation/contracts.md) | Classic and Weft HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |

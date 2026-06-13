@@ -13,15 +13,23 @@ breaking federation consumers (Loomweave / Wardline / Legis). The headline
 moves:
 
 - **Loomweave / Weft rebrand** (schema v26) — `/api/loom/*` → `/api/weft/*`,
-  `clarion:eid:` → `loomweave:eid:`, `WEFT_TOKEN`; no compatibility aliases.
+  `clarion:eid:` → `loomweave:eid:`, outbound `WEFT_TOKEN`; no compatibility
+  aliases.
 - **Machine store consolidation** — `.filigree/` → `.weft/filigree/`, with the
   config anchor following (`.filigree.conf` → `.weft/filigree/config.json`).
 - **MCP tool-name namespacing** (ADR-016 Phase 2) — the legacy flat tool names
   are removed.
 - **Federation auth on-by-default** — the inbound bearer token is
-  auto-provisioned at the anchor.
+  auto-provisioned at the anchor and resolved through `WEFT_FEDERATION_TOKEN`
+  when an operator override is needed.
 - **Legis governance** — fail-closed closure-gate enforcement for governed
   issues, on every close surface.
+- **Agent work surfaces** — ready/startable semantics, atomic start verbs,
+  priority range filters, active-only finding work views, suppression-aware
+  finding rollups, and the visible `filigree observation create` alias.
+- **Migration and server-mode hardening** — crash-convergent store/config
+  migration, daemon busy-probes, write fences, per-project federation tokens,
+  scoped server-mode federation writes, and project echo headers.
 - Smaller breaks: the deprecated `get_stats` alias keys are removed and the
   internal `backward` flag becomes a `TransitionMode` enum.
 

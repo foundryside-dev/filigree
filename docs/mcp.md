@@ -1,6 +1,6 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 116 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 117 tools, 1 resource, and 1 prompt.
 
 !!! note "3.0.0 tool names"
     The tool names below are the subsystem-namespaced `<entity>_<verb>` names
@@ -633,6 +633,7 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 |------|-------------|
 | `admin_export_jsonl` | Export all data to JSONL |
 | `admin_import_jsonl` | Import from JSONL |
+| `db_checkpoint` | Run `PRAGMA wal_checkpoint(TRUNCATE)` on the project store |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
 | `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the Legis gate deferred) |
@@ -685,6 +686,14 @@ agent's artifacts.
 |-----------|------|----------|-------------|
 | `input_path` | string | yes | File path to read JSONL from |
 | `merge` | boolean | no | Skip existing records (default false) |
+
+#### `db_checkpoint`
+
+No parameters. Runs `PRAGMA wal_checkpoint(TRUNCATE)` on the active project
+database. Returns `{status, busy, checkpoint_busy, log_frames,
+checkpointed_frames, wal_size_before, wal_size_after, database}`. When a reader
+or writer prevents truncation, the tool returns `status: "busy"` with the
+partial SQLite checkpoint result instead of raising.
 
 #### `admin_archive_closed`
 

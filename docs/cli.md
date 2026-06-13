@@ -88,6 +88,8 @@ filigree doctor                            # Health check
 filigree doctor --fix                      # Repair local bindings and stale dashboard pointers
 filigree doctor --fix --json               # Machine-readable repair summary
 filigree doctor --verbose                  # Show all checks including passed
+filigree db checkpoint                     # Truncate-checkpoint the current SQLite WAL
+filigree db checkpoint --json              # Machine-readable checkpoint result
 ```
 
 ### `init`
@@ -1442,6 +1444,17 @@ Remove old events for archived issues.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--keep` | integer | 50 | Keep N most recent events per archived issue |
+
+### `db checkpoint`
+
+Run `PRAGMA wal_checkpoint(TRUNCATE)` on the current project store. The command
+reports SQLite's busy result, log/checkpointed frame counts, and WAL byte sizes
+before and after the checkpoint. A busy checkpoint exits successfully with
+`status: "busy"` in JSON mode so operators can retry after other readers exit.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--json` | flag | Emit `{status, busy, checkpoint_busy, log_frames, checkpointed_frames, wal_size_before, wal_size_after, database}` |
 
 ### `migrate`
 
