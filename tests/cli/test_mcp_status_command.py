@@ -28,6 +28,7 @@ EXPECTED_KEYS = {
     "code",
     "error",
     "guidance",
+    "project_root",
     "filigree_dir",
     "runtime",
     "actor_verification",
@@ -45,7 +46,7 @@ def _restore_mcp_globals() -> Generator[None, None, None]:
     """
     from filigree import mcp_server
 
-    names = ("db", "_filigree_dir", "_schema_mismatch", "_registry_startup_error", "_db_open_error")
+    names = ("db", "_filigree_dir", "_project_root", "_schema_mismatch", "_registry_startup_error", "_db_open_error")
     saved = {name: getattr(mcp_server, name) for name in names}
     try:
         yield
@@ -64,7 +65,7 @@ class TestMcpStatusCommand:
         assert "Runtime:" in result.output
 
     def test_json_output_has_expected_keys(self, cli_in_project: tuple[CliRunner, Path]) -> None:
-        runner, _ = cli_in_project
+        runner, project = cli_in_project
         result = runner.invoke(cli, ["mcp-status", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -72,9 +73,17 @@ class TestMcpStatusCommand:
         assert data["status"] == "ok"
         assert data["db_initialized"] is True
         assert data["schema_compatible"] is True
+        assert data["project_root"] == str(project)
         # runtime diagnostics block carries install-context introspection
         assert "install_context" in data["runtime"]
         assert "python_executable" in data["runtime"]
+
+    def test_human_output_names_project_root_and_store(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project = cli_in_project
+        result = runner.invoke(cli, ["mcp-status"])
+        assert result.exit_code == 0
+        assert f"Project root: {project}" in result.output
+        assert "Store dir:" in result.output
 
     def test_cli_json_matches_mcp_payload(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """The CLI --json output must equal what the MCP tool emits.

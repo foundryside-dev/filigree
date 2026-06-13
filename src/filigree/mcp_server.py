@@ -64,6 +64,7 @@ from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchEr
 server = Server("filigree")
 db: FiligreeDB | None = None
 _filigree_dir: Path | None = None
+_project_root: Path | None = None
 _logger: logging.Logger | None = None
 
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
@@ -117,6 +118,12 @@ def _get_db() -> FiligreeDB:
 
 def _get_filigree_dir() -> Path | None:
     return _request_filigree_dir.get() or _filigree_dir
+
+
+def _get_project_root(active_db: FiligreeDB | None = None) -> Path | None:
+    if active_db is not None and active_db.project_root is not None:
+        return active_db.project_root
+    return _project_root
 
 
 def _resolve_request_filigree_dir(active_db: FiligreeDB) -> Path:
@@ -214,6 +221,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
     """
     active_db = _request_db.get() or db
     filigree_dir = _get_filigree_dir()
+    project_root = _get_project_root(active_db)
     installed = CURRENT_SCHEMA_VERSION
 
     if _schema_mismatch is not None:
@@ -226,6 +234,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.SCHEMA_MISMATCH,
             "error": str(_schema_mismatch),
             "guidance": format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -242,6 +251,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": response["error"],
             "details": response.get("details"),
             "guidance": "Upgrade Filigree or Loomweave so their registry API versions match.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -256,6 +266,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.IO,
             "error": str(_db_open_error),
             "guidance": "Run `filigree doctor` for diagnosis.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -270,6 +281,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.NOT_INITIALIZED,
             "error": "Database not initialized",
             "guidance": "Run `filigree init` in the project, then restart MCP.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -286,6 +298,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.IO,
             "error": str(exc),
             "guidance": "Run `filigree doctor` for diagnosis.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -300,6 +313,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "code": None if compatible else ErrorCode.SCHEMA_MISMATCH,
         "error": None if compatible else f"Database schema v{database_version} is newer than installed v{installed}",
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
+        "project_root": str(project_root) if project_root is not None else None,
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
         "runtime": _runtime_diagnostics(),
         # ADR-012 actor-verification posture, derived from the *actual* session
@@ -1137,9 +1151,10 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
     instead of connection drop" was one bug-class wide before this fix.
     ``_run`` consults the sentinel after calling us and exits cleanly.
     """
-    global db, _filigree_dir, _schema_mismatch, _registry_startup_error, _db_open_error
+    global db, _filigree_dir, _project_root, _schema_mismatch, _registry_startup_error, _db_open_error
 
     _filigree_dir = filigree_dir
+    _project_root = project_root
     try:
         if conf_path is not None:
             db = FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
@@ -1150,6 +1165,7 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
             # (which reads weft.toml) rather than reverse-deriving (I2).
             resolved_root = project_root if project_root is not None else find_filigree_anchor(filigree_dir).project_root
             db = FiligreeDB.from_store_dir(filigree_dir, project_root=resolved_root)
+        _project_root = db.project_root
         # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
         # session so every runtime insert records verified_actor. Resolution
         # never raises and never blocks; None leaves verified_actor NULL.

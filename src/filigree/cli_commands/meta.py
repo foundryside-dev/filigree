@@ -295,7 +295,8 @@ def mcp_status(as_json: bool) -> None:
     click.echo(f"Schema compatible: {payload['schema_compatible']}")
     click.echo(f"Installed schema version: {payload['installed_schema_version']}")
     click.echo(f"Database schema version: {payload['database_schema_version']}")
-    click.echo(f"Project dir: {payload['filigree_dir']}")
+    click.echo(f"Project root: {payload.get('project_root')}")
+    click.echo(f"Store dir: {payload['filigree_dir']}")
     if payload.get("code"):
         click.echo(f"Code: {payload['code']}")
     if payload.get("error"):
