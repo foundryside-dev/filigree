@@ -53,7 +53,7 @@ def test_mcp_tools_total_count() -> None:
 
     Count includes the structured observation triage surfaces, the
     four entity-association tools (ADR-029), the reconciliation-debt
-    list (B2), the explicit DB checkpoint verb, and the heddle
+    list (B2), the explicit DB checkpoint verb, and the warpline
     reverify-worklist consumer (federation, Seam 2A) so the split-module
     registry test notices dropped tool registrations.
     """
@@ -68,7 +68,7 @@ def test_mcp_tools_total_count() -> None:
     total += len(tools)
     # +3 for structured observation triage: link, batch-link, promote-many-to-one.
     # +4 for entity_associations (ADR-029): add/remove/list-by-issue/list-by-entity.
-    # +1 for the heddle reverify-worklist consumer (federation).
+    # +1 for the warpline reverify-worklist consumer (federation).
     assert total == 118, f"Expected 118 tools total, got {total}"
 
 

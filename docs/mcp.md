@@ -855,27 +855,27 @@ is required (or accepted).
 
 ### Federation Consumer Bindings
 
-The write-capable half of the heddle↔filigree seam (Seam 2A of the
-2026-06-13 heddle interface lock). heddle produces a reverify worklist and
+The write-capable half of the warpline↔filigree seam (Seam 2A of the
+2026-06-13 warpline interface lock). warpline produces a reverify worklist and
 never auto-files; Filigree consumes it on explicit action.
 
 | Tool | Description |
 |------|-------------|
-| `heddle_worklist_ingest` | File-or-link a `heddle.reverify_worklist.v1` worklist as work — per item: an entity already tracked by an open issue is `linked`, an untracked entity is `filed` (task + ADR-029 affected-entity association on the SEI), a no-SEI item is `skipped` |
+| `warpline_worklist_ingest` | File-or-link a `warpline.reverify_worklist.v1` worklist as work — per item: an entity already tracked by an open issue is `linked`, an untracked entity is `filed` (task + ADR-029 affected-entity association on the SEI), a no-SEI item is `skipped` |
 
-#### `heddle_worklist_ingest`
+#### `warpline_worklist_ingest`
 
-Each filed item carries the `heddle` + `federation` producer labels and an
-entity association on the item's SEI — the same surface heddle reads back via
+Each filed item carries the `warpline` + `federation` producer labels and an
+entity association on the item's SEI — the same surface warpline reads back via
 `entity_association_list_by_entity`, so a filed item shows up as tracked on the
 next worklist (the loop closes). Previews by default; `apply=true` performs the
 writes.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `worklist` | object | yes | A `heddle.reverify_worklist.v1` success envelope or its bare `data` payload (must contain an `items` array) |
+| `worklist` | object | yes | A `warpline.reverify_worklist.v1` success envelope or its bare `data` payload (must contain an `items` array) |
 | `apply` | boolean | no | `false` (default) previews with pure reads; `true` files/links for real |
-| `actor` | string | no | Identity recorded as issue creator / association `attached_by` (default `heddle`) |
+| `actor` | string | no | Identity recorded as issue creator / association `attached_by` (default `warpline`) |
 | `priority` | integer | no | Priority override for every filed item (`0`=P0 … `4`=P4) |
 | `content_hash` | string | no | Default hash stamped on filed associations when an item carries none; absent → a documented `unverified` sentinel |
 

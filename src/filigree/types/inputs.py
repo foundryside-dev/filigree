@@ -663,7 +663,7 @@ class ListAssociationsByEntityArgs(TypedDict):
     current_content_hash: NotRequired[ContentHash]
 
 
-class HeddleWorklistIngestArgs(TypedDict):
+class WarplineWorklistIngestArgs(TypedDict):
     worklist: dict[str, Any]
     apply: NotRequired[bool]
     actor: NotRequired[str]
@@ -974,7 +974,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "remove_entity_association": RemoveEntityAssociationArgs,
     "list_entity_associations": ListEntityAssociationsArgs,
     "list_associations_by_entity": ListAssociationsByEntityArgs,
-    "ingest_heddle_worklist": HeddleWorklistIngestArgs,
+    "ingest_warpline_worklist": WarplineWorklistIngestArgs,
     "get_finding": GetFindingArgs,
     "list_findings": ListFindingsArgs,
     "update_finding": UpdateFindingArgs,

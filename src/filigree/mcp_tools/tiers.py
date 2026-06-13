@@ -170,7 +170,7 @@ _NICHE: frozenset[str] = frozenset(
         "list_entity_associations",
         "list_associations_by_entity",
         # federation consumer bindings
-        "ingest_heddle_worklist",
+        "ingest_warpline_worklist",
         # scanners
         "list_scanners",
         "list_available_scanners",

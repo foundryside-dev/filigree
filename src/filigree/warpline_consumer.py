@@ -1,32 +1,32 @@
-"""Consumer binding — file or link Heddle reverify worklists as Filigree work.
+"""Consumer binding — file or link Warpline reverify worklists as Filigree work.
 
-Seam 2A of the frozen heddle interface (``pm/2026-06-13-heddle-interface-lock.md``):
-heddle PRODUCES a reverify worklist (``heddle.reverify_worklist.v1``); Filigree
+Seam 2A of the frozen warpline interface (``pm/2026-06-13-warpline-interface-lock.md``):
+warpline PRODUCES a reverify worklist (``warpline.reverify_worklist.v1``); Filigree
 is the write-capable CONSUMER that, on **explicit** action, files new work items
 for not-yet-tracked affected entities and reports the already-tracked ones.
 
 Authority split (``post-admission-consumer-tickets.md:32-36``): Filigree owns
-work state, issue lifecycle, claims, and close gates. heddle never auto-files —
+work state, issue lifecycle, claims, and close gates. warpline never auto-files —
 it only surfaces ``next_actions.filigree[]`` *candidates*. The explicit action
 is this consumer call itself, and it is gated ``apply=False`` (preview) by
 default so a human or a write-capable tool must opt into the writes.
 
 Every filed work item carries, per the acceptance criteria:
 
-* **producer identity** — the ``heddle`` + ``federation`` labels and a
+* **producer identity** — the ``warpline`` + ``federation`` labels and a
   provenance line in the issue description.
 * **affected-entity key** — an ADR-029 entity association on the entity's SEI.
-  This is the same surface heddle reads back via
+  This is the same surface warpline reads back via
   ``entity_association_list_by_entity``, so a filed item closes the loop: the
   next reverify worklist sees the entity as tracked (``enrichment.work``
   populated) and this consumer reports it as ``linked`` rather than re-filing.
 
-The worklist entity view (``heddle/refs.py``) carries ``locator`` and ``sei``
+The worklist entity view (``warpline/refs.py``) carries ``locator`` and ``sei``
 but **not** Loomweave's ``content_hash``. The association needs a non-blank hash
 (``make_content_hash``), so when an item supplies none we stamp
-:data:`UNVERIFIED_CONTENT_HASH`. heddle does not interpret
+:data:`UNVERIFIED_CONTENT_HASH`. warpline does not interpret
 ``content_hash_at_attach`` drift (that is Filigree's read-path concern), so the
-sentinel never breaks heddle's reverse-lookup read; it only means a later
+sentinel never breaks warpline's reverse-lookup read; it only means a later
 freshness comparison reads as ``stale`` until a real hash is attached.
 """
 
@@ -41,15 +41,15 @@ if TYPE_CHECKING:
     from filigree.core import FiligreeDB
 
 #: Producer identity stamped on filed work (the ``scan_source``/producer axis).
-PRODUCER = "heddle"
-#: Labels every heddle-filed issue carries for provenance + federation grouping.
-PRODUCER_LABELS = ("heddle", "federation")
+PRODUCER = "warpline"
+#: Labels every warpline-filed issue carries for provenance + federation grouping.
+PRODUCER_LABELS = ("warpline", "federation")
 #: ``entity_kind`` recorded on the affected-entity association.
 ENTITY_KIND = "loomweave-entity"
 #: Stamped as ``content_hash_at_attach`` when the worklist item carries no hash.
-UNVERIFIED_CONTENT_HASH = "heddle:content-unverified"
+UNVERIFIED_CONTENT_HASH = "warpline:content-unverified"
 
-#: heddle worklist priority token -> Filigree integer priority (P0..P4).
+#: warpline worklist priority token -> Filigree integer priority (P0..P4).
 _PRIORITY_MAP = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
 _DEFAULT_PRIORITY = 2  # "unknown" / unmapped -> P2 (medium)
 
@@ -66,7 +66,7 @@ def _priority_for(token: Any, override: int | None) -> int:
 def _normalise_worklist(worklist: Mapping[str, Any]) -> Mapping[str, Any]:
     """Accept either the full success envelope or the bare ``data`` payload.
 
-    heddle returns the worklist under the envelope's ``data`` key; callers may
+    warpline returns the worklist under the envelope's ``data`` key; callers may
     hand us either the whole envelope or just ``data``. Prefer ``data`` when it
     looks like the worklist (carries ``items``), else treat the input as the
     payload itself.
@@ -80,7 +80,7 @@ def _normalise_worklist(worklist: Mapping[str, Any]) -> Mapping[str, Any]:
 def _build_description(item: Mapping[str, Any], sei: str, locator: Any) -> str:
     """Render the filed issue's body from the worklist item (provenance first)."""
     lines = [
-        f"Filed from a heddle reverify worklist (producer: {PRODUCER}).",
+        f"Filed from a warpline reverify worklist (producer: {PRODUCER}).",
         "",
         f"Affected entity: {locator if locator else '(unknown locator)'}",
         f"SEI: {sei}",
@@ -112,7 +112,7 @@ def ingest_reverify_worklist(
     priority_override: int | None = None,
     default_content_hash: str | None = None,
 ) -> dict[str, Any]:
-    """File-or-link a heddle reverify worklist as Filigree work.
+    """File-or-link a warpline reverify worklist as Filigree work.
 
     For each worklist item, keyed on the entity's SEI:
 
@@ -126,7 +126,7 @@ def ingest_reverify_worklist(
 
     Args:
         db: open Filigree store.
-        worklist: a ``heddle.reverify_worklist.v1`` envelope or its ``data``.
+        worklist: a ``warpline.reverify_worklist.v1`` envelope or its ``data``.
         apply: ``False`` (default) previews — pure reads, no writes. ``True``
             performs the file/link writes (the explicit user/tool action).
         actor: identity recorded as issue creator / association ``attached_by``.

@@ -147,16 +147,16 @@ operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
 
 ### Added
 
-- **Heddle reverify-worklist consumer — `heddle_worklist_ingest` (federation
-  Seam 2A, weft-74f1e0c331).** The write-capable half of the heddle↔filigree
-  seam: consumes a `heddle.reverify_worklist.v1` worklist and files-or-links its
+- **Warpline reverify-worklist consumer — `warpline_worklist_ingest` (federation
+  Seam 2A, weft-74f1e0c331).** The write-capable half of the warpline↔filigree
+  seam: consumes a `warpline.reverify_worklist.v1` worklist and files-or-links its
   items as work. Per item, keyed on the entity SEI — already-tracked-by-an-open-
-  issue → `linked`; untracked → `filed` (a task carrying the `heddle`/`federation`
+  issue → `linked`; untracked → `filed` (a task carrying the `warpline`/`federation`
   producer labels plus an ADR-029 entity association on the SEI, the same surface
-  heddle reads back via `entity_association_list_by_entity`, so a filed item shows
+  warpline reads back via `entity_association_list_by_entity`, so a filed item shows
   as tracked on the next worklist); no SEI → `skipped`. Explicit-action only:
   previews by default (`apply=false`, pure reads), `apply=true` performs the
-  writes. heddle never auto-files. MCP-only, matching the ADR-029 federation
+  writes. warpline never auto-files. MCP-only, matching the ADR-029 federation
   surface precedent.
 
 - **`filigree observation create` — visible alias of `filigree observe`

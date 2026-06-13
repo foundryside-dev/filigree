@@ -1,4 +1,4 @@
-"""Tests for the heddle reverify-worklist consumer (federation Seam 2A).
+"""Tests for the warpline reverify-worklist consumer (federation Seam 2A).
 
 Covers the file/link/skip decision per item, the explicit-action (apply) gate,
 producer-identity + affected-entity-key stamping, priority mapping, envelope
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from filigree.core import FiligreeDB
-from filigree.heddle_consumer import (
+from filigree.warpline_consumer import (
     ENTITY_KIND,
     PRODUCER_LABELS,
     UNVERIFIED_CONTENT_HASH,
@@ -65,7 +65,7 @@ class TestApplyFiles:
         assert set(PRODUCER_LABELS).issubset(set(issue.labels))  # producer identity
         assert issue.priority == 1
 
-        # affected-entity key — the ADR-029 association heddle reads back.
+        # affected-entity key — the ADR-029 association warpline reads back.
         assocs = db.list_associations_by_entity(sei)
         assert [a["issue_id"] for a in assocs] == [issue_id]
         assert assocs[0]["content_hash_at_attach"] == UNVERIFIED_CONTENT_HASH
@@ -133,7 +133,7 @@ class TestSkipAndShapes:
         assert report["summary"]["skipped"] == 1
 
     def test_accepts_full_envelope(self, db: FiligreeDB) -> None:
-        envelope = {"schema": "heddle.reverify_worklist.v1", "data": _worklist(_item("loomweave:eid:HHH"))}
+        envelope = {"schema": "warpline.reverify_worklist.v1", "data": _worklist(_item("loomweave:eid:HHH"))}
         report = ingest_reverify_worklist(db, envelope, apply=True)
         assert report["summary"]["filed"] == 1
 

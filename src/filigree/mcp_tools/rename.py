@@ -138,7 +138,7 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "list_entity_associations": "entity_association_list",
     "list_associations_by_entity": "entity_association_list_by_entity",
     # federation consumer bindings (1)
-    "ingest_heddle_worklist": "heddle_worklist_ingest",
+    "ingest_warpline_worklist": "warpline_worklist_ingest",
     # scanner (4) + scan (4)
     "list_scanners": "scanner_list",
     "list_available_scanners": "scanner_available_list",
