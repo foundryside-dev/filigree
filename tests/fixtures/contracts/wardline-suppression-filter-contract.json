@@ -1,0 +1,20 @@
+{
+  "contract": "weft/wardline-filigree-suppression-filter",
+  "version": 1,
+  "owner": "wardline",
+  "description": "Wardline-owned suppression_state vocabulary consumed by Filigree's finding-list suppression filter. Filigree adds only the local 'all' no-filter sentinel; every other accepted filter value must come from Wardline's SuppressionState enum.",
+  "suppression_states": [
+    "active",
+    "baselined",
+    "waived",
+    "judged"
+  ],
+  "filigree_filter_sentinel": "all",
+  "filigree_filter_values": [
+    "active",
+    "all",
+    "baselined",
+    "judged",
+    "waived"
+  ]
+}

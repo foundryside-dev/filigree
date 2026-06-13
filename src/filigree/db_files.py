@@ -94,7 +94,8 @@ VALID_WARDLINE_FINDING_KINDS: frozenset[str] = frozenset({"defect", "fact", "cla
 # to ``active`` and pass ``all`` to opt back in to suppressed rows
 # (filigree-2bdb878bd2); the core query keeps its all-inclusive default so
 # internal callers are unaffected.
-VALID_SUPPRESSION_FILTERS: frozenset[str] = frozenset({"all", "active", "baselined", "waived", "judged"})
+WARDLINE_SUPPRESSION_STATES: frozenset[str] = frozenset({"active", "baselined", "waived", "judged"})
+VALID_SUPPRESSION_FILTERS: frozenset[str] = WARDLINE_SUPPRESSION_STATES | {"all"}
 # FIL-1: the wardline kinds that are NOT defect-signal — engine telemetry and
 # informational output. Derived from VALID_WARDLINE_FINDING_KINDS (never a
 # parallel literal) so a kind added to the enum is defect-side by default
@@ -2595,11 +2596,15 @@ class FilesMixin(DBMixinProtocol):
         if isinstance(wardline_meta, dict):
             qualname = wardline_meta.get("qualname")
             if isinstance(qualname, str) and qualname.strip():
-                return None, None, (
-                    f"resolution failed: finding carries qualname {qualname!r} "
-                    "(metadata.wardline.qualname) but no entity id; filigree does not resolve "
-                    "qualnames locally — resolve it via Loomweave and call "
-                    "finding_promote_and_attach_entity"
+                return (
+                    None,
+                    None,
+                    (
+                        f"resolution failed: finding carries qualname {qualname!r} "
+                        "(metadata.wardline.qualname) but no entity id; filigree does not resolve "
+                        "qualnames locally — resolve it via Loomweave and call "
+                        "finding_promote_and_attach_entity"
+                    ),
                 )
         return None, None, "no entity identity on finding (no metadata.loomweave.entity_id or metadata.wardline.qualname)"
 
