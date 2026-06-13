@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -51,6 +52,15 @@ _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
 _MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
+_SCAN_RESULTS_CHUNKING_GUIDANCE = "Split larger scan output into multiple POST /api/weft/scan-results requests."
+
+
+@dataclass(frozen=True)
+class _ScanResultsBodyError:
+    error: str
+    status_code: int = 400
+    details: dict[str, Any] | None = None
+
 
 # CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
 # router factories, and the findings/clean-stale sweep) run via
@@ -243,57 +253,81 @@ def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONRes
 # ---------------------------------------------------------------------------
 
 
-def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
+def _scan_results_limits_payload() -> dict[str, int | str]:
+    return {
+        "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
+        "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
+        "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
+        "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
+    }
+
+
+def _scan_results_body_error(error: str, *, status_code: int = 400, details: dict[str, Any] | None = None) -> _ScanResultsBodyError:
+    return _ScanResultsBodyError(error=error, status_code=status_code, details=details)
+
+
+def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | _ScanResultsBodyError:
     """Validate the scan-results request body.
 
     Shared by the classic ``POST /api/v1/scan-results`` handler and the weft
     ``POST /api/weft/scan-results`` handler — both generations accept the
     same request shape; only the response envelope differs (per ADR-002 §6
     and the weft contract fixture). Returns the kwargs dict to splat into
-    ``db.process_scan_results`` on success, or an error string on validation
-    failure (caller wraps it in a 400 ``ErrorCode.VALIDATION`` response).
+    ``db.process_scan_results`` on success, or a structured validation error
+    describing the failed contract.
     """
     scan_source = body.get("scan_source", "")
     if not isinstance(scan_source, str) or not scan_source:
-        return "scan_source is required and must be a string"
+        return _scan_results_body_error("scan_source is required and must be a string")
     if "findings" not in body:
-        return "findings is required (use [] for a clean scan)"
+        return _scan_results_body_error("findings is required (use [] for a clean scan)")
     findings = body["findings"]
     if not isinstance(findings, list):
-        return "findings must be a JSON array"
+        return _scan_results_body_error("findings must be a JSON array")
     if len(findings) > _MAX_SCAN_FINDINGS_PER_REQUEST:
-        return f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings"
+        return _scan_results_body_error(
+            f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings",
+            status_code=413,
+            details={
+                "field": "findings",
+                "limit": _MAX_SCAN_FINDINGS_PER_REQUEST,
+                "actual": len(findings),
+                "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
+            },
+        )
     for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
-            return f"findings[{index}] must be a JSON object"
+            return _scan_results_body_error(f"findings[{index}] must be a JSON object")
         for field_name in _SCAN_FINDING_TEXT_FIELDS:
             value = finding.get(field_name)
             if isinstance(value, str) and len(value) > _MAX_SCAN_FINDING_TEXT_LENGTH:
-                return f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
+                return _scan_results_body_error(
+                    f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
+                )
     mark_unseen = body.get("mark_unseen", False)
     if not isinstance(mark_unseen, bool):
-        return "mark_unseen must be a boolean"
+        return _scan_results_body_error("mark_unseen must be a boolean")
     create_observations = body.get("create_observations", False)
     if not isinstance(create_observations, bool):
-        return "create_observations must be a boolean"
+        return _scan_results_body_error("create_observations must be a boolean")
     complete_scan_run = body.get("complete_scan_run", True)
     if not isinstance(complete_scan_run, bool):
-        return "complete_scan_run must be a boolean"
+        return _scan_results_body_error("complete_scan_run must be a boolean")
     scan_run_id = body.get("scan_run_id", "")
     if not isinstance(scan_run_id, str):
-        return "scan_run_id must be a string"
+        return _scan_results_body_error("scan_run_id must be a string")
     # scanned_paths: the authoritative scanned-file set (incl. clean files with
     # no findings) so the absent-fingerprint sweep can reconcile a file whose
     # last finding disappeared — the close-on-fixed cascade's clean-file signal.
     # Optional; a body without it yields [] (back-compat with classic callers).
     scanned_paths = body.get("scanned_paths", [])
     if not isinstance(scanned_paths, list):
-        return "scanned_paths must be a JSON array"
+        return _scan_results_body_error("scanned_paths must be a JSON array")
     if len(scanned_paths) > _MAX_SCANNED_PATHS_PER_REQUEST:
-        return f"scanned_paths must contain at most {_MAX_SCANNED_PATHS_PER_REQUEST} paths"
+        return _scan_results_body_error(f"scanned_paths must contain at most {_MAX_SCANNED_PATHS_PER_REQUEST} paths")
     for index, scanned_path in enumerate(scanned_paths):
         if not isinstance(scanned_path, str) or not scanned_path:
-            return f"scanned_paths[{index}] must be a non-empty string"
+            return _scan_results_body_error(f"scanned_paths[{index}] must be a non-empty string")
     return {
         "scan_source": scan_source,
         "findings": findings,
@@ -391,6 +425,7 @@ def create_classic_router() -> APIRouter:
                 "loomweave_api_version": db.loomweave_api_version,
                 "loomweave_instance_rotated": db.loomweave_instance_rotated,
             },
+            "scan_results_limits": _scan_results_limits_payload(),
             "endpoints": [
                 {
                     "method": "POST",
@@ -407,6 +442,10 @@ def create_classic_router() -> APIRouter:
                         "mark_unseen": "boolean (optional)",
                         "create_observations": "boolean (optional, default false)",
                         "complete_scan_run": "boolean (optional, default true)",
+                        "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
+                        "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
+                        "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
+                        "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
                     },
                 },
                 {"method": "GET", "path": "/api/files", "description": "List tracked files", "status": "live"},
@@ -594,8 +633,8 @@ def create_classic_router() -> APIRouter:
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='loomweave'). It runs on a worker thread
@@ -665,8 +704,8 @@ def create_weft_router() -> APIRouter:
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='loomweave'). It runs on a worker thread
@@ -1186,8 +1225,8 @@ def create_living_surface_router() -> APIRouter:
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
         # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
         # registry_backend='loomweave'). It runs on a worker thread

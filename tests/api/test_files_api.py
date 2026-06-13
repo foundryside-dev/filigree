@@ -82,6 +82,21 @@ class TestFilesSchemaAPI:
             "loomweave_instance_rotated": False,
         }
 
+    async def test_schema_exposes_scan_results_payload_limits(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files/_schema")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["scan_results_limits"] == {
+            "max_findings_per_request": 1000,
+            "max_scanned_paths_per_request": 100_000,
+            "max_finding_text_length": 20_000,
+            "chunking_guidance": "Split larger scan output into multiple POST /api/weft/scan-results requests.",
+        }
+
+        scan_results = next(ep for ep in data["endpoints"] if ep["path"] == "/api/v1/scan-results")
+        assert scan_results["request_body"]["max_findings_per_request"] == 1000
+
     async def test_schema_config_flags_reflect_project_backend(self, loomweave_fallback_client: AsyncClient) -> None:
         resp = await loomweave_fallback_client.get("/api/files/_schema")
         data = resp.json()
@@ -89,6 +104,25 @@ class TestFilesSchemaAPI:
         assert data["config_flags"]["registry_backend"] == "loomweave"
         assert data["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
         assert data["config_flags"]["allow_local_fallback"] is True
+
+
+class TestScanResultsPayloadLimits:
+    @pytest.mark.parametrize("path", ["/api/v1/scan-results", "/api/weft/scan-results", "/api/scan-results"])
+    async def test_over_limit_findings_returns_structured_contract(self, client: AsyncClient, path: str) -> None:
+        findings = [{"path": f"src/{i}.py", "rule_id": "WLN-1", "message": "m"} for i in range(1001)]
+
+        resp = await client.post(path, json={"scan_source": "wardline", "findings": findings})
+
+        assert resp.status_code == 413
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "1000" in body["error"]
+        assert body["details"] == {
+            "field": "findings",
+            "limit": 1000,
+            "actual": 1001,
+            "chunking_guidance": "Split larger scan output into multiple POST /api/weft/scan-results requests.",
+        }
 
 
 class TestScanResultsRegistryErrors:

@@ -117,7 +117,7 @@ class TestScanIngestStatusCode:
 
         resp = await client.post("/api/v1/scan-results", json=payload)
 
-        assert resp.status_code == 400
+        assert resp.status_code == 413
         body = resp.json()
         assert body.get("code") == "VALIDATION"
         assert "at most 1000 findings" in body["error"]
