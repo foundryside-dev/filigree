@@ -26,8 +26,12 @@ htmlcov/
 .env
 .env.*
 
-# MkDocs build output (deployed via `mkdocs gh-deploy`, never committed)
-site/
+# MkDocs default build output. NOTE: `site/` is now the Astro spoke-site SOURCE
+# (filigree.foundryside.dev, consuming @weft/site-kit) and is committable — its
+# own site/.gitignore ignores dist/, vendor/site-kit/, public/_site-kit/, and
+# node_modules/. If you still run `mkdocs build`, point its site_dir elsewhere
+# or ignore that path explicitly. The prior mkdocs output is preserved untracked:
+site.mkdocs-output.bak/
 
 # Node
 node_modules/

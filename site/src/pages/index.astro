@@ -1,0 +1,719 @@
+---
+// ============================================================
+// filigree.foundryside.dev — the Filigree member site.
+//
+// Filigree is the work-state authority of the Weft federation
+// (Python · brass · issue lifecycle) and the ONE member with a real
+// web dashboard. This page fills the shared member-page template
+// (IA §5.1) with Filigree's content (IA §4.2.2):
+//   Hero → What it is → Key capabilities → The dashboard (unique block)
+//   → Usage snapshot → How it composes → Status & honest limits
+//   → Links/pointers → CTA → Footer.
+//
+// Everything that could disagree across the seven subdomains — the
+// roster, the matrix, the SEI spine — is sourced from the shared
+// @weft/site-kit data (ROSTER / MATRIX / pairingsFor / memberUrl), so
+// the member list and cross-links are NEVER hardcoded and cannot drift
+// from the hub (IA §1.3, §2.2, §3). Light theme only; no emoji.
+// ============================================================
+import Layout from '@weft/site-kit/layouts/Layout.astro';
+import { Button, Badge, Tag, Banner } from '@weft/site-kit/components';
+import {
+  SeiTag,
+  EnrichmentChip,
+  FreshnessMeter,
+  StateBadge,
+  MemberMark,
+} from '@weft/site-kit/components';
+import {
+  getMember,
+  pairingsFor,
+  partnerOf,
+  memberUrl,
+  repoUrl,
+} from '@weft/site-kit/data';
+
+const SELF = 'filigree';
+const me = getMember(SELF);
+
+// This member's slice of the combination matrix (IA §2.2) — sourced, not
+// hardcoded. Each pairing's partner links cross-subdomain.
+const pairings = pairingsFor(SELF);
+
+// Cross-subdomain CTAs (absolute https://{member}.foundryside.dev, via the kit).
+const LACUNA_URL = memberUrl('lacuna');
+const HUB_DOCTRINE = 'https://weft.foundryside.dev/#doctrine';
+const HUB_SPINE = 'https://weft.foundryside.dev/#spine';
+const REPO = repoUrl(SELF);
+
+// Repo pointers — surface facts that MOVE (version, tool count) are snapshots
+// with a repo pointer, never bare restated numbers (IA §5.1 invariant).
+const VERSION = 'v3.0.0'; // snapshot — see repo / PyPI
+const TOOL_COUNT = '118'; // the repo's count — pointer, not authority
+
+// Map a matrix pairing status to a Badge tone — honest, never rounded up
+// ('partial'/'planned' are NEVER styled as 'live'; IA §2.2, §3.2).
+const statusTone = (s) => (s === 'live' ? 'ok' : s === 'partial' ? 'warn' : 'neutral');
+
+// ----------------------------------------------------------------
+// Illustrative dashboard data (IA §4.2.2, §6 caveat 9). This is a
+// faithful RECREATION of the filigree-dashboard kit against the Lacuna
+// specimen — captioned as illustrative, NOT a screenshot of the shipping
+// localhost:8377 UI. Structure mirrors src/filigree dashboard semantics
+// (Kanban lanes, the bug verifying hard-gate, federation enrichment).
+// ----------------------------------------------------------------
+const LANES = [
+  {
+    key: 'ready',
+    title: 'Ready',
+    cards: [
+      { id: 'LAC-21', type: 'task', prio: 'P2', title: 'Wire post-commit hook for `warpline changed`', state: 'open' },
+      { id: 'LAC-05', type: 'feature', prio: 'P1', title: 'Wardline → Legis signed-scan handshake', state: 'approved' },
+    ],
+  },
+  {
+    key: 'in_progress',
+    title: 'In progress',
+    cards: [
+      { id: 'LAC-22', type: 'task', prio: 'P0', title: 'elspeth judge-gate parity for the protected cell', state: 'in_progress' },
+      { id: 'LAC-12', type: 'bug', prio: 'P0', title: 'wl-log-injection reaches preview sink, unbaselined', state: 'fixing' },
+    ],
+  },
+  {
+    key: 'review',
+    title: 'Review',
+    cards: [
+      { id: 'LAC-08', type: 'feature', prio: 'P1', title: 'SEI-keyed governed sign-off binding', state: 'reviewing' },
+      { id: 'LAC-19', type: 'bug', prio: 'P1', title: 'Loomweave + Filigree orphans issue on rename', state: 'verifying' },
+    ],
+  },
+  {
+    key: 'done',
+    title: 'Done',
+    cards: [
+      { id: 'LAC-03', type: 'task', prio: 'P2', title: 'Backfill temporal store via warpline ingest', state: 'closed' },
+    ],
+  },
+];
+
+// The slide-in detail panel for the verifying bug — surfaces the signature
+// data vocabulary (SeiTag / EnrichmentChip / StateBadge) + the bug hard-gate.
+const DETAIL = {
+  id: 'LAC-19',
+  title: 'Loomweave + Filigree orphans issue on rename (SEI gap)',
+  sei: 'loomweave:eid:3ab7790f12',
+  enrichment: [
+    { peer: 'loomweave', state: 'present' },
+    { peer: 'wardline', state: 'absent' },
+    { peer: 'legis', state: 'absent' },
+    { peer: 'warpline', state: 'present' },
+  ],
+};
+---
+
+<Layout
+  title="Filigree — work state for a swarm of agents"
+  description="Filigree is the work-state authority of the Weft federation: a local-first issue tracker for AI coding agents — race-free claims, a dependency-aware ready queue, ~118 MCP tools, and the one member with a web dashboard. Standalone-first; the Weft surface is optional enrichment."
+  member="filigree"
+  breadcrumb
+  repo={REPO}
+>
+  {/* ---------------------------------------------------------------- */}
+  {/* 1 · Hero — tagline + member dossier terminal                     */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Filigree · work state / issue lifecycle · Python</p>
+      <h1 class="hero__title">Turns a swarm of stateless agents into a coordinated workforce.</h1>
+      <p class="hero__sub">
+        Filigree owns issues, dependencies, and workflow state machines — giving an
+        agent a <strong>race-free claim</strong>, a <strong>dependency-aware ready
+        queue</strong>, and a <strong>pre-computed orientation file</strong>, so no two
+        agents collide. Local-first: SQLite, no cloud, no accounts.
+      </p>
+      <div class="hero__meta">
+        <Tag client:visible>{me.lang}</Tag>
+        <span class="hero__ver">{VERSION}</span>
+        <span class="hero__vernote">shipped — version is the repo's, see <a href={REPO} rel="noopener">the repo</a></span>
+      </div>
+      <div class="hero__cta">
+        <Button client:idle as="a" href="#usage">Quick start →</Button>
+        <Button client:idle as="a" variant="secondary" href="#dashboard">See the dashboard →</Button>
+      </div>
+
+      {/* member dossier terminal — Filigree's own fact present, with a sibling
+          mix that is honest (present / absent / stale), never all-green (IA §3.4). */}
+      <div class="terminal">
+        <div class="terminal__lines">
+          <div><span class="terminal__prompt">$</span> filigree session-context <span class="terminal__arg">--json</span></div>
+          <div class="terminal__dim">one SEI, one ready-queue, typed facts from every present peer…</div>
+        </div>
+        <div class="terminal__chips">
+          <SeiTag client:visible value={DETAIL.sei} copyable />
+          <StateBadge client:visible state="in_progress" />
+          <EnrichmentChip client:visible state="present" peer="warpline" />
+          <EnrichmentChip client:visible state="absent" peer="wardline" />
+          <EnrichmentChip client:visible state="stale" peer="legis" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 2 · What it is                                                   */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="band">
+    <div class="wrap">
+      <p class="eyebrow">What it is</p>
+      <h2 class="h2">The federation's work-state surface.</h2>
+      <p class="lede">
+        Traditional issue trackers are human-first; agents scrape CLI output or parse
+        API responses. Filigree flips this — agents get a pre-computed
+        <code>context.md</code> at session start, claim work with optimistic locking,
+        and resume sessions via event streams without re-reading history. Each project
+        gets a <code>.weft/filigree/</code> directory (like <code>.git/</code>) holding
+        a SQLite database, config, and the auto-generated context summary; legacy
+        <code>.filigree/</code> stores keep working and migrate on the next
+        <code>filigree init</code>.
+      </p>
+      <Banner client:visible tone="info" title="Standalone-first; the Weft surface is optional enrichment.">
+        Filigree runs fully on its own. It hosts the named <code>weft</code> HTTP
+        generation at <code>/api/weft/*</code> that siblings use as transport, and it
+        keys its facts on the <code>SEI</code> — but it <strong>consumes that identity,
+        never mints it</strong>. Loomweave is the identity authority; Filigree treats the
+        SEI as opaque. (<a href={HUB_SPINE} rel="noopener">how the SEI spine works →</a>)
+      </Banner>
+
+      {/* the three state machines, rendered with the StateBadge vocabulary */}
+      <div class="machines">
+        <div class="machine">
+          <span class="machine__cap">task</span>
+          <div class="machine__flow">
+            <StateBadge client:visible state="open" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="in_progress" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="closed" />
+          </div>
+        </div>
+        <div class="machine">
+          <span class="machine__cap">feature</span>
+          <div class="machine__flow">
+            <StateBadge client:visible state="proposed" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="building" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="reviewing" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="done" />
+          </div>
+        </div>
+        <div class="machine">
+          <span class="machine__cap">bug · hard-gate</span>
+          <div class="machine__flow">
+            <StateBadge client:visible state="triage" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="fixing" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="verifying" />
+            <span class="machine__arrow" aria-hidden="true">→</span>
+            <StateBadge client:visible state="closed" />
+          </div>
+        </div>
+      </div>
+      <p class="machines__note">
+        The bug machine has a hard gate: <code>verifying → closed</code> requires a
+        recorded <code>fix_verification</code>. A fix is not done because someone says
+        so; it is done when the verification is on the record.
+      </p>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 3 · Key capabilities                                            */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Key capabilities · the five things it gives you</p>
+      <h2 class="h2">Built so a swarm of agents does not collide.</h2>
+      <div class="grid grid--3">
+        <article class="card cap">
+          <h3 class="cap__h">Atomic claiming</h3>
+          <p class="cap__p">
+            <code>work_start</code> / <code>work_start_next</code> claim and transition
+            in one optimistic-locked step. Do not chain a separate <code>claim</code>
+            with a status update — the two-step form races; the combined verb does not.
+          </p>
+        </article>
+        <article class="card cap">
+          <h3 class="cap__h">Dependency-aware ready queue</h3>
+          <p class="cap__p">
+            Blockers, the ready-queue, and critical-path analysis — an agent asks for
+            the next startable issue and gets one that is actually unblocked, not just
+            open.
+          </p>
+        </article>
+        <article class="card cap">
+          <h3 class="cap__h">~{TOOL_COUNT} MCP tools</h3>
+          <p class="cap__p">
+            Agents interact natively over MCP — no parsing text. The count is the
+            repo's authority; see <a href={`${REPO}/blob/main/docs/mcp.md`} rel="noopener"><code>docs/mcp.md</code></a> for
+            the live surface.
+          </p>
+        </article>
+        <article class="card cap">
+          <h3 class="cap__h">Entity associations</h3>
+          <p class="cap__p">
+            <code>entity_association_add</code> binds an issue to an opaque external
+            entity id (a <code>loomweave:eid:…</code> SEI or a legacy locator). The
+            consumer does drift detection against the hash captured at attach time.
+          </p>
+        </article>
+        <article class="card cap">
+          <h3 class="cap__h">Pre-computed context</h3>
+          <p class="cap__p">
+            <code>context.md</code> is regenerated on every mutation and injected at
+            session start, so an agent orients instantly instead of re-reading history.
+          </p>
+        </article>
+        <article class="card cap">
+          <h3 class="cap__h">The web dashboard</h3>
+          <p class="cap__p">
+            The only Weft member with a GUI — everything else is CLI/MCP-first.
+            Real-time Kanban, a dependency graph, and Files/Health, local-first on
+            <code>localhost:8377</code>. <a href="#dashboard">See it below ↓</a>
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 4 · THE DASHBOARD — the unique feature block (IA §4.2.2)         */}
+  {/* ---------------------------------------------------------------- */}
+  <section id="dashboard" class="band band--feature">
+    <div class="wrap">
+      <p class="eyebrow">The dashboard · unique to Filigree</p>
+      <h2 class="h2">The only Weft member with a web UI.</h2>
+      <p class="lede">
+        A local-first board on <code>localhost:8377</code> — Kanban lanes with
+        drag-and-drop, a Graph v2 dependency view, Files and Health, and a slide-in
+        issue detail surfacing the federation's signature data vocabulary. Everything
+        else in the suite is CLI/MCP-first; this is the one place a human on the loop
+        can watch the board.
+      </p>
+
+      {/* Illustrative recreation of the filigree-dashboard kit (IA §6 caveat 9). */}
+      <figure class="dash">
+        <div class="dash__chrome" aria-hidden="true">
+          <span class="dash__dots"><i></i><i></i><i></i></span>
+          <span class="dash__url">localhost:8377 · lacuna · .weft/filigree/</span>
+        </div>
+        <div class="dash__body">
+          <aside class="dash__rail">
+            <div class="dash__nav">
+              <span class="dash__navitem is-active">Board</span>
+              <span class="dash__navitem">Graph</span>
+              <span class="dash__navitem">Files</span>
+              <span class="dash__navitem">Health</span>
+            </div>
+            <div class="dash__peers">
+              <span class="dash__peerscap">federation peers</span>
+              <div class="dash__peerrow"><MemberMark client:visible member="loomweave" /><EnrichmentChip client:visible state="present" /></div>
+              <div class="dash__peerrow"><MemberMark client:visible member="wardline" /><EnrichmentChip client:visible state="present" /></div>
+              <div class="dash__peerrow"><MemberMark client:visible member="legis" /><EnrichmentChip client:visible state="absent" /></div>
+              <div class="dash__peerrow"><MemberMark client:visible member="warpline" /><EnrichmentChip client:visible state="present" /></div>
+            </div>
+          </aside>
+
+          <div class="dash__board">
+            {LANES.map((lane) => (
+              <div class="lane">
+                <div class="lane__head">
+                  <span class="lane__title">{lane.title}</span>
+                  <span class="lane__count">{lane.cards.length}</span>
+                </div>
+                <div class="lane__cards">
+                  {lane.cards.map((c) => (
+                    <article class={`icard icard--${c.type}`}>
+                      <div class="icard__top">
+                        <span class="icard__id">{c.id}</span>
+                        <span class={`icard__prio icard__prio--${c.prio.toLowerCase()}`}>{c.prio}</span>
+                      </div>
+                      <p class="icard__title">{c.title}</p>
+                      <div class="icard__foot">
+                        <StateBadge client:visible state={c.state} />
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <aside class="dash__detail">
+            <div class="dash__detailhead">
+              <span class="dash__detailid">{DETAIL.id}</span>
+              <span class="dash__close" aria-hidden="true">×</span>
+            </div>
+            <p class="dash__detailtitle">{DETAIL.title}</p>
+            <div class="dash__detailrow">
+              <span class="dash__detailcap">identity</span>
+              <SeiTag client:visible value={DETAIL.sei} copyable />
+            </div>
+            <div class="dash__detailrow">
+              <span class="dash__detailcap">enrichment</span>
+              <div class="dash__chips">
+                {DETAIL.enrichment.map((e) => (
+                  <EnrichmentChip client:visible state={e.state} peer={e.peer} />
+                ))}
+              </div>
+            </div>
+            <div class="dash__detailrow">
+              <span class="dash__detailcap">freshness</span>
+              <FreshnessMeter client:visible completeness={0.75} staleness="2 commits behind" label="binding" />
+            </div>
+            <div class="dash__gate">
+              <span class="dash__gatedot" aria-hidden="true"></span>
+              fix_verification required before close
+            </div>
+          </aside>
+        </div>
+        <figcaption class="dash__cap">
+          Illustrative recreation of the Filigree dashboard against the Lacuna
+          specimen — composed from the design-system kit, not a screenshot of the
+          shipping <code>localhost:8377</code> UI. Expect cosmetic divergence from the
+          running dashboard.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 5 · Usage snapshot                                              */}
+  {/* ---------------------------------------------------------------- */}
+  <section id="usage" class="section">
+    <div class="wrap">
+      <p class="eyebrow">Usage snapshot · curated, not the full reference</p>
+      <h2 class="h2">The atomic loop.</h2>
+      <div class="usage">
+        <div class="well">
+          <pre class="well__pre"><code><span class="c"># at session start</span>
+filigree session-context
+
+<span class="c"># claim the next startable issue (atomic: claim + transition)</span>
+filigree start-next-work --assignee me
+
+<span class="c"># …do the work, commit, then</span>
+filigree close &lt;id&gt;
+
+<span class="c"># watch the board (the one Weft GUI)</span>
+filigree dashboard --port=8377</code></pre>
+        </div>
+        <Banner client:visible tone="warn" title="Use the atomic verb — do not chain claim + status.">
+          The two-step <code>claim</code> then status-update form races against other
+          agents. <code>start-work</code> / <code>start-next-work</code> claim and
+          transition in one step. The full CLI and MCP surface live in the repo —
+          <a href={`${REPO}/blob/main/docs/cli.md`} rel="noopener"><code>docs/cli.md</code></a> and
+          <a href={`${REPO}/blob/main/docs/mcp.md`} rel="noopener"><code>docs/mcp.md</code></a>.
+        </Banner>
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 6 · How it composes — this member's matrix slice (sourced)       */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="band">
+    <div class="wrap">
+      <p class="eyebrow">How it composes · value is the weave</p>
+      <h2 class="h2">Each pairing lights up a capability Filigree does not have alone.</h2>
+      <p class="lede">
+        Filigree's slice of the combination matrix. Every status is honest on its face:
+        a <code>partial</code> or <code>planned</code> pair is never rendered as
+        <code>live</code>. Each partner links across to its own site.
+      </p>
+
+      <div class="grid grid--2">
+        {pairings.map((p) => {
+          const partner = partnerOf(p, SELF);
+          const partnerUrl = memberUrl(partner);
+          return (
+            <article class="card card--pair">
+              <div class="pair__head">
+                <span class="pair__mark"><MemberMark client:visible member={SELF} /></span>
+                <span class="pair__plus" aria-hidden="true">+</span>
+                <a class="pair__mark" href={partnerUrl}><MemberMark client:visible member={partner} /></a>
+                <span class="pair__status">
+                  <Badge client:visible tone={statusTone(p.status)} dot>{p.status}</Badge>
+                </span>
+              </div>
+              <p class="pair__cap">{p.capability}</p>
+              {p.note && <p class="pair__note">{p.note}</p>}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 7 · Status & honest limits — mandatory, non-empty (IA §5.1)      */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Status & honest limits</p>
+      <h2 class="h2">What it is not.</h2>
+      <div class="limits">
+        <Banner client:visible tone="warn" title="A-1 asterisk: the Wardline → Filigree pairing is live, but watched.">
+          The native findings-to-work emitter has shipped, but the asterisk stays live
+          until the Loomweave-absent path is proven end-to-end — currently exercised
+          only at the unit / server-wiring tier. The pair is not yet fully proven; we
+          say so rather than round it up to a clean <code>live</code>.
+        </Banner>
+        <Banner client:visible tone="warn" title="Loomweave + Filigree is partial — and it orphans on rename.">
+          Issues bound to live code should survive refactors. The drift-aware
+          entity⇄issue binding still matures; today it can orphan an issue on a rename.
+          This is the one <code>partial</code> in Filigree's matrix slice, and we render
+          it as <code>partial</code>.
+        </Banner>
+        <Banner client:visible tone="danger" title="Not a security boundary.">
+          Filigree does not encrypt, sandbox, or harden stored project data beyond
+          ordinary filesystem permissions. It is deconfliction-first, not security. Do
+          not use it for secure, regulated, confidential, or business-sensitive data.
+        </Banner>
+        <Banner client:visible tone="info" title="Consumes identity; never an authority.">
+          Filigree keys its facts on the <code>SEI</code> but treats it as opaque and
+          never mints it. When a sibling is absent, that slot reads
+          <code>absent</code> — explicitly, never as an implied clean state.
+        </Banner>
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 8 · Links / pointers                                            */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="band">
+    <div class="wrap">
+      <p class="eyebrow">Links · pointers to the authorities</p>
+      <h2 class="h2">Where the moving facts actually live.</h2>
+      <div class="links">
+        <a class="link" href={REPO} rel="noopener"><span class="link__t">Repository</span><span class="link__d">github.com/foundryside-dev/filigree</span></a>
+        <a class="link" href={`${REPO}/blob/main/docs/getting-started.md`} rel="noopener"><span class="link__t">Getting started</span><span class="link__d">docs/getting-started.md</span></a>
+        <a class="link" href={`${REPO}/blob/main/docs/cli.md`} rel="noopener"><span class="link__t">CLI reference</span><span class="link__d">docs/cli.md</span></a>
+        <a class="link" href={`${REPO}/blob/main/docs/mcp.md`} rel="noopener"><span class="link__t">MCP reference</span><span class="link__d">docs/mcp.md · ~{TOOL_COUNT} tools</span></a>
+        <a class="link" href={`${REPO}/blob/main/docs/agent-integration.md`} rel="noopener"><span class="link__t">Agent integration</span><span class="link__d">docs/agent-integration.md</span></a>
+        <a class="link" href={`${REPO}/blob/main/docs/federation/index.md`} rel="noopener"><span class="link__t">Federation</span><span class="link__d">docs/federation/ · incl. the Warpline seam</span></a>
+      </div>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- */}
+  {/* 9 · CTA — see it on the specimen / read the doctrine            */}
+  {/* ---------------------------------------------------------------- */}
+  <section class="cta">
+    <div class="wrap cta__inner">
+      <span class="cta__dot" style={`background:${me.thread}`}></span>
+      <div class="cta__copy">
+        <p class="cta__lead">Want to see it actually run?</p>
+        <p class="cta__sub">
+          Watch the whole federation analyze <strong>Lacuna</strong>, the demonstration
+          specimen — tracked work, race-free claims, and the dashboard, on a small app
+          with catalogued flaws.
+        </p>
+      </div>
+      <span class="cta__btns">
+        <Button client:idle as="a" href={LACUNA_URL}>See it on the specimen →</Button>
+        <Button client:idle as="a" variant="secondary" href={HUB_DOCTRINE} rel="noopener">Read the doctrine →</Button>
+      </span>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  /* Page-local layout only. Brand atoms (colors, type, motifs) come ONLY from the
+     site-kit token layer — no new colors, no dark mode (light theme only). */
+  .wrap { max-width: var(--width-content); margin: 0 auto; padding: 0 36px; }
+  .eyebrow {
+    font: var(--type-mono-sm); text-transform: uppercase;
+    letter-spacing: var(--tracking-caps); color: var(--text-muted);
+    font-size: var(--text-xs); margin: 0 0 14px;
+  }
+  .h2 { font: var(--type-h1); color: var(--text-strong); margin: 0 0 16px; max-width: 26ch; }
+  .lede { font: var(--type-body); color: var(--text-body); max-width: 66ch; margin: 0 0 26px; }
+  .lede code, .pair__cap code, .cap__p code, .machines__note code { font-family: var(--font-mono); font-size: 0.92em; color: var(--text-strong); }
+
+  .section { padding: 64px 0; }
+  .band {
+    padding: 64px 0; background: var(--bg-sunken);
+    border-top: 1px solid var(--border-hairline);
+    border-bottom: 1px solid var(--border-hairline);
+  }
+
+  /* hero */
+  .hero { padding: 72px 0 60px; border-bottom: 1px solid var(--border-hairline); }
+  .hero__title {
+    font: var(--type-display); color: var(--member-filigree, var(--brass-700));
+    letter-spacing: -0.025em; line-height: 1.06; max-width: 20ch; margin: 0 0 22px;
+  }
+  .hero__sub { font: var(--type-body); font-size: var(--text-lg); color: var(--text-body); max-width: 60ch; margin: 0 0 18px; }
+  .hero__sub strong { color: var(--text-strong); }
+  .hero__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 26px; }
+  .hero__ver { font: var(--type-mono-sm); color: var(--text-strong); }
+  .hero__vernote { font: var(--type-mono-sm); color: var(--text-faint); font-size: var(--text-xs); }
+  .hero__vernote a { color: var(--text-muted); }
+  .hero__cta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 40px; }
+
+  .terminal {
+    background: var(--surface-inverse); border-radius: var(--radius-lg);
+    padding: 18px 20px; max-width: 760px; box-shadow: var(--shadow-lg);
+  }
+  .terminal__lines { font: var(--type-mono); color: var(--text-on-inverse); font-size: var(--text-xs); line-height: 1.7; }
+  .terminal__prompt { color: var(--ash-500); }
+  .terminal__arg { color: var(--indigo-300); }
+  .terminal__dim { color: var(--ash-500); }
+  .terminal__chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+  /* state machines */
+  .machines { display: flex; flex-direction: column; gap: 12px; margin: 26px 0 12px; }
+  .machine {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: var(--surface-card); border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-md); padding: 12px 16px;
+  }
+  .machine__cap { font: var(--type-mono-sm); color: var(--text-faint); min-width: 96px; }
+  .machine__flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .machine__arrow { color: var(--text-faint); font-family: var(--font-mono); }
+  .machines__note { font: var(--type-body-sm); color: var(--text-muted); max-width: 64ch; margin: 6px 0 0; }
+
+  /* cards (shared) */
+  .grid { display: grid; gap: 16px; }
+  .grid--3 { grid-template-columns: repeat(3, 1fr); }
+  .grid--2 { grid-template-columns: repeat(2, 1fr); }
+  .card {
+    background: var(--surface-card); border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-lg); box-shadow: var(--shadow-xs);
+  }
+
+  /* capability card */
+  .cap { padding: 18px; }
+  .cap__h { font: var(--type-h3); color: var(--text-strong); margin: 0 0 8px; }
+  .cap__p { font: var(--type-body-sm); color: var(--text-body); margin: 0; }
+  .cap__p a { color: var(--indigo-700); }
+
+  /* dashboard feature block */
+  .band--feature { background: var(--surface-sunken, var(--bg-sunken)); }
+  .dash {
+    margin: 8px 0 0; border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-lg); overflow: hidden; background: var(--surface-card);
+    box-shadow: var(--shadow-lg);
+  }
+  .dash__chrome {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    background: var(--bg-sunken); border-bottom: 1px solid var(--border-hairline);
+  }
+  .dash__dots { display: inline-flex; gap: 6px; }
+  .dash__dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--thread-400); display: block; }
+  .dash__url { font: var(--type-mono-sm); color: var(--text-faint); font-size: var(--text-xs); }
+  .dash__body { display: grid; grid-template-columns: 168px 1fr 232px; min-height: 360px; }
+
+  .dash__rail { border-right: 1px solid var(--border-hairline); padding: 14px; display: flex; flex-direction: column; gap: 18px; }
+  .dash__nav { display: flex; flex-direction: column; gap: 4px; }
+  .dash__navitem { font: var(--type-body-sm); color: var(--text-muted); padding: 6px 10px; border-radius: var(--radius-sm); }
+  .dash__navitem.is-active { background: var(--warn-tint); color: var(--brass-700); font-weight: var(--fw-medium); }
+  .dash__peers { display: flex; flex-direction: column; gap: 8px; }
+  .dash__peerscap { font: var(--type-mono-sm); color: var(--text-faint); font-size: var(--text-xs); }
+  .dash__peerrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+  .dash__board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 14px; background: var(--bg-sunken); }
+  .lane { display: flex; flex-direction: column; gap: 8px; }
+  .lane__head { display: flex; align-items: center; justify-content: space-between; }
+  .lane__title { font: var(--type-mono-sm); text-transform: uppercase; letter-spacing: var(--tracking-caps); color: var(--text-faint); font-size: var(--text-2xs); }
+  .lane__count { font: var(--type-mono-sm); color: var(--text-faint); font-size: var(--text-2xs); }
+  .lane__cards { display: flex; flex-direction: column; gap: 8px; }
+  .icard { background: var(--surface-card); border: 1px solid var(--border-hairline); border-left: 3px solid var(--thread-400); border-radius: var(--radius-sm); padding: 10px; }
+  .icard--bug { border-left-color: var(--madder-600, var(--member-wardline)); }
+  .icard--feature { border-left-color: var(--woad-600, var(--member-charter)); }
+  .icard--task { border-left-color: var(--indigo-500, var(--member-loomweave)); }
+  .icard__top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .icard__id { font: var(--type-mono-sm); color: var(--text-muted); font-size: var(--text-2xs); }
+  .icard__prio { font: var(--type-mono-sm); font-size: var(--text-2xs); color: var(--text-faint); }
+  .icard__prio--p0 { color: var(--madder-600, var(--danger)); font-weight: var(--fw-semibold); }
+  .icard__title { font: var(--type-body-sm); color: var(--text-body); margin: 0 0 8px; line-height: 1.35; }
+  .icard__foot { display: flex; }
+
+  .dash__detail { border-left: 1px solid var(--border-hairline); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  .dash__detailhead { display: flex; align-items: center; justify-content: space-between; }
+  .dash__detailid { font: var(--type-mono-sm); color: var(--text-muted); }
+  .dash__close { color: var(--text-faint); font-size: 18px; line-height: 1; }
+  .dash__detailtitle { font: var(--type-body-sm); color: var(--text-strong); font-weight: var(--fw-medium); margin: 0; line-height: 1.4; }
+  .dash__detailrow { display: flex; flex-direction: column; gap: 6px; }
+  .dash__detailcap { font: var(--type-mono-sm); color: var(--text-faint); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+  .dash__chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .dash__gate {
+    display: flex; align-items: center; gap: 8px; margin-top: 4px;
+    font: var(--type-mono-sm); font-size: var(--text-xs); color: var(--brass-700);
+    background: var(--warn-tint); border: 1px solid var(--brass-100);
+    border-radius: var(--radius-sm); padding: 8px 10px;
+  }
+  .dash__gatedot { width: 6px; height: 6px; border-radius: 50%; background: var(--brass-500); flex: none; }
+  .dash__cap { font: var(--type-body-sm); color: var(--text-muted); padding: 12px 16px; border-top: 1px solid var(--border-hairline); margin: 0; }
+  .dash__cap code { font-family: var(--font-mono); color: var(--text-strong); }
+
+  /* usage */
+  .usage { display: grid; grid-template-columns: 1fr; gap: 16px; }
+  .well { background: var(--surface-inverse); border-radius: var(--radius-lg); padding: 18px 20px; box-shadow: var(--shadow-lg); overflow: auto; }
+  .well__pre { margin: 0; }
+  .well__pre code { font: var(--type-mono); color: var(--text-on-inverse); font-size: var(--text-xs); line-height: 1.8; white-space: pre; }
+  .well__pre .c { color: var(--ash-500); }
+
+  /* matrix pair card */
+  .card--pair { padding: 16px; }
+  .pair__head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .pair__mark { text-decoration: none; }
+  a.pair__mark:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .pair__plus { color: var(--text-faint); font-family: var(--font-mono); }
+  .pair__status { margin-left: auto; }
+  .pair__cap { font: var(--type-body-sm); color: var(--text-body); margin: 0; }
+  .pair__note { font: var(--type-mono-sm); color: var(--text-faint); margin: 8px 0 0; line-height: 1.5; }
+
+  /* limits */
+  .limits { display: flex; flex-direction: column; gap: 14px; max-width: 72ch; }
+
+  /* links */
+  .links { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .link {
+    display: flex; flex-direction: column; gap: 2px; text-decoration: none;
+    background: var(--surface-card); border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-md); padding: 14px 16px;
+    transition: box-shadow var(--dur-fast) var(--ease-out);
+  }
+  .link:hover { box-shadow: var(--shadow-md); }
+  .link__t { font: var(--type-body); color: var(--text-strong); font-weight: var(--fw-medium); }
+  .link__d { font: var(--type-mono-sm); color: var(--text-muted); font-size: var(--text-xs); }
+
+  /* CTA */
+  .cta { padding: 44px 0; background: var(--bg-sunken); border-top: 1px solid var(--border-hairline); }
+  .cta__inner { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .cta__dot { width: 12px; height: 12px; border-radius: 3px; flex: none; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+  .cta__copy { flex: 1 1 360px; }
+  .cta__lead { font: var(--type-body); font-weight: var(--fw-semibold); color: var(--text-strong); margin: 0 0 2px; }
+  .cta__sub { font: var(--type-body-sm); color: var(--text-muted); margin: 0; max-width: 60ch; }
+  .cta__btns { flex: none; display: flex; gap: 10px; flex-wrap: wrap; }
+
+  @media (max-width: 1040px) {
+    .dash__body { grid-template-columns: 1fr; }
+    .dash__rail { border-right: none; border-bottom: 1px solid var(--border-hairline); flex-direction: row; flex-wrap: wrap; }
+    .dash__detail { border-left: none; border-top: 1px solid var(--border-hairline); }
+  }
+  @media (max-width: 880px) {
+    .grid--3, .grid--2, .links { grid-template-columns: 1fr; }
+    .dash__board { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .wrap { padding: 0 18px; }
+    .hero { padding: 52px 0 44px; }
+    .dash__board { grid-template-columns: 1fr; }
+  }
+</style>
