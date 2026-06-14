@@ -7,8 +7,9 @@ This directory documents filigree's published HTTP contracts for federation cons
 > authoritative** — including the entity-association routes at the classic
 > `/api/issue/…` surface and `/api/entity-associations`. What is *not* owned here
 > is the federation **roster and axiom**: those now live at `~/weft/doctrine.md`
-> (5 realized members — Loomweave, Filigree, Wardline, Legis, Charter; Shuttle is a
-> roadmap thought-bubble, not a member). The suite-level **cross-product contract
+> (5 realized members — Loomweave, Filigree, Wardline, Legis, Warpline; Charter is a
+> planned Weft integration (adapters pending, not yet an admitted member), and
+> Shuttle is a roadmap thought-bubble, not a member). The suite-level **cross-product contract
 > index** — which lists every live cross-product binding and points back to each
 > owning project's authoritative doc — lives at `~/weft/contracts-index.md`. Where
 > this document names a peer set like "Loomweave + Wardline + Shuttle", read
@@ -20,7 +21,7 @@ This directory documents filigree's published HTTP contracts for federation cons
 A **contract** is a named API generation at the HTTP surface. Filigree currently publishes two:
 
 - **`classic`** — the pre-federation `/api/*` surface as it existed through the 1.x series. Mostly un-prefixed (e.g. `/api/issue/{id}` singular, `/api/issues`, `/api/ready`), with one `/api/v1/` outlier, `POST /api/v1/scan-results`. (The per-endpoint table under "Living-surface alias decisions" below is the precise path reference.) Frozen: no new operations, no shape changes. Continues to be fully supported. Retirement requires a new ADR with 12 months of deprecation notice.
-- **`weft`** — `/api/weft/*`. Introduced in 2.0. The federation-era generation, named for the [Weft federation](file:///home/john/weft/doctrine.md) (authoritative roster lives at `~/weft/doctrine.md`). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `work_start`.
+- **`weft`** — `/api/weft/*`. Introduced in 2.0. The federation-era generation, named for the [Weft federation](https://github.com/foundryside-dev/weft/blob/main/doctrine.md) (authoritative roster lives at `~/weft/doctrine.md`). Uses the unified `BatchResponse[T]` / `ListResponse[T]` envelopes, the closed `ErrorCode` enum, the `issue_id` vocabulary, and composed operations like `work_start`.
 
 The **living surface** at `/api/*` (no generation prefix) aliases the current recommended generation — as of 2026-04-24 that is `weft`. Living-surface endpoints are explicitly non-stability; production integrations across version boundaries must pin to a named generation.
 

@@ -1,6 +1,6 @@
 # Agent Integration
 
-Filigree is built for AI coding agents. This guide covers how foreground agents, background subagents, and multi-agent teams interact with filigree 2.0.
+Filigree is built for AI coding agents. This guide covers how foreground agents, background subagents, and multi-agent teams interact with filigree 3.0.0.
 
 ## Foreground Agents
 
@@ -22,11 +22,11 @@ filigree --actor sub-agent-3 start-next-work --assignee sub-agent-3 --json
 filigree --actor sub-agent-3 close <issue-id> --json
 ```
 
-The `--json` flag returns machine-readable responses in the unified 2.0 envelopes (see "Response Shapes" below). The `--actor` flag sets the identity in the audit trail so you can track which agent performed each action.
+The `--json` flag returns machine-readable responses in the unified 3.0.0 envelopes (see "Response Shapes" below). The `--actor` flag sets the identity in the audit trail so you can track which agent performed each action.
 
 ## The Agent Workflow Loop
 
-The recommended pattern for agents working with filigree 2.0:
+The recommended pattern for agents working with filigree 3.0.0:
 
 1. **Orient** — read `filigree://context` resource for project state
 2. **Find work** — `work_ready` to find unblocked work sorted by priority
@@ -35,17 +35,17 @@ The recommended pattern for agents working with filigree 2.0:
 5. **Close** — `issue_close` when done (response includes newly-unblocked items)
 6. **Repeat** — loop back to step 2
 
-The atomic primitives `work_claim` / `work_claim_next` still exist for niche use (reserve without transitioning), but `work_start` / `work_start_next` are the usual path in 2.0.
+The atomic primitives `work_claim` / `work_claim_next` still exist for niche use (reserve without transitioning), but `work_start` / `work_start_next` are the usual path in 3.0.0.
 
 ## Response Shapes
 
-All MCP tools and CLI `--json` output use the unified 2.0 envelopes:
+All MCP tools and CLI `--json` output use the unified 3.0.0 envelopes:
 
 - **Batch ops** return `{succeeded: [...], failed: [{id, error, code}, ...], newly_unblocked?: [...]}`. `failed` is always present (empty list if none); `newly_unblocked` is present only when non-empty (omitted when the op unblocked nothing). Pass `response_detail="full"` (MCP) or `--detail=full` (CLI) to get full records back instead of slim summaries.
 - **List ops** return `{items: [...], has_more: bool, next_offset?: int}`. `has_more` is always present; `next_offset` appears only when there is a next page.
-- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`, `LOOMWEAVE_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`.
+- **Errors** return `{error: str, code: ErrorCode, details?: dict}` where `code` is one of: `VALIDATION`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`, `INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`, `LOOMWEAVE_REGISTRY_VERSION_MISMATCH`, `LOOMWEAVE_OUT_OF_SYNC`, `BRIEFING_BLOCKED`, `STOP_FAILED`, `SCHEMA_MISMATCH`, `INTERNAL`. (`LOOMWEAVE_OUT_OF_SYNC` means the installed loomweave registry is present but out of sync; remediation is `loomweave analyze`.)
 
-The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, and CLI JSON). Status is always `status`; "state" was retired as a user-facing word in 2.0.
+The issue ID is always exposed as `issue_id` (in MCP inputs, response payloads, and CLI JSON). Status is always `status`; "state" was retired as a user-facing word in 2.0 and stays retired in 3.0.0.
 
 ## Schema-Mismatch (Warm-but-Degraded MCP)
 
@@ -144,7 +144,7 @@ filigree changes --since 2026-02-14T10:00   # Global event stream
 
 ## Pre-Computed Context
 
-Filigree generates a `context.md` file on every mutation, stored at `.filigree/context.md`. This file contains:
+Filigree generates a `context.md` file on every mutation, stored at `.weft/filigree/context.md` (legacy installs that have not yet migrated store it at `.filigree/context.md`). This file contains:
 
 - Project vitals (prefix, enabled packs, issue counts)
 - Ready work queue (unblocked, sorted by priority)
@@ -155,7 +155,7 @@ Agents read this via the `filigree://context` MCP resource or `summary_get` tool
 
 ## Exit Codes (CLI)
 
-Standardised in 2.0 so automated callers can branch on retryability:
+Standardised since 2.0 (unchanged in 3.0.0) so automated callers can branch on retryability:
 
 | Code | Meaning |
 |---|---|

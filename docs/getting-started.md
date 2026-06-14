@@ -38,16 +38,26 @@ filigree init
 ```
 
 ```
-Initialized filigree project with prefix 'my-project'
-Created .filigree/config.json
-Created .filigree/filigree.db
+Initialized filigree store at .weft/filigree/ in /path/to/my-project
+  Prefix: my-project
+  Mode: ethereal
+  Database: /path/to/my-project/.weft/filigree/filigree.db
+  Anchor: .weft/filigree/ (store-dir presence; confless — no .filigree.conf)
+  Scanners: /path/to/my-project/.weft/filigree/scanners/ (add .toml files to register scanners)
+
+Next: filigree install
 ```
 
-This creates a `.filigree/` directory containing:
+This creates a `.weft/filigree/` store directory containing:
 
 - `filigree.db` — SQLite database (WAL mode)
 - `config.json` — project prefix, install mode, enabled packs
 - `context.md` — auto-generated project summary
+- `scanners/` — drop `.toml` files here to register scanners
+
+`.weft/` is the canonical Weft store root since 3.0.0; `filigree` is its sole
+writer under `.weft/filigree/`. Legacy `.filigree/` stores keep working and are
+auto-migrated forward on the next `filigree init`.
 
 Issue IDs use the format `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`). The prefix defaults to your directory name.
 

@@ -139,6 +139,38 @@ re-minted as a fresh issue on ingest.
     So: this binding is **shipping, asterisk live** — not yet fully direct/done.
     See [asterisk-register.md A-1](https://github.com/foundryside-dev/weft/blob/main/asterisk-register.md).
 
+### Warpline → Filigree — reverify worklist becomes tracked work
+
+**Binding (Seam 2A of the 2026-06-13 warpline interface lock).** Warpline
+produces a reverify worklist (the `warpline.reverify_worklist.v1` contract) of
+entities its analysis says need re-verification. Filigree is the
+**write-capable consumer**: on explicit action it files new work items for
+not-yet-tracked affected entities and reports the already-tracked ones. Warpline
+**never auto-files** — it only surfaces candidates; the explicit action is the
+consumer call itself.
+
+The consumer is the `warpline_worklist_ingest` MCP tool (implemented in
+`src/filigree/warpline_consumer.py`). It is **preview-by-default**: with
+`apply=false` it performs pure reads and reports what *would* be filed; with
+`apply=true` it performs the file/link writes. Per worklist item, keyed on the
+entity's SEI:
+
+- an entity already tracked by an open issue is `linked` (the existing issue
+  id(s) are reported; never duplicate-filed);
+- an untracked entity is `filed` — a `task` is created and an ADR-029
+  affected-entity association is attached on the entity's SEI;
+- an item with no SEI is `skipped` (no affected-entity key to bind).
+
+Every filed item carries the `warpline` + `federation` producer labels and the
+SEI entity association — the same surface Warpline reads back via
+`entity_association_list_by_entity` — so a filed item shows up as tracked on the
+next worklist and the loop closes. Filigree retains work-state authority; the
+binding adds no obligation that breaks Filigree's core flow when Warpline is
+absent.
+
+**Status: live** — the consumer shipped in Filigree 3.0.0. See the
+`warpline_worklist_ingest` reference in [MCP Server Reference](../mcp.md).
+
 ### Legis → Filigree — governed sign-offs on issues
 
 **Binding (contracts §7).** Legis binds **SEI-keyed governed sign-offs** to
