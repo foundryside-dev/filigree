@@ -379,6 +379,21 @@ class ChangeRecordWeft(IssueEventWeft):
     affected_entities: list[str]
 
 
+class WeftReasonWeft(TypedDict):
+    """A weft-reason carrier on the wire (PDR-0023, the honesty invariant).
+
+    Mirrors ``filigree.types.files.WeftReason``. A non-clean ingest outcome is
+    reported as a structured carrier rather than a silent count or a bare
+    warning string, so a consumer can switch on ``reason_class`` (drawn from the
+    closed PDR-0023 vocabulary) and act on ``fix`` (the recruiting action).
+    ``cause`` and ``fix`` are present on every (non-clean) carrier.
+    """
+
+    reason_class: str
+    cause: str
+    fix: str
+
+
 class ScanIngestResponseWeft(TypedDict):
     """Response shape for ``POST /api/weft/scan-results``.
 
@@ -405,3 +420,12 @@ class ScanIngestResponseWeft(TypedDict):
     failed: list[BatchFailure]
     stats: ScanStats
     warnings: list[str]
+    #: Structured weft-reason carriers for non-clean ingest outcomes (PDR-0023,
+    #: the honesty invariant). ``NotRequired`` and omitted entirely on the clean
+    #: path, so a conformant same-scheme client sees the byte-identical 4-key
+    #: envelope it always has — a wire-compatible additive field per the
+    #: fixture's stability note. Present only when the ingest produced at least
+    #: one carrier; today that is the ``scheme_mismatch`` case (Weft seam G4),
+    #: where the declared fingerprint_scheme differed from the stored one and the
+    #: mark_unseen sweep was refused to avoid silently closing prior findings.
+    weft_reasons: NotRequired[list[WeftReasonWeft]]

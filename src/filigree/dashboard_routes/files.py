@@ -328,6 +328,13 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | _ScanResu
     for index, scanned_path in enumerate(scanned_paths):
         if not isinstance(scanned_path, str) or not scanned_path:
             return _scan_results_body_error(f"scanned_paths[{index}] must be a non-empty string")
+    # fingerprint_scheme: the scanner-declared fingerprint identity scheme (e.g.
+    # wardline's 'wlfp2'). Recorded per scan_source and compared on each ingest so
+    # a silent scheme bump cannot cascade-close prior-scheme findings as fixed
+    # (Weft seam G4 / PDR-0023). Optional; absent → '' (legacy callers proceed).
+    fingerprint_scheme = body.get("fingerprint_scheme", "")
+    if not isinstance(fingerprint_scheme, str):
+        return _scan_results_body_error("fingerprint_scheme must be a string")
     return {
         "scan_source": scan_source,
         "findings": findings,
@@ -336,6 +343,7 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | _ScanResu
         "create_observations": create_observations,
         "complete_scan_run": complete_scan_run,
         "scanned_paths": scanned_paths,
+        "fingerprint_scheme": fingerprint_scheme,
     }
 
 
@@ -652,6 +660,13 @@ def create_classic_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
+        # The classic envelope shape is frozen (ADR-002) and predates the
+        # PDR-0023 weft-reason carrier. ``weft_reasons`` is a weft-generation
+        # field; the G4 scheme handshake is driven by the weft route (wardline
+        # emits there), so a classic caller never declares fingerprint_scheme
+        # and this list is always empty here. Strip it to keep the classic
+        # response byte-identical to its pinned shape.
+        result = {k: v for k, v in result.items() if k != "weft_reasons"}
         return JSONResponse(result)
 
     @router.get("/scan-runs")

@@ -227,6 +227,22 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS idx_scan_runs_status ON scan_runs(status);
 CREATE INDEX IF NOT EXISTS idx_scan_runs_scanner ON scan_runs(scanner_name);
 
+-- ---- Fingerprint-scheme registry per scan_source (Weft seam G4) ------------
+-- A scanner (wardline) declares a ``fingerprint_scheme`` (e.g. 'wlfp2') on every
+-- emit. The dedup join is keyed on the raw fingerprint VALUE; a silent scheme
+-- bump (wlfp2 -> wlfp3) re-mints every fingerprint, so the incoming batch would
+-- miss the join and the mark_unseen sweep would CASCADE-CLOSE all prior findings
+-- as 'fixed' with zero error. This table records the declared scheme per
+-- scan_source so ingest can DETECT a bump and REFUSE the sweep (see
+-- process_scan_results). Additive: legacy/blank-declaring callers never write a
+-- row, and a row's absence reads as "no stored scheme yet" (proceed normally).
+CREATE TABLE IF NOT EXISTS scan_source_schemes (
+    scan_source        TEXT PRIMARY KEY,
+    fingerprint_scheme TEXT NOT NULL DEFAULT '',
+    first_seen         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS file_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id     TEXT NOT NULL REFERENCES file_records(id),
@@ -591,4 +607,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 27
+CURRENT_SCHEMA_VERSION = 28

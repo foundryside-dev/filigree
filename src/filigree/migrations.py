@@ -918,6 +918,35 @@ def migrate_v26_to_v27(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE entity_associations SET signed_content_hash = content_hash_at_attach WHERE signature IS NOT NULL")
 
 
+def migrate_v27_to_v28(conn: sqlite3.Connection) -> None:
+    """v27 -> v28: Add the ``scan_source_schemes`` registry (Weft seam G4).
+
+    Records the ``fingerprint_scheme`` a scanner declares per ``scan_source`` so
+    Filigree can detect a silent scheme bump (e.g. wardline wlfp2 -> wlfp3) on
+    ingest. The dedup join is keyed on the raw fingerprint VALUE; a scheme bump
+    re-mints every fingerprint, so without this registry the new-scheme batch
+    would miss the join and the ``mark_unseen`` sweep would CASCADE-CLOSE every
+    prior-scheme finding as 'fixed' with zero error. On mismatch, ingest refuses
+    the sweep and surfaces a ``scheme_mismatch`` weft-reason instead.
+
+    Additive + idempotent: a new table only (``CREATE TABLE IF NOT EXISTS``), no
+    column add, no row rewrite. Existing rows and conformant same-scheme clients
+    see ZERO change — the table starts empty and is populated lazily on the first
+    ingest that declares a non-blank scheme for a scan_source. A scan_source that
+    never declares a scheme (legacy/blank) never gets a row, and its absence reads
+    as "no stored scheme yet" (proceed normally).
+    """
+    conn.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS scan_source_schemes (
+            scan_source        TEXT PRIMARY KEY,
+            fingerprint_scheme TEXT NOT NULL DEFAULT '',
+            first_seen         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL
+        )"""
+    )
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -945,6 +974,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     24: migrate_v24_to_v25,
     25: migrate_v25_to_v26,
     26: migrate_v26_to_v27,
+    27: migrate_v27_to_v28,
 }
 
 

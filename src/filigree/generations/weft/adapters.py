@@ -31,6 +31,7 @@ from filigree.generations.weft.types import (
     ScanStats,
     SlimIssueWeft,
     TypeSummaryWeft,
+    WeftReasonWeft,
 )
 from filigree.models import Issue
 from filigree.scanners import ScannerConfig
@@ -352,7 +353,7 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
     - ``failed`` is ``[]`` until per-finding ingest failure tracking
       lands (non-breaking addition per ADR-002 §3).
     """
-    return ScanIngestResponseWeft(
+    response = ScanIngestResponseWeft(
         succeeded=list(result["new_finding_ids"]),
         failed=[],
         stats=ScanStats(
@@ -365,3 +366,12 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
         ),
         warnings=list(result["warnings"]),
     )
+    # weft-reason carriers (PDR-0023): only surfaced when non-empty, so a clean
+    # same-scheme ingest yields the byte-identical 4-key envelope (NotRequired
+    # field omitted). Today the only carrier is the G4 scheme_mismatch case.
+    weft_reasons = result.get("weft_reasons") or []
+    if weft_reasons:
+        response["weft_reasons"] = [
+            WeftReasonWeft(reason_class=r["reason_class"], cause=r["cause"], fix=r["fix"]) for r in weft_reasons
+        ]
+    return response

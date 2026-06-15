@@ -195,6 +195,21 @@ class ScanRunStatusDict(ScanRunDict):
     file_summary: FindingsSummary
 
 
+class WeftReason(TypedDict):
+    """A weft-reason carrier (PDR-0023, the honesty invariant).
+
+    A non-clean ingest outcome is reported as a structured carrier rather than
+    a silent count or a bare warning string, so a caller can switch on
+    ``reason_class`` and act on ``fix`` (the recruiting action) instead of
+    grepping prose. ``reason_class`` is drawn from the closed PDR-0023 set;
+    ``cause`` and ``fix`` are MANDATORY on every (non-clean) carrier.
+    """
+
+    reason_class: str
+    cause: str
+    fix: str
+
+
 class ScanIngestResult(TypedDict):
     """Shape returned by ``process_scan_results()``."""
 
@@ -206,6 +221,12 @@ class ScanIngestResult(TypedDict):
     observations_created: int
     observations_failed: int
     warnings: list[str]
+    #: Structured weft-reason carriers for non-clean ingest outcomes (PDR-0023).
+    #: Empty on the clean path. A ``scheme_mismatch`` carrier here means the
+    #: declared ``fingerprint_scheme`` differed from the stored one for this
+    #: scan_source, so the ``mark_unseen`` sweep was REFUSED to avoid silently
+    #: cascade-closing prior-scheme findings as fixed (Weft seam G4).
+    weft_reasons: list[WeftReason]
 
 
 class EnrichedFileItem(FileRecordDict):

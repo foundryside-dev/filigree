@@ -47,7 +47,7 @@ from filigree.types.core import (
     make_issue_id,
     make_loomweave_entity_id,
 )
-from filigree.types.files import ScanIngestResult
+from filigree.types.files import ScanIngestResult, WeftReason
 
 if TYPE_CHECKING:
     from filigree.registry import ResolvedFile
@@ -1487,6 +1487,43 @@ class FilesMixin(DBMixinProtocol):
                 [now, actor, fid, scan_source, *terminal, *extra_params],
             )
 
+    def _get_scan_source_scheme(self, scan_source: str) -> str:
+        """The fingerprint_scheme recorded for *scan_source*, or '' if none.
+
+        Weft seam G4. A '' result means either no scheme has ever been declared
+        for this scan_source (legacy/blank callers) or the registry row is
+        absent — both read as "no baseline yet", so the caller proceeds normally.
+        Defensive against a pre-v28 DB that somehow skipped the migration: a
+        missing table reads as no-baseline rather than raising.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT fingerprint_scheme FROM scan_source_schemes WHERE scan_source = ?",
+                (scan_source,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return ""
+        return str(row["fingerprint_scheme"]) if row is not None and row["fingerprint_scheme"] else ""
+
+    def _record_scan_source_scheme(self, scan_source: str, fingerprint_scheme: str, *, now: str) -> None:
+        """Record (or refresh) the declared fingerprint_scheme for *scan_source*.
+
+        Weft seam G4. Upsert keyed on scan_source: the first declaration
+        establishes the baseline a later bump is measured against. This is only
+        reached on the MATCH / no-baseline-yet path (the mismatch path never
+        records, so a bump cannot silently overwrite the baseline it just
+        tripped). Runs on the shared connection in the caller's context, before
+        the ingest write window's BEGIN IMMEDIATE.
+        """
+        self.conn.execute(
+            "INSERT INTO scan_source_schemes (scan_source, fingerprint_scheme, first_seen, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(scan_source) DO UPDATE SET "
+            "fingerprint_scheme = excluded.fingerprint_scheme, updated_at = excluded.updated_at",
+            (scan_source, fingerprint_scheme, now, now),
+        )
+        self.conn.commit()
+
     def process_scan_results(
         self,
         *,
@@ -1498,6 +1535,7 @@ class FilesMixin(DBMixinProtocol):
         complete_scan_run: bool = True,
         observation_actor: str = "",
         scanned_paths: Sequence[str] = (),
+        fingerprint_scheme: str = "",
     ) -> ScanIngestResult:
         """Ingest scan results: create/update file records and findings.
 
@@ -1528,6 +1566,20 @@ class FilesMixin(DBMixinProtocol):
         that want to attribute the finding to a specific agent rather than the
         default ``scanner:{scan_source}`` (F3 — review-h). Empty string falls
         back to the default.
+
+        *fingerprint_scheme* is the scanner-declared identity scheme for the
+        fingerprints in this batch (e.g. wardline's ``wlfp2``). It is recorded
+        per *scan_source* on first sight and compared on every subsequent
+        ingest. The dedup join is keyed on the raw fingerprint VALUE, so a
+        silent scheme bump (``wlfp2`` -> ``wlfp3``) re-mints every fingerprint:
+        the new-scheme batch would miss the join and — under *mark_unseen* — the
+        sweep would CASCADE-CLOSE every prior-scheme finding as ``fixed`` with
+        zero error. On a MISMATCH this method REFUSES the sweep (forces
+        ``mark_unseen=False``), ingests the new-scheme findings WITHOUT touching
+        the old set, and appends a ``scheme_mismatch`` weft-reason carrier to the
+        result's ``weft_reasons`` (PDR-0023). A blank declared scheme (legacy
+        caller) or a not-yet-recorded scan_source proceeds normally. INVARIANT: a
+        scheme bump MUST NEVER silently cascade-close existing findings as fixed.
 
         When *complete_scan_run* is ``False`` and a *scan_run_id* is provided,
         the scan run status is NOT transitioned to ``completed``.  Use this for
@@ -1569,12 +1621,51 @@ class FilesMixin(DBMixinProtocol):
             observations_created=0,
             observations_failed=0,
             warnings=warnings,
+            weft_reasons=[],
         )
         regressed_issue_ids: set[str] = set()
         # (finding_id, issue_id) pairs whose finding genuinely transitioned to
         # ``unseen_in_latest`` in the sweep below — the close-on-fixed cascade
         # resolves these post-commit, symmetric to regressed_issue_ids/reopen.
         resolved: set[tuple[str, str]] = set()
+
+        # Weft seam G4 — fingerprint-scheme echo handshake (PDR-0023). Compare the
+        # declared scheme against the one recorded for this scan_source. On a
+        # MISMATCH the raw-fingerprint dedup join is invalidated (every incoming
+        # fingerprint is re-minted under the new scheme), so a mark_unseen sweep
+        # would flip every prior-scheme finding to ``unseen_in_latest`` and the
+        # close-on-fixed cascade would silently close them as fixed. REFUSE the
+        # sweep and surface a structured scheme_mismatch carrier instead; ingest
+        # the new-scheme findings without touching the old set. A blank declared
+        # scheme (legacy caller) or a not-yet-recorded scan_source proceeds
+        # normally and records the scheme. Done BEFORE the ingest write window so
+        # the (possibly forced-off) mark_unseen is what the sweep sees.
+        stored_scheme = self._get_scan_source_scheme(scan_source)
+        declared_scheme = fingerprint_scheme or ""
+        if declared_scheme and stored_scheme and declared_scheme != stored_scheme:
+            if mark_unseen:
+                logger.warning(
+                    "fingerprint scheme mismatch for scan_source=%r: declared %r != stored %r; "
+                    "REFUSING mark_unseen sweep to avoid cascade-closing prior-scheme findings",
+                    scan_source,
+                    declared_scheme,
+                    stored_scheme,
+                )
+            mark_unseen = False
+            stats["weft_reasons"].append(
+                WeftReason(
+                    reason_class="scheme_mismatch",
+                    cause=f"declared {declared_scheme} != stored {stored_scheme} for scan_source {scan_source}",
+                    fix="re-baseline under the new scheme / migrate fingerprints / confirm the bump was intentional",
+                )
+            )
+        else:
+            # MATCH, blank declared (legacy), or no stored scheme yet: record the
+            # declared scheme so the FIRST ingest for a scan_source establishes
+            # the baseline a later bump is measured against. A blank declared
+            # scheme never overwrites a recorded one (it carries no claim).
+            if declared_scheme:
+                self._record_scan_source_scheme(scan_source, declared_scheme, now=now)
 
         # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Loomweave HTTP round
         # trip) BEFORE the writer lock so concurrent ingests overlap. The write

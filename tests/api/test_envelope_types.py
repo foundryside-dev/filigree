@@ -196,18 +196,31 @@ def test_scan_ingest_response_weft_concrete_shape() -> None:
     from filigree.generations.weft.types import ScanIngestResponseWeft, ScanStats
 
     hints = get_type_hints(ScanIngestResponseWeft)
-    assert set(hints.keys()) == {"succeeded", "failed", "stats", "warnings"}
+    # ``weft_reasons`` is the one additive (NotRequired) field: a PDR-0023
+    # weft-reason carrier list, omitted on the clean path so a same-scheme
+    # client sees the byte-identical 4-key envelope. It must stay OPTIONAL —
+    # promoting it to required would break every clean-scan consumer.
+    assert set(hints.keys()) == {"succeeded", "failed", "stats", "warnings", "weft_reasons"}
     assert hints["succeeded"] == list[str]
     assert hints["failed"] == list[BatchFailure]
     assert hints["stats"] is ScanStats
     assert hints["warnings"] == list[str]
     # newly_unblocked must NOT appear — scan ingest cannot unblock issues.
     assert "newly_unblocked" not in hints
+    # ``weft_reasons`` is declared ``NotRequired``, but ``from __future__ import
+    # annotations`` stringifies the marker so CPython's TypedDict machinery
+    # cannot strip it at class-creation time — it lands in ``__required_keys__``
+    # (the same artifact that puts ``newly_unblocked`` there for
+    # ``BatchCloseResponseWeft``). Wire-level optionality is what actually
+    # guards back-compat and is asserted by the adapter test
+    # (``test_scheme_mismatch_surfaced_on_weft_wire`` in
+    # tests/core/test_scan_finding_fingerprint.py): the clean path OMITS the key.
     assert ScanIngestResponseWeft.__required_keys__ == {
         "succeeded",
         "failed",
         "stats",
         "warnings",
+        "weft_reasons",
     }
     assert ScanIngestResponseWeft.__optional_keys__ == frozenset()
 

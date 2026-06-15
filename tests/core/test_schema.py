@@ -2182,8 +2182,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_27(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 27
+    def test_current_schema_version_is_28(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 28
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
