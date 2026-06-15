@@ -502,6 +502,170 @@ class TestReportFindingTool:
         assert data["finding_id"] == beta_finding["id"]
         assert data["observation_id"] == beta_observation["id"]
 
+    async def test_report_finding_with_entity_id_stamps_loomweave_metadata(self, mcp_db: FiligreeDB) -> None:
+        """SEAM SEI-on-create L1: finding_report binds an opaque entity_id at entry
+        by stamping metadata.loomweave.entity_id — the key finding_promote reads."""
+        data = _parse(
+            await call_tool(
+                "finding_report",
+                {
+                    "file_path": "src/on_spine.py",
+                    "rule_id": "agent-risk",
+                    "message": "Agent spotted a risk on a known entity",
+                    "severity": "medium",
+                    "line_start": 3,
+                    "entity_id": "loomweave:eid:cafe1234",
+                },
+            )
+        )
+        finding = mcp_db.get_finding(data["finding_id"])
+        assert finding["metadata"]["loomweave"]["entity_id"] == "loomweave:eid:cafe1234"
+
+    async def test_report_finding_entity_id_survives_to_promote(self, mcp_db: FiligreeDB) -> None:
+        """The spine-join: an entity_id stamped at report time is the identity
+        finding_promote surfaces in entity_attachment (no separate attach call)."""
+        reported = _parse(
+            await call_tool(
+                "finding_report",
+                {
+                    "file_path": "src/promote_me.py",
+                    "rule_id": "agent-risk",
+                    "message": "Spine-join end to end",
+                    "severity": "high",
+                    "line_start": 5,
+                    "entity_id": "loomweave:eid:beef5678",
+                },
+            )
+        )
+        promoted = _parse(await call_tool("finding_promote", {"finding_id": reported["finding_id"]}))
+        # The local test DB file record carries no content hash, so the auto-attach
+        # reports the identity it found rather than persisting it — but the entity_id
+        # it names proves the SEI stamped at report time reached promotion on-spine.
+        assert promoted["entity_attachment"]["entity_id"] == "loomweave:eid:beef5678"
+
+    async def test_report_finding_entity_id_merges_with_category_metadata(self, mcp_db: FiligreeDB) -> None:
+        """entity_id is merged into metadata without clobbering category."""
+        data = _parse(
+            await call_tool(
+                "finding_report",
+                {
+                    "file_path": "src/merge.py",
+                    "rule_id": "agent-risk",
+                    "message": "Both category and entity bind",
+                    "severity": "low",
+                    "category": "perf",
+                    "entity_id": "loomweave:eid:abcd",
+                },
+            )
+        )
+        finding = mcp_db.get_finding(data["finding_id"])
+        assert finding["metadata"]["category"] == "perf"
+        assert finding["metadata"]["loomweave"]["entity_id"] == "loomweave:eid:abcd"
+
+    async def test_report_finding_entity_id_and_symbol_mutually_exclusive(self, mcp_db: FiligreeDB) -> None:
+        data = _parse(
+            await call_tool(
+                "finding_report",
+                {
+                    "file_path": "src/x.py",
+                    "rule_id": "agent-risk",
+                    "message": "both bind sources",
+                    "entity_id": "loomweave:eid:x",
+                    "entity_symbol": "mod.func",
+                },
+            )
+        )
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "not both" in data["error"]
+
+    async def test_report_finding_with_symbol_resolves_and_stamps(self, mcp_db: FiligreeDB) -> None:
+        """L2 happy path: entity_symbol resolves to a SEI via Loomweave, then stamps."""
+        from unittest.mock import patch
+
+        from filigree.sei_backfill import SymbolResolution
+
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(sei="loomweave:eid:resolved99"),
+        ):
+            data = _parse(
+                await call_tool(
+                    "finding_report",
+                    {
+                        "file_path": "src/resolve.py",
+                        "rule_id": "agent-risk",
+                        "message": "resolve a symbol to a SEI",
+                        "entity_symbol": "parser.tokenize",
+                    },
+                )
+            )
+        finding = mcp_db.get_finding(data["finding_id"])
+        assert finding["metadata"]["loomweave"]["entity_id"] == "loomweave:eid:resolved99"
+
+    async def test_report_finding_symbol_unresolved_returns_weft_reason_and_creates_nothing(self, mcp_db: FiligreeDB) -> None:
+        """L2 honesty invariant: a zero/many resolve returns weft-reason
+        unresolved_input and does NOT create an unbound-but-looks-bound finding."""
+        from unittest.mock import patch
+
+        from filigree.sei_backfill import SymbolResolution
+
+        before = mcp_db.list_findings_global()["total"]
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(
+                reason_class="unresolved_input",
+                cause="'ghost' resolved to no alive entity.",
+                fix="Check the symbol is current, or bind a known SEI via entity_id.",
+            ),
+        ):
+            data = _parse(
+                await call_tool(
+                    "finding_report",
+                    {
+                        "file_path": "src/ghost.py",
+                        "rule_id": "agent-risk",
+                        "message": "ghost symbol",
+                        "entity_symbol": "ghost",
+                    },
+                )
+            )
+        assert data["code"] == ErrorCode.VALIDATION
+        wr = data["details"]["weft_reason"]
+        assert wr["reason_class"] == "unresolved_input"
+        assert wr["cause"]
+        assert wr["fix"]
+        assert mcp_db.list_findings_global()["total"] == before
+
+    async def test_report_finding_symbol_transport_disabled_propagates_reason(self, mcp_db: FiligreeDB) -> None:
+        """When the resolve transport is unavailable by config, its own weft-reason
+        propagates (never silently dropped) and nothing is created."""
+        from unittest.mock import patch
+
+        from filigree.sei_backfill import SymbolResolution
+
+        before = mcp_db.list_findings_global()["total"]
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(
+                reason_class="disabled",
+                cause="SEI backfill requires Loomweave as the registry backend.",
+                fix="Bind a known opaque entity_id directly, or configure a SEI-capable Loomweave backend.",
+            ),
+        ):
+            data = _parse(
+                await call_tool(
+                    "finding_report",
+                    {
+                        "file_path": "src/disabled.py",
+                        "rule_id": "agent-risk",
+                        "message": "transport disabled",
+                        "entity_symbol": "mod.f",
+                    },
+                )
+            )
+        assert data["details"]["weft_reason"]["reason_class"] == "disabled"
+        assert mcp_db.list_findings_global()["total"] == before
+
 
 class TestUpdateFindingTool:
     async def test_update_status(self, mcp_db: FiligreeDB) -> None:

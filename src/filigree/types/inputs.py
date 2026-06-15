@@ -775,6 +775,13 @@ class ReportFindingArgs(TypedDict):
     actor: NotRequired[str]
     create_observation: NotRequired[bool]
     response_detail: NotRequired[str]
+    # SEAM SEI-on-create (ADR-029). Bind an agent-reported finding to the spine
+    # at entry by stamping the SEI into ``metadata.loomweave.entity_id`` — the
+    # same key ``finding_promote`` later reads to auto-attach the entity
+    # association. ``entity_id`` is the L1 direct opaque bind; ``entity_symbol``
+    # is the L2 symbol/qualname resolved to an SEI via Loomweave before binding.
+    entity_id: NotRequired[str]
+    entity_symbol: NotRequired[str]
 
 
 class ListPromptPacksArgs(TypedDict):

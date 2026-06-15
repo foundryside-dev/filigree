@@ -236,6 +236,26 @@ def register(
                             "additionally includes the batch-style ingest stats."
                         ),
                     },
+                    "entity_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional opaque external entity ID (SEI or legacy locator) to bind to "
+                            "this finding at report time (ADR-029, SEAM SEI-on-create). Stamped into "
+                            "metadata.loomweave.entity_id — the same key finding_promote reads to "
+                            "auto-attach the entity association — so an agent-reported finding lands ON "
+                            "the spine. Not parsed by Filigree. Mutually exclusive with entity_symbol."
+                        ),
+                    },
+                    "entity_symbol": {
+                        "type": "string",
+                        "description": (
+                            "Optional symbol/qualname (Loomweave locator) resolved to a stable SEI via "
+                            "Loomweave at report time, then stamped into metadata.loomweave.entity_id "
+                            "(ADR-029 L2). Requires a Loomweave registry backend with SEI support; an "
+                            "input that resolves to zero or many returns a weft-reason unresolved_input "
+                            "and does NOT create the finding. Mutually exclusive with entity_id."
+                        ),
+                    },
                 },
                 "required": ["file_path", "rule_id", "message"],
             },
@@ -679,6 +699,61 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     if args.get("category"):
         finding["metadata"] = {"category": args["category"]}
 
+    # SEAM SEI-on-create (ADR-029). entity_id (L1) is the direct opaque bind;
+    # entity_symbol (L2) is resolved to a stable SEI via Loomweave first, then
+    # bound. They are mutually exclusive — one finding, one binding source. The
+    # resolved id is stamped into metadata.loomweave.entity_id, the exact key
+    # finding_promote's _entity_identity_from_finding reads to auto-attach the
+    # ADR-029 entity association — so the spine-join happens at report time and
+    # survives to promotion, with no separate attach call.
+    tracker = get_db()
+    entity_id = args.get("entity_id")
+    entity_symbol = args.get("entity_symbol")
+    if entity_id is not None and not isinstance(entity_id, str):
+        return _text(ErrorResponse(error="entity_id must be a string", code=ErrorCode.VALIDATION))
+    if entity_symbol is not None and not isinstance(entity_symbol, str):
+        return _text(ErrorResponse(error="entity_symbol must be a string", code=ErrorCode.VALIDATION))
+    has_entity_id = entity_id is not None and entity_id.strip() != ""
+    has_entity_symbol = entity_symbol is not None and entity_symbol.strip() != ""
+    if has_entity_id and has_entity_symbol:
+        return _text(
+            ErrorResponse(
+                error="Pass either entity_id (opaque bind) or entity_symbol (Loomweave-resolved), not both.",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+
+    # L2: resolve entity_symbol -> SEI BEFORE storing the finding. A symbol that
+    # resolves to zero/many (or whose transport is unavailable/stale) returns a
+    # weft-reason and creates NOTHING — never an unbound-but-looks-bound finding.
+    if has_entity_symbol and entity_symbol is not None:
+        from filigree.sei_backfill import resolve_symbol_to_sei
+
+        resolution = resolve_symbol_to_sei(tracker, entity_symbol)
+        if resolution.reason_class is not None:
+            return _text(
+                ErrorResponse(
+                    error=f"entity_symbol {entity_symbol!r} did not resolve: {resolution.cause}",
+                    code=ErrorCode.VALIDATION,
+                    details={
+                        "weft_reason": {
+                            "reason_class": resolution.reason_class,
+                            "cause": resolution.cause,
+                            "fix": resolution.fix,
+                        }
+                    },
+                )
+            )
+        entity_id = resolution.sei
+        has_entity_id = True
+
+    if has_entity_id and entity_id is not None:
+        # Merge into any existing metadata (e.g. category) without clobbering it.
+        existing_meta = finding.get("metadata")
+        meta = existing_meta if isinstance(existing_meta, dict) else {}
+        meta["loomweave"] = {"entity_id": entity_id}
+        finding["metadata"] = meta
+
     actor = ""
     if "actor" in args:
         actor, actor_error = _validate_actor(args.get("actor"))
@@ -693,7 +768,6 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
             ErrorResponse(error="'response_detail' must be 'slim' or 'full'", code=ErrorCode.VALIDATION),
         )
 
-    tracker = get_db()
     try:
         outcome = report_scanner_finding(
             tracker,
