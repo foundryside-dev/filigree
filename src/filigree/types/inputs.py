@@ -75,6 +75,13 @@ class CreateIssueArgs(TypedDict):
     labels: NotRequired[list[str]]
     deps: NotRequired[list[str]]
     actor: NotRequired[str]
+    # SEAM SEI-on-create (ADR-029). Bind a hand-filed ticket to the spine at
+    # creation. ``entity_id`` is the L1 direct opaque bind; ``entity_symbol`` is
+    # the L2 symbol/qualname resolved to an SEI via Loomweave before binding.
+    entity_id: NotRequired[str]
+    entity_kind: NotRequired[str]
+    content_hash: NotRequired[str]
+    entity_symbol: NotRequired[str]
 
 
 class UpdateIssueArgs(TypedDict):

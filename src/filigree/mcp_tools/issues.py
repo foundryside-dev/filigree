@@ -326,6 +326,35 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "deps": {"type": "array", "items": {"type": "string"}, "description": "Issue IDs this depends on"},
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "entity_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional opaque external entity ID (SEI or legacy locator) to bind to the new "
+                            "issue at creation (ADR-029). Binds inline in one call so a hand-filed ticket "
+                            "lands ON the spine. Not parsed by Filigree."
+                        ),
+                    },
+                    "entity_kind": {
+                        "type": "string",
+                        "description": "Optional caller-supplied kind metadata for the binding; never inferred from entity_id.",
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": (
+                            "Optional producer content_hash snapshotted at bind time (stored verbatim for the "
+                            "consumer's drift check). When entity_id is given without content_hash, a "
+                            "deferred-freshness sentinel is stamped."
+                        ),
+                    },
+                    "entity_symbol": {
+                        "type": "string",
+                        "description": (
+                            "Optional symbol/qualname (Loomweave locator) resolved to a stable SEI via Loomweave "
+                            "at create time, then bound (ADR-029 L2). Requires a Loomweave registry backend with "
+                            "SEI support; an input that resolves to zero or many returns a weft-reason "
+                            "unresolved_input and does NOT create the issue. Mutually exclusive with entity_id."
+                        ),
+                    },
                 },
                 "required": ["title"],
             },
@@ -1064,6 +1093,44 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
     if priority_err:
         return priority_err
     tracker = get_db()
+
+    # SEAM SEI-on-create (ADR-029). entity_id (L1) is the direct opaque bind;
+    # entity_symbol (L2) is resolved to a stable SEI via Loomweave first, then
+    # bound. They are mutually exclusive — one ticket, one binding source — so a
+    # caller cannot accidentally request two different identities.
+    entity_id = args.get("entity_id")
+    entity_symbol = args.get("entity_symbol")
+    if entity_id is not None and str(entity_id).strip() and entity_symbol is not None and str(entity_symbol).strip():
+        return _text(
+            ErrorResponse(
+                error="Pass either entity_id (opaque bind) or entity_symbol (Loomweave-resolved), not both.",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+
+    # L2: resolve entity_symbol -> SEI BEFORE creating the issue. A symbol that
+    # resolves to zero/many (or whose transport is unavailable/stale) returns a
+    # weft-reason and creates NOTHING — never an unbound-but-looks-bound ticket.
+    if entity_symbol is not None and str(entity_symbol).strip():
+        from filigree.sei_backfill import resolve_symbol_to_sei
+
+        resolution = resolve_symbol_to_sei(tracker, str(entity_symbol))
+        if resolution.reason_class is not None:
+            return _text(
+                ErrorResponse(
+                    error=f"entity_symbol {entity_symbol!r} did not resolve: {resolution.cause}",
+                    code=ErrorCode.VALIDATION,
+                    details={
+                        "weft_reason": {
+                            "reason_class": resolution.reason_class,
+                            "cause": resolution.cause,
+                            "fix": resolution.fix,
+                        }
+                    },
+                )
+            )
+        entity_id = resolution.sei
+
     try:
         issue = tracker.create_issue(
             args["title"],
@@ -1076,6 +1143,9 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
             labels=args.get("labels"),
             deps=args.get("deps"),
             actor=actor,
+            entity_id=entity_id,
+            entity_kind=args.get("entity_kind"),
+            content_hash=args.get("content_hash"),
         )
     except WrongProjectError as e:
         return _wrong_project_response(e)

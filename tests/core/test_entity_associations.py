@@ -498,3 +498,69 @@ class TestSignatureAndSignoffSeq:
         ).fetchone()
         assert row is not None
         assert row["signature"] is None  # "" normalised away on import
+
+
+class TestCreateIssueWithEntity:
+    """SEAM SEI-on-create (ADR-029, L1): create_issue binds an opaque entity_id
+    inline so a hand-filed ticket enters ON the spine in one call.
+    """
+
+    def test_create_with_entity_id_binds_inline(self, db: FiligreeDB) -> None:
+        issue = db.create_issue(
+            "Hand-filed, on the spine",
+            priority=2,
+            entity_id="py:func:parser.tokenize",
+            content_hash="hash-a",
+            entity_kind="function",
+            actor="alice",
+        )
+        rows = db.list_entity_associations(issue.id)
+        assert len(rows) == 1
+        assert rows[0]["entity_id"] == "py:func:parser.tokenize"
+        assert rows[0]["content_hash_at_attach"] == "hash-a"
+        assert rows[0]["entity_kind"] == "function"
+        assert rows[0]["attached_by"] == "alice"
+
+    def test_create_with_entity_id_records_added_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2, entity_id="py:func:a", content_hash="h1", actor="alice")
+        events = db.get_issue_events(issue.id, limit=10)
+        added = [e for e in events if e["event_type"] == "entity_association_added"]
+        assert len(added) == 1
+        assert added[0]["new_value"] == "py:func:a"
+
+    def test_create_with_entity_id_no_content_hash_stamps_sentinel(self, db: FiligreeDB) -> None:
+        from filigree.db_issues import UNVERIFIED_CONTENT_HASH
+
+        issue = db.create_issue("t", priority=2, entity_id="py:func:a", actor="alice")
+        rows = db.list_entity_associations(issue.id)
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == UNVERIFIED_CONTENT_HASH
+
+    def test_create_without_entity_id_binds_nothing(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("plain", priority=2)
+        assert db.list_entity_associations(issue.id) == []
+
+    def test_create_reverse_lookup_finds_the_issue(self, db: FiligreeDB) -> None:
+        """The whole point: the binding makes the issue discoverable by entity."""
+        issue = db.create_issue("bound", priority=2, entity_id="py:func:z", content_hash="h1")
+        found = db.list_associations_by_entity("py:func:z")
+        assert [r["issue_id"] for r in found] == [issue.id]
+
+    def test_create_blank_entity_id_binds_nothing(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2, entity_id="   ")
+        assert db.list_entity_associations(issue.id) == []
+
+    def test_create_content_hash_without_entity_id_rejected(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="content_hash was supplied without entity_id"):
+            db.create_issue("t", priority=2, content_hash="h1")
+
+    def test_create_entity_kind_without_entity_id_rejected(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="entity_kind was supplied without entity_id"):
+            db.create_issue("t", priority=2, entity_kind="function")
+
+    def test_bad_content_hash_rolls_back_the_issue(self, db: FiligreeDB) -> None:
+        """A bad inline binding fails the whole create atomically — no orphan issue."""
+        before = len(db.list_issues())
+        with pytest.raises(ValueError, match="content_hash"):
+            db.create_issue("t", priority=2, entity_id="py:func:a", content_hash="has space")
+        assert len(db.list_issues()) == before

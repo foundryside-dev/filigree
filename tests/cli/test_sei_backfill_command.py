@@ -347,3 +347,100 @@ def test_sei_backfill_sync_check_passes_with_synced_db(
     payload = json.loads(result.output)
     assert payload.get("code") != "LOOMWEAVE_OUT_OF_SYNC"
     assert payload["associations_migrated"] == 1
+
+
+# --- create-time symbol→SEI resolution (SEAM SEI-on-create, L2) ----------------
+
+
+def test_resolve_symbol_binds_to_sei_via_live_loomweave(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """L2 transport happy path: a symbol resolves to its alive SEI through the real
+    LoomweaveRegistry resolve client against a live (stub) Loomweave authority."""
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, project = cli_in_project
+    symbol = "py:func:mod::tokenize"
+    sei = "loomweave:eid:00000000000000000000000000000a11"
+
+    with clarion_stub(sei_supported=True, sei_by_locator={symbol: sei}) as (base_url, _state):
+        _switch_to_loomweave_mode(project, base_url)
+        with get_db() as db:
+            outcome = resolve_symbol_to_sei(db, symbol)
+
+    assert outcome.reason_class is None
+    assert outcome.sei == sei
+
+
+def test_resolve_symbol_orphaned_returns_unresolved_input(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """A symbol Loomweave reports as not_found maps to weft-reason unresolved_input."""
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, project = cli_in_project
+
+    with clarion_stub(sei_supported=True, sei_by_locator={}) as (base_url, _state):
+        _switch_to_loomweave_mode(project, base_url)
+        with get_db() as db:
+            outcome = resolve_symbol_to_sei(db, "py:func:mod::gone")
+
+    assert outcome.sei is None
+    assert outcome.reason_class == "unresolved_input"
+    assert outcome.cause
+    assert outcome.fix
+
+
+def test_resolve_symbol_invalid_locator_returns_unresolved_input(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """A locator Loomweave rejects (invalid channel) also maps to unresolved_input."""
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, project = cli_in_project
+    bad = "py:func:mod::bad"
+
+    with clarion_stub(sei_supported=True, sei_by_locator={}) as (base_url, state):
+        state.invalid_locators.add(bad)
+        _switch_to_loomweave_mode(project, base_url)
+        with get_db() as db:
+            outcome = resolve_symbol_to_sei(db, bad)
+
+    assert outcome.reason_class == "unresolved_input"
+    assert "malformed" in outcome.cause or "invalid" in outcome.cause
+
+
+def test_resolve_symbol_local_backend_is_disabled(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """No Loomweave backend → the transport is disabled; its own weft-reason propagates."""
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, _project = cli_in_project
+    with get_db() as db:
+        outcome = resolve_symbol_to_sei(db, "py:func:mod::f")
+
+    assert outcome.sei is None
+    assert outcome.reason_class == "disabled"
+    assert outcome.cause
+    assert outcome.fix
+
+
+def test_resolve_symbol_passthrough_for_already_sei(cli_in_project: tuple[CliRunner, Path]) -> None:
+    """An input already shaped as an SEI is bound verbatim — no resolve round trip."""
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, _project = cli_in_project
+    with get_db() as db:
+        outcome = resolve_symbol_to_sei(db, "loomweave:eid:abc123")
+
+    assert outcome.reason_class is None
+    assert outcome.sei == "loomweave:eid:abc123"
+
+
+def test_resolve_symbol_blank_is_unresolved_input(cli_in_project: tuple[CliRunner, Path]) -> None:
+    from filigree.cli_common import get_db
+    from filigree.sei_backfill import resolve_symbol_to_sei
+
+    _runner, _project = cli_in_project
+    with get_db() as db:
+        outcome = resolve_symbol_to_sei(db, "   ")
+
+    assert outcome.reason_class == "unresolved_input"

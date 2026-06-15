@@ -59,6 +59,105 @@ class TestCreateAndGet:
         assert data["fields"]["severity"] == "critical"
         assert "urgent" in data["labels"]
 
+    async def test_create_issue_with_entity_id_binds_inline(self, mcp_db: FiligreeDB) -> None:
+        """SEAM SEI-on-create L1: issue_create binds an opaque entity_id in one call."""
+        result = await call_tool(
+            "issue_create",
+            {
+                "title": "On the spine",
+                "entity_id": "py:func:foo.bar",
+                "content_hash": "h1",
+                "entity_kind": "function",
+            },
+        )
+        data = _parse(result)
+        rows = mcp_db.list_entity_associations(data["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["entity_id"] == "py:func:foo.bar"
+        assert rows[0]["content_hash_at_attach"] == "h1"
+        assert rows[0]["entity_kind"] == "function"
+
+    async def test_create_issue_with_entity_id_no_hash_stamps_sentinel(self, mcp_db: FiligreeDB) -> None:
+        from filigree.db_issues import UNVERIFIED_CONTENT_HASH
+
+        result = await call_tool("issue_create", {"title": "no hash", "entity_id": "py:func:baz"})
+        data = _parse(result)
+        rows = mcp_db.list_entity_associations(data["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == UNVERIFIED_CONTENT_HASH
+
+    async def test_create_issue_entity_id_and_symbol_mutually_exclusive(self, mcp_db: FiligreeDB) -> None:
+        result = await call_tool(
+            "issue_create",
+            {"title": "both", "entity_id": "sei:x", "entity_symbol": "mod.func"},
+        )
+        data = _parse(result)
+        assert data["code"] == "VALIDATION"
+        assert "not both" in data["error"]
+
+    async def test_create_issue_with_symbol_resolves_and_binds(self, mcp_db: FiligreeDB) -> None:
+        """L2 happy path: entity_symbol resolves to a SEI via Loomweave, then binds."""
+        from filigree.sei_backfill import SymbolResolution
+
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(sei="loomweave:eid:deadbeef"),
+        ):
+            result = await call_tool(
+                "issue_create",
+                {"title": "resolved", "entity_symbol": "parser.tokenize"},
+            )
+        data = _parse(result)
+        assert "issue_id" in data, data
+        rows = mcp_db.list_entity_associations(data["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["entity_id"] == "loomweave:eid:deadbeef"
+
+    async def test_create_issue_symbol_unresolved_returns_weft_reason_and_creates_nothing(self, mcp_db: FiligreeDB) -> None:
+        """L2 honesty invariant: a zero/many resolve returns weft-reason
+        unresolved_input and does NOT create an unbound-but-looks-bound ticket.
+        """
+        from filigree.sei_backfill import SymbolResolution
+
+        before = len(mcp_db.list_issues())
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(
+                reason_class="unresolved_input",
+                cause="'ghost' resolved to no alive entity.",
+                fix="Check the symbol is current, or bind a known SEI via entity_id.",
+            ),
+        ):
+            result = await call_tool("issue_create", {"title": "ghost", "entity_symbol": "ghost"})
+        data = _parse(result)
+        assert data["code"] == "VALIDATION"
+        wr = data["details"]["weft_reason"]
+        assert wr["reason_class"] == "unresolved_input"
+        assert wr["cause"]
+        assert wr["fix"]
+        # Nothing was created.
+        assert len(mcp_db.list_issues()) == before
+
+    async def test_create_issue_symbol_transport_disabled_propagates_reason(self, mcp_db: FiligreeDB) -> None:
+        """When the resolve transport is unavailable by config, its own
+        weft-reason propagates (never silently dropped) and nothing is created.
+        """
+        from filigree.sei_backfill import SymbolResolution
+
+        before = len(mcp_db.list_issues())
+        with patch(
+            "filigree.sei_backfill.resolve_symbol_to_sei",
+            return_value=SymbolResolution(
+                reason_class="disabled",
+                cause="SEI backfill requires Loomweave as the registry backend.",
+                fix="Bind a known opaque entity_id directly, or configure a SEI-capable Loomweave backend.",
+            ),
+        ):
+            result = await call_tool("issue_create", {"title": "x", "entity_symbol": "mod.f"})
+        data = _parse(result)
+        assert data["details"]["weft_reason"]["reason_class"] == "disabled"
+        assert len(mcp_db.list_issues()) == before
+
     async def test_get_issue(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Get me")
         result = await call_tool("issue_get", {"issue_id": issue.id})

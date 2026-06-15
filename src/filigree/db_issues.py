@@ -39,9 +39,25 @@ from filigree.types.api import (
     allowed_transitions_clause,
     classify_value_error,
 )
-from filigree.types.core import StatusCategory
+from filigree.types.core import (
+    StatusCategory,
+    make_content_hash,
+    make_issue_id,
+    make_loomweave_entity_id,
+)
 from filigree.types.files import DeleteIssueResult
 from filigree.validation import sanitize_actor
+
+#: Stamped as ``content_hash_at_attach`` when ``create_issue`` is given an
+#: ``entity_id`` to bind at creation but no ``content_hash``. A hand-filed
+#: ticket binds to a code identity (the SEI/locator is the moat) before the
+#: caller necessarily knows the producer's current content hash; the
+#: association needs a non-blank hash (``make_content_hash`` rejects blank), so
+#: we stamp this sentinel. Filigree never interprets ``content_hash_at_attach``
+#: itself (drift is the consumer's read-path concern), so a sentinel here is a
+#: deferred-freshness marker, not a forged hash. Mirrors warpline_consumer's
+#: ``UNVERIFIED_CONTENT_HASH`` convention without coupling to that module.
+UNVERIFIED_CONTENT_HASH = "filigree:content-unverified"
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -509,6 +525,9 @@ class IssuesMixin(DBMixinProtocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        entity_id: str | None = None,
+        entity_kind: str | None = None,
+        content_hash: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         if not isinstance(title, str):
@@ -533,6 +552,21 @@ class IssuesMixin(DBMixinProtocol):
         assignee = _normalize_assignee(assignee)
         if labels:
             labels = [self._validate_label_name(label) for label in labels]
+        # Validate the optional inline entity binding BEFORE any writes so a
+        # bad entity_id/content_hash fails the whole create atomically rather
+        # than leaving a bound-less issue behind (the bind itself runs after the
+        # issue row exists, since add_entity_association needs the issue FK).
+        bind_entity = entity_id is not None and str(entity_id).strip() != ""
+        if bind_entity and entity_id is not None:
+            bound_entity_id = make_loomweave_entity_id(entity_id)
+            raw_hash = content_hash if (content_hash and content_hash.strip()) else UNVERIFIED_CONTENT_HASH
+            bind_content_hash = make_content_hash(raw_hash)
+        elif content_hash is not None and content_hash.strip():
+            msg = "content_hash was supplied without entity_id; nothing to bind it to"
+            raise ValueError(msg)
+        elif entity_kind is not None and str(entity_kind).strip():
+            msg = "entity_kind was supplied without entity_id; nothing to bind it to"
+            raise ValueError(msg)
         # Reject unknown types — don't silently fall back
         if self.templates.get_type(type) is None:
             valid_types = [t.type for t in self.templates.list_types()]
@@ -607,6 +641,22 @@ class IssuesMixin(DBMixinProtocol):
                     "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
                     (issue_id, dep_id, now),
                 )
+
+        # Inline ADR-029 entity binding (SEAM SEI-on-create, L1). The opaque
+        # entity_id is bound at the moment information enters, so a hand-filed
+        # ticket lands ON the spine in one call rather than off it. Runs inside
+        # the same create transaction (add_entity_association composes via
+        # _skip_begin because we are already in the create's immediate tx), so
+        # the issue and its binding commit together. Re-validated above.
+        if bind_entity:
+            self.add_entity_association(
+                make_issue_id(issue_id),
+                bound_entity_id,
+                bind_content_hash,
+                actor=actor,
+                entity_kind=entity_kind,
+                _skip_begin=True,
+            )
 
         return self.get_issue(issue_id)
 

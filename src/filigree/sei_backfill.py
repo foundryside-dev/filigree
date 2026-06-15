@@ -559,3 +559,115 @@ def _orphan_reason(locator: str, resolution: SeiResolution) -> Literal["unresolv
     if locator in resolution["already_migrated"]:
         return "invalid"
     return "unresolved"
+
+
+# ---------------------------------------------------------------------------
+# Create-time symbol→SEI resolution (SEAM SEI-on-create, L2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolResolution:
+    """Outcome of resolving a single symbol/qualname (Loomweave locator) to a SEI.
+
+    Exactly one of the three states holds:
+
+    - ``sei`` set (the resolved alive SEI) — ``reason_class is None``; the caller
+      binds this SEI and proceeds.
+    - ``reason_class == "unresolved_input"`` — the symbol resolved to zero or to a
+      non-alive/invalid result (Loomweave's ``orphaned``/``already_migrated``
+      channels, or simply absent). The caller MUST NOT create an unbound-but-
+      looks-bound ticket; it returns the weft-reason.
+    - ``reason_class in {"disabled", "stale", "unreachable", "error"}`` — the
+      transport itself could not answer (backend not Loomweave / no SEI support /
+      registry out of sync with HEAD / network). Per PDR-0023 each member
+      PROPAGATES its own weft-reason rather than being silently dropped.
+
+    ``cause`` and ``fix`` are MANDATORY whenever ``reason_class`` is set
+    (the non-clean carrier).
+    """
+
+    sei: str | None = None
+    reason_class: str | None = None
+    cause: str = ""
+    fix: str = ""
+
+
+def resolve_symbol_to_sei(db: FiligreeDB, symbol: str) -> SymbolResolution:
+    """Resolve a symbol/qualname to a stable SEI via Loomweave, at create time.
+
+    Wraps the same SEI-capability + sync gate and one-shot resolve client the
+    operator-driven backfill uses, but for a single create-time lookup. Returns a
+    discriminated :class:`SymbolResolution` rather than raising, so the caller can
+    render a PDR-0023 weft-reason for every non-clean transport/resolve outcome
+    instead of leaking an exception or — worse — silently creating an unbound
+    ticket that looks bound.
+
+    Resolve-channel mapping (Loomweave ``POST /api/v1/identity/resolve:batch``):
+      * ``resolved``         -> bind the alive SEI (clean).
+      * ``orphaned``         -> ``unresolved_input`` (symbol no longer resolves).
+      * ``already_migrated`` -> ``unresolved_input`` (Loomweave rejected it as a
+                                malformed/invalid locator).
+      * absent from all      -> ``unresolved_input`` (resolved to nothing).
+    """
+    symbol = symbol.strip()
+    if not symbol:
+        return SymbolResolution(
+            reason_class="unresolved_input",
+            cause="entity_symbol was blank after trimming whitespace.",
+            fix="Pass a non-empty symbol/qualname (a Loomweave locator), or omit entity_symbol.",
+        )
+    if symbol.startswith(SEI_PREFIX):
+        # Already an SEI — no resolve round trip needed; bind it verbatim. This
+        # is the resumable client-side skip the backfill also relies on.
+        return SymbolResolution(sei=symbol)
+
+    try:
+        _require_sei_capable(db)
+    except LoomweaveOutOfSyncError as e:
+        # Reachable-but-stale (or unreachable) registry. Distinguish the two so
+        # the recruiting action is precise.
+        unreachable = "unreachable" in str(e) or "offline" in str(e)
+        return SymbolResolution(
+            reason_class="unreachable" if unreachable else "stale",
+            cause=str(e),
+            fix=(
+                "Bring Loomweave online and retry."
+                if unreachable
+                else "Re-run the Loomweave analysis on the current HEAD (its index is behind git), then retry; "
+                "or bind a known SEI directly via entity_id."
+            ),
+        )
+    except SeiBackfillError as e:
+        # Backend is not Loomweave, or the reachable Loomweave has not shipped
+        # SEI — the symbol→SEI transport is unavailable by configuration.
+        return SymbolResolution(
+            reason_class="disabled",
+            cause=str(e),
+            fix="Bind a known opaque entity_id directly instead of entity_symbol, or configure a SEI-capable Loomweave backend.",
+        )
+
+    registry = _build_loomweave_registry(db)
+    try:
+        resolution = registry.resolve_locators_batch([symbol])
+    except (RegistryUnavailableError, RegistryResolutionError) as e:
+        return SymbolResolution(
+            reason_class="unreachable",
+            cause=f"Loomweave identity resolve failed for {symbol!r}: {e}",
+            fix="Bring Loomweave online and retry, or bind a known SEI directly via entity_id.",
+        )
+    finally:
+        registry.close()
+
+    sei = resolution["resolved"].get(symbol)
+    if sei is not None:
+        return SymbolResolution(sei=sei)
+
+    reason = _orphan_reason(symbol, resolution)
+    if reason == "invalid":
+        cause = f"Loomweave rejected {symbol!r} as a malformed/invalid locator."
+        fix = "Pass a well-formed Loomweave locator (qualname), or bind a known SEI directly via entity_id."
+    else:
+        cause = f"{symbol!r} resolved to no alive entity (Loomweave reports it orphaned/not-found)."
+        fix = "Check the symbol is current in Loomweave's analyzed index, or bind a known SEI directly via entity_id."
+    return SymbolResolution(reason_class="unresolved_input", cause=cause, fix=fix)
