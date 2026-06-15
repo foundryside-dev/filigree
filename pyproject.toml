@@ -39,9 +39,6 @@ dependencies = [
     "uvicorn>=0.34",
 ]
 
-[project.optional-dependencies]
-docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
-
 [project.urls]
 Homepage = "https://github.com/foundryside-dev/filigree"
 Repository = "https://github.com/foundryside-dev/filigree"

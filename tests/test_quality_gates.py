@@ -69,12 +69,6 @@ def test_development_docs_list_node_as_pytest_prerequisite() -> None:
     assert "Node-backed static dashboard pytest tests" in readme
 
 
-def test_docs_deploy_waits_for_all_ci_quality_gates() -> None:
-    workflow = _read(".github/workflows/ci.yml")
-
-    assert "needs: [lint, typecheck, frontend, test, loomweave-contract]" in workflow
-
-
 def test_ci_has_required_loomweave_contract_lane() -> None:
     workflow = _read(".github/workflows/ci.yml")
 

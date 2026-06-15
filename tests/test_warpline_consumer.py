@@ -72,9 +72,7 @@ class TestApplyFiles:
         assert assocs[0]["entity_kind"] == ENTITY_KIND
 
     def test_supplied_content_hash_is_used(self, db: FiligreeDB) -> None:
-        report = ingest_reverify_worklist(
-            db, _worklist(_item("loomweave:eid:CCC", content_hash="deadbeef")), apply=True
-        )
+        report = ingest_reverify_worklist(db, _worklist(_item("loomweave:eid:CCC", content_hash="deadbeef")), apply=True)
         result = report["results"][0]
         assert result["content_hash_source"] == "provided"
         assocs = db.list_associations_by_entity("loomweave:eid:CCC")

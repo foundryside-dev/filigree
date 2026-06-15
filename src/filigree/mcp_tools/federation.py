@@ -18,7 +18,6 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
-from filigree.warpline_consumer import ingest_reverify_worklist
 from filigree.mcp_tools.common import (
     _parse_args,
     _text,
@@ -28,6 +27,7 @@ from filigree.mcp_tools.common import (
 )
 from filigree.types.api import ErrorCode, ErrorResponse
 from filigree.types.inputs import WarplineWorklistIngestArgs
+from filigree.warpline_consumer import ingest_reverify_worklist
 
 _logger = logging.getLogger(__name__)
 
@@ -54,8 +54,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "worklist": {
                         "type": "object",
                         "description": (
-                            "A warpline.reverify_worklist.v1 success envelope or its bare 'data' "
-                            "payload (must contain an 'items' array)."
+                            "A warpline.reverify_worklist.v1 success envelope or its bare 'data' payload (must contain an 'items' array)."
                         ),
                     },
                     "apply": {
