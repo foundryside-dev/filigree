@@ -111,8 +111,7 @@ def test_emitted_reason_classes_are_subset_of_canonical() -> None:
     # a refactor that moves emission elsewhere would make this test vacuously
     # pass. We know at minimum scheme_mismatch (db_files) is emitted.
     assert "scheme_mismatch" in emitted, (
-        "AST introspection found no scheme_mismatch carrier — producers may have "
-        "moved; update _PRODUCER_MODULES."
+        "AST introspection found no scheme_mismatch carrier — producers may have moved; update _PRODUCER_MODULES."
     )
     assert "<dynamic>" not in emitted, (
         "A reason_class is assigned a non-literal value; it can no longer be "

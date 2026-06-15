@@ -666,8 +666,8 @@ def create_classic_router() -> APIRouter:
         # emits there), so a classic caller never declares fingerprint_scheme
         # and this list is always empty here. Strip it to keep the classic
         # response byte-identical to its pinned shape.
-        result = {k: v for k, v in result.items() if k != "weft_reasons"}
-        return JSONResponse(result)
+        classic_result = {k: v for k, v in result.items() if k != "weft_reasons"}
+        return JSONResponse(classic_result)
 
     @router.get("/scan-runs")
     async def api_scan_runs(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:

@@ -190,7 +190,8 @@ class TestFingerprintSchemeHandshake:
         # Sanity: both wlfp2 findings are open.
         for fp in ("wlfp2:aaa", "wlfp2:bbb"):
             f = db.find_finding_by_fingerprint("wardline", fp)
-            assert f is not None and f["status"] == "open"
+            assert f is not None
+            assert f["status"] == "open"
 
         # The bump: SAME logical findings, re-minted fingerprints, new scheme.
         wlfp3_findings = [
@@ -218,7 +219,8 @@ class TestFingerprintSchemeHandshake:
         carriers = [r for r in res["weft_reasons"] if r["reason_class"] == "scheme_mismatch"]
         assert len(carriers) == 1
         carrier = carriers[0]
-        assert "wlfp3" in carrier["cause"] and "wlfp2" in carrier["cause"]
+        assert "wlfp3" in carrier["cause"]
+        assert "wlfp2" in carrier["cause"]
         assert "wardline" in carrier["cause"]
         assert carrier["fix"]  # mandatory recruiting action, non-empty
 

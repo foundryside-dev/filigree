@@ -373,6 +373,9 @@ class DBMixinProtocol(Protocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        entity_id: str | None = None,
+        entity_kind: str | None = None,
+        content_hash: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

@@ -371,7 +371,5 @@ def scan_ingest_result_to_weft(result: ScanIngestResult) -> ScanIngestResponseWe
     # field omitted). Today the only carrier is the G4 scheme_mismatch case.
     weft_reasons = result.get("weft_reasons") or []
     if weft_reasons:
-        response["weft_reasons"] = [
-            WeftReasonWeft(reason_class=r["reason_class"], cause=r["cause"], fix=r["fix"]) for r in weft_reasons
-        ]
+        response["weft_reasons"] = [WeftReasonWeft(reason_class=r["reason_class"], cause=r["cause"], fix=r["fix"]) for r in weft_reasons]
     return response
