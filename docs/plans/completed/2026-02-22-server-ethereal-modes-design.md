@@ -98,8 +98,8 @@ The port is always included since it's no longer a well-known fixed port. The `s
 port = 8377
 
 [projects]
-"/home/john/filigree/.filigree" = { prefix = "filigree" }
-"/home/john/other-project/.filigree" = { prefix = "other" }
+"/home/user/filigree/.filigree" = { prefix = "filigree" }
+"/home/user/other-project/.filigree" = { prefix = "other" }
 ```
 
 **Project registration:**
@@ -160,11 +160,11 @@ python -m venv .venv && .venv/bin/pip install "filigree[dashboard]"
 **Dead project UX:** When doctor finds dead projects, it reports them clearly and prompts for action:
 
 ```
-!! Project "old-thing" (/home/john/old-thing/.filigree)
+!! Project "old-thing" (/home/user/old-thing/.filigree)
    Directory no longer exists
-   Fix: filigree server unregister /home/john/old-thing
+   Fix: filigree server unregister /home/user/old-thing
 
-!! Project "experiment" (/home/john/experiment/.filigree)
+!! Project "experiment" (/home/user/experiment/.filigree)
    Schema v5 (daemon supports v4)
    Fix: upgrade daemon or switch project to ethereal mode
 ```

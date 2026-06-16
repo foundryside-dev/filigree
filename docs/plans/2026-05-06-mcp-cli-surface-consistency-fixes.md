@@ -9,7 +9,7 @@
 **Tech Stack:** Python 3.13, Click CLI, MCP `Tool` schemas, `TypedDict` response contracts, pytest, ruff, mypy.
 
 **Prerequisites:**
-- Work in `/home/john/filigree`.
+- Work in `/home/user/filigree`.
 - Keep the existing dirty worktree intact; do not revert unrelated edits.
 - Use `uv run ...` for all commands.
 - Confirm tracker issues `filigree-e79c19ff6b` and `filigree-0e025002a6` are still open before starting.
@@ -630,13 +630,13 @@ Use a temp project:
 ```bash
 tmpdir="$(mktemp -d /tmp/filigree-surface.XXXXXX)"
 cd "$tmpdir"
-uv run --project /home/john/filigree filigree init --name Smoke --prefix smoke
-uv run --project /home/john/filigree filigree create "Smoke task" --json
-uv run --project /home/john/filigree filigree list --json
-uv run --project /home/john/filigree filigree ready --json
-uv run --project /home/john/filigree filigree start-next-work --assignee smoke-bot --type task --json
-uv run --project /home/john/filigree filigree explain-status task open --help
-uv run --project /home/john/filigree filigree workflow-statuses --help
+uv run --project /home/user/filigree filigree init --name Smoke --prefix smoke
+uv run --project /home/user/filigree filigree create "Smoke task" --json
+uv run --project /home/user/filigree filigree list --json
+uv run --project /home/user/filigree filigree ready --json
+uv run --project /home/user/filigree filigree start-next-work --assignee smoke-bot --type task --json
+uv run --project /home/user/filigree filigree explain-status task open --help
+uv run --project /home/user/filigree filigree workflow-statuses --help
 ```
 
 Expected:

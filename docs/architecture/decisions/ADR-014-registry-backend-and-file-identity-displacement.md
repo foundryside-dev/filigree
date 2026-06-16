@@ -235,11 +235,11 @@ Phase A must ship before Phase C can land an integration that does anything obse
 
 ## References
 
-- Clarion ADR-014: `/home/john/clarion/docs/clarion/adr/ADR-014-filigree-registry-backend.md`.
-- Clarion ADR-029: `/home/john/clarion/docs/clarion/adr/ADR-029-entity-associations-binding.md`.
-- Clarion v0.1 plan §WP10: `/home/john/clarion/docs/implementation/v0.1-plan.md` (the cross-product work package this ADR fulfils).
-- Sprint 2 scope amendment (defer): `/home/john/clarion/docs/implementation/sprint-2/scope-amendment-2026-05.md`.
-- Clarion integration recon: `/home/john/clarion/docs/clarion/v0.1/reviews/pre-restructure/integration-recon.md` (auto-create paths and FK survey).
+- Clarion ADR-014: `/home/user/clarion/docs/clarion/adr/ADR-014-filigree-registry-backend.md`.
+- Clarion ADR-029: `/home/user/clarion/docs/clarion/adr/ADR-029-entity-associations-binding.md`.
+- Clarion v0.1 plan §WP10: `/home/user/clarion/docs/implementation/v0.1-plan.md` (the cross-product work package this ADR fulfils).
+- Sprint 2 scope amendment (defer): `/home/user/clarion/docs/implementation/sprint-2/scope-amendment-2026-05.md`.
+- Clarion integration recon: `/home/user/clarion/docs/clarion/v0.1/reviews/pre-restructure/integration-recon.md` (auto-create paths and FK survey).
 - Filigree auto-create paths (verified 2026-05-19):
   - `src/filigree/db_files.py:186` `register_file`
   - `src/filigree/db_files.py:663` `_upsert_file_record`

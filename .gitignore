@@ -80,3 +80,6 @@ READ_ONLY_CODEBASE_AUDIT_*.md
 
 # Wardline scan output (regenerated per scan; emitted to the store, never committed)
 findings.jsonl
+
+# Product ownership workspace — internal strategy, kept local (not public)
+docs/product/

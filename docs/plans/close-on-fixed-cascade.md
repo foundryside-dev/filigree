@@ -4,7 +4,7 @@
 > cascade and misdiagnosed the real product gap (clean files are never swept) as
 > a test-construction rule. The implemented, two-part plan — close cascade **plus**
 > the prerequisite `scanned_paths`-driven sweep — and its no-decoy acceptance
-> tests live at `/home/john/.claude/plans/fluttering-dreaming-tower.md`. The work
+> tests live at `/home/user/.claude/plans/fluttering-dreaming-tower.md`. The work
 > shipped per that plan; this file is kept for history only.
 
 Re-verified against working tree at HEAD `54cdd65`. Source is schema **v23**

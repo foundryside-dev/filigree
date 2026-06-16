@@ -149,5 +149,5 @@ their pytest invocation; lanes that do not will silently skip.
 ## Ownership Boundary
 
 Filigree issues for ADR-014 track Filigree code, schema, tests, and docs.
-Loomweave Sprint 3 work for C-WP10 is tracked in `/home/john/loomweave/.filigree/`
+Loomweave Sprint 3 work for C-WP10 is tracked in `/home/user/loomweave/.filigree/`
 and should not be filed or closed from the Filigree tracker.

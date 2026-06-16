@@ -7,7 +7,7 @@
     "authority": [
       "docs/architecture/decisions/ADR-015-findings-retention-policy.md",
       "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md",
-      "/home/john/loomweave/docs/suite/weft.md"
+      "/home/user/loomweave/docs/suite/weft.md"
     ],
     "pinning_discipline": "shape reference; see docs/federation/contracts.md",
     "verification": "tests/api/test_files_api.py::TestWeftCleanStaleFindingsAPI::test_fixture_examples_match_live_shape",

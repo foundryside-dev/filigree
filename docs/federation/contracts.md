@@ -502,5 +502,5 @@ Pinned by `tests/api/test_files_api.py::TestWeftFindingsKindSuppressionFilters::
 - **2.0 work package** (the execution sequence): `docs/plans/2026-04-24-2.0-federation-work-package.md`.
 - **ADR-017 audit** (verifies classic-generation semantics are preserved on the 2.0 branch): `docs/plans/2026-04-24-adr017-audit.md`.
 - **SEI conformance position** (Filigree's obligations + emerging requirements for the SEI lock window): `docs/superpowers/specs/2026-06-01-filigree-roadmap-to-first-class.md` Appendix A.
-- **Loomweave ADR-004** (finding exchange format): `/home/john/loomweave/docs/loomweave/adr/ADR-004-finding-exchange-format.md`.
-- **Loomweave ADR-017** (severity + dedup): `/home/john/loomweave/docs/loomweave/adr/ADR-017-severity-and-dedup.md`.
+- **Loomweave ADR-004** (finding exchange format): `/home/user/loomweave/docs/loomweave/adr/ADR-004-finding-exchange-format.md`.
+- **Loomweave ADR-017** (severity + dedup): `/home/user/loomweave/docs/loomweave/adr/ADR-017-severity-and-dedup.md`.

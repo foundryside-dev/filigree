@@ -236,5 +236,5 @@ See the 2.0 federation work package (`docs/plans/2026-04-24-2.0-federation-work-
 - **Rebaseline**: `docs/plans/2026-04-23-2.0-stage-2b-rebaseline.md` (superseded; shape pins and Clarion survey findings preserved)
 - **Snapshot**: `docs/plans/2026-04-21-2.0-unified-surface-snapshot.md` (historical; still accurate for pre-2026-04-24 state)
 - **2.0 work package**: `docs/plans/2026-04-24-2.0-federation-work-package.md`
-- **Clarion ADRs consulted**: ADR-004 (finding-exchange-format), ADR-014 (filigree-registry-backend), ADR-015 (wardline-filigree-emission), ADR-016 (observation-transport), ADR-017 (severity-and-dedup) — all in `/home/john/clarion/docs/clarion/adr/`.
-- **Loom doctrine**: `~/loom/doctrine.md` (authoritative federation framing, roster, and axiom — promoted here 2026-06-05 from the former `/home/john/clarion/docs/suite/loom.md`, which is now a pointer). Cross-product contract index: `~/loom/contracts-index.md`.
+- **Clarion ADRs consulted**: ADR-004 (finding-exchange-format), ADR-014 (filigree-registry-backend), ADR-015 (wardline-filigree-emission), ADR-016 (observation-transport), ADR-017 (severity-and-dedup) — all in `/home/user/clarion/docs/clarion/adr/`.
+- **Loom doctrine**: `~/loom/doctrine.md` (authoritative federation framing, roster, and axiom — promoted here 2026-06-05 from the former `/home/user/clarion/docs/suite/loom.md`, which is now a pointer). Cross-product contract index: `~/loom/contracts-index.md`.

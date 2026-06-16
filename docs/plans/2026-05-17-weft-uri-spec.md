@@ -339,10 +339,10 @@ A URI holder fetches the referenced object by:
 Each component publishes its `kind_endpoint` mapping and slim payload
 schema in its own loom-contracts directory:
 
-- Filigree: `/home/john/filigree/docs/federation/contracts.md` (exists).
-- Shuttle: `/home/john/shuttle/docs/federation/contracts.md` (to be
+- Filigree: `/home/user/filigree/docs/federation/contracts.md` (exists).
+- Shuttle: `/home/user/shuttle/docs/federation/contracts.md` (to be
   created with Batch 3).
-- Clarion: documented in `/home/john/clarion/docs/...`.
+- Clarion: documented in `/home/user/clarion/docs/...`.
 
 Slim payloads are deliberately limited — the kind-endpoint returns
 just enough for the consumer to display a one-line summary. Deep

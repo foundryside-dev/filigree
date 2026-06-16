@@ -1062,7 +1062,7 @@ git commit -m "feat(dashboard): wire Files and Health views into app entry point
 
 **Step 1: Start the dashboard**
 
-Run: `cd /home/john/filigree && uv run filigree dashboard --port 8377`
+Run: `cd /home/user/filigree && uv run filigree dashboard --port 8377`
 
 **Step 2: Verify in browser**
 

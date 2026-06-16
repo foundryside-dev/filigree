@@ -3,9 +3,9 @@
   "round": 2,
   "summary": "Revision v2 successfully resolves all 8 blockers from round 1 (test strategy, observability, migration mechanism, force semantics, polymorphic FK, prose_blocks design, deprecation separation, Loom decoupling). The 10 new blockers surfaced this round are finer-grained — they live at the implementation-detail layer rather than the design-coherence layer. Highest-signal items are convergent across reviewers: pack rename safety (3 reviewers), Wardline trust model (3 reviewers), Loom URI registry coordination (2 reviewers). Recommend a focused B1-B7 fix pass; B8-B10 can be inlined during implementation.",
   "plans_reviewed": [
-    "/home/john/filigree/docs/plans/2026-05-17-shuttle-design.md",
-    "/home/john/filigree/docs/plans/2026-05-17-filigree-planning-deprecation.md",
-    "/home/john/filigree/docs/plans/2026-05-17-loom-uri-spec.md"
+    "/home/user/filigree/docs/plans/2026-05-17-shuttle-design.md",
+    "/home/user/filigree/docs/plans/2026-05-17-filigree-planning-deprecation.md",
+    "/home/user/filigree/docs/plans/2026-05-17-loom-uri-spec.md"
   ],
   "reviewed_at": "2026-05-17T00:00:00Z",
   "reviewers": ["reality", "architecture", "quality", "systems"],

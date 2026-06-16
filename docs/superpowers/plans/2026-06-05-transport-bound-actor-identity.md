@@ -72,7 +72,7 @@ These resolve gaps and conflicts found between the spec and codebase reality. Th
 
 Run:
 ```bash
-cd /home/john/filigree
+cd /home/user/filigree
 git branch --show-current   # expect: release/3.0.0
 uv run pytest tests/core/test_schema.py -q
 ```
@@ -1396,7 +1396,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 Run:
 ```bash
-cd /home/john/filigree
+cd /home/user/filigree
 grep -rl "ADR-012" docs/
 ls tests/fixtures/contracts/classic tests/fixtures/contracts/loom
 grep -rn "verified_actor\|verified_author" tests/fixtures/contracts/ || echo "no fixture hits yet"
@@ -1467,7 +1467,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 Run:
 ```bash
-cd /home/john/filigree
+cd /home/user/filigree
 uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 uv run mypy src/filigree/

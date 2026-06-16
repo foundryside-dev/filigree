@@ -64,6 +64,8 @@ exclude = [
     "/.pre-commit-config.yaml",
     "/.python-version",
     "/docs/plans",
+    "/docs/investigations",
+    "/docs/superpowers",
     "/scripts",
     "/Makefile",
     "/uv.lock",

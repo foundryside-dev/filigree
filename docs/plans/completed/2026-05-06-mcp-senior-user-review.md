@@ -186,7 +186,7 @@ mcp__filigree__.report_finding({
 
 ```json
 {
-  "command_string": "python scripts/claude_bug_hunt.py --root /home/john/filigree --file src/filigree/types/api.py --max-files 1 --api-url http://localhost:8377 --scan-run-id preview-dry-run",
+  "command_string": "python scripts/claude_bug_hunt.py --root /home/user/filigree --file src/filigree/types/api.py --max-files 1 --api-url http://localhost:8377 --scan-run-id preview-dry-run",
   "valid": true
 }
 ```
