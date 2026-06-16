@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS events (
     -- computes the next value inline under the caller-held writer transaction via
     -- COALESCE((SELECT MAX(event_seq) FROM events WHERE issue_id = ?),
     -- -1) + 1; legacy rows default to 0.
-    event_seq  INTEGER NOT NULL DEFAULT 0
+    event_seq  INTEGER NOT NULL DEFAULT 0,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
@@ -77,7 +78,8 @@ CREATE TABLE IF NOT EXISTS comments (
     issue_id   TEXT NOT NULL REFERENCES issues(id),
     author     TEXT DEFAULT '',
     text       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    verified_author TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
@@ -181,7 +183,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_dedup
   ON scan_findings(file_id, scan_source, rule_id, coalesce(line_start, -1))
   WHERE fingerprint = '';
 -- Fingerprint-bearing findings use the scanner-supplied fingerprint as their
--- cross-run identity (Loom §3.B). Scoped by scan_source so two scanners may
+-- cross-run identity (Weft §3.B). Scoped by scan_source so two scanners may
 -- mint colliding fingerprints without interfering.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_findings_fingerprint
   ON scan_findings(scan_source, fingerprint)
@@ -225,6 +227,22 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS idx_scan_runs_status ON scan_runs(status);
 CREATE INDEX IF NOT EXISTS idx_scan_runs_scanner ON scan_runs(scanner_name);
 
+-- ---- Fingerprint-scheme registry per scan_source (Weft seam G4) ------------
+-- A scanner (wardline) declares a ``fingerprint_scheme`` (e.g. 'wlfp2') on every
+-- emit. The dedup join is keyed on the raw fingerprint VALUE; a silent scheme
+-- bump (wlfp2 -> wlfp3) re-mints every fingerprint, so the incoming batch would
+-- miss the join and the mark_unseen sweep would CASCADE-CLOSE all prior findings
+-- as 'fixed' with zero error. This table records the declared scheme per
+-- scan_source so ingest can DETECT a bump and REFUSE the sweep (see
+-- process_scan_results). Additive: legacy/blank-declaring callers never write a
+-- row, and a row's absence reads as "no stored scheme yet" (proceed normally).
+CREATE TABLE IF NOT EXISTS scan_source_schemes (
+    scan_source        TEXT PRIMARY KEY,
+    fingerprint_scheme TEXT NOT NULL DEFAULT '',
+    first_seen         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS file_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id     TEXT NOT NULL REFERENCES file_records(id),
@@ -233,7 +251,8 @@ CREATE TABLE IF NOT EXISTS file_events (
     old_value   TEXT DEFAULT '',
     new_value   TEXT DEFAULT '',
     actor       TEXT DEFAULT '',
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_events_file ON file_events(file_id);
@@ -252,7 +271,8 @@ CREATE TABLE IF NOT EXISTS observations (
     priority          INTEGER DEFAULT 3 CHECK (priority BETWEEN 0 AND 4),
     actor             TEXT DEFAULT '',
     created_at        TEXT NOT NULL,
-    expires_at        TEXT NOT NULL
+    expires_at        TEXT NOT NULL,
+    verified_actor    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_observations_priority ON observations(priority, created_at);
@@ -377,7 +397,8 @@ CREATE TABLE IF NOT EXISTS annotation_events (
     new_value     TEXT,
     target_type   TEXT DEFAULT '',
     target_id     TEXT DEFAULT '',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    verified_actor TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_annotation_events_annotation ON annotation_events(annotation_id, created_at);
@@ -399,36 +420,50 @@ CREATE INDEX IF NOT EXISTS idx_annotation_closeout_ack_target
   ON annotation_closeout_acknowledgements(target_type, target_id);
 
 -- ---- Cross-product entity associations (ADR-029) --------------------------
--- Binds Filigree issues to Clarion entities (functions, classes, modules).
--- The clarion_entity_id is OPAQUE to Filigree — no grammar parsing, no
--- CHECK constraint on its shape. Filigree does not know what a "Clarion
--- entity" is; it stores the ID as a string and hands content_hash back at
--- query time so Clarion can detect drift. This preserves the federation
--- enrich-only rule (loom.md §5).
+-- Binds Filigree issues to opaque external entities.
+-- The loomweave_entity_id column (renamed from clarion_entity_id in v26) holds
+-- the value OPAQUE to Filigree: no grammar parsing, no CHECK constraint
+-- on its shape, and no inference of kind from the ID string. Callers may supply
+-- entity_kind metadata explicitly when they already know it.
 
 -- ``migration_orphaned_at`` (v22) supports the locator→SEI backfill (ADR-038
 -- §7). NULL is the healthy/default state. A non-NULL ISO timestamp marks a row
 -- whose stored locator no longer resolved to an alive SEI at backfill time
--- (Clarion answered ``alive:false``): the locator is kept verbatim — never
+-- (Loomweave answered ``alive:false``): the locator is kept verbatim — never
 -- silently dropped — and stamped here so an operator can review the orphan.
--- It is metadata about the migration, not part of the opaque ``clarion_entity_id``
+-- It is metadata about the migration, not part of the opaque ``loomweave_entity_id``
 -- value or its wire shape, both of which are unchanged.
 CREATE TABLE IF NOT EXISTS entity_associations (
     issue_id                TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-    clarion_entity_id       TEXT NOT NULL,
+    loomweave_entity_id     TEXT NOT NULL,
     content_hash_at_attach  TEXT NOT NULL,
     attached_at             TEXT NOT NULL,
     attached_by             TEXT NOT NULL,
     migration_orphaned_at   TEXT,
-    PRIMARY KEY (issue_id, clarion_entity_id)
+    entity_kind             TEXT NOT NULL DEFAULT '',
+    -- v25 (B1): the opaque Legis HMAC signature and sign-off sequence sent
+    -- when a *governed* sign-off is bound. Both nullable: Legis omits them
+    -- when no key is configured, and pre-v25 / non-governed rows read NULL.
+    -- Filigree never interprets or verifies the signature (it has no key) —
+    -- stored verbatim and echoed back, exactly like content_hash_at_attach.
+    signature               TEXT,
+    signoff_seq             INTEGER,
+    -- v27 (signature-bypass fix): the content_hash the current ``signature``
+    -- was cut over (the HMAC binds content_hash). Set = content_hash whenever a
+    -- write carries a signature; PRESERVED across a signatureless re-attach
+    -- while content_hash_at_attach advances. The gate treats
+    -- signed_content_hash != content_hash_at_attach as a drifted (stale) sign-off
+    -- and fails closed. NULL for non-governed / pre-v27 rows (read as fresh).
+    signed_content_hash     TEXT,
+    PRIMARY KEY (issue_id, loomweave_entity_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
-  ON entity_associations(clarion_entity_id);
+  ON entity_associations(loomweave_entity_id);
 
 -- ---- Deleted-issue tombstones (v20) --------------------------------------
 -- A hard-deleted issue leaves no events/issues row, so federation consumers
--- (Clarion / Wardline / Shuttle) reconciling off ``GET /api/loom/changes``
+-- (Loomweave / Wardline / Shuttle) reconciling off ``GET /api/weft/changes``
 -- would otherwise keep a stale reference forever. ``delete_issue`` writes a
 -- tombstone here in the same transaction it deletes the issue; the changes
 -- feed surfaces it as a synthetic ``issue_deleted`` record cursored on
@@ -444,11 +479,11 @@ CREATE INDEX IF NOT EXISTS ix_entity_assoc_entity
 -- re-deletion (``INSERT OR REPLACE`` on the same id) assigns a NEW, strictly
 -- higher ``seq`` and re-notifies consumers as a fresh deletion, monotonically.
 --
--- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``clarion_entity_id``s
+-- ``entity_ids`` (v21, F5 amplifier) is a JSON array of the ``loomweave_entity_id``s
 -- whose ``entity_associations`` rows the delete cascade removed. ``delete_issue``
 -- captures them BEFORE the cascade so the synthetic ``issue_deleted`` change record
 -- can name them as ``affected_entities`` — a consumer must purge its mirrored
--- reverse lookup (Clarion ``list_associations_by_entity``) for those entities or it
+-- reverse lookup (Loomweave ``list_associations_by_entity``) for those entities or it
 -- surfaces a phantom issue (filigree-f3bf56554c). Kept out of the column list as an
 -- inline comment on purpose: SQLite cannot re-parse a CREATE that carries comments,
 -- which would break any future ``ALTER TABLE … DROP/RENAME COLUMN`` on this table.
@@ -572,4 +607,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 28

@@ -1,4 +1,4 @@
-"""Tests for entity_associations CRUD (ADR-029, Clarion B.7 / WP9-A).
+"""Tests for entity_associations CRUD (ADR-029, Loomweave B.7 / WP9-A).
 
 Covers the data-layer surface of :class:`EntityAssociationsMixin`. The
 MCP tool layer and HTTP route layer have their own test files. The
@@ -26,7 +26,7 @@ class TestAddEntityAssociation:
             actor="alice",
         )
         assert row["issue_id"] == issue.id
-        assert row["clarion_entity_id"] == "py:func:parser.tokenize"
+        assert row["loomweave_entity_id"] == "py:func:parser.tokenize"
         assert row["content_hash_at_attach"] == "hash-a"
         assert row["attached_by"] == "alice"
         assert row["attached_at"]  # non-empty timestamp
@@ -153,7 +153,7 @@ class TestAddEntityAssociation:
             assert not thread.is_alive()
             assert errors == []
             assert rows[0]["issue_id"] == issue.id
-            assert rows[0]["clarion_entity_id"] == "py:func:locked"
+            assert rows[0]["loomweave_entity_id"] == "py:func:locked"
         finally:
             if holder.conn.in_transaction:
                 holder.conn.rollback()
@@ -181,7 +181,7 @@ class TestRemoveEntityAssociation:
         db.remove_entity_association(issue.id, "py:func:a")
         rows = db.list_entity_associations(issue.id)
         assert len(rows) == 1
-        assert rows[0]["clarion_entity_id"] == "py:func:b"
+        assert rows[0]["loomweave_entity_id"] == "py:func:b"
 
     def test_remove_records_audit_event(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
@@ -259,7 +259,7 @@ class TestListEntityAssociations:
         db.add_entity_association(issue.id, "py:class:C", content_hash="h3")
 
         rows = db.list_entity_associations(issue.id)
-        ids = {row["clarion_entity_id"] for row in rows}
+        ids = {row["loomweave_entity_id"] for row in rows}
         assert ids == {"py:func:a", "py:func:b", "py:class:C"}
 
     def test_does_not_leak_other_issues_associations(self, db: FiligreeDB) -> None:
@@ -269,11 +269,11 @@ class TestListEntityAssociations:
         db.add_entity_association(b.id, "py:func:y", content_hash="h2")
 
         rows_a = db.list_entity_associations(a.id)
-        assert {r["clarion_entity_id"] for r in rows_a} == {"py:func:x"}
+        assert {r["loomweave_entity_id"] for r in rows_a} == {"py:func:x"}
 
     def test_list_does_not_compute_drift(self, db: FiligreeDB) -> None:
         """ADR-029 §"Decision 3" — drift comparison is the consumer's job
-        (Clarion's issues_for after fetching). list_entity_associations
+        (Loomweave's issues_for after fetching). list_entity_associations
         returns raw rows; no drift_warning field exists.
         """
         issue = db.create_issue("t", priority=2)
@@ -285,7 +285,7 @@ class TestListEntityAssociations:
 
 
 class TestListAssociationsByEntity:
-    """Reverse lookup — the surface Clarion's issues_for (B.6) calls."""
+    """Reverse lookup — the surface Loomweave's issues_for (B.6) calls."""
 
     def test_empty_entity_returns_empty_list(self, db: FiligreeDB) -> None:
         assert db.list_associations_by_entity("py:func:never-attached") == []
@@ -303,7 +303,7 @@ class TestListAssociationsByEntity:
         issue_ids = {row["issue_id"] for row in rows}
         assert issue_ids == {a.id, b.id}
         # The unrelated entity's binding does not appear in the result.
-        assert all(row["clarion_entity_id"] == target for row in rows)
+        assert all(row["loomweave_entity_id"] == target for row in rows)
 
     def test_returns_raw_hash_for_drift_comparison(self, db: FiligreeDB) -> None:
         issue = db.create_issue("t", priority=2)
@@ -326,7 +326,7 @@ class TestListAssociationsByEntity:
         db.add_entity_association(issue.id, weird, content_hash="h")
         rows = db.list_associations_by_entity(weird)
         assert len(rows) == 1
-        assert rows[0]["clarion_entity_id"] == weird
+        assert rows[0]["loomweave_entity_id"] == weird
 
 
 # Cascade behaviour (ON DELETE CASCADE on issue_id) is pinned at the schema
@@ -334,3 +334,233 @@ class TestListAssociationsByEntity:
 # using a raw issues row with no other FK dependents. Replicating it here would
 # need an isolated fixture that doesn't create dependencies/events/labels —
 # overkill for a property already covered.
+
+
+class TestSignatureAndSignoffSeq:
+    """B1: opaque Legis HMAC ``signature`` + ``signoff_seq`` persistence.
+
+    Filigree stores both verbatim and echoes them on read; it never verifies
+    the signature (it has no key), exactly as it treats content_hash_at_attach.
+    """
+
+    def test_attach_persists_signature_and_signoff_seq(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Governed work", priority=2)
+        row = db.add_entity_association(
+            issue.id,
+            "sei:abc",
+            content_hash="h1",
+            actor="legis",
+            signature="deadbeef",
+            signoff_seq=7,
+        )
+        assert row["signature"] == "deadbeef"
+        assert row["signoff_seq"] == 7
+        # Echoed back through both read surfaces.
+        listed = db.list_entity_associations(issue.id)
+        assert listed[0]["signature"] == "deadbeef"
+        assert listed[0]["signoff_seq"] == 7
+        by_entity = db.list_associations_by_entity("sei:abc")
+        assert by_entity[0]["signature"] == "deadbeef"
+        assert by_entity[0]["signoff_seq"] == 7
+
+    def test_attach_without_signature_stores_null(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Ungoverned work", priority=2)
+        row = db.add_entity_association(issue.id, "sei:plain", content_hash="h1", actor="x")
+        assert row["signature"] is None
+        assert row["signoff_seq"] is None
+        listed = db.list_entity_associations(issue.id)
+        assert listed[0]["signature"] is None
+        assert listed[0]["signoff_seq"] is None
+
+    def test_reattach_updates_signature_but_preserves_attached_by(self, db: FiligreeDB) -> None:
+        """Re-attach refreshes signature/signoff_seq to the latest binding
+        (they pertain to the latest sign-off), mirroring content_hash_at_attach,
+        while attached_by stays the original first-attach attribution."""
+        issue = db.create_issue("Governed work", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="alice", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="bob", signature="sig2", signoff_seq=2)
+        assert second["signature"] == "sig2"
+        assert second["signoff_seq"] == 2
+        assert second["attached_by"] == "alice"  # preserved
+
+    def test_reattach_without_signature_preserves_prior(self, db: FiligreeDB) -> None:
+        """A signatureless re-attach PRESERVES the prior Legis sign-off (v27,
+        sticky governance — PR #52 fix). Only Legis can sign; an agent's drift
+        refresh must not silently revoke governance by clobbering the signature
+        to NULL. signature/signoff_seq/signed_content_hash all survive, while
+        content_hash_at_attach advances — leaving the binding governed-but-stale."""
+        issue = db.create_issue("Governed stays governed", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="alice", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="bob")
+        assert second["signature"] == "sig1"  # preserved, not clobbered
+        assert second["signoff_seq"] == 1
+        assert second["signed_content_hash"] == "h1"  # still bound to the signed snapshot
+        assert second["content_hash_at_attach"] == "h2"  # but the content advanced -> stale
+
+    def test_signed_attach_records_signed_content_hash(self, db: FiligreeDB) -> None:
+        """A signed write records the content the signature was cut over."""
+        issue = db.create_issue("Governed", priority=2)
+        row = db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
+        assert row["signed_content_hash"] == "h1"
+
+    def test_unsigned_attach_leaves_signed_content_hash_null(self, db: FiligreeDB) -> None:
+        """An ungoverned binding has no signed snapshot."""
+        issue = db.create_issue("Ungoverned", priority=2)
+        row = db.add_entity_association(issue.id, "sei:plain", content_hash="h1", actor="x")
+        assert row["signed_content_hash"] is None
+
+    def test_signed_reattach_advances_signed_content_hash(self, db: FiligreeDB) -> None:
+        """A re-sign (write carrying a new signature) re-binds the snapshot to the
+        new content, making the binding fresh again."""
+        issue = db.create_issue("Re-signed", priority=2)
+        db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
+        second = db.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="legis", signature="sig2", signoff_seq=2)
+        assert second["signature"] == "sig2"
+        assert second["signed_content_hash"] == "h2"  # re-bound to current content
+        assert second["content_hash_at_attach"] == "h2"  # fresh again
+
+    def test_empty_string_signature_normalises_to_null(self, db: FiligreeDB) -> None:
+        """A blank signature is stored as NULL (data-layer normalisation), so it
+        cannot masquerade as a governed-but-falsy binding (vector a)."""
+        issue = db.create_issue("Blank sig", priority=2)
+        row = db.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="x", signature="")
+        assert row["signature"] is None
+        assert row["signed_content_hash"] is None
+
+    def test_export_import_round_trips_signature_and_signoff_seq(self, tmp_path: object) -> None:
+        """B1: a governed binding's signature/signoff_seq survive a JSONL
+        backup/restore verbatim (export uses SELECT *; import threads them)."""
+        from pathlib import Path
+
+        src_dir = Path(str(tmp_path)) / "src" / ".filigree"
+        src_dir.mkdir(parents=True)
+        src = FiligreeDB.from_filigree_dir(src_dir)
+        issue = src.create_issue(title="Governed", priority=2)
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
+        # Drift the content via a signatureless re-attach so signed_content_hash
+        # (h1) and content_hash_at_attach (h2) diverge — the round-trip must keep
+        # them distinct or a backup/restore silently un-stales a drifted binding.
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h2", actor="agent")
+        export_path = Path(str(tmp_path)) / "dump.jsonl"
+        src.export_jsonl(export_path)
+
+        # v26: the exported JSONL carries the renamed key, never the old one.
+        blob = export_path.read_text()
+        assert "loomweave_entity_id" in blob
+        assert "clarion_entity_id" not in blob
+
+        dst_dir = Path(str(tmp_path)) / "dst" / ".filigree"
+        dst_dir.mkdir(parents=True)
+        dst = FiligreeDB.from_filigree_dir(dst_dir)
+        dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+        # Read via raw conn: the imported issue keeps its source prefix, which
+        # the dst project's _check_id_prefix would reject on the public read path.
+        row = dst.conn.execute(
+            "SELECT signature, signoff_seq, signed_content_hash, content_hash_at_attach FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchone()
+        assert row is not None
+        assert row["signature"] == "sigX"  # preserved across the drift refresh
+        assert row["signoff_seq"] == 9
+        assert row["signed_content_hash"] == "h1"  # signed snapshot survives restore
+        assert row["content_hash_at_attach"] == "h2"  # drifted content survives -> still stale
+
+    def test_import_normalises_blank_signature_to_null(self, tmp_path: object) -> None:
+        """A foreign/hand-built JSONL carrying ``signature: ""`` must not land an
+        empty string in the column (import uses a raw INSERT that bypasses
+        add_entity_association, so the normalisation is applied there too). Else a
+        blank signature would be classified governed (``is not None``) on a row
+        whose blank value was never a real sign-off."""
+        from pathlib import Path
+
+        src_dir = Path(str(tmp_path)) / "src" / ".filigree"
+        src_dir.mkdir(parents=True)
+        src = FiligreeDB.from_filigree_dir(src_dir)
+        issue = src.create_issue(title="Blank sig on import", priority=2)
+        src.add_entity_association(issue.id, "sei:abc", content_hash="h1", actor="legis", signature="sigX", signoff_seq=9)
+        export_path = Path(str(tmp_path)) / "dump.jsonl"
+        src.export_jsonl(export_path)
+
+        # Tamper the export: blank out the signature on the entity_association line.
+        tampered = export_path.read_text().replace('"signature": "sigX"', '"signature": ""')
+        assert '"signature": ""' in tampered
+        export_path.write_text(tampered)
+
+        dst_dir = Path(str(tmp_path)) / "dst" / ".filigree"
+        dst_dir.mkdir(parents=True)
+        dst = FiligreeDB.from_filigree_dir(dst_dir)
+        dst.import_jsonl(export_path, allow_foreign_ids=True)
+
+        row = dst.conn.execute(
+            "SELECT signature FROM entity_associations WHERE issue_id = ?",
+            (issue.id,),
+        ).fetchone()
+        assert row is not None
+        assert row["signature"] is None  # "" normalised away on import
+
+
+class TestCreateIssueWithEntity:
+    """SEAM SEI-on-create (ADR-029, L1): create_issue binds an opaque entity_id
+    inline so a hand-filed ticket enters ON the spine in one call.
+    """
+
+    def test_create_with_entity_id_binds_inline(self, db: FiligreeDB) -> None:
+        issue = db.create_issue(
+            "Hand-filed, on the spine",
+            priority=2,
+            entity_id="py:func:parser.tokenize",
+            content_hash="hash-a",
+            entity_kind="function",
+            actor="alice",
+        )
+        rows = db.list_entity_associations(issue.id)
+        assert len(rows) == 1
+        assert rows[0]["entity_id"] == "py:func:parser.tokenize"
+        assert rows[0]["content_hash_at_attach"] == "hash-a"
+        assert rows[0]["entity_kind"] == "function"
+        assert rows[0]["attached_by"] == "alice"
+
+    def test_create_with_entity_id_records_added_event(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2, entity_id="py:func:a", content_hash="h1", actor="alice")
+        events = db.get_issue_events(issue.id, limit=10)
+        added = [e for e in events if e["event_type"] == "entity_association_added"]
+        assert len(added) == 1
+        assert added[0]["new_value"] == "py:func:a"
+
+    def test_create_with_entity_id_no_content_hash_stamps_sentinel(self, db: FiligreeDB) -> None:
+        from filigree.db_issues import UNVERIFIED_CONTENT_HASH
+
+        issue = db.create_issue("t", priority=2, entity_id="py:func:a", actor="alice")
+        rows = db.list_entity_associations(issue.id)
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == UNVERIFIED_CONTENT_HASH
+
+    def test_create_without_entity_id_binds_nothing(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("plain", priority=2)
+        assert db.list_entity_associations(issue.id) == []
+
+    def test_create_reverse_lookup_finds_the_issue(self, db: FiligreeDB) -> None:
+        """The whole point: the binding makes the issue discoverable by entity."""
+        issue = db.create_issue("bound", priority=2, entity_id="py:func:z", content_hash="h1")
+        found = db.list_associations_by_entity("py:func:z")
+        assert [r["issue_id"] for r in found] == [issue.id]
+
+    def test_create_blank_entity_id_binds_nothing(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("t", priority=2, entity_id="   ")
+        assert db.list_entity_associations(issue.id) == []
+
+    def test_create_content_hash_without_entity_id_rejected(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="content_hash was supplied without entity_id"):
+            db.create_issue("t", priority=2, content_hash="h1")
+
+    def test_create_entity_kind_without_entity_id_rejected(self, db: FiligreeDB) -> None:
+        with pytest.raises(ValueError, match="entity_kind was supplied without entity_id"):
+            db.create_issue("t", priority=2, entity_kind="function")
+
+    def test_bad_content_hash_rolls_back_the_issue(self, db: FiligreeDB) -> None:
+        """A bad inline binding fails the whole create atomically — no orphan issue."""
+        before = len(db.list_issues())
+        with pytest.raises(ValueError, match="content_hash"):
+            db.create_issue("t", priority=2, entity_id="py:func:a", content_hash="has space")
+        assert len(db.list_issues()) == before

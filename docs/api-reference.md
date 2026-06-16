@@ -835,8 +835,6 @@ Returns project statistics:
 {
     "by_status": {"open": 5, "in_progress": 2, ...},
     "by_category": {"open": 5, "wip": 2, "done": 10},
-    "status_name_counts": {"open": 5, "in_progress": 2, ...},
-    "status_category_counts": {"open": 5, "wip": 2, "done": 10},
     "by_type": {"task": 8, "bug": 4, ...},
     "ready_count": int,
     "blocked_count": int,
@@ -845,11 +843,9 @@ Returns project statistics:
 ```
 
 `by_status` holds counts keyed by literal workflow status name; `by_category`
-holds template-aware category counts (`open`/`wip`/`done`). `status_name_counts`
-and `status_category_counts` are **deprecated** exact duplicates of `by_status`
-and `by_category` respectively (filigree-17694d2db8), retained as compatibility
-aliases per ADR-009 §7 and scheduled for removal in the next major. Read
-`by_status` / `by_category`.
+holds template-aware category counts (`open`/`wip`/`done`). The deprecated
+`status_name_counts` / `status_category_counts` aliases (exact duplicates of
+`by_status` / `by_category`) were **removed in 3.0.0** (filigree-e4181ae767).
 
 #### `get_recent_events`
 
@@ -1326,6 +1322,40 @@ class HardEnforcementError(ValueError):
     type_name: str
     missing_fields: list[str]
 ```
+
+### TransitionMode (3.0.0)
+
+```python
+from filigree.types.api import TransitionMode
+
+class TransitionMode(Enum):
+    FORWARD = "forward"
+    BACKWARD = "backward"
+```
+
+3.0.0 replaced the internal `backward: bool` selector on `update_issue` /
+`validate_transition` (and the `DBMixinProtocol`) with this enum
+([ADR-019](https://github.com/foundryside-dev/filigree/blob/main/docs/architecture/decisions/ADR-019-transition-mode-enum.md)).
+A reverse/escape transition is now selected with `mode=TransitionMode.BACKWARD`
+(was `backward=True`); the default `TransitionMode.FORWARD` selects normal
+forward validation. The flag has no MCP/CLI/HTTP exposure, so there is no
+`backward=` compatibility alias — embedders of the Python API must migrate the
+keyword. `InvalidTransitionError.backward` is likewise now
+`InvalidTransitionError.mode`.
+
+### InvalidTransitionError / ClaimConflictError safe messages (3.0.0)
+
+`InvalidTransitionError` and `ClaimConflictError` (both `ValueError` subclasses,
+`filigree.types.api`) gained a `safe_message` property in 3.0.0, mirroring the
+`WrongProjectError` pattern. On the **untrusted** HTTP / MCP surfaces the error
+*string* is now the fixed, ID/actor-free `safe_message` (`"Requested status
+transition is not allowed"` / `"Issue is claimed by a different assignee"`)
+rather than the full `str(exc)`. The structured recovery data is **retained** in
+the wire `details` payload (transition: `current_status` / `type_name` /
+`to_state` / `valid_transitions`; claim: `observed` / `expected`), so agents
+still self-correct. The in-process Python API and the CLI keep the full rich
+`str(exc)`. See the
+[3.0.0 consumer migration guide §5](MIGRATION-3.0.md#5-safe_message-parity-for-claimtransition-errors).
 
 ---
 

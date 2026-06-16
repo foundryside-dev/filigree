@@ -20,21 +20,21 @@ import pytest
 from filigree.core import VALID_REGISTRY_BACKENDS, FiligreeDB
 from filigree.models import FileRecord
 from filigree.registry import (
-    CLARION_BATCH_MAX_QUERIES,
+    LOOMWEAVE_BATCH_MAX_QUERIES,
     BatchQuery,
     BatchResolution,
-    ClarionRegistry,
-    ClarionResolvedFile,
     LocalRegistry,
     LocalResolvedFile,
+    LoomweaveRegistry,
+    LoomweaveResolvedFile,
     RegistryBriefingBlockedError,
     RegistryFileNotFoundError,
     RegistryResolutionError,
     RegistryUnavailableError,
     ResolvedFile,
-    probe_clarion_capabilities,
+    probe_loomweave_capabilities,
 )
-from filigree.types.core import ClarionConfig, ContentHash, EntityId, FileId, FileRecordDict, ProjectConfig, RegistryBackend
+from filigree.types.core import ContentHash, EntityId, FileId, FileRecordDict, LoomweaveConfig, ProjectConfig, RegistryBackend
 
 
 def test_local_registry_resolves_file_with_local_identity() -> None:
@@ -58,11 +58,11 @@ def test_local_registry_resolves_file_with_local_identity() -> None:
     assert registry.is_displaced() is False
 
 
-def test_project_config_uses_typed_clarion_config() -> None:
+def test_project_config_uses_typed_loomweave_config() -> None:
     hints = get_type_hints(ProjectConfig)
 
-    assert hints["clarion"] is ClarionConfig
-    assert set(get_type_hints(ClarionConfig)) == {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
+    assert hints["loomweave"] is LoomweaveConfig
+    assert set(get_type_hints(LoomweaveConfig)) == {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
 
 
 def test_registry_backend_literal_is_shared_config_model_source_of_truth() -> None:
@@ -82,32 +82,39 @@ def test_file_record_documents_content_hash_backend_invariant() -> None:
     assert doc is not None
     assert "content_hash == ''" in doc
     assert "registry_backend == 'local'" in doc
-    assert "Clarion" in doc
+    assert "Loomweave" in doc
     assert "non-empty" in doc
 
 
-def test_filigree_db_reads_clarion_token_from_named_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """CONTRACT-2: ``ClarionConfig.token_env`` names the env var; the resolved
-    token threads into ``ClarionRegistry.auth_token``."""
+def test_default_token_env_is_weft_token() -> None:
+    """T1/Task 8: the hub-locked short-form federation token env var."""
+    from filigree.registry import DEFAULT_LOOMWEAVE_TOKEN_ENV
+
+    assert DEFAULT_LOOMWEAVE_TOKEN_ENV == "WEFT_TOKEN"  # noqa: S105
+
+
+def test_filigree_db_reads_loomweave_token_from_named_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CONTRACT-2: ``LoomweaveConfig.token_env`` names the env var; the resolved
+    token threads into ``LoomweaveRegistry.auth_token``."""
     from tests._fakes.clarion_http import clarion_stub
 
-    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "live-token-value")
+    monkeypatch.setenv("FILIGREE_TEST_WEFT_TOKEN", "live-token-value")
     with clarion_stub() as (base_url, state):
         state.required_token = "live-token-value"  # noqa: S105 — test fixture
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={
+            registry_backend="loomweave",
+            loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,
-                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+                "token_env": "FILIGREE_TEST_WEFT_TOKEN",
             },
         )
         db.initialize()
         try:
-            assert isinstance(db.registry, ClarionRegistry)
+            assert isinstance(db.registry, LoomweaveRegistry)
             assert db.registry.auth_token == "live-token-value"  # noqa: S105 — test fixture
             # Capability probe at startup sent the Bearer header.
             assert state.auth_headers_seen[0] == "Bearer live-token-value"
@@ -115,33 +122,33 @@ def test_filigree_db_reads_clarion_token_from_named_env_var(tmp_path: Path, monk
             db.close()
 
 
-def test_filigree_db_warns_when_clarion_token_env_unset(
+def test_filigree_db_warns_when_loomweave_token_env_unset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """CONTRACT-2: ``token_env`` explicitly configured but env var empty →
-    WARN log, no header sent, Clarion accepts on loopback."""
+    WARN log, no header sent, Loomweave accepts on loopback."""
     from tests._fakes.clarion_http import clarion_stub
 
-    monkeypatch.delenv("FILIGREE_TEST_LOOM_TOKEN_MISSING", raising=False)
+    monkeypatch.delenv("FILIGREE_TEST_WEFT_TOKEN_MISSING", raising=False)
     with clarion_stub() as (base_url, state):
-        # required_token stays None — Clarion accepts unauthenticated on loopback.
+        # required_token stays None — Loomweave accepts unauthenticated on loopback.
         with caplog.at_level(logging.WARNING, logger="filigree.core"):
             db = FiligreeDB(
                 tmp_path / "filigree.db",
                 prefix="test",
                 check_same_thread=False,
-                registry_backend="clarion",
-                clarion_config={
+                registry_backend="loomweave",
+                loomweave_config={
                     "base_url": base_url,
                     "timeout_seconds": 1,
-                    "token_env": "FILIGREE_TEST_LOOM_TOKEN_MISSING",
+                    "token_env": "FILIGREE_TEST_WEFT_TOKEN_MISSING",
                 },
             )
             db.initialize()
         try:
-            assert isinstance(db.registry, ClarionRegistry)
+            assert isinstance(db.registry, LoomweaveRegistry)
             assert db.registry.auth_token is None
             assert state.auth_headers_seen
             assert state.auth_headers_seen[0] is None
@@ -172,35 +179,35 @@ def test_filigree_db_exceptional_context_exit_closes_registry(tmp_path: Path) ->
     assert registry.closed
 
 
-def test_filigree_db_validates_programmatic_clarion_config(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="unknown clarion setting"):
+def test_filigree_db_validates_programmatic_loomweave_config(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown loomweave setting"):
         FiligreeDB(
             tmp_path / "unknown.db",
             prefix="test",
-            clarion_config={"base-url": "http://clarion.test"},  # type: ignore[typeddict-unknown-key]
+            loomweave_config={"base-url": "http://loomweave.test"},  # type: ignore[typeddict-unknown-key]
         )
 
     with pytest.raises(ValueError, match="allow_local_fallback"):
         FiligreeDB(
             tmp_path / "bad-fallback.db",
             prefix="test",
-            clarion_config={"allow_local_fallback": "yes"},  # type: ignore[typeddict-item]
+            loomweave_config={"allow_local_fallback": "yes"},  # type: ignore[typeddict-item]
         )
 
 
 def test_registry_resolved_file_uses_branded_file_identity_types() -> None:
-    # ResolvedFile is a discriminated union (LocalResolvedFile | ClarionResolvedFile),
+    # ResolvedFile is a discriminated union (LocalResolvedFile | LoomweaveResolvedFile),
     # so the branded identity types live on the members, pinned to the backend.
     local_hints = get_type_hints(LocalResolvedFile)
-    clarion_hints = get_type_hints(ClarionResolvedFile)
+    loomweave_hints = get_type_hints(LoomweaveResolvedFile)
 
     assert local_hints["file_id"] is FileId
     assert local_hints["content_hash"] == Literal[""]
     assert local_hints["registry_backend"] == Literal["local"]
 
-    assert clarion_hints["file_id"] is EntityId
-    assert clarion_hints["content_hash"] is ContentHash
-    assert clarion_hints["registry_backend"] == Literal["clarion"]
+    assert loomweave_hints["file_id"] is EntityId
+    assert loomweave_hints["content_hash"] is ContentHash
+    assert loomweave_hints["registry_backend"] == Literal["loomweave"]
 
 
 def test_filigree_db_composes_local_registry_by_default(tmp_path: Path) -> None:
@@ -217,7 +224,7 @@ def test_filigree_db_composes_local_registry_by_default(tmp_path: Path) -> None:
         db.close()
 
 
-def test_clarion_registry_resolves_file_via_http() -> None:
+def test_loomweave_registry_resolves_file_via_http() -> None:
     requests: list[dict[str, list[str]]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -246,7 +253,7 @@ def test_clarion_registry_resolves_file_via_http() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         resolved = registry.resolve_file("src/main.py", language="python", actor="tester")
 
@@ -256,7 +263,7 @@ def test_clarion_registry_resolves_file_via_http() -> None:
             "content_hash": "sha256:abc123",
             "canonical_path": "src/main.py",
             "language": "python",
-            "registry_backend": "clarion",
+            "registry_backend": "loomweave",
         }
         assert registry.is_displaced() is True
     finally:
@@ -265,7 +272,7 @@ def test_clarion_registry_resolves_file_via_http() -> None:
         thread.join(timeout=1)
 
 
-def test_clarion_registry_reuses_http_connection_for_contiguous_resolves() -> None:
+def test_loomweave_registry_reuses_http_connection_for_contiguous_resolves() -> None:
     connections: list[tuple[str, int]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -299,7 +306,7 @@ def test_clarion_registry_reuses_http_connection_for_contiguous_resolves() -> No
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         registry.resolve_file("src/one.py", language="python")
         registry.resolve_file("src/two.py", language="python")
@@ -315,7 +322,7 @@ def test_clarion_registry_reuses_http_connection_for_contiguous_resolves() -> No
         thread.join(timeout=1)
 
 
-def test_clarion_registry_follows_redirects_for_single_file_resolution() -> None:
+def test_loomweave_registry_follows_redirects_for_single_file_resolution() -> None:
     requests: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -355,7 +362,7 @@ def test_clarion_registry_follows_redirects_for_single_file_resolution() -> None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         resolved = registry.resolve_file("src/main.py", language="python")
 
@@ -370,7 +377,7 @@ def test_clarion_registry_follows_redirects_for_single_file_resolution() -> None
         thread.join(timeout=1)
 
 
-def test_clarion_registry_follows_redirects_for_batch_resolution() -> None:
+def test_loomweave_registry_follows_redirects_for_batch_resolution() -> None:
     requests: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -412,7 +419,7 @@ def test_clarion_registry_follows_redirects_for_batch_resolution() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         batch = registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
 
@@ -427,7 +434,7 @@ def test_clarion_registry_follows_redirects_for_batch_resolution() -> None:
         thread.join(timeout=1)
 
 
-def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
+def test_loomweave_registry_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
     requests: list[dict[str, list[str]]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -459,7 +466,7 @@ def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.Lo
     thread.start()
     try:
         caplog.set_level(logging.WARNING, logger="filigree.registry")
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         resolved = registry.resolve_file("src/main.py", language="python")
 
@@ -469,7 +476,7 @@ def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.Lo
         ]
         assert resolved["file_id"] == "core:file:abc123@src/main.py"
         retry_records = [
-            record for record in caplog.records if record.message == "Retrying Clarion registry request after transient failure"
+            record for record in caplog.records if record.message == "Retrying Loomweave registry request after transient failure"
         ]
         assert len(retry_records) == 1
         retry_extra = vars(retry_records[0])
@@ -482,7 +489,7 @@ def test_clarion_registry_retries_transient_5xx_before_success(caplog: pytest.Lo
         thread.join(timeout=1)
 
 
-def test_clarion_registry_batch_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
+def test_loomweave_registry_batch_retries_transient_5xx_before_success(caplog: pytest.LogCaptureFixture) -> None:
     """Batch resolve has the same transient-5xx retry parity as single-file resolve."""
     requests: list[str] = []
 
@@ -521,14 +528,14 @@ def test_clarion_registry_batch_retries_transient_5xx_before_success(caplog: pyt
     thread.start()
     try:
         caplog.set_level(logging.WARNING, logger="filigree.registry")
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         batch = registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
 
         assert requests == ["/api/v1/files/batch", "/api/v1/files/batch"]
         assert batch["resolved"]["src/main.py"]["file_id"] == "core:file:abc123@src/main.py"
         retry_records = [
-            record for record in caplog.records if record.message == "Retrying Clarion registry request after transient failure"
+            record for record in caplog.records if record.message == "Retrying Loomweave registry request after transient failure"
         ]
         assert len(retry_records) == 1
         retry_extra = vars(retry_records[0])
@@ -541,22 +548,22 @@ def test_clarion_registry_batch_retries_transient_5xx_before_success(caplog: pyt
         thread.join(timeout=1)
 
 
-@pytest.mark.parametrize("base_url", ["ftp://clarion.test", "http://", "localhost:9111", "http:///api"])
-def test_clarion_registry_rejects_invalid_base_url(base_url: str) -> None:
+@pytest.mark.parametrize("base_url", ["ftp://loomweave.test", "http://", "localhost:9111", "http:///api"])
+def test_loomweave_registry_rejects_invalid_base_url(base_url: str) -> None:
     with pytest.raises(ValueError, match="base_url"):
-        ClarionRegistry(base_url)
+        LoomweaveRegistry(base_url)
 
 
 @pytest.mark.parametrize("timeout_seconds", [0, -1, False, "slow"])
-def test_clarion_registry_rejects_invalid_timeout_seconds(timeout_seconds: object) -> None:
+def test_loomweave_registry_rejects_invalid_timeout_seconds(timeout_seconds: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
-        ClarionRegistry("http://clarion.test", timeout_seconds=timeout_seconds)  # type: ignore[arg-type]
+        LoomweaveRegistry("http://loomweave.test", timeout_seconds=timeout_seconds)  # type: ignore[arg-type]
 
 
-def test_clarion_registry_is_immutable() -> None:
-    registry = ClarionRegistry("http://clarion.test/")
+def test_loomweave_registry_is_immutable() -> None:
+    registry = LoomweaveRegistry("http://loomweave.test/")
 
-    assert registry.base_url == "http://clarion.test"
+    assert registry.base_url == "http://loomweave.test"
     with pytest.raises(FrozenInstanceError):
         registry.base_url = "http://other.test"  # type: ignore[misc]
 
@@ -564,23 +571,23 @@ def test_clarion_registry_is_immutable() -> None:
 def test_registry_unavailable_error_carries_structured_fields() -> None:
     error = RegistryUnavailableError(
         "registry unavailable",
-        url="http://clarion.test/api/v1/files?path=src/main.py",
+        url="http://loomweave.test/api/v1/files?path=src/main.py",
         path="src/main.py",
         cause_kind="network",
     )
 
     assert str(error) == "registry unavailable"
-    assert error.url == "http://clarion.test/api/v1/files?path=src/main.py"
+    assert error.url == "http://loomweave.test/api/v1/files?path=src/main.py"
     assert error.path == "src/main.py"
     assert error.cause_kind == "network"
 
 
-def test_clarion_registry_wraps_unreachable_backend() -> None:
+def test_loomweave_registry_wraps_unreachable_backend() -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         host, port = sock.getsockname()
 
-    registry = ClarionRegistry(f"http://{host}:{port}", timeout_seconds=0.1)
+    registry = LoomweaveRegistry(f"http://{host}:{port}", timeout_seconds=0.1)
 
     with pytest.raises(RegistryUnavailableError, match="/api/v1/files") as exc_info:
         registry.resolve_file("src/main.py", language="python")
@@ -590,7 +597,7 @@ def test_clarion_registry_wraps_unreachable_backend() -> None:
     assert exc_info.value.cause_kind == "network"
 
 
-def test_clarion_registry_distinguishes_unknown_file_from_unavailable() -> None:
+def test_loomweave_registry_distinguishes_unknown_file_from_unavailable() -> None:
     requests = 0
 
     class Handler(BaseHTTPRequestHandler):
@@ -606,7 +613,7 @@ def test_clarion_registry_distinguishes_unknown_file_from_unavailable() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryFileNotFoundError, match="HTTP 404 not indexed") as exc_info:
             registry.resolve_file("src/missing.py", language="python")
@@ -639,30 +646,30 @@ def test_local_registry_resolve_files_batch_returns_per_query_resolution() -> No
     assert batch["errors"] == []
 
 
-def test_clarion_registry_resolve_files_batch_chunks_at_256() -> None:
+def test_loomweave_registry_resolve_files_batch_chunks_at_256() -> None:
     """CONTRACT-1: 300 queries → 2 HTTP POSTs (chunks 256 + 44)."""
     from tests._fakes.clarion_http import clarion_stub
 
     paths = [f"src/file_{i:04d}.py" for i in range(300)]
     queries = [BatchQuery(path=p, language="python") for p in paths]
     with clarion_stub() as (base_url, state):
-        registry = ClarionRegistry(base_url, timeout_seconds=2)
+        registry = LoomweaveRegistry(base_url, timeout_seconds=2)
 
         batch = registry.resolve_files_batch(queries)
 
     assert len(batch["resolved"]) == 300
     assert len(state.batch_requests) == 2
-    assert len(state.batch_requests[0]["queries"]) == CLARION_BATCH_MAX_QUERIES
-    assert len(state.batch_requests[1]["queries"]) == 300 - CLARION_BATCH_MAX_QUERIES
+    assert len(state.batch_requests[0]["queries"]) == LOOMWEAVE_BATCH_MAX_QUERIES
+    assert len(state.batch_requests[1]["queries"]) == 300 - LOOMWEAVE_BATCH_MAX_QUERIES
 
 
-def test_clarion_registry_resolve_files_batch_separates_resolved_and_briefing_blocked() -> None:
+def test_loomweave_registry_resolve_files_batch_separates_resolved_and_briefing_blocked() -> None:
     """CONTRACT-1: structured response splits ``resolved`` from ``briefing_blocked``."""
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, state):
         state.briefing_blocked_paths.add("src/secrets.py")
-        registry = ClarionRegistry(base_url, timeout_seconds=2)
+        registry = LoomweaveRegistry(base_url, timeout_seconds=2)
 
         batch = registry.resolve_files_batch(
             [
@@ -676,7 +683,7 @@ def test_clarion_registry_resolve_files_batch_separates_resolved_and_briefing_bl
     assert batch["errors"] == []
 
 
-def test_clarion_registry_rejects_batch_response_missing_requested_path() -> None:
+def test_loomweave_registry_rejects_batch_response_missing_requested_path() -> None:
     """Every requested path must appear in exactly one batch result channel."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -695,7 +702,7 @@ def test_clarion_registry_rejects_batch_response_missing_requested_path() -> Non
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="missing outcome") as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/missing-outcome.py", language="python")])
@@ -746,7 +753,7 @@ def test_clarion_registry_rejects_batch_response_missing_requested_path() -> Non
         ),
     ],
 )
-def test_clarion_registry_rejects_batch_response_with_ambiguous_path_outcomes(
+def test_loomweave_registry_rejects_batch_response_with_ambiguous_path_outcomes(
     payload: dict[str, object],
     message: str,
 ) -> None:
@@ -766,7 +773,7 @@ def test_clarion_registry_rejects_batch_response_with_ambiguous_path_outcomes(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/requested.py", language="python")])
@@ -786,7 +793,7 @@ def test_clarion_registry_rejects_batch_response_with_ambiguous_path_outcomes(
         ("errors", [{"requested_path": "src/x.py", "code": "ERR"}], "errors"),
     ],
 )
-def test_clarion_registry_rejects_malformed_batch_failure_channels(
+def test_loomweave_registry_rejects_malformed_batch_failure_channels(
     field: str,
     value: object,
     message: str,
@@ -814,7 +821,7 @@ def test_clarion_registry_rejects_malformed_batch_failure_channels(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/x.py", language="python")])
@@ -847,8 +854,8 @@ def _serve_one_payload(payload: dict[str, object]) -> tuple[ThreadingHTTPServer,
     return server, thread
 
 
-def test_clarion_registry_rejects_sei_resolution_missing_requested_locator() -> None:
-    """A locator Clarion drops from every channel must raise, not vanish.
+def test_loomweave_registry_rejects_sei_resolution_missing_requested_locator() -> None:
+    """A locator Loomweave drops from every channel must raise, not vanish.
 
     The backfill treats a missing ``resolved`` entry as "orphan this binding"
     (writes ``migration_orphaned_at``). If a truncated/buggy response silently
@@ -858,7 +865,7 @@ def test_clarion_registry_rejects_sei_resolution_missing_requested_locator() -> 
     file-path sibling does."""
     server, thread = _serve_one_payload({"resolved": {}, "not_found": [], "invalid": []})
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="missing outcome") as exc_info:
             registry.resolve_locators_batch(["core:file:abc123@src/dropped.py"])
@@ -879,7 +886,7 @@ def test_clarion_registry_rejects_sei_resolution_missing_requested_locator() -> 
         ),
         (
             {
-                "resolved": {"core:file:dup@src/dup.py": {"sei": "clarion:sei:9"}},
+                "resolved": {"core:file:dup@src/dup.py": {"sei": "loomweave:sei:9"}},
                 "not_found": ["core:file:dup@src/dup.py"],
                 "invalid": [],
             },
@@ -887,7 +894,7 @@ def test_clarion_registry_rejects_sei_resolution_missing_requested_locator() -> 
         ),
     ],
 )
-def test_clarion_registry_rejects_sei_resolution_with_ambiguous_locator_outcomes(
+def test_loomweave_registry_rejects_sei_resolution_with_ambiguous_locator_outcomes(
     payload: dict[str, object],
     message: str,
 ) -> None:
@@ -895,7 +902,7 @@ def test_clarion_registry_rejects_sei_resolution_with_ambiguous_locator_outcomes
     no locator claimed by two channels at once."""
     server, thread = _serve_one_payload(payload)
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match=message) as exc_info:
             registry.resolve_locators_batch(["core:file:dup@src/dup.py"])
@@ -907,7 +914,7 @@ def test_clarion_registry_rejects_sei_resolution_with_ambiguous_locator_outcomes
         thread.join(timeout=1)
 
 
-def test_clarion_registry_batch_http_403_briefing_blocked_bypasses_unavailable_fallback() -> None:
+def test_loomweave_registry_batch_http_403_briefing_blocked_bypasses_unavailable_fallback() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.dumps({"error": "blocked", "code": "BRIEFING_BLOCKED"}).encode()
@@ -924,7 +931,7 @@ def test_clarion_registry_batch_http_403_briefing_blocked_bypasses_unavailable_f
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryBriefingBlockedError) as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/secrets.py", language="python")])
@@ -937,7 +944,7 @@ def test_clarion_registry_batch_http_403_briefing_blocked_bypasses_unavailable_f
         thread.join(timeout=1)
 
 
-def test_clarion_registry_batch_http_400_is_resolution_error_not_unavailable() -> None:
+def test_loomweave_registry_batch_http_400_is_resolution_error_not_unavailable() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.dumps({"error": "bad request", "code": "BAD_BATCH"}).encode()
@@ -954,7 +961,7 @@ def test_clarion_registry_batch_http_400_is_resolution_error_not_unavailable() -
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryResolutionError) as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/bad.py", language="python")])
@@ -967,98 +974,98 @@ def test_clarion_registry_batch_http_400_is_resolution_error_not_unavailable() -
         thread.join(timeout=1)
 
 
-def test_clarion_registry_sends_no_authorization_header_when_no_token_configured() -> None:
+def test_loomweave_registry_sends_no_authorization_header_when_no_token_configured() -> None:
     """CONTRACT-2 baseline: with ``auth_token=None`` (default), no
-    Authorization header is sent — Clarion's loopback bind accepts."""
+    Authorization header is sent — Loomweave's loopback bind accepts."""
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, state):
-        registry = ClarionRegistry(base_url, timeout_seconds=1)
+        registry = LoomweaveRegistry(base_url, timeout_seconds=1)
 
         resolved = registry.resolve_file("src/x.py", language="python")
 
-    assert resolved["registry_backend"] == "clarion"
-    # capability probe is not invoked by ClarionRegistry itself; the only
+    assert resolved["registry_backend"] == "loomweave"
+    # capability probe is not invoked by LoomweaveRegistry itself; the only
     # request issued here was /api/v1/files, so exactly one header tracked.
     assert state.auth_headers_seen == [None]
 
 
-def test_clarion_registry_sends_bearer_authorization_when_token_provided() -> None:
+def test_loomweave_registry_sends_bearer_authorization_when_token_provided() -> None:
     """CONTRACT-2 happy path: token set → ``Authorization: Bearer <token>``
     on every outbound request."""
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, state):
-        state.required_token = "test-loom-token"  # noqa: S105 — test fixture
-        registry = ClarionRegistry(base_url, timeout_seconds=1, auth_token="test-loom-token")  # noqa: S106 — test fixture
+        state.required_token = "test-weft-token"  # noqa: S105 — test fixture
+        registry = LoomweaveRegistry(base_url, timeout_seconds=1, auth_token="test-weft-token")  # noqa: S106 — test fixture
 
         resolved = registry.resolve_file("src/x.py", language="python")
         registry.resolve_file("src/y.py", language="python")
 
-    assert resolved["registry_backend"] == "clarion"
-    assert state.auth_headers_seen == ["Bearer test-loom-token", "Bearer test-loom-token"]
+    assert resolved["registry_backend"] == "loomweave"
+    assert state.auth_headers_seen == ["Bearer test-weft-token", "Bearer test-weft-token"]
 
 
-def test_clarion_registry_rejects_token_for_untrusted_origin_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_registry_rejects_token_for_untrusted_origin_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_client(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("token-bearing non-loopback registry must not create an HTTP client")
 
     monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
 
-    with pytest.raises(ValueError, match="loopback Clarion origins"):
-        ClarionRegistry(
+    with pytest.raises(ValueError, match="loopback Loomweave origins"):
+        LoomweaveRegistry(
             "https://example.invalid",
             timeout_seconds=1,
-            auth_token="test-loom-token",  # noqa: S106 - test fixture
+            auth_token="test-weft-token",  # noqa: S106 - test fixture
         )
 
 
-def test_clarion_registry_rejects_non_string_auth_token_before_creating_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_registry_rejects_non_string_auth_token_before_creating_client(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_client(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("invalid auth_token must not create an HTTP client")
 
     monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
 
     with pytest.raises(ValueError, match="auth_token must be a string"):
-        ClarionRegistry(
+        LoomweaveRegistry(
             "http://127.0.0.1:8765",
             timeout_seconds=1,
             auth_token=cast(str, object()),
         )
 
 
-def test_filigree_db_skip_probe_still_rejects_clarion_token_for_untrusted_origin(
+def test_filigree_db_skip_probe_still_rejects_loomweave_token_for_untrusted_origin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FILIGREE_TEST_LOOM_TOKEN", "test-loom-token")
+    monkeypatch.setenv("FILIGREE_TEST_WEFT_TOKEN", "test-weft-token")
 
-    with pytest.raises(ValueError, match="loopback Clarion origins"):
+    with pytest.raises(ValueError, match="loopback Loomweave origins"):
         FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
-            clarion_config={
+            registry_backend="loomweave",
+            loomweave_config={
                 "base_url": "https://example.invalid",
                 "timeout_seconds": 1,
-                "token_env": "FILIGREE_TEST_LOOM_TOKEN",
+                "token_env": "FILIGREE_TEST_WEFT_TOKEN",
             },
-            skip_clarion_capability_probe=True,
+            skip_loomweave_capability_probe=True,
         )
 
 
 @pytest.mark.parametrize(
     ("url_builder_name", "operation"),
     [
-        ("clarion_file_read_url", lambda registry: registry.resolve_file("src/x.py", language="python")),
-        ("clarion_files_batch_url", lambda registry: registry.resolve_files_batch([BatchQuery(path="src/x.py", language="python")])),
-        ("clarion_identity_resolve_batch_url", lambda registry: registry.resolve_locators_batch(["core:file:abc123@src/x.py"])),
+        ("loomweave_file_read_url", lambda registry: registry.resolve_file("src/x.py", language="python")),
+        ("loomweave_files_batch_url", lambda registry: registry.resolve_files_batch([BatchQuery(path="src/x.py", language="python")])),
+        ("loomweave_identity_resolve_batch_url", lambda registry: registry.resolve_locators_batch(["core:file:abc123@src/x.py"])),
     ],
 )
-def test_clarion_registry_rechecks_token_origin_for_concrete_request_urls(
+def test_loomweave_registry_rechecks_token_origin_for_concrete_request_urls(
     monkeypatch: pytest.MonkeyPatch,
     url_builder_name: str,
-    operation: Callable[[ClarionRegistry], object],
+    operation: Callable[[LoomweaveRegistry], object],
 ) -> None:
     class FailClient:
         def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
@@ -1067,19 +1074,19 @@ def test_clarion_registry_rechecks_token_origin_for_concrete_request_urls(
         def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
             raise AssertionError("token-bearing non-loopback request must not reach the network")
 
-    registry = ClarionRegistry(
+    registry = LoomweaveRegistry(
         "http://127.0.0.1:1",
         timeout_seconds=1,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
     object.__setattr__(registry, "_http_client", FailClient())
     monkeypatch.setattr("filigree.registry." + url_builder_name, lambda *_args, **_kwargs: "https://example.invalid/api/v1/files")
 
-    with pytest.raises(ValueError, match="loopback Clarion origins"):
+    with pytest.raises(ValueError, match="loopback Loomweave origins"):
         operation(registry)
 
 
-def test_clarion_registry_disables_redirects_when_auth_token_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_registry_disables_redirects_when_auth_token_provided(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: dict[str, object] = {}
 
     class FakeClient:
@@ -1088,31 +1095,31 @@ def test_clarion_registry_disables_redirects_when_auth_token_provided(monkeypatc
 
     monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
 
-    ClarionRegistry(
+    LoomweaveRegistry(
         "http://127.0.0.1:8765",
         timeout_seconds=1,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
 
     assert observed["trust_env"] is False
     assert observed["follow_redirects"] is False
 
 
-def test_clarion_capability_probe_rejects_token_for_untrusted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_capability_probe_rejects_token_for_untrusted_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_client(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("token-bearing non-loopback probe must not reach the network")
 
     monkeypatch.setattr("filigree.registry.httpx.Client", fail_client)
 
     with pytest.raises(ValueError, match="auth_token"):
-        probe_clarion_capabilities(
+        probe_loomweave_capabilities(
             "https://attacker.example",
             timeout_seconds=1,
-            auth_token="test-loom-token",  # noqa: S106 - test fixture
+            auth_token="test-weft-token",  # noqa: S106 - test fixture
         )
 
 
-def test_clarion_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: dict[str, object] = {}
 
     class FakeClient:
@@ -1135,22 +1142,22 @@ def test_clarion_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.M
                     "registry_backend": True,
                     "file_registry": True,
                     "api_version": 1,
-                    "instance_id": "clarion-test",
+                    "instance_id": "loomweave-test",
                 },
             )
 
     monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
 
-    capabilities = probe_clarion_capabilities(
+    capabilities = probe_loomweave_capabilities(
         "http://127.0.0.1:8765",
         timeout_seconds=2,
-        auth_token="test-loom-token",  # noqa: S106 - test fixture
+        auth_token="test-weft-token",  # noqa: S106 - test fixture
     )
 
     assert capabilities["registry_backend"] is True
     assert observed["trust_env"] is False
     assert observed["follow_redirects"] is False
-    assert observed["headers"] == {"Authorization": "Bearer test-loom-token"}
+    assert observed["headers"] == {"Authorization": "Bearer test-weft-token"}
     assert observed["timeout"] == 2
 
 
@@ -1166,7 +1173,7 @@ def test_clarion_capability_probe_uses_runtime_http_policy(monkeypatch: pytest.M
         ),
     ],
 )
-def test_clarion_capability_probe_rejects_invalid_response_shapes(
+def test_loomweave_capability_probe_rejects_invalid_response_shapes(
     monkeypatch: pytest.MonkeyPatch,
     response: bytes,
     expected_message: str,
@@ -1189,7 +1196,7 @@ def test_clarion_capability_probe_rejects_invalid_response_shapes(
     monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
 
     with pytest.raises(RegistryUnavailableError, match=expected_message) as exc_info:
-        probe_clarion_capabilities("http://127.0.0.1:8765", timeout_seconds=1)
+        probe_loomweave_capabilities("http://127.0.0.1:8765", timeout_seconds=1)
 
     assert exc_info.value.cause_kind == "invalid_response"
 
@@ -1201,8 +1208,8 @@ def test_clarion_capability_probe_rejects_invalid_response_shapes(
         (lambda registry: registry.resolve_locators_batch(["core:file:abc123@src/bad-json.py"]), "returned invalid JSON"),
     ],
 )
-def test_clarion_registry_read_paths_reject_invalid_json_payloads(
-    operation: Callable[[ClarionRegistry], object],
+def test_loomweave_registry_read_paths_reject_invalid_json_payloads(
+    operation: Callable[[LoomweaveRegistry], object],
     expected_message: str,
 ) -> None:
     class FakeClient:
@@ -1212,7 +1219,7 @@ def test_clarion_registry_read_paths_reject_invalid_json_payloads(
         def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
             return httpx.Response(200, content=b"{")
 
-    registry = ClarionRegistry("http://127.0.0.1:8765", timeout_seconds=1)
+    registry = LoomweaveRegistry("http://127.0.0.1:8765", timeout_seconds=1)
     object.__setattr__(registry, "_http_client", FakeClient())
 
     with pytest.raises(RegistryUnavailableError, match=expected_message) as exc_info:
@@ -1221,14 +1228,14 @@ def test_clarion_registry_read_paths_reject_invalid_json_payloads(
     assert exc_info.value.cause_kind == "invalid_response"
 
 
-def test_clarion_registry_maps_401_to_registry_unavailable_with_auth_cause_kind() -> None:
-    """CONTRACT-2: wrong token → Clarion returns 401 → ``RegistryUnavailableError``
+def test_loomweave_registry_maps_401_to_registry_unavailable_with_auth_cause_kind() -> None:
+    """CONTRACT-2: wrong token → Loomweave returns 401 → ``RegistryUnavailableError``
     with ``cause_kind="auth"`` so fallback policy can engage uniformly."""
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, state):
         state.required_token = "expected-token"  # noqa: S105 — test fixture
-        registry = ClarionRegistry(base_url, timeout_seconds=1, auth_token="wrong-token")  # noqa: S106 — test fixture
+        registry = LoomweaveRegistry(base_url, timeout_seconds=1, auth_token="wrong-token")  # noqa: S106 — test fixture
 
         with pytest.raises(RegistryUnavailableError) as exc_info:
             registry.resolve_file("src/x.py", language="python")
@@ -1237,8 +1244,8 @@ def test_clarion_registry_maps_401_to_registry_unavailable_with_auth_cause_kind(
     assert "401" in str(exc_info.value)
 
 
-def test_clarion_registry_raises_briefing_blocked_on_403_with_code() -> None:
-    """CONTRACT-3: Clarion 1.0 returns 403 + ``{"code": "BRIEFING_BLOCKED"}``
+def test_loomweave_registry_raises_briefing_blocked_on_403_with_code() -> None:
+    """CONTRACT-3: Loomweave 1.0 returns 403 + ``{"code": "BRIEFING_BLOCKED"}``
     for paths it intentionally withholds. Filigree must raise
     ``RegistryBriefingBlockedError`` — a separate class that the fallback
     wrapper does NOT swallow.
@@ -1247,7 +1254,7 @@ def test_clarion_registry_raises_briefing_blocked_on_403_with_code() -> None:
 
     with clarion_stub() as (base_url, state):
         state.briefing_blocked_paths.add("src/secrets.py")
-        registry = ClarionRegistry(base_url, timeout_seconds=1)
+        registry = LoomweaveRegistry(base_url, timeout_seconds=1)
 
         with pytest.raises(RegistryBriefingBlockedError) as exc_info:
             registry.resolve_file("src/secrets.py", language="python")
@@ -1262,7 +1269,7 @@ def test_clarion_registry_raises_briefing_blocked_on_403_with_code() -> None:
     assert not isinstance(exc_info.value, RegistryFileNotFoundError)
 
 
-def test_clarion_registry_treats_403_without_code_as_generic_resolution_error() -> None:
+def test_loomweave_registry_treats_403_without_code_as_generic_resolution_error() -> None:
     """A bare 403 (no ``code: BRIEFING_BLOCKED`` body) must NOT be promoted
     to ``RegistryBriefingBlockedError`` — that would mis-attribute an
     auth/policy refusal as a briefing block.
@@ -1284,7 +1291,7 @@ def test_clarion_registry_treats_403_without_code_as_generic_resolution_error() 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryResolutionError) as exc_info:
             registry.resolve_file("src/main.py", language="python")
@@ -1296,7 +1303,7 @@ def test_clarion_registry_treats_403_without_code_as_generic_resolution_error() 
         thread.join(timeout=1)
 
 
-def test_clarion_registry_rejects_malformed_response() -> None:
+def test_loomweave_registry_rejects_malformed_response() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             body = json.dumps({"entity_id": "core:file:abc123@src/main.py"}).encode()
@@ -1313,7 +1320,7 @@ def test_clarion_registry_rejects_malformed_response() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="content_hash") as exc_info:
             registry.resolve_file("src/main.py", language="python")
@@ -1327,7 +1334,7 @@ def test_clarion_registry_rejects_malformed_response() -> None:
         thread.join(timeout=1)
 
 
-def test_clarion_registry_rejects_blank_content_hash() -> None:
+def test_loomweave_registry_rejects_blank_content_hash() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             body = json.dumps(
@@ -1351,7 +1358,7 @@ def test_clarion_registry_rejects_blank_content_hash() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="content_hash"):
             registry.resolve_file("src/main.py", language="python")
@@ -1361,7 +1368,7 @@ def test_clarion_registry_rejects_blank_content_hash() -> None:
         thread.join(timeout=1)
 
 
-def test_clarion_registry_wraps_invalid_entity_id_as_invalid_response() -> None:
+def test_loomweave_registry_wraps_invalid_entity_id_as_invalid_response() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             body = json.dumps(
@@ -1385,7 +1392,7 @@ def test_clarion_registry_wraps_invalid_entity_id_as_invalid_response() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="entity_id") as exc_info:
             registry.resolve_file("src/main.py", language="python")
@@ -1398,7 +1405,7 @@ def test_clarion_registry_wraps_invalid_entity_id_as_invalid_response() -> None:
         thread.join(timeout=1)
 
 
-def test_clarion_registry_wraps_batch_invalid_entity_id_as_invalid_response() -> None:
+def test_loomweave_registry_wraps_batch_invalid_entity_id_as_invalid_response() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.dumps(
@@ -1430,7 +1437,7 @@ def test_clarion_registry_wraps_batch_invalid_entity_id_as_invalid_response() ->
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        registry = ClarionRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
+        registry = LoomweaveRegistry(f"http://127.0.0.1:{server.server_port}", timeout_seconds=1)
 
         with pytest.raises(RegistryUnavailableError, match="entity_id") as exc_info:
             registry.resolve_files_batch([BatchQuery(path="src/main.py", language="python")])
@@ -1442,15 +1449,15 @@ def test_clarion_registry_wraps_batch_invalid_entity_id_as_invalid_response() ->
         thread.join(timeout=1)
 
 
-def test_filigree_db_composes_clarion_registry_when_configured(tmp_path: Path) -> None:
+def test_filigree_db_composes_loomweave_registry_when_configured(tmp_path: Path) -> None:
     from tests._fakes.clarion_http import clarion_stub
 
     with clarion_stub() as (base_url, _state):
         db = FiligreeDB(
             tmp_path / "filigree.db",
             prefix="test",
-            registry_backend="clarion",
-            clarion_config={"base_url": base_url, "timeout_seconds": 1},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1},
         )
         try:
             db.initialize()
@@ -1459,16 +1466,16 @@ def test_filigree_db_composes_clarion_registry_when_configured(tmp_path: Path) -
 
             assert file_record.id == "core:file:stub@src/main.py"
             assert file_record.content_hash == "sha256:src/main.py"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             assert db.registry.is_displaced() is True
         finally:
             db.close()
 
 
-def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_filigree_db_allow_local_fallback_tries_loomweave_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     resolutions: list[str] = []
 
-    class FakeClarionRegistry:
+    class FakeLoomweaveRegistry:
         def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
             self.base_url = base_url
             self.timeout_seconds = timeout_seconds
@@ -1479,24 +1486,24 @@ def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, mo
             return cast(
                 ResolvedFile,
                 {
-                    "file_id": "core:file:clarion-first@src/fallback.py",
-                    "content_hash": "sha256:clarion-first",
+                    "file_id": "core:file:loomweave-first@src/fallback.py",
+                    "content_hash": "sha256:loomweave-first",
                     "canonical_path": path,
                     "language": language,
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                 },
             )
 
         def is_displaced(self) -> bool:
             return True
 
-    monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
+    monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
-        clarion_config={
-            "base_url": "http://clarion.test",
+        registry_backend="loomweave",
+        loomweave_config={
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 1,
             "allow_local_fallback": True,
         },
@@ -1507,17 +1514,17 @@ def test_filigree_db_allow_local_fallback_tries_clarion_first(tmp_path: Path, mo
         file_record = db.register_file("src/fallback.py", language="python")
 
         assert resolutions == ["src/fallback.py"]
-        assert file_record.id == "core:file:clarion-first@src/fallback.py"
-        assert file_record.content_hash == "sha256:clarion-first"
-        assert file_record.registry_backend == "clarion"
+        assert file_record.id == "core:file:loomweave-first@src/fallback.py"
+        assert file_record.content_hash == "sha256:loomweave-first"
+        assert file_record.registry_backend == "loomweave"
         assert db.registry.is_displaced() is True
     finally:
         db.close()
 
 
-def test_filigree_db_requires_explicit_clarion_base_url(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match=r"clarion\.base_url"):
-        FiligreeDB(tmp_path / "filigree.db", prefix="test", registry_backend="clarion")
+def test_filigree_db_requires_explicit_loomweave_base_url(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"loomweave\.base_url"):
+        FiligreeDB(tmp_path / "filigree.db", prefix="test", registry_backend="loomweave")
 
 
 def test_filigree_db_allow_local_fallback_uses_local_registry(
@@ -1527,7 +1534,7 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
 ) -> None:
     resolution_attempts: list[str] = []
 
-    class FailingClarionRegistry:
+    class FailingLoomweaveRegistry:
         def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
             self.base_url = base_url
             self.timeout_seconds = timeout_seconds
@@ -1536,7 +1543,7 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
             resolution_attempts.append(path)
             raise RegistryUnavailableError(
-                "Clarion unavailable for test",
+                "Loomweave unavailable for test",
                 url=f"{self.base_url}/api/v1/files",
                 path=path,
                 cause_kind="network",
@@ -1545,13 +1552,13 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         def is_displaced(self) -> bool:
             return True
 
-    monkeypatch.setattr("filigree.core.ClarionRegistry", FailingClarionRegistry)
+    monkeypatch.setattr("filigree.core.LoomweaveRegistry", FailingLoomweaveRegistry)
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
-        clarion_config={
-            "base_url": "http://clarion.test",
+        registry_backend="loomweave",
+        loomweave_config={
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 0.1,
             "allow_local_fallback": True,
         },
@@ -1579,7 +1586,7 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         assert event is not None
         assert event["event_type"] == "registry_local_fallback"
         assert event["field"] == "registry_backend"
-        assert event["old_value"] == "clarion"
+        assert event["old_value"] == "loomweave"
         assert event["new_value"] == "local"
         assert result["files_created"] == 1
         # CONTRACT-1: scan-results now goes through resolve_files_batch, so
@@ -1589,13 +1596,13 @@ def test_filigree_db_allow_local_fallback_uses_local_registry(
         db.close()
 
 
-def test_filigree_db_allow_local_fallback_rejects_invalid_clarion_batch_response(
+def test_filigree_db_allow_local_fallback_rejects_invalid_loomweave_batch_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolution_attempts: list[list[str]] = []
 
-    class MalformedBatchClarionRegistry:
+    class MalformedBatchLoomweaveRegistry:
         def __init__(self, base_url: str, *, timeout_seconds: float = 5, auth_token: str | None = None) -> None:
             self.base_url = base_url
             self.timeout_seconds = timeout_seconds
@@ -1607,7 +1614,7 @@ def test_filigree_db_allow_local_fallback_rejects_invalid_clarion_batch_response
         def resolve_files_batch(self, queries: list[BatchQuery], *, actor: str = "") -> BatchResolution:
             resolution_attempts.append([query["path"] for query in queries])
             raise RegistryUnavailableError(
-                "Clarion batch resolve returned an ambiguous briefing_blocked response",
+                "Loomweave batch resolve returned an ambiguous briefing_blocked response",
                 url=f"{self.base_url}/api/v1/files/batch",
                 path="",
                 cause_kind="invalid_response",
@@ -1616,13 +1623,13 @@ def test_filigree_db_allow_local_fallback_rejects_invalid_clarion_batch_response
         def is_displaced(self) -> bool:
             return True
 
-    monkeypatch.setattr("filigree.core.ClarionRegistry", MalformedBatchClarionRegistry)
+    monkeypatch.setattr("filigree.core.LoomweaveRegistry", MalformedBatchLoomweaveRegistry)
     db = FiligreeDB(
         tmp_path / "filigree.db",
         prefix="test",
-        registry_backend="clarion",
-        clarion_config={
-            "base_url": "http://clarion.test",
+        registry_backend="loomweave",
+        loomweave_config={
+            "base_url": "http://loomweave.test",
             "timeout_seconds": 0.1,
             "allow_local_fallback": True,
         },
@@ -1656,12 +1663,12 @@ def test_filigree_db_logs_hybrid_registry_state_on_startup(tmp_path: Path, caplo
         db = FiligreeDB(
             db_path,
             prefix="test",
-            registry_backend="clarion",
-            clarion_config={"base_url": "http://clarion.test"},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": "http://loomweave.test"},
             # Test exercises hybrid-state detection logic on initialize(),
             # not the capability handshake — skip the probe so the
             # unreachable URL doesn't abort __init__.
-            skip_clarion_capability_probe=True,
+            skip_loomweave_capability_probe=True,
         )
         try:
             db.initialize()
@@ -1670,11 +1677,11 @@ def test_filigree_db_logs_hybrid_registry_state_on_startup(tmp_path: Path, caplo
 
     records = [record for record in caplog.records if record.message == "file_registry_hybrid_state_detected"]
     assert records
-    assert records[0].registry_backend == "clarion"
+    assert records[0].registry_backend == "loomweave"
     assert records[0].local_file_records == 1
 
 
-def test_filigree_db_rejects_injected_local_registry_for_clarion_backend(tmp_path: Path) -> None:
+def test_filigree_db_rejects_injected_local_registry_for_loomweave_backend(tmp_path: Path) -> None:
     registry = LocalRegistry(lambda: "test-f-1")
 
     with pytest.raises(ValueError, match="Injected registry displacement"):
@@ -1682,12 +1689,12 @@ def test_filigree_db_rejects_injected_local_registry_for_clarion_backend(tmp_pat
             tmp_path / "filigree.db",
             prefix="test",
             registry=registry,
-            registry_backend="clarion",
+            registry_backend="loomweave",
         )
 
 
 def test_filigree_db_rejects_injected_displaced_registry_for_local_backend(tmp_path: Path) -> None:
-    registry = ClarionRegistry("http://127.0.0.1:9", timeout_seconds=0.1)
+    registry = LoomweaveRegistry("http://127.0.0.1:9", timeout_seconds=0.1)
 
     with pytest.raises(ValueError, match="Injected registry displacement"):
         FiligreeDB(

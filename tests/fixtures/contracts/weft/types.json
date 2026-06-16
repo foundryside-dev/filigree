@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "contract": "filigree-weft",
+    "stability": "Frozen for the weft-generation lifetime per ADR-002.",
+    "authority": [
+      "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md"
+    ],
+    "pinning_discipline": "shape reference; see docs/federation/contracts.md",
+    "updated": "2026-04-26",
+    "endpoint": "GET /api/weft/types",
+    "status": "live as of Phase C4.",
+    "relation_to_classic": "Classic GET /api/types returns a bare list of {type, display_name, pack, initial_state}. Weft wraps the same projection in ListResponse[TypeSummaryWeft] with has_more always false."
+  },
+  "shape_decl": {
+    "request_type": "GET (no body, no query params)",
+    "response_type": "ListResponse[TypeSummaryWeft]",
+    "rationale": "TypeSummaryWeft mirrors classic /api/types item shape; 'type' is the entity's logical primary key but already string-named, no rename."
+  },
+  "examples": [
+    {
+      "name": "default_types",
+      "note": "Default packs register several types; fixture pins envelope shape only.",
+      "request": {
+        "method": "GET",
+        "path": "/api/weft/types",
+        "headers": {},
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"items": [], "has_more": false}
+      }
+    }
+  ]
+}

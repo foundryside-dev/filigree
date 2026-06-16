@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_conf
+from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeAnchor, FiligreeDB, write_conf
 from filigree.hooks import (
     CONTEXT_TITLE_MAX_LEN,
     READY_CAP,
@@ -25,6 +25,8 @@ from filigree.hooks import (
     generate_session_context,
 )
 from filigree.install import (
+    FILIGREE_INSTRUCTIONS,
+    FILIGREE_WRITER_MARKER,
     _instructions_hash,
     inject_instructions,
     install_codex_skills,
@@ -47,6 +49,17 @@ def _write_conf_for_db(db: FiligreeDB) -> Path:
         },
     )
     return conf_path
+
+
+def _anchor_for_db(db: FiligreeDB) -> FiligreeAnchor:
+    """Build a resolved anchor for *db* (writing a conf so from_conf opens it).
+
+    Repoints the implicit-startup hook tests off the retired ``find_filigree_conf``
+    onto ``find_filigree_anchor`` (filigree-4bf16e64b6)."""
+    db_path = Path(db.db_path)
+    project_root = db_path.parent.parent if db_path.parent.name == FILIGREE_DIR_NAME else db_path.parent
+    conf_path = _write_conf_for_db(db)
+    return FiligreeAnchor(project_root, conf_path, db_path.parent)
 
 
 class TestBuildContext:
@@ -131,6 +144,9 @@ class TestBuildContext:
         db.create_observation("Something to triage")
         result = _build_context(db)
         assert "OBSERVATION" in result.upper()
+        # N-4 (weft-993c1077e1): the runnable hint must be the CLI command;
+        # the MCP verb is named alongside, never backtick'd as a command.
+        assert "`filigree observation list`" in result
         assert "observation_list" in result
 
     def test_stale_observations_warning_in_context(self, db: FiligreeDB) -> None:
@@ -142,6 +158,7 @@ class TestBuildContext:
         db.conn.commit()
         result = _build_context(db)
         assert "STALE OBSERVATION" in result.upper()
+        assert "`filigree observation list`" in result
 
     def test_observation_stats_operational_error_silent_in_context(self, db: FiligreeDB) -> None:
         """If observation_stats() raises OperationalError, context still generates."""
@@ -157,10 +174,113 @@ class TestBuildContext:
         with patch.object(db, "observation_stats", side_effect=TypeError("bad type")), pytest.raises(TypeError, match="bad type"):
             _build_context(db)
 
+    # --- F2: un-bridged analyzer findings surface in orientation ---
+
+    @staticmethod
+    def _wln(path: str, fp: str, **md: Any) -> dict[str, Any]:
+        f = {"path": path, "rule_id": "R", "message": "m", "severity": "high", "line_start": 1, "fingerprint": fp}
+        if md:
+            f["metadata"] = md
+        return f
+
+    def test_no_findings_no_analyzer_mention(self, db: FiligreeDB) -> None:
+        """Honest-empty (C-6): a project with no findings shows no ANALYZER line."""
+        assert "ANALYZER FINDINGS" not in _build_context(db)
+
+    def test_unbridged_findings_shown_with_split(self, db: FiligreeDB) -> None:
+        """F2 + FIL-1: un-bridged findings surface, split so a baselined defect
+        does not read as actionable work and engine telemetry (kind:metric)
+        does not read as defect-signal. A promoted (bridged) finding is
+        excluded; kind-less findings count as defect-signal."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                self._wln("a.py", "fp1"),
+                self._wln("b.py", "fp2"),
+                self._wln("c.py", "fp3", wardline={"suppression_state": "baselined"}),
+                self._wln("d.py", "fp4"),  # will be bridged
+                self._wln("e.py", "fp5", wardline={"kind": "metric"}),  # telemetry
+            ],
+        )
+        bridged = db.find_finding_by_fingerprint("wardline", "fp4")
+        assert bridged is not None
+        db.promote_finding_to_issue(bridged["id"], actor="t")
+
+        result = _build_context(db)
+        # 4 un-bridged (3 actionable: 2 kind-less → defect-signal, 1 metric →
+        # telemetry; 1 suppressed); fp4 bridged → excluded.
+        assert (
+            "ANALYZER FINDINGS: 4 not yet bridged to the tracker "
+            "(3 actionable: 2 defect-signal, 1 telemetry/info; 1 baselined/suppressed)" in result
+        )
+        # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs
+        # are named alongside. The split form steers triage to the defect view.
+        assert "`filigree finding list --kind defect`" in result
+        assert "`filigree finding promote`" in result
+        assert "finding_list" in result
+        assert "finding_promote" in result
+
+    def test_unbridged_findings_simple_form_when_no_telemetry(self, db: FiligreeDB) -> None:
+        """FIL-1: when there is no telemetry to filter out, the simple form is
+        kept verbatim — steering to ``--kind defect`` would hide exactly the
+        kind-less third-party findings the defect-side rule protects."""
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                self._wln("a.py", "fp1"),
+                self._wln("b.py", "fp2"),
+                self._wln("c.py", "fp3", wardline={"suppression_state": "baselined"}),
+            ],
+        )
+        result = _build_context(db)
+        assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
+        assert "defect-signal" not in result
+        assert "`filigree finding list`" in result
+
+    def test_all_bridged_no_analyzer_line(self, db: FiligreeDB) -> None:
+        """Honest-empty: when every finding is bridged, no misleading absence — the
+        line is omitted (not '0 not yet bridged')."""
+        db.process_scan_results(scan_source="wardline", findings=[self._wln("a.py", "fp1")])
+        f = db.find_finding_by_fingerprint("wardline", "fp1")
+        assert f is not None
+        db.promote_finding_to_issue(f["id"], actor="t")
+        result = _build_context(db)
+        assert "ANALYZER FINDINGS" not in result
+
+    def test_backticked_commands_are_runnable_cli(self, db: FiligreeDB) -> None:
+        """N-4 (weft-993c1077e1): every backtick'd command in the banner must be
+        a runnable ``filigree ...`` CLI invocation. An agent in a CLI-first
+        session (no MCP) runs the backtick'd string verbatim — a bare MCP verb
+        there fails with 'No such command' as its first action of the session.
+        """
+        import re
+
+        db.create_observation("Something to triage")
+        # Include a metric-kind finding so the sweep covers the FIL-1 split-form
+        # hint (`filigree finding list --kind defect`) too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[self._wln("a.py", "fp1"), self._wln("b.py", "fp2", wardline={"kind": "metric"})],
+        )
+        result = _build_context(db)
+        snippets = re.findall(r"`([^`]+)`", result)
+        assert snippets, "expected backtick'd command hints in the banner"
+        for snippet in snippets:
+            assert snippet.startswith("filigree "), f"non-runnable backtick'd command in banner: {snippet!r}"
+
+    def test_finding_stats_operational_error_silent_in_context(self, db: FiligreeDB) -> None:
+        """A pre-findings DB (no scan_findings table) must not break orientation."""
+        import sqlite3
+
+        with patch.object(db, "unbridged_finding_stats", side_effect=sqlite3.OperationalError("no such table")):
+            result = _build_context(db)
+        assert "Filigree Project Snapshot" in result
+        assert "ANALYZER FINDINGS" not in result
+
 
 class TestGenerateSessionContext:
     def test_returns_none_without_filigree_dir(self, tmp_path: Path) -> None:
-        with patch("filigree.hooks.find_filigree_conf", side_effect=FileNotFoundError):
+        with patch("filigree.hooks.find_filigree_anchor", side_effect=FileNotFoundError):
             assert generate_session_context() is None
 
     def test_returns_none_from_unconfigured_folder_under_legacy_ancestor(
@@ -183,8 +303,8 @@ class TestGenerateSessionContext:
 
     def test_returns_context_string(self, tmp_path: Path, db: FiligreeDB) -> None:
         """Smoke test that generate_session_context returns a string when a project exists."""
-        conf_path = _write_conf_for_db(db)
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        anchor = _anchor_for_db(db)
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Filigree Project Snapshot" in result
@@ -556,6 +676,9 @@ class TestTerminateOrphanDashboard:
 
 
 class TestExtractMarkerHash:
+    def test_instruction_block_records_writer_identity(self) -> None:
+        assert "<!-- filigree:last-writer:filigree install -->" in FILIGREE_INSTRUCTIONS.splitlines()[1]
+
     def test_extracts_hash_from_versioned_marker(self) -> None:
         content = "before\n<!-- filigree:instructions:v1.2.0:abc12345 -->\nstuff\n<!-- /filigree:instructions -->"
         assert _extract_marker_hash(content) == "abc12345"
@@ -595,6 +718,16 @@ class TestCheckInstructionsFreshness:
         assert not any("CLAUDE.md" in m for m in messages)
         assert claude_md.stat().st_mtime == mtime_before
 
+    def test_updates_current_hash_missing_writer_identity(self, tmp_path: Path) -> None:
+        """A pre-stamp block with the current body hash should be refreshed."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            f"<!-- filigree:instructions:v0.0.0:{_instructions_hash()} -->\n## Filigree Issue Tracker\n<!-- /filigree:instructions -->\n"
+        )
+        messages = _check_instructions_freshness(tmp_path)
+        assert any("CLAUDE.md" in m for m in messages)
+        assert "<!-- filigree:last-writer:filigree install -->" in claude_md.read_text()
+
     def test_updates_old_format_marker(self, tmp_path: Path) -> None:
         """CLAUDE.md with the old marker format (no hash) should be updated."""
         claude_md = tmp_path / "CLAUDE.md"
@@ -623,6 +756,18 @@ class TestCheckInstructionsFreshness:
         messages = _check_instructions_freshness(tmp_path)
         assert messages == []
         assert "filigree" not in claude_md.read_text().lower() or "No filigree here" in claude_md.read_text()
+
+    def test_restores_existing_empty_instruction_file(self, tmp_path: Path) -> None:
+        """An empty managed-doc file should be repaired during SessionStart."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert "Restored filigree instructions in empty CLAUDE.md" in messages
+        content = claude_md.read_text()
+        assert FILIGREE_INSTRUCTIONS in content
+        assert FILIGREE_WRITER_MARKER in content
 
     def test_updates_stale_skill_pack(self, tmp_path: Path) -> None:
         """Skill pack with different content should be overwritten."""
@@ -659,20 +804,20 @@ class TestCheckInstructionsFreshness:
 class TestGenerateSessionContextFreshness:
     def test_context_includes_freshness_messages(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should include update messages when instructions are stale."""
-        conf_path = _write_conf_for_db(db)
-        project_root = conf_path.parent
+        anchor = _anchor_for_db(db)
+        project_root = anchor.project_root
         # Create a stale CLAUDE.md in the project root
         claude_md = project_root / "CLAUDE.md"
         claude_md.write_text("<!-- filigree:instructions:v0.0.0:00000000 -->\nold\n<!-- /filigree:instructions -->\n")
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Updated filigree instructions in CLAUDE.md" in result
 
     def test_context_without_stale_instructions(self, tmp_path: Path, db: FiligreeDB) -> None:
         """generate_session_context should not include update messages when everything is fresh."""
-        conf_path = _write_conf_for_db(db)
-        with patch("filigree.hooks.find_filigree_conf", return_value=conf_path):
+        anchor = _anchor_for_db(db)
+        with patch("filigree.hooks.find_filigree_anchor", return_value=anchor):
             result = generate_session_context()
         assert result is not None
         assert "Updated" not in result
@@ -1059,10 +1204,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
-        conf_path = _write_conf_for_db(db)
+        anchor = _anchor_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
             patch("filigree.hooks._check_instructions_freshness", side_effect=OSError("disk full")),
             patch("filigree.hooks.logger") as mock_logger,
         ):
@@ -1079,10 +1224,10 @@ class TestFreshnessCheckLogLevel:
         db = FiligreeDB(db_dir / DB_FILENAME, prefix="test")
         db.initialize()
         db.close()
-        conf_path = _write_conf_for_db(db)
+        anchor = _anchor_for_db(db)
 
         with (
-            patch("filigree.hooks.find_filigree_conf", return_value=conf_path),
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
             patch("filigree.hooks._check_instructions_freshness", side_effect=RuntimeError("boom")),
             pytest.raises(RuntimeError, match="boom"),
         ):

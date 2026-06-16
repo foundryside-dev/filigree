@@ -152,6 +152,7 @@ _CORE_PACK: dict[str, Any] = {
             "display_name": "Epic",
             "description": "Large body of work spanning multiple features or tasks",
             "pack": "core",
+            "container": True,
             "states": [
                 {"name": "open", "category": "open"},
                 {"name": "in_progress", "category": "wip"},
@@ -232,6 +233,7 @@ _PLANNING_PACK: dict[str, Any] = {
             "display_name": "Milestone",
             "description": "Top-level delivery marker containing phases",
             "pack": "planning",
+            "container": True,
             "states": [
                 {"name": "planning", "category": "open"},
                 {"name": "active", "category": "wip"},
@@ -262,6 +264,7 @@ _PLANNING_PACK: dict[str, Any] = {
             "display_name": "Phase",
             "description": "Logical grouping of steps within a milestone",
             "pack": "planning",
+            "container": True,
             "states": [
                 {"name": "pending", "category": "open"},
                 {"name": "active", "category": "wip"},
@@ -1535,6 +1538,7 @@ _RELEASE_PACK: dict[str, Any] = {
             "display_name": "Release",
             "description": "A software release to be planned, tested, and shipped",
             "pack": "release",
+            "container": True,
             "states": [
                 {"name": "planning", "category": "open"},
                 {"name": "development", "category": "wip"},

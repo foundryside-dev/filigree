@@ -434,9 +434,17 @@ async def _handle_get_workflow_guide(arguments: dict[str, Any]) -> list[TextCont
             note = f"Resolved type '{args['pack']}' to pack '{wf_pack.pack}'" if wf_pack else None
 
     if wf_pack is None:
+        # Inline the actual options instead of pointing at another tool.
+        available_packs = sorted(p.pack for p in tracker.templates.list_packs())
+        available_types = sorted(t.type for t in tracker.templates.list_types())
+        parts = [f"Unknown pack: '{args['pack']}'."]
+        if available_packs:
+            parts.append(f"Available packs: {', '.join(available_packs)}.")
+        if available_types:
+            parts.append(f"Or pass a type name: {', '.join(available_types)}.")
         return _text(
             ErrorResponse(
-                error=f"Unknown pack: '{args['pack']}'. Use pack_list to see available packs, or type_list to see types.",
+                error=" ".join(parts),
                 code=ErrorCode.NOT_FOUND,
             )
         )

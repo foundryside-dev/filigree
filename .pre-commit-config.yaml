@@ -5,3 +5,12 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: wardline-scan
+        name: wardline scan
+        entry: wardline scan
+        language: system
+        types: [python]
+        pass_filenames: false
+

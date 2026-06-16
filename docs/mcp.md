@@ -1,6 +1,14 @@
 # MCP Server Reference
 
-Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 114 tools, 1 resource, and 1 prompt.
+Filigree exposes an MCP (Model Context Protocol) server so AI agents interact natively without parsing CLI output. The server provides 118 tools, 1 resource, and 1 prompt.
+
+!!! note "3.0.0 tool names"
+    The tool names below are the subsystem-namespaced `<entity>_<verb>` names
+    (`issue_get`, `finding_list`, `work_start`, …). 3.0.0 **removed** the legacy
+    flat aliases that 2.3.0 still resolved — a call to a removed name now returns
+    the `NOT_FOUND` envelope. See
+    the [3.0.0 consumer migration guide](MIGRATION-3.0.md#1-mcp-tool-name-namespacing)
+    for the full old→new table.
 
 ## Contents
 
@@ -294,10 +302,9 @@ callers can confirm the exact inserted comment without a follow-up read.
 Returns `by_status` (counts by literal workflow status name such as `open` or
 `in_progress`) and `by_category` (template categories `open`/`wip`/`done`),
 plus `by_type`, `ready_count`, `blocked_count`, and `total_dependencies`. The
-`status_name_counts` and `status_category_counts` maps are **deprecated** exact
-duplicates of `by_status` / `by_category` (filigree-17694d2db8), kept as
-compatibility aliases per ADR-009 §7 and scheduled for removal in the next
-major.
+deprecated `status_name_counts` / `status_category_counts` maps (exact
+duplicates of `by_status` / `by_category`) were **removed in 3.0.0**
+(filigree-e4181ae767). Read `by_status` / `by_category`.
 
 ### Planning
 
@@ -590,7 +597,7 @@ Returns `ListResponse[TransitionDetail]` (`{items, has_more}`), with
 
 #### `mcp_status_get`
 
-No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, and `runtime`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
+No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, `runtime`, and `actor_verification`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). The `actor_verification` object (`{verified, verified_actor, deferral, note}`) reports the ADR-012 actor-verification posture for this transport: MCP-stdio stamps the OS identity (`verified=true`); MCP-HTTP cannot vouch for the caller, so the `actor` argument is a self-asserted claim and `verified_actor`/`verified_author` are NULL (`verified=false`) — transport-bound identity is deferred to `filigree-81d3971467`. This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
 
 ### Analytics
 
@@ -626,8 +633,17 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 |------|-------------|
 | `admin_export_jsonl` | Export all data to JSONL |
 | `admin_import_jsonl` | Import from JSONL |
+| `db_checkpoint` | Run `PRAGMA wal_checkpoint(TRUNCATE)` on the project store |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
+| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the Legis gate deferred) |
+
+#### `reconciliation_debt_list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | no | Max results (default 50) |
+| `offset` | integer | no | Skip first N results |
 
 #### End-of-session cleanup
 
@@ -648,6 +664,9 @@ agent's artifacts.
    evidence, or intentionally dropped.
 4. Review scan scratch with `finding_list`; use `finding_promote`,
    `finding_dismiss`, or `finding_batch_update` before deleting file records.
+   Note `finding_list` defaults to `suppression='active'` — wardline-accepted
+   (baselined/waived/judged) findings are hidden; pass `suppression='all'` (or a
+   specific verdict) to review them.
 5. Remove synthetic file records with `file_delete`. Prefer the default
    refusal mode first; use `force=true` only after associated issues/findings
    are handled.
@@ -667,6 +686,14 @@ agent's artifacts.
 |-----------|------|----------|-------------|
 | `input_path` | string | yes | File path to read JSONL from |
 | `merge` | boolean | no | Skip existing records (default false) |
+
+#### `db_checkpoint`
+
+No parameters. Runs `PRAGMA wal_checkpoint(TRUNCATE)` on the active project
+database. Returns `{status, busy, checkpoint_busy, log_frames,
+checkpointed_frames, wal_size_before, wal_size_after, database}`. When a reader
+or writer prevents truncation, the tool returns `status: "busy"` with the
+partial SQLite checkpoint result instead of raising.
 
 #### `admin_archive_closed`
 
@@ -771,24 +798,35 @@ file deletion treat `fixed` and `false_positive` as terminal; stale
 ### Cross-Product Entity Associations
 
 Bind a Filigree issue to an opaque entity identifier from a sibling
-product (notably Clarion — see ADR-029). Filigree never parses the
+product (notably Loomweave — see ADR-029). Filigree never parses the
 entity-ID grammar; the binding stores opaque strings so the federation
-enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
+enrich-only rule is preserved.
 
 | Tool | Description |
 |------|-------------|
-| `entity_association_add` | Attach a Clarion entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
+| `entity_association_add` | Attach an opaque external entity to a Filigree issue (idempotent on the composite key — re-attach refreshes the hash, preserves original actor) |
 | `entity_association_remove` | Remove the binding identified by `(issue_id, entity_id)` |
 | `entity_association_list` | Return the entity bindings attached to an issue (raw rows; drift comparison is the consumer's job per ADR-029 §"Decision 3") |
-| `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given Clarion entity (the surface Clarion's `issues_for` calls) |
+| `entity_association_list_by_entity` | Reverse lookup: return every issue in this project bound to a given opaque external entity ID |
+| `finding_promote_and_attach_entity` | Promote a scan finding to an issue and attach an opaque external entity binding (explicit, caller-resolved form) |
+
+Plain `finding_promote` also attaches by default (dogfood-4 B9): when the
+finding carries `metadata.loomweave.entity_id` and its file record carries a
+content hash, the association is created as part of the promote, and the
+response's `entity_attachment` field says what was attached or exactly why
+not. Pass `attach_entity=false` to opt out;
+`finding_promote_and_attach_entity` remains the explicit form for a
+caller-resolved `entity_id`/`content_hash` (e.g. a Wardline qualname resolved
+through Loomweave).
 
 #### `entity_association_add`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
-| `entity_id` | string | yes | Opaque Clarion entity ID; not parsed |
-| `content_hash` | string | yes | Snapshot of Clarion's current content hash for drift detection at query time |
+| `entity_id` | string | yes | Opaque external entity ID; may be a `loomweave:eid:...` SEI or a legacy locator; not parsed |
+| `content_hash` | string | yes | Snapshot of the caller's current content hash for drift detection at query time |
+| `entity_kind` / `external_entity_kind` | string | no | Caller-supplied kind metadata; never inferred from `entity_id` |
 | `actor` | string | no | Actor identity recorded as `attached_by` on first attach |
 
 #### `entity_association_remove`
@@ -796,7 +834,7 @@ enrich-only rule (`clarion/docs/suite/loom.md` §5) is preserved.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Filigree issue ID |
-| `entity_id` | string | yes | Clarion entity ID |
+| `entity_id` | string | yes | Opaque external entity ID |
 
 #### `entity_association_list`
 
@@ -812,7 +850,34 @@ is required (or accepted).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `entity_id` | string | yes | Opaque Clarion entity ID; not parsed |
+| `entity_id` | string | yes | Opaque external entity ID; not parsed |
+| `current_content_hash` | string | no | Caller-supplied current hash; response `freshness_status` is `fresh`, `stale`, or `unknown` |
+
+### Federation Consumer Bindings
+
+The write-capable half of the warpline↔filigree seam (Seam 2A of the
+2026-06-13 warpline interface lock). warpline produces a reverify worklist and
+never auto-files; Filigree consumes it on explicit action.
+
+| Tool | Description |
+|------|-------------|
+| `warpline_worklist_ingest` | File-or-link a `warpline.reverify_worklist.v1` worklist as work — per item: an entity already tracked by an open issue is `linked`, an untracked entity is `filed` (task + ADR-029 affected-entity association on the SEI), a no-SEI item is `skipped` |
+
+#### `warpline_worklist_ingest`
+
+Each filed item carries the `warpline` + `federation` producer labels and an
+entity association on the item's SEI — the same surface warpline reads back via
+`entity_association_list_by_entity`, so a filed item shows up as tracked on the
+next worklist (the loop closes). Previews by default; `apply=true` performs the
+writes.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `worklist` | object | yes | A `warpline.reverify_worklist.v1` success envelope or its bare `data` payload (must contain an `items` array) |
+| `apply` | boolean | no | `false` (default) previews with pure reads; `true` files/links for real |
+| `actor` | string | no | Identity recorded as issue creator / association `attached_by` (default `warpline`) |
+| `priority` | integer | no | Priority override for every filed item (`0`=P0 … `4`=P4) |
+| `content_hash` | string | no | Default hash stamped on filed associations when an item carries none; absent → a documented `unverified` sentinel |
 
 ### Agent Context Notes
 
@@ -955,7 +1020,8 @@ scanner's `language_focus`, when selecting a pack.
 | `prompt` | enum | no | Bundled prompt pack (default `bug-hunt`; see `prompt_pack_list`; advisory only; requires `accepts_prompt=true` / `prompt_pack_aware=true` for non-default packs) |
 | `api_url` | string | no | Dashboard URL override (localhost only). Defaults to the active local Filigree dashboard. |
 
-Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, message}`.
+Response: `{status, scanner, file_path, file_id, scan_run_id, pid, api_url, api_url_source, sandbox_class, risk_summary, prompt_pack_scope, file_summary, message}`.
+`file_summary` is the file's current severity-bucketed findings posture (`{total_findings, open_findings, critical, high, medium, low, info}`) — a posture echo so a "triggered" response is not a vacuous run-state-only green. At trigger time it is the pre-scan posture; poll `scan_status_get` for the updated breakdown once results are ingested.
 If the scanner name is a bundled scanner that is not enabled in this project,
 the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
 "scanner_enable"`, `cli_enable_command`, and a hint pointing at
@@ -972,8 +1038,9 @@ the `NOT_FOUND` error includes `details.bundled=true`, `enable_with:
 
 Spawns one scanner process per file and returns per-file `scan_run_id`s plus a
 `batch_id` for correlation. The response also echoes `api_url`,
-`api_url_source`, and scanner risk/sandbox metadata. Same 30s rate-limit applies
-per scanner+file.
+`api_url_source`, and scanner risk/sandbox metadata. Each `per_file` entry
+carries a `file_summary` posture echo (severity-bucketed findings for that file).
+Same 30s rate-limit applies per scanner+file.
 
 #### `scan_status_get`
 
@@ -982,7 +1049,9 @@ per scanner+file.
 | `scan_run_id` | string | yes | Scan run ID returned by `scan_trigger` / `scan_trigger_batch` |
 | `log_lines` | integer | no | Tail size (1–500, default 50) |
 
-Returns scan status with a live PID check and a tail of the scanner's log.
+Returns scan status with a live PID check and a tail of the scanner's log, plus
+a `file_summary` posture echo — the severity-bucketed findings for the run's
+target file(s), reflecting post-ingest state once results are POSTed back.
 
 #### `scan_preview`
 
@@ -1022,11 +1091,22 @@ create a linked triage observation; full responses then include
 3. `prompt_pack_list` — choose an advisory review lens, if needed
 4. `scan_trigger` or `scan_trigger_batch` — fire-and-forget, get `scan_run_id`(s)
 5. `scan_status_get` — poll for completion / tail logs
-6. Check results via `finding_list` / `finding_get` or `GET /api/loom/files/{file_id}/findings`
+6. Check results via `finding_list` / `finding_get` or `GET /api/weft/files/{file_id}/findings` (note: `finding_list` defaults to active-only — pass `suppression='all'` to also see wardline-accepted findings; the `/api/weft/...` read is unfiltered by default)
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Loom generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+
+External scanner producers should include a globally unique, non-empty
+`scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`
+history. An omitted or empty `scan_run_id` is accepted for fire-and-forget
+findings, but those findings are intentionally excluded from scan-run history.
+
+Filigree does not parse SARIF on the scan-results endpoint. Wardline/SARIF
+adapters must map SARIF `partialFingerprints` or `fingerprints` into each
+posted finding's `fingerprint` field before POSTing. Filigree preserves that
+`finding.fingerprint` through readback, promote-by-fingerprint, dedup, stale
+cleanup, and reopen-on-regress lifecycle transitions.
 
 **Scanner registration:** Use `scanner_available_list`, `scanner_enable`, and `scanner_disable` from MCP, or `filigree scanner available`, `filigree scanner enable <name>`, and `filigree scanner disable <name>` from the CLI. Bundled scanners call installed `filigree-scanner-*` entrypoints, so projects do not need copied runner scripts. Custom scanners can still be added as TOML files under `.filigree/scanners/`. Custom scanners that declare `{prompt}` in their args template are expected to honor that prompt value themselves.
 

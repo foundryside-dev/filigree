@@ -15,16 +15,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tachyon-beep/filigree.git"
+    "url": "git+https://github.com/foundryside-dev/filigree.git"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "type": "module",
   "bugs": {
-    "url": "https://github.com/tachyon-beep/filigree/issues"
+    "url": "https://github.com/foundryside-dev/filigree/issues"
   },
-  "homepage": "https://github.com/tachyon-beep/filigree#readme",
+  "homepage": "https://github.com/foundryside-dev/filigree#readme",
   "devDependencies": {
     "@biomejs/biome": "2.4.3"
   }

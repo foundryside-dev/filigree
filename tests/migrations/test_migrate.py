@@ -1177,7 +1177,7 @@ class TestMigrateClosedAtNormalization:
 
 
 class TestMigrateV18ToV19:
-    """v18 -> v19: scan_findings.fingerprint + partitioned dedup indexes (Loom §3.B)."""
+    """v18 -> v19: scan_findings.fingerprint + partitioned dedup indexes (Weft §3.B)."""
 
     @pytest.fixture
     def pre_v19_conn(self) -> Iterator[sqlite3.Connection]:

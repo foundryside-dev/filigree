@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from mcp.types import TextContent, Tool
 
+from filigree import governance
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
@@ -31,6 +32,7 @@ from filigree.mcp_tools.common import (
 from filigree.mcp_tools.payloads import file_assoc_to_mcp
 from filigree.types.api import (
     AmbiguousTransitionError,
+    BatchFailure,
     BatchResponse,
     ClaimConflictError,
     ClaimNextEmptyResponse,
@@ -85,7 +87,84 @@ def _wrong_project_response(exc: WrongProjectError) -> list[TextContent]:
 
 
 def _claim_conflict_response(exc: ClaimConflictError) -> list[TextContent]:
-    return _text(claim_conflict_envelope(exc))
+    # MCP is an untrusted surface: emit the generic safe_message string while
+    # retaining the observed/expected assignees in details (filigree-d25e75cebf).
+    return _text(claim_conflict_envelope(exc, safe=True))
+
+
+def _closure_gate_error(decision: governance.GateDecision) -> ErrorResponse:
+    """Map a non-PROCEED closure-gate verdict to an MCP ErrorResponse (B5).
+
+    Blocked / unavailable fail closed with CONFLICT; a tampered-ledger
+    integrity failure surfaces as INTERNAL so an operator notices the backend.
+    """
+    code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+    return ErrorResponse(error=decision.reason, code=code)
+
+
+def _gate_batch_failures(tracker: Any, issue_ids: list[str]) -> tuple[list[str], list[BatchFailure]]:
+    """Partition *issue_ids* into (allowed, gate_failures) per B5 DECISION 3.
+
+    Governed issues the gate rejects are reported per-item rather than
+    aborting the batch.
+
+    Gate-read contract (fail closed): only ``WrongProjectError`` is delegated
+    — left in ``allowed`` so the §0.4 foreign-prefix envelope abort fires from
+    ``batch_close``. Any other ``ValueError``/``KeyError`` is a gate-read
+    failure on a possibly-governed issue; it is reported as a per-item
+    ``BatchFailure`` (VALIDATION) and the issue is NOT routed into the close.
+    This must never let a governed issue close on a gate-read error.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_closure_gate(tracker, issue_id)
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_close raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            err = _closure_gate_error(decision)
+            failures.append(BatchFailure(id=issue_id, error=err["error"], code=err["code"]))
+    return allowed, failures
+
+
+def _gate_status_change_failures(tracker: Any, issue_ids: list[str], requested_status: str | None) -> tuple[list[str], list[BatchFailure]]:
+    """Partition for ``batch_update`` (C1): gate only issues whose status write
+    would close a governed issue.
+
+    Mirrors :func:`_gate_batch_failures` but uses the status-change gate, which
+    PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
+    changes priority/assignee, or moves issues to a non-done status, gates
+    nothing.
+
+    Same gate-read contract (fail closed): only ``WrongProjectError`` delegates
+    to ``batch_update`` (for the §0.4 envelope abort); any other
+    ``ValueError``/``KeyError`` is reported as a per-item ``BatchFailure``
+    (VALIDATION) and the issue is NOT routed into the close.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_status_change_gate(tracker, issue_id, requested_status)
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_update raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            err = _closure_gate_error(decision)
+            failures.append(BatchFailure(id=issue_id, error=err["error"], code=err["code"]))
+    return allowed, failures
 
 
 def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) -> list[TextContent]:
@@ -94,7 +173,7 @@ def _issue_value_error_response(tracker: Any, issue_id: str, exc: ValueError) ->
     msg = str(exc)
     if isinstance(exc, (AmbiguousTransitionError, InvalidTransitionError)):
         valid_transitions = exc.valid_transitions if isinstance(exc, InvalidTransitionError) else None
-        return _text(_build_transition_error(tracker, issue_id, msg, valid_transitions=valid_transitions))
+        return _text(_build_transition_error(tracker, issue_id, msg, valid_transitions=valid_transitions, exc=exc))
     code = classify_value_error(msg)
     if code == ErrorCode.INVALID_TRANSITION:
         return _text(_build_transition_error(tracker, issue_id, msg))
@@ -107,7 +186,7 @@ def _release_claim_value_error_response(tracker: Any, issue_id: str, exc: ValueE
     if code == ErrorCode.CONFLICT:
         return _text(ErrorResponse(error=msg, code=code))
     if code == ErrorCode.INVALID_TRANSITION:
-        return _text(_build_transition_error(tracker, issue_id, msg))
+        return _text(_build_transition_error(tracker, issue_id, msg, exc=exc))
     return _text(ErrorResponse(error=msg, code=code))
 
 
@@ -132,7 +211,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": (
                             "Include file associations in response (default false; pass true to "
                             "include the files list). Federation consumers typically want a clean "
-                            "issue projection — this aligns with /api/loom/issues/{issue_id} which "
+                            "issue projection — this aligns with /api/weft/issues/{issue_id} which "
                             "has defaulted include_files to false since Phase C3."
                         ),
                     },
@@ -160,6 +239,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Filter by type (use type_list for available types)",
                     },
                     "priority": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Filter by priority"},
+                    "priority_min": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Minimum priority (0=critical)",
+                    },
+                    "priority_max": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Maximum priority"},
                     "parent_issue_id": {"type": "string", "description": "Filter by parent issue ID"},
                     "assignee": {"type": "string", "description": "Filter by assignee"},
                     "label": {
@@ -240,6 +326,35 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     },
                     "deps": {"type": "array", "items": {"type": "string"}, "description": "Issue IDs this depends on"},
                     "actor": {"type": "string", "description": "Agent/user identity for audit trail"},
+                    "entity_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional opaque external entity ID (SEI or legacy locator) to bind to the new "
+                            "issue at creation (ADR-029). Binds inline in one call so a hand-filed ticket "
+                            "lands ON the spine. Not parsed by Filigree."
+                        ),
+                    },
+                    "entity_kind": {
+                        "type": "string",
+                        "description": "Optional caller-supplied kind metadata for the binding; never inferred from entity_id.",
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": (
+                            "Optional producer content_hash snapshotted at bind time (stored verbatim for the "
+                            "consumer's drift check). When entity_id is given without content_hash, a "
+                            "deferred-freshness sentinel is stamped."
+                        ),
+                    },
+                    "entity_symbol": {
+                        "type": "string",
+                        "description": (
+                            "Optional symbol/qualname (Loomweave locator) resolved to a stable SEI via Loomweave "
+                            "at create time, then bound (ADR-029 L2). Requires a Loomweave registry backend with "
+                            "SEI support; an input that resolves to zero or many returns a weft-reason "
+                            "unresolved_input and does NOT create the issue. Mutually exclusive with entity_id."
+                        ),
+                    },
                 },
                 "required": ["title"],
             },
@@ -295,7 +410,10 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "current status must have a defined transition to the target done state. When status is "
                 "omitted, defaults to the first done-category state for the type (e.g. 'closed'); pass "
                 "status explicitly to land in an alternate done state (e.g. 'wont_fix', 'not_a_bug', "
-                "'cancelled'). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
+                "'cancelled'). NOTE: the default can be legitimately unreachable from a mid-workflow "
+                "state — e.g. a bug in 'fixing' must walk fixing→verifying before closing (the "
+                "verify-before-close gate; close never silently picks a different done state on your "
+                "behalf). Returns INVALID_TRANSITION with valid_transitions when the path isn't "
                 "defined — walk the workflow with issue_update, pass a reachable status, or pass "
                 "force=true to use the declared reverse/escape edge for cleanup."
             ),
@@ -384,9 +502,11 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Search issues by title and description. Pure word-token queries use FTS5 "
                 "with prefix matching for ranked relevance. Queries containing punctuation "
                 "(hyphens, brackets, etc.) — e.g. 'mcp-review-e' or '[cluster-foo]' — fall "
-                "back to a LIKE substring search on the raw query so agents can find their "
-                "own self-tagged work without splitting it manually. Pass status_category "
-                "to scope results to live work (open/wip) and exclude archived/closed rows."
+                "back to a LIKE substring search on the raw query, which ALSO matches labels "
+                "(label vocabulary is kebab-case, so searching a label lands here). Word-token "
+                "FTS does not search labels — for precise label filtering use "
+                "issue_list(label=...). Pass status_category to scope results to live work "
+                "(open/wip) and exclude archived/closed rows."
             ),
             inputSchema={
                 "type": "object",
@@ -428,19 +548,24 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             description=(
                 "Atomically claim an open-category issue, or an unassigned wip-category issue released for handoff, "
                 "by setting assignee (optimistic locking). "
-                "Does NOT change status — use issue_update to advance through workflow after claiming."
+                "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to claim"},
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is claiming (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is claiming (agent name); defaults to actor when omitted",
+                    },
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
                     },
                 },
-                "required": ["issue_id", "assignee"],
+                "required": ["issue_id"],
             },
         ),
         Tool(
@@ -613,11 +738,19 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="claim_next",
-            description="Claim the highest-priority open-category ready issue by setting assignee. Does NOT change status — use issue_update to advance through workflow after claiming.",
+            description=(
+                "Claim the highest-priority open-category ready issue by setting assignee. "
+                "Does NOT change status — use issue_update to advance through workflow after claiming. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is claiming (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is claiming (agent name); defaults to actor when omitted",
+                    },
                     "type": {"type": "string", "description": "Filter by issue type"},
                     "priority_min": {
                         "type": "integer",
@@ -631,7 +764,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
                     },
                 },
-                "required": ["assignee"],
             },
         ),
         Tool(
@@ -642,13 +774,18 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "AmbiguousTransitionError surfaces if the current status has multiple reachable wip targets "
                 "(specify target_status explicitly). Issues with no single-hop wip target (e.g. triage bugs) "
                 "raise INVALID_TRANSITION with the intermediate status to move through first, unless advance=true. "
-                "On transition failure the claim is rolled back."
+                "On transition failure the claim is rolled back. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to claim and transition"},
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is starting work (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is starting work (agent name); defaults to actor when omitted",
+                    },
                     "target_status": {
                         "type": "string",
                         "description": (
@@ -669,7 +806,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                 },
-                "required": ["issue_id", "assignee"],
+                "required": ["issue_id"],
             },
         ),
         Tool(
@@ -679,12 +816,17 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Tie-break ordering: priority asc, created_at asc, issue_id asc (same as work_claim_next). "
                 "Candidates that are ready but not single-hop startable (e.g. triage bugs) are skipped; pass advance=true "
                 "to make them startable via the multi-hop soft walk. "
-                "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches."
+                "Returns the transitioned issue, or {status: 'empty'} when no ready issue matches. "
+                "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "assignee": {"type": "string", "minLength": 1, "description": "Who is starting work (agent name)"},
+                    "assignee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who is starting work (agent name); defaults to actor when omitted",
+                    },
                     "type": {"type": "string", "description": "Filter by issue type"},
                     "priority_min": {
                         "type": "integer",
@@ -712,7 +854,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                 },
-                "required": ["assignee"],
             },
         ),
         Tool(
@@ -883,6 +1024,21 @@ async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
     priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
     if priority_err:
         return priority_err
+    priority_min = args.get("priority_min")
+    pmin_err = _validate_int_range(priority_min, "priority_min", min_val=0, max_val=4)
+    if pmin_err:
+        return pmin_err
+    priority_max = args.get("priority_max")
+    pmax_err = _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4)
+    if pmax_err:
+        return pmax_err
+    if priority is not None and (priority_min is not None or priority_max is not None):
+        return _text(
+            ErrorResponse(
+                error="priority is exact-match and cannot be combined with priority_min/priority_max",
+                code=ErrorCode.VALIDATION,
+            )
+        )
     tracker = get_db()
     status_filter = args.get("status")
     status_category = args.get("status_category")
@@ -907,6 +1063,8 @@ async def _handle_list_issues(arguments: dict[str, Any]) -> list[TextContent]:
             status=status_filter,
             type=args.get("type"),
             priority=priority,
+            priority_min=priority_min,
+            priority_max=priority_max,
             parent_id=args.get("parent_issue_id"),
             assignee=args.get("assignee"),
             label=args.get("label"),
@@ -935,6 +1093,44 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
     if priority_err:
         return priority_err
     tracker = get_db()
+
+    # SEAM SEI-on-create (ADR-029). entity_id (L1) is the direct opaque bind;
+    # entity_symbol (L2) is resolved to a stable SEI via Loomweave first, then
+    # bound. They are mutually exclusive — one ticket, one binding source — so a
+    # caller cannot accidentally request two different identities.
+    entity_id = args.get("entity_id")
+    entity_symbol = args.get("entity_symbol")
+    if entity_id is not None and str(entity_id).strip() and entity_symbol is not None and str(entity_symbol).strip():
+        return _text(
+            ErrorResponse(
+                error="Pass either entity_id (opaque bind) or entity_symbol (Loomweave-resolved), not both.",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+
+    # L2: resolve entity_symbol -> SEI BEFORE creating the issue. A symbol that
+    # resolves to zero/many (or whose transport is unavailable/stale) returns a
+    # weft-reason and creates NOTHING — never an unbound-but-looks-bound ticket.
+    if entity_symbol is not None and str(entity_symbol).strip():
+        from filigree.sei_backfill import resolve_symbol_to_sei
+
+        resolution = resolve_symbol_to_sei(tracker, str(entity_symbol))
+        if resolution.reason_class is not None:
+            return _text(
+                ErrorResponse(
+                    error=f"entity_symbol {entity_symbol!r} did not resolve: {resolution.cause}",
+                    code=ErrorCode.VALIDATION,
+                    details={
+                        "weft_reason": {
+                            "reason_class": resolution.reason_class,
+                            "cause": resolution.cause,
+                            "fix": resolution.fix,
+                        }
+                    },
+                )
+            )
+        entity_id = resolution.sei
+
     try:
         issue = tracker.create_issue(
             args["title"],
@@ -947,6 +1143,9 @@ async def _handle_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
             labels=args.get("labels"),
             deps=args.get("deps"),
             actor=actor,
+            entity_id=entity_id,
+            entity_kind=args.get("entity_kind"),
+            content_hash=args.get("content_hash"),
         )
     except WrongProjectError as e:
         return _wrong_project_response(e)
@@ -976,6 +1175,12 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
         before = tracker.get_issue(args["issue_id"])
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))
+    # C1: update_issue can drive a governed issue into a done-category status
+    # (close_issue delegates here) — gate it like close_issue. PROCEED unless
+    # this is a real close of a governed issue.
+    gate = governance.evaluate_status_change_gate(tracker, args["issue_id"], args.get("status"))
+    if not gate.allowed:
+        return _text(_closure_gate_error(gate))
     try:
         issue = tracker.update_issue(
             args["issue_id"],
@@ -1005,7 +1210,7 @@ async def _handle_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
             return _claim_conflict_response(e)
         if classify_value_error(msg) == ErrorCode.INVALID_TRANSITION:
             transitions = e.valid_transitions if isinstance(e, InvalidTransitionError) else None
-            return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions))
+            return _text(_build_transition_error(tracker, args["issue_id"], msg, valid_transitions=transitions, exc=e))
         return _text(ErrorResponse(error=msg, code=ErrorCode.VALIDATION))
 
 
@@ -1022,6 +1227,9 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
+        gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
+        if not gate.allowed:
+            return _text(_closure_gate_error(gate))
         ready_before = {i.id for i in tracker.get_ready()}
         annotation_warnings = tracker.get_annotation_closeout_warnings(args["issue_id"])
         issue = tracker.close_issue(
@@ -1128,11 +1336,36 @@ async def _handle_search_issues(arguments: dict[str, Any]) -> list[TextContent]:
     return _text(_list_response(items, has_more=has_more, next_offset=next_offset))
 
 
+_CLAIM_IDENTITY_MISSING = "Provide 'assignee' or 'actor': claim verbs need a caller identity (whichever is omitted defaults from the other)"
+
+
+def _resolve_claim_assignee(args: dict[str, Any]) -> tuple[str, list[TextContent] | None]:
+    """Resolve the caller identity for claim-shaped verbs (FIL-3, filigree-3028a8d0f8).
+
+    ``assignee`` is the claim holder; when omitted it defaults from a non-blank
+    ``actor`` (sanitized through the same validator actor itself uses). The
+    existing actor-defaults-from-assignee direction is preserved by the
+    ``_validate_actor(args.get("actor", assignee))`` call each handler keeps,
+    so the defaulting is bidirectional. An explicitly supplied assignee keeps
+    its historical non-empty-string check byte-identically; with neither param
+    (or a blank actor and no assignee) a VALIDATION error names both.
+    """
+    if "assignee" in args:
+        assignee = args.get("assignee")
+        if not isinstance(assignee, str) or not assignee.strip():
+            return "", _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+        return assignee, None
+    actor = args.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return "", _text(ErrorResponse(error=_CLAIM_IDENTITY_MISSING, code=ErrorCode.VALIDATION))
+    return _validate_actor(actor)
+
+
 async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, ClaimIssueArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1193,7 +1426,7 @@ async def _handle_release_claim(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         return _wrong_project_response(e)
     except InvalidTransitionError as e:
-        return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
+        return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions, exc=e))
     except ClaimConflictError as e:
         return _claim_conflict_response(e)
     except ValueError as e:
@@ -1377,9 +1610,9 @@ async def _handle_reclaim_issue(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_claim_next(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, ClaimNextArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1430,10 +1663,13 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     issue_ids = args["issue_ids"]
     if not all(isinstance(i, str) for i in issue_ids):
         return _text(ErrorResponse(error="All issue IDs must be strings", code=ErrorCode.VALIDATION))
+    # B5 DECISION 3: gate each issue first; rejected governed issues are
+    # reported per-item instead of aborting the batch.
+    allowed_ids, gate_failures = _gate_batch_failures(tracker, issue_ids)
     ready_before = {i.id for i in tracker.get_ready()}
     try:
         closed, failed = tracker.batch_close(
-            issue_ids,
+            allowed_ids,
             reason=args.get("reason", ""),
             actor=actor,
             expected_assignee=expected_assignee,
@@ -1442,6 +1678,7 @@ async def _handle_batch_close(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
+    failed = [*gate_failures, *failed]
     refresh_summary()
     ready_after = tracker.get_ready()
     newly_unblocked = [i for i in ready_after if i.id not in ready_before]
@@ -1484,9 +1721,13 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     u_fields = args.get("fields")
     if u_fields is not None and not isinstance(u_fields, dict):
         return _text(ErrorResponse(error="fields must be a JSON object", code=ErrorCode.VALIDATION))
+    # C1: gate each issue whose status write would close a governed issue,
+    # per-item like batch_close (B5 DECISION 3) — a blocked issue is reported
+    # in `failed`, not closed.
+    allowed_ids, gate_failures = _gate_status_change_failures(tracker, issue_ids, args.get("status"))
     try:
         updated, update_failed = tracker.batch_update(
-            issue_ids,
+            allowed_ids,
             status=args.get("status"),
             priority=priority,
             assignee=args.get("assignee"),
@@ -1497,25 +1738,26 @@ async def _handle_batch_update(arguments: dict[str, Any]) -> list[TextContent]:
     except WrongProjectError as e:
         # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
         return _wrong_project_response(e)
+    all_failed = [*gate_failures, *update_failed]
     refresh_summary()
     if detail == "full":
         full_result: BatchResponse[PublicIssue] = BatchResponse(
             succeeded=[issue_to_public(i) for i in updated],
-            failed=update_failed,
+            failed=all_failed,
         )
         return _text(full_result)
     result: BatchResponse[SlimIssue] = BatchResponse(
         succeeded=[_slim_issue(i) for i in updated],
-        failed=update_failed,
+        failed=all_failed,
     )
     return _text(result)
 
 
 async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, StartWorkArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
@@ -1537,7 +1779,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
         return _wrong_project_response(e)
     except (AmbiguousTransitionError, InvalidTransitionError) as e:
         if isinstance(e, InvalidTransitionError):
-            return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions))
+            return _text(_build_transition_error(tracker, args["issue_id"], str(e), valid_transitions=e.valid_transitions, exc=e))
         return _text(ErrorResponse(error=str(e), code=ErrorCode.INVALID_TRANSITION))
     except ClaimConflictError as e:
         # Optimistic-lock conflict — emit a structured CONFLICT envelope so
@@ -1558,9 +1800,9 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_start_next_work(arguments: dict[str, Any]) -> list[TextContent]:
     args = _parse_args(arguments, StartNextWorkArgs)
-    assignee = args.get("assignee")
-    if not isinstance(assignee, str) or not assignee.strip():
-        return _text(ErrorResponse(error="assignee must be a non-empty string", code=ErrorCode.VALIDATION))
+    assignee, identity_err = _resolve_claim_assignee(arguments)
+    if identity_err:
+        return identity_err
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err

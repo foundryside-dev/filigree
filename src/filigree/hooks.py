@@ -22,15 +22,15 @@ from urllib.error import URLError
 import portalocker
 
 from filigree.core import (
-    FILIGREE_DIR_NAME,
     FiligreeDB,
     ForeignDatabaseError,
+    find_filigree_anchor,
     find_filigree_command,
-    find_filigree_conf,
     get_mode,
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
+    FILIGREE_WRITER_MARKER,
     _instructions_hash,
     inject_instructions,
     install_codex_skills,
@@ -147,15 +147,54 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
     blocked_count = stats.get("blocked_count", 0)
     lines.append(f"STATS: {ready_count} ready, {blocked_count} blocked")
 
+    # Analyzer findings awareness (F2): surface un-bridged findings so orientation
+    # never silently reads "nothing to do" while un-promoted findings sit in
+    # scan_findings. The baselined/suppressed split keeps an already-accepted
+    # defect from reading as actionable work. Honest-empty: omit when 0 unbridged.
+    # Guarded for pre-findings DBs where scan_findings may not exist.
+    try:
+        fstats = db.unbridged_finding_stats()
+        if fstats["total"] > 0:
+            lines.append("")
+            if fstats["actionable_other"] > 0:
+                # FIL-1: split the actionable bucket so engine telemetry
+                # (kind:metric etc.) does not read as defect-signal; steer
+                # triage to the defect view.
+                lines.append(
+                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
+                    f"({fstats['actionable']} actionable: {fstats['actionable_defect']} defect-signal, "
+                    f"{fstats['actionable_other']} telemetry/info; {fstats['suppressed']} baselined/suppressed) "
+                    f"— review with `filigree finding list --kind defect`, bridge with `filigree finding promote` "
+                    f"(MCP: finding_list / finding_promote)"
+                )
+            else:
+                # No telemetry to filter out — keep the simple form. Steering
+                # to `--kind defect` here would hide exactly the kind-less
+                # third-party findings the defect-side rule protects (the
+                # filter is strict kind == 'defect'; the count is inclusive).
+                lines.append(
+                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
+                    f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
+                    f"— review with `filigree finding list`, bridge with `filigree finding promote` "
+                    f"(MCP: finding_list / finding_promote)"
+                )
+    except sqlite3.OperationalError:
+        logger.debug("finding stats unavailable in session context", exc_info=True)
+
     # Observation awareness (read-only, guarded for pre-v7 DBs)
     try:
         obs_stats = db.observation_stats(sweep=False)
         if obs_stats["count"] > 0:
             lines.append("")
             if obs_stats["stale_count"] > 0:
-                lines.append(f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h — run `observation_list` to triage")
+                lines.append(
+                    f"STALE OBSERVATIONS: {obs_stats['stale_count']} older than 48h "
+                    f"— run `filigree observation list` to triage (MCP: observation_list)"
+                )
             else:
-                lines.append(f"OBSERVATIONS: {obs_stats['count']} pending — run `observation_list` to review")
+                lines.append(
+                    f"OBSERVATIONS: {obs_stats['count']} pending — run `filigree observation list` to review (MCP: observation_list)"
+                )
     except sqlite3.OperationalError:
         logger.debug("observation stats unavailable in session context", exc_info=True)
 
@@ -191,10 +230,14 @@ def _check_instructions_freshness(project_root: Path) -> list[str]:
         if not md_path.exists():
             continue
         content = md_path.read_text()
+        if not content.strip():
+            inject_instructions(md_path)
+            messages.append(f"Restored filigree instructions in empty {filename}")
+            continue
         if FILIGREE_INSTRUCTIONS_MARKER not in content:
             continue
         embedded_hash = _extract_marker_hash(content)
-        if embedded_hash == current_hash:
+        if embedded_hash == current_hash and FILIGREE_WRITER_MARKER in content:
             continue
         # Stale or old-format marker — update
         inject_instructions(md_path)
@@ -267,7 +310,7 @@ def generate_session_context() -> str | None:
     Returns ``None`` when there is no filigree project (silent exit).
     """
     try:
-        conf_path = find_filigree_conf()
+        anchor = find_filigree_anchor(include_legacy_dir=False)
     except ForeignDatabaseError as exc:
         # Surface the remediation message rather than swallowing it as a
         # silent "no project" exit (filigree-acbacc5b3e).
@@ -275,8 +318,8 @@ def generate_session_context() -> str | None:
     except FileNotFoundError:
         return None
 
-    project_root = conf_path.parent
-    filigree_dir = project_root / FILIGREE_DIR_NAME
+    project_root = anchor.project_root
+    filigree_dir = anchor.store_dir
 
     # Check instruction freshness (best-effort — don't let failures block context)
     freshness_messages: list[str] = []
@@ -286,7 +329,7 @@ def generate_session_context() -> str | None:
         logger.warning("Instructions freshness check failed for %s", project_root, exc_info=True)
 
     try:
-        db = FiligreeDB.from_conf(conf_path)
+        db = FiligreeDB.from_anchor(anchor)
     except (sqlite3.Error, ValueError, OSError):
         logger.warning("Database init failed for %s", filigree_dir, exc_info=True)
         context = (
@@ -346,13 +389,13 @@ def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
 def _find_agent_filigree_dir() -> Path:
     """Resolve the metadata dir for implicit agent startup hooks.
 
-    Agent hooks run automatically when a coding agent opens a folder. Require
-    the authoritative ``.filigree.conf`` anchor so a legacy ancestor
-    ``.filigree/`` directory is not treated as consent to attach to that
-    project.
+    Agent hooks run automatically when a coding agent opens a folder. The
+    consent signal is a ``.filigree.conf`` anchor or a ``.weft/filigree/``
+    store; a bare legacy ``.filigree/`` ancestor is NOT treated as consent to
+    attach (``include_legacy_dir=False``). The ``.git``-boundary
+    ``ForeignDatabaseError`` guard is preserved by ``find_filigree_anchor``.
     """
-    conf_path = find_filigree_conf()
-    return conf_path.parent / FILIGREE_DIR_NAME
+    return find_filigree_anchor(include_legacy_dir=False).store_dir
 
 
 def ensure_dashboard_running(port: int | None = None) -> str:

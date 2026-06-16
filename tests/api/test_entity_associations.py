@@ -1,4 +1,4 @@
-"""HTTP route tests for entity_associations (ADR-029, Clarion B.7 / WP9-A).
+"""HTTP route tests for entity_associations (ADR-029, Loomweave B.7 / WP9-A).
 
 Mirrors the MCP-layer test surface against the FastAPI routes — same
 shapes, same idempotency, same error semantics. Federation §5 audit
@@ -7,11 +7,24 @@ tests live in ``tests/test_entity_associations_federation.py``.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from httpx import AsyncClient, Response
 
 from filigree.core import WrongProjectError
 from filigree.types.api import ErrorCode
 from tests.conftest import PopulatedDB
+
+_CONTRACT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "entity-associations-response.json"
+
+
+def _fixture_example_body(example_name: str) -> dict:
+    fixture = json.loads(_CONTRACT_FIXTURE.read_text())
+    for example in fixture["examples"]:
+        if example["name"] == example_name:
+            return example["response"]["body"]
+    raise AssertionError(f"missing fixture example {example_name}")
 
 
 def _assert_wrong_project_response(resp: Response) -> None:
@@ -38,7 +51,7 @@ class TestListEntityAssociationsHTTP:
         resp = await client.get(f"/api/issue/{issue_id}/entity-associations")
         assert resp.status_code == 200
         body = resp.json()
-        ids = {row["clarion_entity_id"] for row in body["associations"]}
+        ids = {row["loomweave_entity_id"] for row in body["associations"]}
         assert ids == {"py:func:a", "py:func:b"}
 
     async def test_missing_issue_returns_404(self, client: AsyncClient) -> None:
@@ -54,6 +67,44 @@ class TestListEntityAssociationsHTTP:
         resp = await client.get("/api/issue/other-1234567890/entity-associations")
         _assert_wrong_project_response(resp)
 
+    async def test_reverse_lookup_emits_canonical_conformance_fixture(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+        monkeypatch,
+    ) -> None:
+        import filigree.db_entity_associations as entity_associations
+
+        expected = _fixture_example_body("live_v27_reverse_lookup_200")
+        expected_row = expected["associations"][0]
+        monkeypatch.setattr(entity_associations, "_now_iso", lambda: expected_row["attached_at"])
+        dashboard_db.db.conn.execute(
+            "INSERT INTO issues (id, title, status, priority, type, created_at, updated_at, fields) "
+            "VALUES (?, ?, 'open', 2, 'task', ?, ?, '{}')",
+            (
+                expected_row["issue_id"],
+                "G15 EntityAssociation oracle",
+                expected_row["attached_at"],
+                expected_row["attached_at"],
+            ),
+        )
+        dashboard_db.db.conn.commit()
+
+        create = await client.post(
+            f"/api/issue/{expected_row['issue_id']}/entity-associations",
+            json={
+                "entity_id": expected_row["entity_id"],
+                "entity_kind": expected_row["entity_kind"],
+                "content_hash": expected_row["content_hash_at_attach"],
+                "actor": expected_row["attached_by"],
+            },
+        )
+        assert create.status_code == 201, create.text
+
+        resp = await client.get("/api/entity-associations", params={"entity_id": expected_row["entity_id"]})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == expected
+
 
 class TestAddEntityAssociationHTTP:
     async def test_attach_returns_201(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
@@ -68,9 +119,91 @@ class TestAddEntityAssociationHTTP:
         )
         assert resp.status_code == 201
         body = resp.json()
-        assert body["clarion_entity_id"] == "py:func:tokenize"
+        assert body["entity_id"] == "py:func:tokenize"
+        assert body["loomweave_entity_id"] == "py:func:tokenize"
         assert body["content_hash_at_attach"] == "hash-a"
         assert body["attached_by"] == "alice"
+
+    async def test_attach_preserves_optional_entity_kind(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={
+                "entity_id": "not-a-loomweave-locator",
+                "content_hash": "hash-a",
+                "entity_kind": "function",
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["entity_id"] == "not-a-loomweave-locator"
+        assert body["entity_kind"] == "function"
+
+    async def test_attach_persists_and_echoes_signature(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """B1: POST with signature/signoff_seq → 201 echoes them; a follow-up
+        GET returns them verbatim (the response shape reported to Legis)."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={
+                "entity_id": "sei:gov",
+                "content_hash": "hash-a",
+                "actor": "legis",
+                "signature": "deadbeef",
+                "signoff_seq": 7,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["signature"] == "deadbeef"
+        assert body["signoff_seq"] == 7
+
+        listed = await client.get(f"/api/issue/{issue_id}/entity-associations")
+        assert listed.status_code == 200
+        row = next(r for r in listed.json()["associations"] if r["loomweave_entity_id"] == "sei:gov")
+        assert row["signature"] == "deadbeef"
+        assert row["signoff_seq"] == 7
+
+    async def test_attach_without_signature_returns_nulls(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Back-compat: omitting the new fields still works and returns nulls."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "py:func:plain", "content_hash": "h"},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["signature"] is None
+        assert body["signoff_seq"] is None
+
+    async def test_attach_rejects_non_string_signature(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signature": 123},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_attach_rejects_non_int_signoff_seq(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signoff_seq": "7"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_attach_rejects_bool_signoff_seq(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """bool is an int subclass; reject it so True/False can't masquerade
+        as a sign-off sequence."""
+        issue_id = dashboard_db.ids["a"]
+        resp = await client.post(
+            f"/api/issue/{issue_id}/entity-associations",
+            json={"entity_id": "sei:gov", "content_hash": "h", "signoff_seq": True},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == ErrorCode.VALIDATION
 
     async def test_attach_idempotent_refreshes_hash(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         issue_id = dashboard_db.ids["a"]
@@ -148,7 +281,7 @@ class TestAddEntityAssociationHTTP:
 
 
 class TestListAssociationsByEntityHTTP:
-    """Reverse lookup — the route Clarion's issues_for (B.6) calls."""
+    """Reverse lookup — the route Loomweave's issues_for (B.6) calls."""
 
     async def test_returns_empty_for_unbound_entity(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         resp = await client.get("/api/entity-associations", params={"entity_id": "py:func:never"})
@@ -168,7 +301,27 @@ class TestListAssociationsByEntityHTTP:
         assert resp.status_code == 200
         body = resp.json()
         assert {row["issue_id"] for row in body["associations"]} == {a_id, b_id}
-        assert all(row["clarion_entity_id"] == target for row in body["associations"])
+        assert all(row["entity_id"] == target for row in body["associations"])
+        assert all(row["loomweave_entity_id"] == target for row in body["associations"])
+
+    async def test_current_content_hash_marks_freshness(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        a_id = dashboard_db.ids["a"]
+        target = "loomweave:eid:fresh"
+        dashboard_db.db.add_entity_association(a_id, target, content_hash="hash-a")
+
+        fresh = await client.get(
+            "/api/entity-associations",
+            params={"entity_id": target, "current_content_hash": "hash-a"},
+        )
+        stale = await client.get(
+            "/api/entity-associations",
+            params={"entity_id": target, "current_content_hash": "hash-b"},
+        )
+
+        assert fresh.status_code == 200
+        assert stale.status_code == 200
+        assert fresh.json()["associations"][0]["freshness_status"] == "fresh"
+        assert stale.json()["associations"][0]["freshness_status"] == "stale"
 
     async def test_foreign_looking_entity_id_is_opaque_lookup_key(self, client: AsyncClient) -> None:
         resp = await client.get("/api/entity-associations", params={"entity_id": "other-1234567890"})

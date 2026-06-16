@@ -21,7 +21,16 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import filigree.dashboard as dash_module
-from filigree.core import CONF_FILENAME, DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, ForeignDatabaseError, write_conf, write_config
+from filigree.core import (
+    CONF_FILENAME,
+    DB_FILENAME,
+    FILIGREE_DIR_NAME,
+    FiligreeAnchor,
+    FiligreeDB,
+    ForeignDatabaseError,
+    write_conf,
+    write_config,
+)
 from filigree.dashboard import (
     IDLE_TIMEOUT_SECONDS,
     ProjectStore,
@@ -207,7 +216,7 @@ class TestMainGlobalReset:
 
     def test_ethereal_main_clears_prior_project_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         filigree_dir = _create_filigree_dir(tmp_path, "proj-a", "a")
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (filigree_dir.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(filigree_dir.parent, None, filigree_dir))
 
         # Simulate lingering server-mode global from a prior in-process run.
         leftover = ProjectStore()
@@ -270,7 +279,7 @@ class TestMainGlobalReset:
 
     def test_main_resets_both_globals_in_finally(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         filigree_dir = _create_filigree_dir(tmp_path, "proj-c", "c")
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (filigree_dir.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(filigree_dir.parent, None, filigree_dir))
 
         dash_module._project_store = ProjectStore()
         dash_module._db = None
@@ -301,7 +310,7 @@ class TestMainGlobalReset:
         def fake_uvicorn_run_a(*args: object, **kwargs: object) -> None:
             captured["after_run_a"] = dict(dash_module._config)
 
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj_a.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj_a.parent, None, proj_a))
         monkeypatch.setattr("uvicorn.run", fake_uvicorn_run_a)
         monkeypatch.setattr("filigree.dashboard.webbrowser.open", lambda *a, **kw: None)
 
@@ -315,7 +324,7 @@ class TestMainGlobalReset:
         def fake_uvicorn_run_b(*args: object, **kwargs: object) -> None:
             captured["after_run_b"] = dict(dash_module._config)
 
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj_b.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj_b.parent, None, proj_b))
         monkeypatch.setattr("uvicorn.run", fake_uvicorn_run_b)
 
         dash_module.main(port=9999, no_browser=True, server_mode=False)
@@ -327,7 +336,7 @@ class TestMainGlobalReset:
         """filigree-154a23794c: finally block must clear _config too."""
         proj = _create_filigree_dir(tmp_path, "proj-fin", "fin")
         write_config(proj, {"prefix": "fin", "version": 1, "name": "Finalize"})
-        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: (proj.parent, None))
+        monkeypatch.setattr(dash_module, "find_filigree_anchor", lambda: FiligreeAnchor(proj.parent, None, proj))
         monkeypatch.setattr("uvicorn.run", lambda *a, **kw: None)
         monkeypatch.setattr("filigree.dashboard.webbrowser.open", lambda *a, **kw: None)
 
@@ -385,8 +394,8 @@ class TestMainGlobalReset:
             {
                 "prefix": "dash",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
         write_conf(
@@ -396,8 +405,8 @@ class TestMainGlobalReset:
                 "project_name": "dash",
                 "prefix": "dash",
                 "db": ".filigree/filigree.db",
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="dash")
@@ -408,7 +417,7 @@ class TestMainGlobalReset:
 
         def fake_run(*args: object, **kwargs: object) -> None:
             captured["config"] = dict(dash_module._config)
-            captured["clarion_config"] = dict(dash_module._db.clarion_config) if dash_module._db is not None else {}
+            captured["loomweave_config"] = dict(dash_module._db.loomweave_config) if dash_module._db is not None else {}
             captured["allow_local_fallback"] = dash_module._db.allow_local_fallback if dash_module._db is not None else False
             captured["registry_displaced"] = dash_module._db.registry.is_displaced() if dash_module._db is not None else False
 
@@ -417,19 +426,19 @@ class TestMainGlobalReset:
         with caplog.at_level(logging.WARNING, logger="filigree.dashboard"):
             dash_module.main(port=9999, no_browser=True, server_mode=False, allow_local_fallback=True)
 
-        assert "dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates" in caplog.text
-        # The post-startup *write-path* WARN (``_ClarionLocalFallbackRegistry``
+        assert "dashboard started with --allow-local-fallback; loomweave registry is bypassed for auto-creates" in caplog.text
+        # The post-startup *write-path* WARN (``_LoomweaveLocalFallbackRegistry``
         # logs this on every resolve_file fall-through) is still absent —
         # only the startup-time probe-failure WARN is in caplog.
-        assert "Clarion registry backend unavailable; using local file registry fallback" not in caplog.text
+        assert "Loomweave registry backend unavailable; using local file registry fallback" not in caplog.text
         assert captured["allow_local_fallback"] is True
         assert captured["registry_displaced"] is True
-        assert captured["config"]["clarion"] == {"base_url": "http://clarion.test"}
+        assert captured["config"]["loomweave"] == {"base_url": "http://loomweave.test"}
         # ADR-014: ``--allow-local-fallback`` overrides whatever the project
         # config says about fallback *before* the capability probe runs, so
-        # the resulting in-memory ``clarion_config`` carries
+        # the resulting in-memory ``loomweave_config`` carries
         # ``allow_local_fallback: True``.
-        assert captured["clarion_config"] == {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        assert captured["loomweave_config"] == {"base_url": "http://loomweave.test", "allow_local_fallback": True}
 
     def test_dashboard_structured_log_does_not_leak_paths(
         self,
@@ -533,8 +542,8 @@ class TestGetDbErrorPaths:
             {
                 "prefix": "bad",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "file:///not-http"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "file:///not-http"},
             },
         )
         bad_db = FiligreeDB(bad_dir / DB_FILENAME, prefix="bad", check_same_thread=False)
@@ -556,7 +565,7 @@ class TestGetDbErrorPaths:
             assert bad_resp.status_code == 400
             bad_body = bad_resp.json()
             assert bad_body["code"] == "VALIDATION"
-            assert "clarion.base_url" in bad_body["error"]
+            assert "loomweave.base_url" in bad_body["error"]
         finally:
             store.close_all()
             dash_module._project_store = None
@@ -795,12 +804,12 @@ class TestSafeBoundedIntReexport:
 
 
 # ---------------------------------------------------------------------------
-# /api/loom/scanners — relocated-DB resolution (filigree-641037692a)
+# /api/weft/scanners — relocated-DB resolution (filigree-641037692a)
 # ---------------------------------------------------------------------------
 
 
-class TestLoomScannersRelocatedDB:
-    """``GET /api/loom/scanners`` must resolve scanner TOMLs from
+class TestWeftScannersRelocatedDB:
+    """``GET /api/weft/scanners`` must resolve scanner TOMLs from
     ``project_root / ".filigree" / "scanners"``, not ``db.db_path.parent /
     "scanners"`` — otherwise ``.filigree.conf`` projects with a relocated
     ``db = ...`` path return an empty scanner list while the CLI/MCP
@@ -844,11 +853,11 @@ class TestLoomScannersRelocatedDB:
             app = create_app()
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.get("/api/loom/scanners")
+                resp = await client.get("/api/weft/scanners")
             assert resp.status_code == 200, resp.text
             body = resp.json()
             names = [item["name"] for item in body["items"]]
-            assert "demo" in names, f"scanners not found via /api/loom/scanners: {body!r}"
+            assert "demo" in names, f"scanners not found via /api/weft/scanners: {body!r}"
         finally:
             dash_module._db = None
             db.close()
@@ -873,7 +882,7 @@ class TestLoomScannersRelocatedDB:
             app = create_app()
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.get("/api/loom/scanners")
+                resp = await client.get("/api/weft/scanners")
             assert resp.status_code == 200
             names = [item["name"] for item in resp.json()["items"]]
             assert "legacy" in names

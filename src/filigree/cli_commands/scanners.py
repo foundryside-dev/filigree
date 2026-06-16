@@ -24,7 +24,7 @@ import click
 from filigree.bundled_scanners import BUNDLED_SCANNERS, bundled_scanner_matches, get_bundled_scanner, looks_like_stale_bundled_scanner
 from filigree.cli_commands.files import finding_group
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
-from filigree.core import FILIGREE_DIR_NAME, VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
+from filigree.core import VALID_SEVERITIES, ProjectNotInitialisedError, find_filigree_anchor
 from filigree.mcp_tools.scanners import (
     _load_scanner_or_error,
     _validate_localhost_url,
@@ -59,8 +59,7 @@ def _get_filigree_dir() -> Path:
     "not initialized" message regresses the contract asserted in
     ``tests/test_doctor.py::test_foreign_database_is_reported_with_specific_message``.
     """
-    project_root, _ = find_filigree_anchor()
-    return project_root / FILIGREE_DIR_NAME
+    return find_filigree_anchor().store_dir
 
 
 def _resolve_filigree_dir_or_die(as_json: bool) -> Path:
@@ -158,7 +157,9 @@ def list_scanners_cmd(as_json: bool) -> None:
 
     if not items:
         click.echo("No scanners configured.")
-        click.echo("Run 'filigree scanner available' to see bundled scanners that can be enabled.")
+        if BUNDLED_SCANNERS:
+            click.echo(f"Bundled scanners that can be enabled: {', '.join(sorted(BUNDLED_SCANNERS))}.")
+            click.echo("Enable one with 'filigree scanner enable <name>'.")
         return
     for sc in items:
         click.echo(f"{sc['name']}  {sc.get('description', '')}")
@@ -404,7 +405,10 @@ def trigger_scan_cmd(
     if url_err is not None:
         _emit_error(url_err["error"], url_err["code"], as_json=as_json)
 
-    project_root = filigree_dir.parent
+    # Project root from the canonical anchor (reads weft.toml) — correct for an
+    # arbitrary-depth store_dir override, unlike reverse-deriving from the store
+    # dir by stripping a fixed number of segments (I2).
+    project_root = find_filigree_anchor(filigree_dir).project_root
     try:
         target = safe_path(file_path, project_root)
     except ValueError as e:
@@ -654,7 +658,10 @@ def trigger_scan_batch_cmd(
     assert cfg is not None  # noqa: S101
     _validate_scanner_accepts_prompt_or_die(cfg, prompt, as_json=as_json)
 
-    project_root = filigree_dir.parent
+    # Project root from the canonical anchor (reads weft.toml) — correct for an
+    # arbitrary-depth store_dir override, unlike reverse-deriving from the store
+    # dir by stripping a fixed number of segments (I2).
+    project_root = find_filigree_anchor(filigree_dir).project_root
 
     with get_db() as tracker:
         canonical_paths: list[str] = []
@@ -969,7 +976,10 @@ def preview_scan_cmd(scanner: str, file_path: str, prompt: str, as_json: bool) -
     """Preview the command that would be executed for a scan, without spawning a process."""
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
     _validate_prompt_or_die(prompt, as_json=as_json)
-    project_root = filigree_dir.parent
+    # Project root from the canonical anchor (reads weft.toml) — correct for an
+    # arbitrary-depth store_dir override, unlike reverse-deriving from the store
+    # dir by stripping a fixed number of segments (I2).
+    project_root = find_filigree_anchor(filigree_dir).project_root
     try:
         target = safe_path(file_path, project_root)
     except ValueError as e:
@@ -1086,7 +1096,8 @@ def report_finding_cmd(
     # error. This matches the rest of this module (list-scanners, trigger-scan,
     # trigger-scan-batch, preview-scan).
     filigree_dir = _resolve_filigree_dir_or_die(as_json)
-    project_root: Path = filigree_dir.parent
+    # Canonical-anchor project root (see note above) — override-safe (I2).
+    project_root: Path = find_filigree_anchor(filigree_dir).project_root
 
     # Read input
     if file_path is not None:

@@ -1,8 +1,8 @@
-"""Entity-association HTTP routes (ADR-029, Clarion B.7 / WP9-A).
+"""Entity-association HTTP routes (ADR-029, Loomweave B.7 / WP9-A).
 
 Mirrors the four MCP tools on the HTTP surface so cross-product
-callers (notably Clarion's ``issues_for`` MCP tool, which runs on the
-Clarion side and reaches into Filigree via HTTP) can read and write
+callers (notably Loomweave's ``issues_for`` MCP tool, which runs on the
+Loomweave side and reaches into Filigree via HTTP) can read and write
 the binding without going through MCP.
 
 Routes:
@@ -41,7 +41,7 @@ from filigree.dashboard_routes.common import (
     _validate_actor,
 )
 from filigree.types.api import ErrorCode
-from filigree.types.core import make_clarion_entity_id, make_content_hash, make_issue_id
+from filigree.types.core import make_content_hash, make_issue_id, make_loomweave_entity_id
 
 logger = logging.getLogger(__name__)
 
@@ -100,36 +100,68 @@ def create_classic_router() -> APIRouter:
 
         The companion to ``GET /api/issue/{issue_id}/entity-associations``;
         the entity_id lives in the query string (URL-encoded) because
-        Clarion entity IDs contain colons. Project isolation is by DB
+        Loomweave entity IDs contain colons. Project isolation is by DB
         file. Drift detection is the consumer's job per ADR-029
         §"Decision 3".
         """
         entity_id = request.query_params.get("entity_id", "")
+        current_content_hash = request.query_params.get("current_content_hash")
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id query parameter is required", ErrorCode.VALIDATION, 400)
+        if current_content_hash is not None and (not isinstance(current_content_hash, str) or not current_content_hash.strip()):
+            return _error_response("current_content_hash must be a non-empty string when provided", ErrorCode.VALIDATION, 400)
         try:
-            rows = db.list_associations_by_entity(make_clarion_entity_id(entity_id))
+            rows = db.list_associations_by_entity(
+                make_loomweave_entity_id(entity_id),
+                current_content_hash=make_content_hash(current_content_hash) if current_content_hash is not None else None,
+            )
         except ValueError as exc:
             return _error_response(str(exc), ErrorCode.VALIDATION, 400)
         return JSONResponse({"associations": [dict(row) for row in rows]})
 
     @router.post("/issue/{issue_id}/entity-associations", status_code=201)
     async def api_add_entity_association(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Attach a Clarion entity to *issue_id*. Idempotent on the composite
+        """Attach a Loomweave entity to *issue_id*. Idempotent on the composite
         key — re-attach refreshes ``content_hash_at_attach`` and ``attached_at``
         while preserving the original ``attached_by``.
 
-        Body: ``{"entity_id": str, "content_hash": str, "actor": str?}``.
+        Body: ``{"entity_id": str, "content_hash": str, "entity_kind": str?,
+        "actor": str?, "signature": str?, "signoff_seq": int?}``.
+
+        ``signature``/``signoff_seq`` carry Legis's governed sign-off (v25/B1).
+        This classic surface is transport-open (ADR-012: not enforced; transport
+        is the boundary — only ``/api/weft/*`` is weft-scoped). The sign-off is
+        stored **verbatim and never verified here** — Filigree holds no key; Legis
+        is the sole verifier. Their semantic effect is functional, not a security
+        gate: a *present* (non-null) ``signature`` flips the binding to
+        ``governed``, which makes it non-removable via the delete route and makes
+        a governed close fail closed when Legis is unreachable. A fabricated
+        sign-off therefore grants no privilege — it only makes the binding
+        stickier and closes stricter; deconfliction (cooperating callers) is the
+        boundary, which a route-level check could not improve.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
         entity_id = body.get("entity_id", "")
         content_hash = body.get("content_hash", "")
+        entity_kind = body.get("entity_kind", body.get("external_entity_kind"))
         if not isinstance(entity_id, str) or not entity_id.strip():
             return _error_response("entity_id is required", ErrorCode.VALIDATION, 400)
         if not isinstance(content_hash, str) or not content_hash.strip():
             return _error_response("content_hash is required", ErrorCode.VALIDATION, 400)
+        if entity_kind is not None and not isinstance(entity_kind, str):
+            return _error_response("entity_kind must be a string", ErrorCode.VALIDATION, 400)
+        # v25 (B1): opaque Legis governed-sign-off binding fields. Optional on
+        # the wire — Legis omits them when no key is configured — so missing →
+        # None, stored verbatim. Validate type when present; reject bool for
+        # signoff_seq since bool is an int subclass.
+        signature = body.get("signature")
+        if signature is not None and not isinstance(signature, str):
+            return _error_response("signature must be a string", ErrorCode.VALIDATION, 400)
+        signoff_seq = body.get("signoff_seq")
+        if signoff_seq is not None and (not isinstance(signoff_seq, int) or isinstance(signoff_seq, bool)):
+            return _error_response("signoff_seq must be an integer", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -141,9 +173,12 @@ def create_classic_router() -> APIRouter:
         try:
             row = db.add_entity_association(
                 make_issue_id(issue_id),
-                make_clarion_entity_id(entity_id),
+                make_loomweave_entity_id(entity_id),
                 make_content_hash(content_hash),
                 actor=actor,
+                entity_kind=entity_kind,
+                signature=signature,
+                signoff_seq=signoff_seq,
             )
         except WrongProjectError as exc:
             return _error_response(exc.safe_message, ErrorCode.VALIDATION, 400)
@@ -170,7 +205,7 @@ def create_classic_router() -> APIRouter:
         try:
             removed = db.remove_entity_association(
                 make_issue_id(issue_id),
-                make_clarion_entity_id(entity_id),
+                make_loomweave_entity_id(entity_id),
                 actor=actor,
             )
         except WrongProjectError as exc:

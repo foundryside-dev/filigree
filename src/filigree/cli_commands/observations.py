@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json as json_mod
 import sqlite3
 import sys
@@ -697,7 +698,8 @@ def observation_group(ctx: click.Context) -> None:
 
     Grouped form of the flat observation-management verbs (which still resolve as
     hidden back-compat aliases). Note: ``observe`` (recording a new observation)
-    stays a flat, visible top-level verb. (filigree-03303d6c5a)
+    stays a flat, visible top-level verb (filigree-03303d6c5a); ``observation
+    create`` is a visible alias of it (filigree-ce3bfae865).
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -717,6 +719,19 @@ def register(cli: click.Group) -> None:
     observation_group.add_command(batch_dismiss_observations_cmd, "batch-dismiss")
     observation_group.add_command(batch_link_observations_cmd, "batch-link")
     observation_group.add_command(batch_promote_observations_cmd, "batch-promote")
+
+    # ``observation create`` — visible in-group alias of the flat ``observe``
+    # verb (filigree-ce3bfae865, dogfood N-7). Clone for the same reason
+    # ``add_hidden_flat_alias`` clones: the Command object is shared, so
+    # alias-specific attrs (name/help) must be set on a copy, never on the
+    # original. copy.copy is shallow — the clone shares observe_cmd's params
+    # and callback (no fork); mutate attrs only, never params.
+    create_alias = copy.copy(observe_cmd)
+    create_alias.name = "create"
+    create_alias.short_help = "Alias of `filigree observe` — record an observation."
+    create_alias.help = f"{observe_cmd.help}\n\nAlias of `filigree observe`, the canonical flat verb."
+    observation_group.add_command(create_alias, "create")
+
     cli.add_command(observation_group)
 
     add_hidden_flat_alias(cli, list_observations_cmd, "list-observations")

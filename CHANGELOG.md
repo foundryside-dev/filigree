@@ -5,23 +5,889 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2026-06-17
+
+3.0.0 is a **major release** — the SemVer-major boundary that lands the
+breaking changes deferred through 2.x because they could not ship without
+breaking federation consumers (Loomweave / Wardline / Legis). The headline
+moves:
+
+- **Loomweave / Weft rebrand** (schema v26) — `/api/loom/*` → `/api/weft/*`,
+  `clarion:eid:` → `loomweave:eid:`, outbound `WEFT_TOKEN`; no compatibility
+  aliases.
+- **Machine store consolidation** — `.filigree/` → `.weft/filigree/`, with the
+  config anchor following (`.filigree.conf` → `.weft/filigree/config.json`).
+- **MCP tool-name namespacing** (ADR-016 Phase 2) — the legacy flat tool names
+  are removed.
+- **Federation auth on-by-default** — the inbound bearer token is
+  auto-provisioned at the anchor and resolved through `WEFT_FEDERATION_TOKEN`
+  when an operator override is needed.
+- **Legis governance** — fail-closed closure-gate enforcement for governed
+  issues, on every close surface.
+- **Agent work surfaces** — ready/startable semantics, atomic start verbs,
+  priority range filters, active-only finding work views, suppression-aware
+  finding rollups, and the visible `filigree observation create` alias.
+- **Migration and server-mode hardening** — crash-convergent store/config
+  migration, daemon busy-probes, write fences, per-project federation tokens,
+  scoped server-mode federation writes, and project echo headers.
+- Smaller breaks: the deprecated `get_stats` alias keys are removed and the
+  internal `backward` flag becomes a `TransitionMode` enum.
+
+Upgrade path: **stop all writers (daemon, MCP sessions), then run
+`filigree init`** in each project — the store and config migrations are
+idempotent and crash-convergent. The full old→new tool-name table and the
+operator checklist live in [UPGRADING.md](docs/UPGRADING.md).
+
+### Changed (BREAKING)
+
+- **Internal `loom` → `weft` naming sweep; `loom://` URI scheme retired
+  (filigree-73a2d91f5c).** The last Loom-era names are gone: handler/type/test
+  identifiers (`is_loom_scoped_path` → `is_weft_scoped_path`, `IssueLoom` →
+  `IssueWeft`, …), the contract-fixture tree
+  (`tests/fixtures/contracts/loom/` → `…/weft/`), and the bearer-token /
+  URI-scheme design docs. There is **no live federation URI scheme**: the
+  planned `loom://` scheme was formally closed by the hub's SEI standard, and
+  `weft://` is reserved for future federation-level resources, not active.
+  Wire shapes are unaffected (the `/api/loom/*` → `/api/weft/*` route flip
+  shipped earlier in this release).
+- **Machine store consolidation: `.filigree/` → `.weft/filigree/`
+  (filigree-37e3f26145).** The machine-owned store (SQLite database,
+  `config.json`, scanner/template metadata, runtime sidecars) moves from
+  `.filigree/` to the federation convention `.weft/filigree/`, sharing the
+  `.weft/` subtree with the other Weft tools. Operators can relocate it with a
+  `weft.toml [filigree] store_dir` overlay (honoured at init and at runtime;
+  filigree never writes `weft.toml`). Existing installs migrate on their next
+  `filigree init` via `migrate_store_to_weft` — idempotent and
+  crash-convergent, with atomic copy-then-publish at every step (see the
+  migration fixes below). Legacy `.filigree/` store resolution is retained as
+  permanent back-compat for unmigrated installs. **Stop all writers before
+  migrating** (see [UPGRADING.md](docs/UPGRADING.md)): a live daemon holding
+  the legacy DB is detected and refused, but an in-session stdio MCP
+  connection cannot be detected and must be quiesced by the operator.
+- **Config-anchor cutover: `.filigree.conf` → `.weft/filigree/config.json`
+  (filigree-4bf16e64b6).** The project anchor moves off the legacy root file
+  `.filigree.conf` into the store's own `config.json` — completing the WEFT store
+  consolidation for config the way `migrate_store_to_weft` did for the database.
+  `filigree init` now **imports** a present `.filigree.conf` into
+  `.weft/filigree/config.json` (conf-wins on the fields the runtime served —
+  `prefix`/`enabled_packs`/`registry_backend`/`loomweave`/`project_name`; `mode`
+  stays config.json-authoritative; `db` is dropped) and **retires** the conf to
+  `.filigree.conf.imported` — idempotent and crash-convergent (config.json is
+  written atomically before the conf is atomically renamed). **Fresh installs are
+  born confless**; the project anchor is now the **presence of `.weft/filigree/`**
+  (or an operator `weft.toml [filigree].store_dir` override). `weft.toml` is never
+  written by filigree and never holds identity (the C-9c deletion test: filigree
+  boots with no `weft.toml`). Implicit agent-startup surfaces
+  (`generate_session_context`, the agent dashboard hook, stdio-MCP with no
+  `--project`) resolve via `find_filigree_anchor(include_legacy_dir=False)` so a
+  bare legacy `.filigree/` ancestor is still not treated as attach-consent. Legacy
+  `.filigree/` **store** reads are retained as permanent back-compat
+  (`resolve_store_dir` fallback, C-9f); only the conf **anchor** is demoted to
+  one-shot-import-and-retire. Existing installs migrate on their next `filigree
+  init`; nothing breaks until then. Because `config.json` is now the sole identity
+  authority (no conf backstop), a present-but-corrupt `config.json` is refused at
+  **open** with a structured `VALIDATION` error — symmetric with a corrupt conf —
+  rather than being silently defaulted to the directory name (which would write
+  issues into the wrong namespace).
+- **Loomweave / Weft rebrand (schema v26).** The Clarion→Loomweave (sibling/
+  registry/SEI) and Loom→Weft (federation + named API generation) renames land
+  as a hard wire-break: `/api/loom/*`→`/api/weft/*`, the entity-association key
+  `clarion_entity_id`→`loomweave_entity_id`, the SEI prefix
+  `clarion:eid:`→`loomweave:eid:`, finding rule-ids `CLA-`→`LMWV-`, and the token
+  env var `CLARION_LOOM_TOKEN`→`WEFT_TOKEN`. No compatibility aliases. The v26
+  migration rewrites every stored SEI prefix in place — the entity-association
+  column, the `deleted_issues` F5 tombstone `entity_ids` array, and the
+  entity-association audit events — plus finding rule-ids. Deployments must set
+  `WEFT_TOKEN` (the opaque federation bearer token; `CLARION_LOOM_TOKEN` is no
+  longer read). The `registry_backend` value/section is now `loomweave` (a
+  deployed `clarion` config is migrated on load via a one-shot rename-on-load
+  shim). Stored Legis signatures are stale-pending-reissue until Legis re-signs
+  over the renamed `loomweave:eid:` entity_ids (Filigree never verifies them, so
+  reads do not break). The registry error codes are renamed
+  with the rest: `CLARION_REGISTRY_VERSION_MISMATCH` →
+  `LOOMWEAVE_REGISTRY_VERSION_MISMATCH` and `CLARION_OUT_OF_SYNC` →
+  `LOOMWEAVE_OUT_OF_SYNC`. The dormant `loom://` URI scheme is NOT renamed
+  (closed/historical; tracked with the remaining federation-name residuals,
+  filigree-73a2d91f5c).
+- **MCP tool-name namespacing — legacy flat names removed (ADR-016 Phase 2).**
+  The ~115 flat MCP tool names (`get_issue`, `list_findings`, `start_work`, …)
+  were renamed to the subsystem-namespaced `<entity>_<verb>` convention
+  (`issue_get`, `finding_list`, `work_start`, …) in 2.3.0, which served the new
+  names while still resolving the old ones as a transition window. 3.0.0 removes
+  that fallback: `call_tool` rejects a legacy name with the standard `NOT_FOUND`
+  (`Unknown tool`) envelope. MCP consumers that hardcode tool names must switch
+  to the new names — see [UPGRADING.md](docs/UPGRADING.md) for the full old→new
+  table. Callers that read `list_tools` dynamically are unaffected (it has served
+  only the namespaced names since 2.3.0); the CLI surface is unchanged. The
+  2.3.0 deprecation-telemetry field (`deprecated_tool_name_calls` in
+  `mcp_status_get` / `mcp-status`) is removed.
+- **`TransitionMode` enum replaces the internal `backward: bool` (internal
+  Python API).** The transition-direction flag that was conflated with
+  force/escape semantics across `TemplateRegistry.validate_transition`,
+  `update_issue`, the `DBMixinProtocol` signature, and
+  `InvalidTransitionError` is now a `TransitionMode{FORWARD, BACKWARD}` enum
+  (`filigree.types.api.TransitionMode`); `InvalidTransitionError.backward`
+  becomes `.mode`. The flag has no MCP/CLI/HTTP/wire exposure, so it is
+  replaced outright with no compatibility alias. Only callers of the internal
+  Python API (`backward=True` → `mode=TransitionMode.BACKWARD`) are affected;
+  the close/reopen/release behaviour and `transition_forced` audit events are
+  unchanged.
+- **`get_stats` alias keys `status_name_counts` / `status_category_counts`
+  removed.** Deprecated in 2.1.0 (filigree-17694d2db8) as exact duplicates of
+  `by_status` / `by_category`, they are now dropped from every surface that
+  carries `get_stats` output: the MCP `stats_get` tool, the MCP `summary_get`
+  JSON envelope (nested under `stats`), the HTTP `GET /api/stats` projection,
+  and the `filigree stats --json` CLI output. The keys never held information
+  beyond the canonical pair, so the drop loses no data. **Migration:** read
+  `by_status` (literal workflow status names) and `by_category` (template
+  categories `open`/`wip`/`done`). The public `GET /api/stats` endpoint is the
+  out-of-suite breaking boundary — pinned external consumers must switch. No
+  in-suite sibling (loomweave / wardline / legis / lacuna / weft) read the
+  removed keys (confirmed by full call-site enumeration, filigree-034931a584).
+
+### Added
+
+- **Warpline reverify-worklist consumer — `warpline_worklist_ingest` (federation
+  Seam 2A, weft-74f1e0c331).** The write-capable half of the warpline↔filigree
+  seam: consumes a `warpline.reverify_worklist.v1` worklist and files-or-links its
+  items as work. Per item, keyed on the entity SEI — already-tracked-by-an-open-
+  issue → `linked`; untracked → `filed` (a task carrying the `warpline`/`federation`
+  producer labels plus an ADR-029 entity association on the SEI, the same surface
+  warpline reads back via `entity_association_list_by_entity`, so a filed item shows
+  as tracked on the next worklist); no SEI → `skipped`. Explicit-action only:
+  previews by default (`apply=false`, pure reads), `apply=true` performs the
+  writes. warpline never auto-files. MCP-only, matching the ADR-029 federation
+  surface precedent.
+
+- **`filigree observation create` — visible alias of `filigree observe`
+  (dogfood N-7, filigree-ce3bfae865).** The natural first-try
+  `filigree observation create` previously failed with a hintless
+  `No such command 'create'`. The alias shares observe's callback and options
+  (no fork) and is marked as an alias in the group help; `observe` stays the
+  canonical flat verb.
+
+- **Priority range filters on the listing and ready surfaces (dogfood N-6,
+  filigree-7fe21777b6).** `--priority-min` / `--priority-max` on
+  `filigree list` and `filigree ready`, and `priority_min` / `priority_max`
+  on MCP `issue_list` and `work_ready` — the same range pattern the claim
+  verbs and `observation list` already had, applied SQL-side in
+  `list_issues` / `get_ready`. `--priority` stays exact-match sugar;
+  combining it with a range bound is a `VALIDATION` error.
+
+- **Claim verbs accept `actor` alone as the caller identity (dogfood FIL-3,
+  filigree-3028a8d0f8).** `work_claim` / `work_claim_next` / `work_start` /
+  `work_start_next` no longer hard-require `assignee`: when omitted it
+  defaults from `actor` (completing the existing actor-from-assignee
+  direction into bidirectional defaulting); omitting both is a handler-level
+  `VALIDATION` error naming both params. On the CLI, an *explicitly* passed
+  `--actor` fills an omitted `--assignee` on `claim` / `claim-next` /
+  `start-work` / `start-next-work`; the implicit `cli` default never claims
+  anonymously. `work_reclaim` is deliberately excluded — its assignee is the
+  transfer recipient, not the caller. Strictly additive: every pre-existing
+  call shape is byte-identical, pinned by regression tests.
+
+- **Federation auth is now on-by-default: the anchor auto-provisions the
+  inbound token (3-tier resolution).** `filigree install` and `doctor --fix`
+  pre-seed — and the daemon mints on first serve — a per-machine token at
+  `<store_dir>/federation_token` (mode 0600, gitignored). The resolver reads
+  three tiers, highest first: `$WEFT_FEDERATION_TOKEN` (operator override; the
+  only cross-host tier) → the store-dir token file → absent (auth stays off,
+  graceful degrade). Because tier 2 auto-mints, the `/api/weft/*` + `/mcp`
+  surface is bearer-gated by default after a daemon's first serve; on-host
+  siblings read the token from the `.weft/` subtree they can already read.
+  A mint that cannot persist (read-only mount, full disk) is fail-loud —
+  stderr + structured log — and an ethereal daemon pins the in-memory token so
+  the enforced posture matches the report. A new
+  `filigree rotate-federation-token` command rotates the file atomically
+  (effective at the next daemon restart, and it says so). Resolving the token
+  through a deprecated `FILIGREE_*` alias now logs a deprecation warning
+  naming `WEFT_FEDERATION_TOKEN`. This is deconfliction plumbing, not an
+  authority key; the env var remains the cross-host escape hatch.
+
+- **`finding_list` filter axes: `kind`, `suppression`, `qualname`, `rule_id`
+  (FIL-2/X-5, weft-d7273d61e3).** The consumer surface previously filtered
+  only on flat top-level columns, so excluding wardline's `kind:metric` engine
+  telemetry or already-suppressed defects meant pulling every finding and
+  filtering `metadata.wardline.*` client-side. The relevant wardline `where:{}`
+  axes are now flat parameters: `kind`
+  (defect/fact/classification/metric/suggestion), `suppression`
+  (`active`/`baselined`/`waived`/`judged`/`all`), `qualname` (exact match),
+  and `rule_id`. Wired through the single `list_findings_global` chokepoint so
+  every surface gets parity: MCP `finding_list`, CLI `list-findings`
+  (`--kind`/`--suppression`/`--qualname`/`--rule-id`), HTTP
+  `GET /api/weft/findings`, and the `/files/_schema` discovery endpoint.
+  Headline query: `finding_list kind=defect suppression=active`. (`path_glob`
+  is deferred — weft-2b71565563.)
+
+- **Scan findings carry the linked issue's `issue_status` and
+  `issue_resolution` (N6).** A finding whose promoted issue was dismissed
+  (`not_a_bug`) previously read as open work; the linked issue's status and
+  `close_reason` resolution now ride on every finding read surface (MCP,
+  `GET /api/weft/findings`), `NULL` when unlinked. Re-promoting a finding
+  linked to a closed/dismissed issue returns that issue with a warning naming
+  the done state instead of minting a duplicate bug.
+
+- **`finding_promote` refuses a wardline-suppressed finding without `force`
+  (weft-171fc22a50).** A baselined/waived/judged finding is an
+  already-accepted defect, not active work — promoting one manufactures false
+  work. Promotion now fails `VALIDATION` unless `force=true` is passed
+  explicitly (recorded as a warning on the result), threaded through both
+  promote tools and both weft HTTP routes.
+
+- **`WEFT_FEDERATION_TOKEN` canonical inbound federation bearer + token
+  negotiation (filigree-0e4bc3d81a).** The bearer that gates Filigree's own
+  `/api/weft/*` + `/mcp` HTTP surface is now read from `WEFT_FEDERATION_TOKEN`
+  first, falling back to the **deprecated** `FILIGREE_FEDERATION_API_TOKEN` and
+  `FILIGREE_API_TOKEN` (soft migration — existing exports keep working; removal
+  post-1.0). This is the *inbound* surface token and is distinct from the
+  *outbound* registry token `WEFT_TOKEN`; it is federation/deconfliction
+  plumbing, not a security secret. Server-mode `filigree install` now writes the
+  `.mcp.json` Authorization header as `Bearer ${WEFT_FEDERATION_TOKEN}` (it
+  previously wrote none, so the transport could not authenticate) and
+  *negotiates* a token: it reuses an exported one, prints a one-line migration
+  for a deprecated-alias value, or mints + records one under the gitignored
+  `<store_dir>/federation_token` and prints the `export` the operator must run
+  (filigree cannot write the agent's process env). `filigree doctor` now fails
+  the Claude Code MCP check when a streamable-http Authorization header
+  references an env var that does not resolve — turning the previously silent
+  `/mcp` 401 (an agent coordinating blind) into a diagnosable connectivity
+  check — and `doctor --fix` rewrites a committed header from a deprecated token
+  name to `${WEFT_FEDERATION_TOKEN}` (commit-safe; never writes a secret value).
+
+- **Reconciliation-debt list surface (B2).** When the Legis closure gate defers
+  a governed finding→issue auto-close (blocked or unconfirmable), the deferral is
+  recorded as reconciliation debt. A new read surface lists the issues that carry
+  it: `db.list_reconciliation_debt()`, the CLI verb `filigree reconciliation-debt`
+  (`--limit`/`--offset`/`--json`), and the MCP tool `reconciliation_debt_list`
+  (brings the served MCP surface to 116 tools). The debt write is idempotent, so
+  re-evaluating the same blocked issue on every ingest/sweep does not duplicate
+  comments.
+
+- **Legis governed-sign-off binding fields (B1, schema v25).** The
+  entity-association attach surface (`POST /api/issue/{id}/entity-associations`)
+  now accepts and persists two optional opaque fields Legis sends when it binds
+  a cleared *governed* sign-off: `signature` (an HMAC over
+  `{issue_id, entity_id, content_hash, signoff_seq}`) and `signoff_seq`. Filigree
+  stores both verbatim and echoes them back on every read (HTTP + MCP
+  `entity_association_list` / `_list_by_entity`) — it has no key and **never**
+  verifies the signature, exactly as it treats `content_hash_at_attach`. Both
+  columns are nullable: Legis omits them when no key is configured, and
+  pre-v25 / non-governed bindings read `NULL`. A re-attach that carries a
+  signature refreshes the binding; a *signatureless* re-attach **preserves** the
+  prior sign-off (sticky governance — see the v27 fix below), so a routine drift
+  refresh never silently revokes governance. The attach idempotency key
+  `(issue_id, entity_id)` is unchanged. `export`/`import` round-trips the new
+  columns. Wrong-typed `signature`/`signoff_seq` (incl. a `bool` for the
+  sequence) are rejected `400 VALIDATION`.
+
+- **Legis closure-gate enforcement (B5).** Closing a *governed* issue — one with
+  at least one entity-association carrying a Legis `signature` — now consults
+  Legis's read-only, fail-closed closure-gate first and refuses the close
+  unless Legis confirms a verified binding. Enforced at **every** close surface
+  (HTTP single + loom single + classic/loom batch, MCP `close_issue` /
+  `batch_close`, and the CLI `close` command) via a shared transport-neutral
+  policy, so no surface is a bypass; the data layer makes no network calls.
+  Governance is **off** until `LEGIS_URL` is set ("invisible until wanted"):
+  ungoverned closes are unaffected and make no network call. When governance is
+  on, a governed close is blocked (`409`) if Legis says no; if Legis is disabled
+  (`404`) or unreachable it **fails closed** for governed issues (`409`,
+  "governance backend unavailable") so the gate cannot be dodged by taking Legis
+  offline; a tampered-ledger integrity failure surfaces as `502`. Batch closes
+  report a blocked issue per-item without aborting the batch. New env:
+  `LEGIS_URL`, optional `LEGIS_API_TOKEN`.
+
+- **Transport-bound actor identity (ADR-012, schema v24).** Every runtime write
+  now records a `verified_*` column alongside the claimed `actor`/`author`,
+  holding the OS-user identity the process verifiably ran as (or `NULL` when no
+  transport proof exists — all historical rows, unverified surfaces, and
+  system-authored writes). Resolved at the CLI and MCP-stdio entry points. A
+  non-blocking `ACTOR_MISMATCH` warning surfaces when the claimed and verified
+  identities disagree (CLI: stderr; MCP: response-envelope `warnings` array);
+  framework default actors (`cli`/`mcp`) are suppressed. No backfill; the
+  `events` dedup index is unchanged; `export`/`import` round-trips the new
+  columns. MCP-HTTP peer identity and dashboard auth remain deferred.
+
+- **`scanned_paths` on `POST /api/loom/scan-results` (and the classic/living
+  aliases) — close-on-fixed now fires from scan ingest.** A scanner can now send
+  `scanned_paths`: the authoritative set of files it visited this run, including
+  clean files with zero findings. When `mark_unseen` is true, the
+  absent-fingerprint sweep is driven off the union of files-with-findings and
+  `scanned_paths`, so a file whose **last/only** finding was fixed (and is
+  therefore absent from `findings`) is still reconciled to `unseen_in_latest` and
+  its linked issue **cascade-closes** — eagerly, from ingest, no longer only via
+  the age-gated `clean-stale` sweep. With `scanned_paths` non-empty, a fully-clean
+  scan (`findings: []`, `mark_unseen: true`) is now valid instead of `400`.
+  Optional and wire-compatible: a body omitting `scanned_paths` behaves exactly as
+  before. Unknown clean paths (no prior file record) are skipped, never created.
+  Wardline already emits this field; Filigree previously dropped it silently.
+
+### Changed
+
+- **`safe_message` parity for claim/transition errors on HTTP & MCP
+  (filigree-d25e75cebf).** `ClaimConflictError` and `InvalidTransitionError`
+  now follow the `WrongProjectError` pattern: the untrusted HTTP/MCP error
+  *string* is a fixed, generic `safe_message` ("Issue is claimed by a different
+  assignee" / "Requested status transition is not allowed") instead of
+  reflecting arbitrary call-site exception text on the wire. The structured
+  recovery data is **retained** so agents still self-correct — claim conflicts
+  keep `details.observed`/`details.expected` (the assignees); transition errors
+  keep `current_status`/`type_name`/`to_state` (and `valid_transitions` when
+  computed), now carried in the HTTP `details` payload and the MCP
+  `TransitionError` payload even when no allowed-transition hint was enriched
+  (previously these were only in the human string). The CLI keeps the full rich
+  `str(exc)` operator message — it is the local diagnostic surface and is
+  unchanged. **Not breaking:** assignees/statuses/transitions are coordination
+  data, not confidential, and remain available in structured `details`; only a
+  consumer that string-matched the prose of these two error *messages* over
+  HTTP/MCP (rather than switching on `code` + reading `details`) is affected,
+  which the 2.0 envelope contract already directs against. Scope note: batch
+  per-item failures (`batch_close`/`batch_update`) and `AmbiguousTransitionError`
+  are intentionally out of scope — batch failures carry only structured
+  coordination data with no probe-sensitive text, and there is no
+  `WrongProjectError` batch precedent to mirror.
+
+- **Accessibility: ARIA labels on icon-only dashboard buttons.** Icon-only
+  controls across the app, detail, graph, health, ready, releases, and workflow
+  views now carry `aria-label`s so screen-reader users get a meaningful name.
+
+- **Performance: dropped a redundant open-blockers query in the issue batch
+  fetch** (`db_issues`), removing a per-issue round trip from the batch path.
+
+### Fixed
+
+- **Migration daemon-liveness probe no longer false-refuses on a
+  deterministic-port collision with an unrelated listener
+  (filigree-d5aa3bfe3d).** The ephemeral-dashboard tier of the migration's
+  busy-detection treated *any* listener on the project's deterministic port as
+  a live dashboard — but `compute_port` hashes into a 1000-port window shared
+  with whatever else runs on the box, so an unrelated daemon on the colliding
+  port aborted real migrations with a spurious `StoreMigrationBusyError`. The
+  probe now requires the listener to positively identify itself: `GET
+  /api/health` must answer `mode == "ethereal"`. Non-HTTP listeners,
+  non-filigree services, and server-mode daemons (the registry tier's call)
+  no longer contribute a refusal; a pre-1.3.0 dashboard (no `mode` field)
+  reads as unidentified and falls through to the write-fence + quiesce
+  backstops.
+
+- **Session-context banner named MCP verbs as if they were CLI commands
+  (dogfood N-4, weft-993c1077e1, filigree-4e64621f70).** The banner's
+  backtick'd hints (`finding_list`, `finding_promote`, `observation_list`)
+  were MCP verb names that fail as shell commands, so an agent in a CLI-first
+  session got `No such command` as its first action. Hints are now runnable
+  CLI commands with the MCP verb named in an `(MCP: …)` aside, and a
+  regression test pins every backtick'd banner hint to a `filigree …` form.
+
+- **Session-context "actionable" finding count no longer presents engine
+  telemetry as defect signal (dogfood FIL-1 residual, filigree-4d489560e0).**
+  `unbridged_finding_stats` now additionally splits the actionable bucket by
+  wardline kind (`actionable_defect` / `actionable_other`; kind-less findings
+  count defect-side so third-party scanner findings are never hidden as
+  telemetry), and the ANALYZER FINDINGS banner line surfaces the split and
+  steers triage to `filigree finding list --kind defect` when telemetry is
+  present.
+
+- **Server-mode `.mcp.json` no longer leaks the per-machine federation token
+  into git, and `doctor` recognises file-sourced auth
+  (filigree-ebfc16a090, filigree-b09a4854d7).** The server-mode install
+  embedded the literal token into `.mcp.json` at umask-default 0644 with no
+  gitignore guard — and the token is per-machine, so a committed copy makes
+  every other clone present one machine's token and get 401s. The file is now
+  chmod 0600 after write, a `.mcp.json` gitignore rule is appended (server
+  mode only; ethereal's token-less stdio entry stays committable), and an
+  already-tracked file gets a `git rm --cached` warning. Separately, the
+  doctor "Auth config" check read env vars only, so an on-by-default daemon
+  authed via the auto-minted token file was reported "auth disabled" — it now
+  resolves tier 2 read-only and reports the real posture.
+
+- **Store migration refuses to run while a live daemon holds the legacy DB
+  (filigree-031f9a413f).** The migration deletes the legacy database after
+  copying it forward, so a daemon idle across the copy→unlink window could
+  commit a post-copy write to the unlinked inode — silent loss that no
+  copy-time lock can close (the write has not happened yet at copy time).
+  Migration now runs a registry-based, PID-verified detect-and-refuse before
+  any mutation: a live filigree daemon serving the project (server-mode
+  registration or a bound ephemeral dashboard port) raises
+  `StoreMigrationBusyError` naming the port and the recovery. Detection is
+  best-effort and can never crash the migration; an in-session stdio MCP
+  connection cannot be detected and is documented as an operator quiesce
+  requirement in UPGRADING.md.
+
+- **Resumed store migration no longer ships stale metadata (M1).** The DB
+  re-copies unconditionally while the legacy store is canonical, but
+  `config.json`/`federation_token` copied once — so a resumed migration could
+  publish a stale snapshot of them. The metadata files now mirror the DB's
+  re-copy rule (atomic re-copy while legacy is the resolved canonical store;
+  copy-once after the weft store takes over, so a committed install is never
+  clobbered by a stale legacy copy). Step 4 also unlinks the now-dead
+  `federation_token` from the legacy husk (secret hygiene).
+
+- **`CLAUDE.md`/`AGENTS.md` instruction-block rewrite is bounded — it can no
+  longer delete a sibling tool's block (filigree-bcbd4d66fd).** The shared
+  instruction files are co-owned by filigree, wardline, and legis via
+  namespaced fences, but `inject_instructions` had no foreign-owner concept:
+  when filigree's own end-marker was missing it truncated everything after its
+  start marker to end-of-file — deleting any co-resident sibling block that
+  followed — and the SessionStart auto-repair hook made that reachable on
+  every session start. The rewrite now bounds filigree's writable region at
+  the first foreign-namespace fence (case-insensitive); duplicate or unclosed
+  filigree blocks still collapse to one, and a stale duplicate surviving
+  beyond a foreign fence warns instead of silently shipping.
+
+- **Server registry survives a store relocation: `register_project` dedups by
+  project root (filigree-a4925b59bb).** `server.json` keys entries by
+  store-dir string, but a project's identity is its root: after the
+  `.filigree/` → `.weft/filigree/` relocation the stale old-store key lingered
+  with the same prefix, read as a collision, and the re-register was refused.
+  An existing entry resolving to the same project root is now recognised as
+  the same project's stale key and dropped — the registry converges to a
+  single live key and self-heals.
+
+- **Server mode echoes `X-Filigree-Project` on every response, classic
+  surface included (filigree-b62d865dad).** An unscoped classic-router write
+  (`POST /api/issues`) silently resolved to the daemon's default project with
+  no header echo, so a misroute was undetectable. Every non-`/mcp` response
+  now names the project it resolved to, uniform with the federation seam.
+  Classic writes intentionally keep default-project resolution (the
+  dashboard's no-project view relies on it); only the federation surface fails
+  closed on unscoped writes.
+
+- **JSONL export→import round-trip preserves `file_events.actor` (B4,
+  filigree-673a1f3af5).** Both file-event import INSERTs listed
+  `verified_actor` but omitted the claimed `actor`, silently resetting it to
+  the empty string on re-import. Audit-trail fidelity fix; the trustworthy
+  `verified_actor` column already round-tripped.
+
+- **`POST /api/v1/observations` is gated behind the federation token like its
+  siblings (filigree-bd101dbfa0).** The versioned classic write alias
+  dispatches the same handler as the gated `/api/observations` and
+  `/api/weft/observations` routes but was missing from the alias set, so a
+  federation producer could write the project DB ungated. Gate-coverage
+  consistency (deconfliction, not a security hole); the `/api/health` auth
+  report lists it among the protected paths, and the cross-generation drift
+  guard now iterates the classic router too.
+
+- **`filigree sei-backfill` works on rebranded projects and preserves
+  governance through merges (filigree-c31a22fd47).** (a) The backfill read
+  the pre-rebrand `.clarion/clarion.db` — which no rebranded project has — so
+  every run failed the sync gate and the ADR-017 production migration could
+  not run at all; it now reads `.loomweave/loomweave.db`, probing the
+  forward-compat `.weft/loomweave/` location first so it keeps working when
+  Loomweave consolidates its own store. (b) Merging a duplicate locator-keyed
+  binding into its SEI-keyed survivor carried only the content hash and attach
+  time — never the Legis sign-off columns — so deleting a signed non-survivor
+  silently downgraded the issue governed→ungoverned. The merge now carries the
+  freshest valid sign-off onto the survivor (signed wins, never downgrade,
+  higher `signoff_seq` when both are signed); the content-mismatch edge lands
+  governed-but-`STALE`, which fails closed — no path silently proceeds.
+
+- **Removing a Legis-signed entity association is refused — the closure
+  gate's removal vector is closed.** Schema v27 closed the write-clobber and
+  blank-signature bypasses, but a plain `DELETE` of a governed issue's only
+  signed binding remained an independent governed→ungoverned downgrade that
+  let the issue close with no Legis call. `remove_entity_association` now
+  hard-refuses when the target row carries a signature
+  (`GovernedAssociationRemovalError`); the predicate mirrors the gate's
+  governed-ness test exactly, and it keys on the durable signature — not on
+  `LEGIS_URL` being set — so unsetting Legis is not a back door. There is no
+  signatureless override: Filigree holds no key and cannot verify a
+  caller-supplied signature, so removal authority stays with Legis.
+
+- **A contract-violating Legis 2xx fails closed per-issue without poisoning
+  the batch.** A 2xx closure-gate response that does not affirm
+  `allowed: true` was mapped to `UNREACHABLE`, which flips the cascade batch's
+  Legis-down short-circuit and defers every remaining governed issue — but a
+  2xx means Legis answered; the defect is in that one response, not
+  connectivity. A new `CONTRACT_VIOLATION` outcome blocks that issue (with
+  reconciliation debt) while every later issue still gets its own gate call;
+  5xx and unexpected statuses keep the systemic short-circuit.
+
+- **Only an exact Legis 500 is a ledger-integrity failure; other 5xx degrade
+  to `UNREACHABLE` (filigree-6e0d7a6a82).** The wire contract reserves
+  exactly 500 for a tampered ledger, but the classifier mapped every status
+  ≥ 500 to `INTEGRITY_FAILURE` — which the cascade deliberately does not
+  short-circuit — so a transient 502/503/504 from a restarting Legis or an
+  interposed proxy made every issue in a batch eat its own timeout.
+  Availability fix; the posture stays fail-closed throughout.
+
+- **Batch closure-gate helpers fail closed on a gate-read error.** The four
+  batch helpers (HTTP + MCP, close + update) caught `ValueError`/`KeyError`
+  while reading governed-ness and appended the issue to the ALLOWED list —
+  fail-open, the inverse of the single-close path. A gate-read error is now a
+  per-item `VALIDATION` failure that never routes the issue into the close;
+  the foreign-prefix envelope abort is unchanged.
+
+- **`filigree doctor` no longer flags the retired `.filigree.conf` as a missing anchor (filigree-4bf16e64b6 residual).** The conf-anchor check predated the config-anchor cutover: it warned that the conf was "missing" and promised it "will be auto-written on next use" — but post-cutover nothing writes a conf, so the warning was unresolvable and fired on every healthy migrated project (including right after the `filigree init` that retired the conf). The check's polarity is now inverted to match the cutover: a **missing** conf passes (noting the anchor lives in the store's `config.json`, and the `.filigree.conf.imported` breadcrumb when present); a **present** conf warns that the legacy anchor is pending import and points at `filigree init`. The conf-declared `db` path is still honored for unmigrated legacy installs, and the home-directory-conf warning is unchanged.
+- **HTTP / MCP-HTTP writes no longer silently drop `verified_author`/`verified_actor` — the unverified posture is now discoverable (ADR-012).** Only CLI and MCP-stdio can vouch for the caller (they stamp the OS identity); over HTTP the `actor` is a self-asserted claim and the `verified_*` columns are correctly NULL (stamping the server's OS user would be a *false* attestation). The drop was silent — callers had no signal. Both transports now expose an `actor_verification` posture (`verified`, `deferral`, explanatory `note`): on the dashboard/loom HTTP surface via the `/api/health` `auth` scope, and on the MCP surface via `mcp_status_get` (where it is derived from the live session state, so MCP-stdio reads verified and MCP-HTTP reads unverified). Authentication itself — transport-bound caller identity — remains deferred to `filigree-81d3971467`; this change makes the *current* state honest, not silent.
+- **Scan findings surface the wardline `suppression_state` at the top level.** A finding that wardline has baselined/waived/judged carried that verdict only inside `metadata.wardline.suppression_state`, so an agent triaging via the slim `finding_list` (or `finding_get`, or `GET /api/weft/findings`) could not tell an accepted/suppressed defect from open work without parsing nested metadata. `suppression_state` is now lifted onto `ScanFinding`/`ScanFindingWeft` (mirroring the N6 `issue_status` lift); `None` when the finding is unsuppressed, and independent of issue-linkage.
+- **Agent finding work-views default to active-only — accepted defects no longer read as fresh, open work (filigree-2bdb878bd2, residual of the N2 wardline→filigree seam).** `finding_list` (MCP) and `list-findings` (CLI) previously returned wardline-baselined/waived/judged findings mixed in with real ones at `status:open severity:high`, annotated but not hidden, so a `finding_list status=open severity=high` work-query still surfaced already-accepted defects. Both surfaces now default to `suppression=active`; pass `suppression=all` to include suppressed rows, or a specific verdict (`baselined`/`waived`/`judged`) to triage them. The default-hide lives at the agent surfaces only: the core `list_findings_global` primitive keeps its all-inclusive default (internal callers are unaffected), and the federation read API (`GET /api/weft/findings`) and dashboard are likewise unchanged — federation consumers pass an explicit `suppression=` filter. `all` is now an advertised suppression-filter value. Complements the already-shipped `finding_promote` suppression guard (which refuses to mint a new issue from an accepted defect without `force`) and the session-context actionable/suppressed split.
+- **Scan trigger / status responses echo the file's findings posture (W2 class).** `scan_trigger`, `scan_trigger_batch` (per file), and `scan_status_get` returned run metadata (run id, pid, log path) with no sense of the file's findings — a vacuous run-state-only green. They now carry a `file_summary` (severity-bucketed `FindingsSummary`); on the status shape it aggregates the run's target file(s) in a single query, reflecting post-ingest state once results are POSTed back.
+- **`FindingsSummary` severity rollups now carry a `suppressed` breakdown so accepted defects are distinguishable from actionable work (filigree-c3e2b72f21).** The row level already separated open status from the wardline `suppression_state`, but every summary producer (`get_file_findings_summary`, `get_files_findings_summary`, `get_global_findings_stats`, and the inline `list_files_paginated`/loom file-list summary) bucketed severity by open-status alone — so one active HIGH plus one baselined HIGH read as `{"high": 2}` with no way to tell them apart, and a federation consumer over-reported actionable high/critical work by the count of already-accepted findings. The fix is **additive**: the existing top-level buckets keep their meaning (every open finding, suppression-agnostic) and a parallel `suppressed: SeverityBreakdown` is added, computed with the same shared classifier as the row-level `finding_list` suppression filter (so the two cannot drift). Consumers can now derive actionable work as `bucket − suppressed[bucket]`; no existing number changes. `GlobalFindingsStats` and `EnrichedFileItem.summary` inherit the key. Counterpart of the weft federation interface audit gap G4.
+- **Session-context surfaces un-bridged analyzer findings (F2).** A new
+  `ANALYZER FINDINGS: N not yet bridged to the tracker (M actionable, K
+  baselined/suppressed)` line in `filigree session-context` (CLI + MCP) so an
+  agent's orientation no longer silently reads "nothing to do" while
+  un-promoted findings sit in `scan_findings`. Honest-empty: omitted at 0; the
+  actionable/suppressed split uses the wardline `suppression_state`.
+- **Aggregate/container types are never offered as startable work (F3).**
+  `release`, `epic`, `milestone`, and `phase` carry a declarative `container`
+  type-schema flag; `work_ready` reports them `startable=false` ("complete child
+  issues") and `start_next_work` skips them, so the picker no longer hands an
+  agent a release/epic container as if it were a unit of work. Manual
+  transitions are unaffected.
+- **Confless store-migration re-run is idempotent.** A completed confless
+  migration (legacy DB carried forward + removed, no `.filigree.conf`) no longer
+  falls through to a needless re-copy or a spurious `StoreMigrationBusyError`
+  when a daemon is live — `migrate_store_to_weft` short-circuits on the
+  confless-completion state before the daemon-liveness probe.
+- **Store migration fails closed (not with a raw traceback) on a corrupt
+  `.filigree.conf`.** `migrate_store_to_weft` publishes the weft DB and copies
+  metadata (steps 1-2) before rewriting the conf's `db` field (step 3); a
+  present-but-unreadable conf made step 3's `read_conf` raise *after* those
+  mutations, escaping `filigree init`/`install` as an uncaught traceback and
+  leaving a half-published weft husk. The conf read is now a strict pre-mutation
+  gate (mirroring the `weft.toml` I1 read): a present-but-unreadable conf raises
+  `StoreMigrationConfUnreadableError` **before any filesystem mutation** — the
+  conf and legacy store are left byte-identical and a re-run converges once the
+  conf is readable — and the install path reports it as a clean `exit 1` with a
+  fix-or-remove message. The gate sits after the idempotency no-op checks, so a
+  migration that already completed and was corrupted afterward still no-ops
+  rather than refusing. Not data-loss (step 4 never ran; legacy stayed
+  canonical) — an availability/robustness fix. (filigree-obs-85b37a7cdc)
+- **Store-migration metadata sub-trees (`scanners/`, `templates/`) copy
+  atomically (filigree-197be8b501).** Step 2 copied these directories with
+  `shutil.copytree` straight to the final path, guarded on `not dest.exists()`
+  — the same torn-then-skip pattern already fixed for the DB and the metadata
+  files: a crash mid-copy left a *partial* directory that a re-run's existence
+  guard mistook for a finished copy and skipped, publishing the partial. A new
+  `_atomic_copy_tree` copies into a dest-dir temp then `os.replace`-publishes, so
+  the destination only ever appears complete; the copy-once guard stays but is
+  now safe. (Lower-severity than the step-1 DB bug: the legacy `.filigree/` husk
+  is retained, so the original always survives.)
+- **Store migration write-fences the snapshot→unlink window as defense-in-depth
+  against an ad-hoc writer (filigree-39c6958f31).** `migrate_store_to_weft` now
+  holds `BEGIN IMMEDIATE` on the legacy DB across the copy, conf-rewrite, and
+  unlink, and copies the DB via the SQLite online-backup API (folding WAL frames
+  and preserving the `application_id` without a checkpoint that cannot run under
+  the fence). A writer already active at fence-acquire is refused with
+  `StoreMigrationBusyError` before any mutation (superseding the old copy-time
+  checkpoint-busy guard), and a short-/zero-`busy_timeout` writer gets a visible
+  `SQLITE_BUSY`. **Known residual (intentional):** a writer that opens the legacy
+  DB and blocks on the fence *during* the hold commits to the orphaned inode
+  *after* release (POSIX keeps an open fd writing to a deleted inode) — a silent
+  loss that cannot be closed without the writer's cooperation. The mandatory
+  operator quiesce (see UPGRADING — "Stop ALL writers before upgrading") and the
+  daemon detect-and-refuse remain the real backstops; the fence narrows, it does
+  not eliminate.
+- **Server-mode `.mcp.json` install reports its *actual* file mode, not an
+  assumed `0600`.** The success message unconditionally claimed `mode 0600`
+  while the `chmod(0o600)` that tightens the token-bearing file is best-effort —
+  on filesystems where `chmod` is a no-op that still *returns success* (WSL
+  DrvFs, CIFS) the file stays at the umask default, so the message asserted a
+  lockdown that never happened (the same false-`0600`-posture class `d2597d0`
+  set out to fix, partially reintroduced in the message path). The install now
+  stats the file after `chmod` and states the real mode, appending "could not
+  tighten to 0600 on this filesystem" when it differs. Posture-honesty, not
+  hardening (the file is local, not world-writable, and the gitignore guard
+  already prevents git-history leakage).
+- **`read_token_file` honours its "unreadable → empty" contract for corrupt
+  files.** A non-UTF-8 federation-token file raised `UnicodeDecodeError` (a
+  `ValueError`, not `OSError`) — now caught (with a warning) so it fails closed
+  to "no token" instead of crashing server-mode auth / daemon boot / `doctor`.
+- **`force` is now declared on the `promote_finding` /
+  `promote_finding_and_attach_entity` input TypedDicts**, restoring schema↔type
+  agreement for the suppression-override added earlier in this cycle.
+- **Server-mode federation now scopes to the caller; ambiguous writes fail
+  closed (weft-7a399b8124 / weft-23574069a1).** In `--server-mode` (one daemon,
+  many projects) an *unscoped* federation request (bare `/api/weft/*` or a living
+  alias) silently fell back to the daemon's default project, contaminating it
+  with another project's writes. Two fixes, one root cause:
+  - **Routing.** The whole federation API now honours an explicit scope — the
+    `/api/p/{project_key}/…` path *or* a `?project={key}` query (uniform with how
+    `/mcp` is scoped) — and an **unscoped write fails closed with 400** instead of
+    a silent home-project write. Unscoped reads stay lenient. Every federation
+    response carries an `X-Filigree-Project` header naming the project it resolved
+    to, so a misroute cannot read as success.
+  - **Token auth.** A project-scoped request is validated against **that
+    project's** federation token (or an operator `WEFT_FEDERATION_TOKEN` env pin),
+    no longer only against the daemon's home-store token — so a project presenting
+    its own token no longer 401s. Server-mode `filigree install` and `doctor
+    --fix` now embed the **project's** token in `.mcp.json` (not the home token);
+    existing installs re-heal via `filigree doctor --fix`, which also reports a
+    `.mcp.json` carrying a token the daemon will reject for its scoped route and
+    flags multi-store token divergence when no env pin is set. Deconfliction /
+    data-integrity + availability — not a security change.
+
+
+- **Instruction-file write hardening against 0-byte data loss (filigree-04bad2a2bf).**
+  Two defensive gaps closed around the CLAUDE.md/AGENTS.md/`.gitignore` write path.
+  (a) A *refuse-to-empty* guard: the shared atomic writer (`_atomic_write_text`)
+  now raises before touching the filesystem if handed empty or whitespace-only
+  content, so filigree's write path is structurally incapable of renaming a
+  0-byte temp file over a populated user file — every caller always has non-empty
+  content, so an empty payload is corruption or a logic bug. (b) A *cross-process
+  lock*: `inject_instructions`' read-modify-write is now serialised by a blocking
+  exclusive `portalocker` flock at `.filigree/instructions.lock` (mirroring
+  `ephemeral.lock`/`server.lock`), so two concurrent SessionStart hooks — or a
+  hook racing a manual `filigree install` — can no longer interleave and clobber
+  each other's injection. Best-effort: when `.filigree/` is absent there is no
+  shared project to race over, so the write proceeds unlocked. The nested
+  `.filigree/.gitignore` now lists `instructions.lock`.
+
+- **Instruction-write lock now follows the resolved store dir (regression in the
+  3.0 store consolidation; filigree-04bad2a2bf).** The cross-process lock above
+  keyed its directory on a hardcoded `.filigree/`, but 3.0 moved the machine
+  store to `.weft/filigree/` — a fresh `filigree init` creates no `.filigree/`
+  at all, so the lock was silently bypassed on every SessionStart of a normally
+  initialised 3.0 project (only legacy-migrated projects, which keep a
+  `.filigree/` husk, accidentally still locked). The lock now resolves its
+  directory via `resolve_store_dir`, whose single precedence chain both finds
+  the real store (`.weft/filigree/`) and guarantees every racing process picks
+  the *same* lock location when both layouts are present — restoring mutual
+  exclusion. `ephemeral.lock` already resolved correctly; `server.lock` is
+  home-dir scoped and unaffected.
+
+- **Store migration copies the DB atomically and re-copies unconditionally while
+  legacy is canonical (filigree-37e3f26145).** `migrate_store_to_weft`'s
+  `.filigree/ → .weft/filigree/` DB copy went straight to its final path via
+  `shutil.copy2`, and the step-1 guard keyed on file *existence*
+  (`not weft_db.is_file()`). A crash mid-copy (SIGKILL/power loss) therefore left
+  a truncated DB at the destination that a re-run mistook for a finished copy: it
+  repointed the conf at the corrupt file and deleted the still-valid legacy DB —
+  silent total loss of the issue database, contradicting the function's
+  documented crash-convergence. The copy now stages to a temp file in the dest
+  dir and publishes with an atomic `os.replace` (so the destination only ever
+  appears complete). Crucially, step 1 re-copies the DB forward
+  *unconditionally* while the legacy DB exists, rather than skipping when the
+  destination merely *looks* valid: the database is conf-pinned, so until the
+  conf commits to the weft destination the legacy DB stays canonical and can take
+  writes after an interrupted copy — an intact-but-*stale* weft snapshot would,
+  if published, silently drop every post-interrupt write. The atomic publish
+  makes the unconditional refresh safe and cheap, and the committed case
+  short-circuits at the top guard so re-copy never fires post-commit.
+
+- **An aborted store migration no longer orphans the legacy DB on confless
+  installs (filigree-37e3f26145).** `migrate_store_to_weft` created
+  `.weft/filigree/` (`weft_store.mkdir`) *before* the busy-abortable checkpoint,
+  so a live writer holding the legacy DB raised `StoreMigrationBusyError` and
+  left an **empty** `.weft/filigree/` husk behind. `resolve_store_dir` then
+  declared that husk canonical purely on `is_dir()`, so the next confless open
+  (no `.filigree.conf` to pin the legacy DB) stamped a fresh empty database into
+  the husk and orphaned the real issue data still sitting in `.filigree/` —
+  reachable on the documented deploy recipe (a running daemon holds the legacy
+  DB while `filigree init` migrates). Conf installs were unaffected (the conf
+  still pinned legacy). Fixed at two layers: `resolve_store_dir` now keys the
+  `.weft/filigree/` choice on DB *presence*, not bare directory existence — an
+  empty weft husk never shadows a legacy store that holds the DB (this also
+  defends against an empty husk left by a copy failure); and the eager
+  `weft_store.mkdir` is deferred until after the busy check passes, so a busy
+  abort leaves no husk at all. `find_filigree_anchor` inherits the fix for free
+  (it derives `store_dir` from `resolve_store_dir`). Distinct from the atomic-copy
+  fix above.
+
+- **`doctor --fix` repairs instruction files and `context.md` again
+  (filigree-f57cb498d4).** `--fix` now wires `CLAUDE.md`, `AGENTS.md`, and the
+  generated `context.md` back into its fixable set: instruction files via the
+  non-destructive marked-block injection (which preserves surrounding user
+  content), and `context.md` regenerated from the DB. This **partially reverses**
+  the `doctor --fix` narrowing in `54cdd65` for these filigree-owned/-managed
+  artifacts; `.gitignore` is *intentionally* left excluded (the user runs
+  `filigree install --gitignore` for that). `context.md` opens the DB via the
+  anchor-aware constructors so a broken DB surfaces as "Cannot fix context.md"
+  rather than aborting the whole doctor run.
+
+- **Governed→ungoverned closure-gate bypass via the signature field (schema v27).**
+  Two reachable paths defeated the closure gate by making a governed issue read
+  ungoverned. (a) A blank-string `signature` was stored verbatim and the gate's
+  truthiness predicate read it as ungoverned — contradicting DECISION 1A
+  ("governed = *non-null* signature"). (b) A signatureless re-attach (a routine
+  drift refresh; the MCP surface and Legis-without-key both omit the signature)
+  **unconditionally clobbered** a stored signature to `NULL`, flipping a
+  previously-governed issue ungoverned so the gate skipped Legis entirely. Fix:
+  the data layer normalises blank signatures to `NULL` and the gate classifies
+  governed-ness by `is not None`; the re-attach UPSERT is now **sticky** —
+  `signature`/`signoff_seq`/`signed_content_hash` change only on a write that
+  carries a signature, so only Legis (which signs via the HTTP route) can move a
+  binding between governed states. A new nullable `signed_content_hash` column
+  records the content the signature was cut over (the HMAC binds `content_hash`);
+  when it diverges from `content_hash_at_attach` the sign-off has **drifted** and
+  the gate fails closed with the new `STALE` verdict (a `409`, no network call)
+  until Legis re-signs over the new content — distinct from `UNAVAILABLE` so a
+  single drifted issue does not short-circuit a finding-cascade batch. Migration
+  backfills `signed_content_hash = content_hash_at_attach WHERE signature IS NOT
+  NULL`; `export`/`import` round-trips it. Detects *content* drift, not *identity*
+  drift (the v26 rebrand's `entity_id` rewrite is resolved by Legis on the gate
+  call).
+
+- **Cascade batch's Legis-down short-circuit no longer over-blocks ungoverned
+  issues.** When an earlier governed issue in a `close_resolved_findings` batch
+  proved Legis unreachable, the short-circuit handed every remaining candidate a
+  synthetic `UNAVAILABLE` *without* re-running the gate's cheap local checks — so
+  an **ungoverned** issue (which never touches Legis, DECISION 1A) appearing later
+  in the same unordered batch was wrongly deferred and tagged with a spurious
+  "governed issue … unreachable" reconciliation-debt comment. The suppression is
+  now threaded into `evaluate_closure_gate` (`legis_known_down`) and applied only
+  at the point a network call would happen — after the ungoverned/governance-off/
+  `STALE` short-circuits — so ungoverned issues still PROCEED and close while a
+  down/slow Legis is still bounded to one timeout per batch. No governance bypass:
+  a governed, non-stale issue still fails closed as `UNAVAILABLE`.
+
+- **`filigree init`/`install` now ship a nested `.filigree/.gitignore`.** A project
+  that tracks its `.filigree/` dir as committed payload (a shared team issue DB, or a
+  demo) — or a naive `git add -A` in the window between `init` and `install` —
+  previously committed the SQLite write-ahead-log sidecars (`-wal`/`-shm`, which yield
+  a torn/corrupt DB on checkout), rollback journals, migration backups (`*.db.*-bak`),
+  logs, the per-run lock/pid/port and `instance_id`, and the generated `context.md`.
+  The shipped nested ignore excludes all of those. `filigree.db` and `config.json` are
+  intentionally **durable** (committable when the dir is tracked) so the issue data
+  still ships in the payload case; the project-root whole-dir `.filigree/` rule (added
+  by `install`) remains the default that keeps the entire dir out otherwise. A header
+  in the file documents the durable/ephemeral split. Committing the DB itself as a
+  clean point-in-time artifact additionally needs WAL checkpoint-on-snapshot (see the
+  separate WAL-hygiene task).
+
+- **Legis closure gate was bypassable through every non-`close` write path.** The
+  gate (B5) was enforced per transport verb — only `close_issue`/`batch_close` —
+  but `close_issue` routes through `update_issue`, so a governed issue could be
+  driven into a done-category status, ungated, via `update_issue`/`batch_update`
+  on MCP, HTTP (classic + weft), and CLI, and via the scan-ingest/age-out
+  finding→issue cascade. All of these now consult the same gate through a single
+  shared decision (`governance.evaluate_status_change_gate`); a status write that
+  is not a real close of a governed issue makes no network call. The cascade
+  (Design A, B2) fails closed for governed issues Legis blocks/cannot confirm and
+  records reconciliation debt instead of auto-closing; the reopen-on-regress
+  cascade is intentionally not gated.
+
+- **Finding→issue close cascade was unreachable from scan ingest.** Re-ingest
+  wired reopen-on-regress but never close-on-fixed: fixing code and re-scanning
+  flipped the finding to `unseen_in_latest` while leaving the linked issue open
+  (the close helper had a single caller — the `clean-stale` sweep — that Wardline
+  never invokes). Ingest now runs a close cascade symmetric to the existing
+  reopen cascade (best-effort, in its own transaction, preserving terminal human
+  decisions via the `done`-category guard, surfacing failures in `warnings` and
+  per-failure logs).
+
+- **Finding→issue close cascade no longer closes an issue with an active sibling
+  defect.** An issue can link more than one finding (`update_finding(...,
+  issue_id=...)`; see `get_issue_findings`). The close cascade now skips the
+  close when any *other* linked finding is still open (a non-terminal,
+  non-`unseen_in_latest` status), checked under the writer lock — so resolving
+  one of an issue's findings cannot close it while another is an active defect.
+  This also resolves the same-batch reopen-then-close collision (a finding
+  regressing in the same ingest now blocks the close). The guard lives in the
+  shared close transaction, so the age-gated `clean-stale` sweep gets the same
+  protection.
+
+- **Entity-association surface polish (ADR-029).** The forward (issue→entity)
+  read projection only badges a content-axis freshness state it actually owns;
+  the identity axis remains Clarion's (`unknown`, never a fabricated `active`),
+  per ADR-017's two-axis model. `add_entity_association` now declares
+  `_skip_begin` on both the protocol stub and its `@_in_immediate_tx`
+  implementation so the stub-signature contract test and the mypy override check
+  agree.
+
+- **`doctor --fix` now clears the stale server-registry entries it already
+  flags.** In server mode, `doctor` reports every registered project whose
+  directory has vanished (`Directory gone: …`) with a `filigree server
+  unregister` hint, but `--fix` skipped them: those checks carry a dynamic,
+  non-unique name (`Project "<prefix>"`) that the name-keyed fixer table never
+  matched, so each reported "manual intervention" despite a deterministic
+  remediation. `--fix` now routes them by a stable `code`
+  (`server_registry_orphan`) and removes them by their exact stored config key
+  in one locked pass (new `server.unregister_projects`), reporting each entry it
+  unregistered. Gone-directory only — a live project re-registers on next use —
+  and the data plane (issues/findings) is never mutated.
+
+- **MCP actor-mismatch warning no longer fails silently (PR #52 review #3).** The
+  ADR-012 surfacing block in `call_tool` — resolve verified identity, build the
+  `ACTOR_MISMATCH` warning, inject it into the response envelope's `warnings[]` —
+  was wrapped in `except Exception: pass`. Non-blocking is correct by design (a
+  mismatch must never break a tool call), but log-less was not: any failure
+  (import error, `_inject_warnings` bug, `_verified_actor` attribute error)
+  dropped the warning with zero signal, and a systemic break would have made every
+  MCP actor-mismatch invisible server-wide while the identity-verification feature
+  appeared healthy. The handler now logs at DEBUG (`exc_info=True`) instead of
+  swallowing — still non-blocking, never silent. The CLI path already surfaced the
+  same mismatch on stderr.
 
 ### Security
 
-- **Dashboard `/mcp` HTTP transport now requires a federation bearer token.**
-  The streamable-HTTP MCP endpoint exposes high-privilege agent tools. It was
+- **Legis closure gate fails closed on contract-violating 2xx (B7, PR #52).**
+  `legis_client.check_closure_gate` previously treated *any* HTTP 2xx as
+  `ALLOWED`, reading only `reason`/`evidence` and never `allowed`. A `200
+  {"allowed": false}`, a `200` with an empty/unparseable body (`_read_json`
+  yields `{}`), or any interposed 2xx (proxy, cache, captive portal) therefore
+  defeated the gate's fail-closed posture (DECISION 2) and let a governed issue
+  close. The 2xx branch now requires `body["allowed"] is True` (the JSON `true`
+  literal — no truthiness coercion); anything else degrades to `UNREACHABLE`,
+  which the governance layer maps to a fail-closed block. The wire contract is
+  unchanged (`200 {"allowed": true}` = allow / `409` = blocked).
+
+- **Legis client strips the bearer across redirects + validates the URL scheme
+  (B3, PR #52).** `check_closure_gate` sent the `LEGIS_API_TOKEN` bearer on a
+  plain `urllib` request whose default redirect handler copies request headers
+  (minus content-length/content-type) onto the redirect target with no
+  same-origin check — so a `302` from a compromised or open-redirecting Legis
+  could re-send the token to an attacker-chosen host. The request now goes
+  through a custom opener whose redirect handler drops `Authorization` before
+  following a redirect (benign redirects are still followed; normal token auth
+  on a non-redirecting call is unchanged), and a non-`http(s)` `LEGIS_URL` is
+  refused before any request or bearer attach. Defense-in-depth: exploitation
+  requires a Legis-side open-redirect or a compromised Legis, not a critical on
+  its own.
+
+- **Bidirectional back-pointer verification for git-worktree discovery.**
+  Worktree-aware anchor discovery previously redirected to a main worktree on
+  the strength of a worktree's `.git` pointer alone. A spoofed `.git` file
+  (shipped in an untrusted clone, aimed at a victim project's
+  `worktrees/<name>` admin dir) or a stale pointer (admin dir renamed, worktree
+  removed but the `.git` file left behind) could silently latch discovery onto
+  the wrong project's database. Discovery now verifies that the admin dir's
+  `gitdir` back-pointer resolves back to *this* `.git` file before redirecting;
+  on mismatch or read failure the `.git` entry stands as a project boundary.
+
+- **Dashboard `/mcp` HTTP transport now requires a federation bearer token (#56).**
+  The streamable-HTTP MCP endpoint exposes high-privilege agent tools and was
   previously mounted unconditionally on the loopback interface even with no auth
   configured. It is now mounted only when `FILIGREE_FEDERATION_API_TOKEN` (or
   legacy `FILIGREE_API_TOKEN`) is set; otherwise `/mcp` returns `404`. Bearer
   enforcement on the mounted endpoint is unchanged (ADR-018; the loopback
-  boundary remains ADR-012).
+  boundary remains ADR-012). **Migration:** if you use **server-mode** MCP
+  (`.mcp.json` with `type: streamable-http` pointing at the daemon), set
+  `FILIGREE_FEDERATION_API_TOKEN` before starting the dashboard or the client
+  receives `404`; the installer (`filigree doctor`/`init`) now warns when it
+  writes a server-mode config while no token is configured. Ethereal (stdio) MCP
+  is unaffected. *(Superseded later in this release: the token is now
+  auto-provisioned — see Added — so `/mcp` is mounted and bearer-gated by
+  default, and the canonical env var is `WEFT_FEDERATION_TOKEN`.)*
 
-  **Migration:** if you use **server-mode** MCP (`.mcp.json` with `type:
-  streamable-http` pointing at the daemon), set `FILIGREE_FEDERATION_API_TOKEN`
-  before starting the dashboard, or the MCP client will receive `404`. The
-  installer (`filigree doctor`/`init`) now warns when it writes a server-mode
-  config while no token is configured. Ethereal (stdio) MCP is unaffected.
+- **Installer / `doctor --fix` writes reject symlinked targets (#54).** The
+  maintenance write paths (`CLAUDE.md`/`AGENTS.md`, `.gitignore`, `.mcp.json`,
+  `.claude/settings.json`, skill directories, Codex `config.toml`, and their
+  `.bak` backups) now refuse to follow or write through symlinks, so a malicious
+  repository cannot redirect those writes outside the resolved project root.
+
+- **Clarion registry fails closed on malformed responses (#53).** A reachable but
+  protocol-violating Clarion response (`cause_kind="invalid_response"`) is no
+  longer treated as an availability failure: the local-fallback wrapper re-raises
+  instead of silently re-attaching files to the local registry, which could
+  otherwise mask a security-bearing `briefing_blocked` outcome.
+
+- **Hook module fallback uses Python safe-path mode (#57).** When command
+  resolution falls back to `python -m filigree`, it now emits `python -P -m
+  filigree`, preventing an attacker-controlled project-local `filigree/` package
+  from shadowing the installed one during cwd-based module resolution when hooks
+  run from the project root.
+
+- **Windows PID checks use a trusted absolute WMIC path (#55).** Process
+  command-line verification now invokes `%SystemRoot%\System32\wbem\WMIC.exe`
+  by absolute path instead of a bare `wmic`, closing a Windows executable
+  search-path / current-directory hijack when filigree runs from an untrusted
+  project directory.
+
+### Dependencies
+
+- **Bumped `starlette` 0.52.1 → 1.0.1** (major). Full test suite green against
+  the 1.0 line; no application-level ASGI changes were required.
 
 ## [2.3.0] - 2026-06-02
 
@@ -3351,22 +4217,25 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
-[Unreleased]: https://github.com/tachyon-beep/filigree/compare/v2.1.0...HEAD
-[2.1.0]: https://github.com/tachyon-beep/filigree/compare/v2.0.3...v2.1.0
-[2.0.3]: https://github.com/tachyon-beep/filigree/compare/v2.0.2...v2.0.3
-[2.0.2]: https://github.com/tachyon-beep/filigree/compare/v2.0.1...v2.0.2
-[2.0.1]: https://github.com/tachyon-beep/filigree/compare/v2.0.0...v2.0.1
-[2.0.0]: https://github.com/tachyon-beep/filigree/compare/v1.6.1...v2.0.0
-[1.6.1]: https://github.com/tachyon-beep/filigree/compare/v1.6.0...v1.6.1
-[1.6.0]: https://github.com/tachyon-beep/filigree/compare/v1.5.2...v1.6.0
-[1.5.2]: https://github.com/tachyon-beep/filigree/compare/v1.5.1...v1.5.2
-[1.5.1]: https://github.com/tachyon-beep/filigree/compare/v1.5.0...v1.5.1
-[1.5.0]: https://github.com/tachyon-beep/filigree/compare/v1.4.1...v1.5.0
-[1.4.1]: https://github.com/tachyon-beep/filigree/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/tachyon-beep/filigree/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/tachyon-beep/filigree/compare/v1.2.0...v1.3.0
-[1.2.0]: https://github.com/tachyon-beep/filigree/compare/v1.1.1...v1.2.0
-[1.1.1]: https://github.com/tachyon-beep/filigree/compare/v1.1.0...v1.1.1
-[1.1.0]: https://github.com/tachyon-beep/filigree/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/tachyon-beep/filigree/compare/v0.1.0...v1.0.0
-[0.1.0]: https://github.com/tachyon-beep/filigree/releases/tag/v0.1.0
+[3.0.0]: https://github.com/foundryside-dev/filigree/compare/v2.3.0...v3.0.0
+[2.3.0]: https://github.com/foundryside-dev/filigree/compare/v2.2.0...v2.3.0
+[2.2.0]: https://github.com/foundryside-dev/filigree/compare/v2.1.1...v2.2.0
+[2.1.1]: https://github.com/foundryside-dev/filigree/compare/v2.1.0...v2.1.1
+[2.1.0]: https://github.com/foundryside-dev/filigree/compare/v2.0.3...v2.1.0
+[2.0.3]: https://github.com/foundryside-dev/filigree/compare/v2.0.2...v2.0.3
+[2.0.2]: https://github.com/foundryside-dev/filigree/compare/v2.0.1...v2.0.2
+[2.0.1]: https://github.com/foundryside-dev/filigree/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/foundryside-dev/filigree/compare/v1.6.1...v2.0.0
+[1.6.1]: https://github.com/foundryside-dev/filigree/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/foundryside-dev/filigree/compare/v1.5.2...v1.6.0
+[1.5.2]: https://github.com/foundryside-dev/filigree/compare/v1.5.1...v1.5.2
+[1.5.1]: https://github.com/foundryside-dev/filigree/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/foundryside-dev/filigree/compare/v1.4.1...v1.5.0
+[1.4.1]: https://github.com/foundryside-dev/filigree/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/foundryside-dev/filigree/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/foundryside-dev/filigree/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/foundryside-dev/filigree/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/foundryside-dev/filigree/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/foundryside-dev/filigree/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/foundryside-dev/filigree/compare/v0.1.0...v1.0.0
+[0.1.0]: https://github.com/foundryside-dev/filigree/releases/tag/v0.1.0

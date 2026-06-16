@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import click
+from click.core import ParameterSource
 
 from filigree import __version__
 from filigree.cli_commands import admin, files, issues, meta, observations, planning, scanners, sei, server, workflow
@@ -95,6 +96,24 @@ def cli(ctx: click.Context, actor: str) -> None:
             ctx.exit(1)
         raise click.BadParameter(err, param_hint="'--actor'")
     ctx.obj["actor"] = cleaned
+    # FIL-3 (filigree-3028a8d0f8): record whether --actor was explicitly
+    # provided (vs the implicit "cli" default) so claim-shaped verbs can
+    # default an omitted --assignee from an *explicit* actor identity only.
+    ctx.obj["actor_explicit"] = ctx.get_parameter_source("actor") != ParameterSource.DEFAULT
+
+    # ADR-012: surface a non-blocking warning when the claimed --actor disagrees
+    # with the transport-verified OS identity. Resolution + warning never raise
+    # and never block the command. Placeholder defaults ("cli") are suppressed
+    # by actor_mismatch_warning.
+    from filigree import actor_identity
+
+    verified = actor_identity.resolve_os_actor()
+    mismatch = actor_identity.actor_mismatch_warning(cleaned, verified)
+    if mismatch is not None:
+        click.echo(
+            f"warning: {mismatch['code']} claimed={mismatch['claimed']!r} verified={mismatch['verified']!r}",
+            err=True,
+        )
 
 
 # Register domain command modules

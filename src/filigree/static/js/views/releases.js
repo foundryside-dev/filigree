@@ -7,12 +7,12 @@ import { escHtml, escJsSingleAttr } from "../ui.js";
 
 // --- Module-level state ---
 
-let expandedReleaseIds = new Set();
-let releaseTreeCache = new Map();
-let expandedNodeIds = new Set();
+const expandedReleaseIds = new Set();
+const releaseTreeCache = new Map();
+const expandedNodeIds = new Set();
 let showReleased = false;
-let loadingReleaseIds = new Set();
-let errorReleaseIds = new Set();
+const loadingReleaseIds = new Set();
+const errorReleaseIds = new Set();
 let _pendingFocusTarget = null;
 
 export function scrollToReleaseCard(cardId) {
@@ -665,7 +665,10 @@ export async function retryReleaseTree(releaseId) {
   }
 }
 
-export function toggleReleaseTreeNode(nodeId, releaseId) {
+// `releaseId` is accepted for signature parity with the sibling tree handlers
+// (collapse/expand), which key off it — toggling only needs the globally-unique
+// nodeId. The leading underscore marks it intentionally unused (biome).
+export function toggleReleaseTreeNode(nodeId, _releaseId) {
   if (expandedNodeIds.has(nodeId)) {
     expandedNodeIds.delete(nodeId);
   } else {

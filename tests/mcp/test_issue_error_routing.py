@@ -17,12 +17,12 @@ pytestmark = pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "db_method", "extra_args"),
     [
-        ("reopen_issue", "reopen_issue", {}),
-        ("close_issue", "close_issue", {"reason": "done"}),
-        ("release_claim", "release_claim", {"actor": "agent"}),
-        ("heartbeat_work", "heartbeat_work", {"actor": "agent"}),
+        ("issue_reopen", "reopen_issue", {}),
+        ("issue_close", "close_issue", {"reason": "done"}),
+        ("work_release", "release_claim", {"actor": "agent"}),
+        ("work_heartbeat", "heartbeat_work", {"actor": "agent"}),
         (
-            "reclaim_issue",
+            "work_reclaim",
             "reclaim_issue",
             {"assignee": "new-agent", "expected_assignee": "old-agent", "reason": "stale", "actor": "agent"},
         ),

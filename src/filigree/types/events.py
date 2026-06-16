@@ -113,6 +113,7 @@ class EventRecord(TypedDict):
     issue_id: str
     event_type: EventType
     actor: str
+    verified_actor: str | None
     old_value: str | None
     new_value: str | None
     comment: str
@@ -127,9 +128,9 @@ class EventRecordWithTitle(EventRecord):
 
     issue_title: str
     # Only populated on synthetic ``issue_deleted`` tombstone records: the sorted
-    # ``clarion_entity_id``s whose entity_associations the delete cascade removed
+    # ``loomweave_entity_id``s whose entity_associations the delete cascade removed
     # (schema v21, F5 amplifier). Absent on real event rows; consumers of the wire
-    # shape see it normalized to ``[]`` via ``change_record_to_loom``.
+    # shape see it normalized to ``[]`` via ``change_record_to_weft``.
     affected_entities: NotRequired[list[str]]
 
 

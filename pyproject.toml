@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "filigree"
-version = "2.3.0"
+version = "3.0.0"
 description = "Agent-native issue tracker with convention-based project discovery"
 requires-python = ">=3.11"
 license = "MIT"
@@ -31,17 +31,19 @@ dependencies = [
     "httpx>=0.28",
     "mcp>=1.0,<2",
     "portalocker>=2.7,<4",
+    # Pinned explicitly (not just via fastapi's unbounded starlette>=0.46): the
+    # bearer-auth middleware (dashboard_auth) is built on Starlette 1.0
+    # BaseHTTPMiddleware/Request semantics, so a published-wheel consumer or a
+    # future re-lock must not drift across the 0.x->2.x boundary. (W2)
+    "starlette>=1.0,<2",
     "uvicorn>=0.34",
 ]
 
-[project.optional-dependencies]
-docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
-
 [project.urls]
-Homepage = "https://github.com/tachyon-beep/filigree"
-Repository = "https://github.com/tachyon-beep/filigree"
-Issues = "https://github.com/tachyon-beep/filigree/issues"
-Changelog = "https://github.com/tachyon-beep/filigree/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/foundryside-dev/filigree"
+Repository = "https://github.com/foundryside-dev/filigree"
+Issues = "https://github.com/foundryside-dev/filigree/issues"
+Changelog = "https://github.com/foundryside-dev/filigree/blob/main/CHANGELOG.md"
 Documentation = "https://filigree.foundryside.dev"
 
 [project.scripts]
@@ -62,6 +64,8 @@ exclude = [
     "/.pre-commit-config.yaml",
     "/.python-version",
     "/docs/plans",
+    "/docs/investigations",
+    "/docs/superpowers",
     "/scripts",
     "/Makefile",
     "/uv.lock",

@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "contract": "filigree-weft",
+    "stability": "Frozen for the weft-generation lifetime per ADR-002.",
+    "authority": [
+      "docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md"
+    ],
+    "pinning_discipline": "shape reference; see docs/federation/contracts.md",
+    "updated": "2026-04-26",
+    "endpoint": "GET /api/weft/issues/{issue_id}/files",
+    "status": "live as of Phase C4.",
+    "relation_to_classic": "Classic GET /api/issue/{id}/files (singular path) returns a bare list of IssueFileAssociation rows. Weft uses /issues/{id}/files (plural, symmetric with the /issues collection) and wraps in ListResponse[FileAssocWeft] (assoc_id replaces id at the row's primary key; cross-entity refs file_id and issue_id keep their names)."
+  },
+  "shape_decl": {
+    "request_type": "GET (no body, no query params)",
+    "response_type": "ListResponse[FileAssocWeft]",
+    "rationale": "Validates parent issue exists upfront (db.get_issue_files does not validate)."
+  },
+  "examples": [
+    {
+      "name": "issue_not_found",
+      "note": "Missing issue id → 404. Weft validates upfront unlike db.get_issue_files, matching classic /api/issue/{id}/files behavior.",
+      "request": {
+        "method": "GET",
+        "path": "/api/weft/issues/genp-deadbeef00/files",
+        "headers": {},
+        "body": null
+      },
+      "response": {
+        "status": 404,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"error": "Issue not found: genp-deadbeef00", "code": "NOT_FOUND"}
+      }
+    }
+  ]
+}

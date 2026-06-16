@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,17 +21,23 @@ from filigree.core import (
     DB_FILENAME,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
     FiligreeDB,
     find_filigree_command,
 )
 from filigree.install import (
+    _INSTR_FENCE_RE,
+    FILIGREE_INSTRUCTIONS,
     FILIGREE_INSTRUCTIONS_MARKER,
     SKILL_NAME,
     CheckResult,
+    _atomic_write_text,
     _find_filigree_mcp_command,
     _has_hook_command,
     _instructions_hash,
     _instructions_version,
+    ensure_filigree_dir_gitignore,
     ensure_gitignore,
     inject_instructions,
     install_claude_code_hooks,
@@ -131,6 +139,234 @@ class TestInjectInstructions:
         assert "stale body line 2" not in content
 
 
+class TestAtomicWriteEmptyGuard:
+    """filigree-04bad2a2bf: the atomic writer must never truncate a user-visible
+    file to 0 bytes. Every legitimate caller has non-empty content, so an empty
+    or whitespace-only payload is corruption/logic-bug — refuse it loudly."""
+
+    def test_refuses_empty_content_on_new_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        assert not target.exists()
+
+    def test_refuses_whitespace_only_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "   \n\t\n")
+        assert not target.exists()
+
+    def test_refuses_empty_and_preserves_existing_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        original = "# My instructions\n\nImportant content.\n"
+        target.write_text(original)
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        # The populated file must be left exactly as it was.
+        assert target.read_text() == original
+
+    def test_does_not_leak_temp_file_on_refusal(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with pytest.raises(ValueError, match="empty"):
+            _atomic_write_text(target, "")
+        # The guard fires before mkstemp, so no .tmp sidecar is left behind.
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestInstructionWriteLock:
+    """filigree-04bad2a2bf: inject_instructions serialises its read-modify-write
+    across processes with a blocking exclusive lock under .filigree/."""
+
+    def test_uses_blocking_exclusive_lock_when_project_initialised(self, tmp_path: Path) -> None:
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        # Locked exactly once, exclusively (blocking — never LOCK_NB).
+        mock_lock.assert_called_once()
+        import portalocker
+
+        flags = mock_lock.call_args.args[1]
+        assert flags & portalocker.LOCK_EX
+        assert not (flags & portalocker.LOCK_NB)
+        assert (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
+
+    def test_locks_under_weft_store_on_fresh_3_0_project(self, tmp_path: Path) -> None:
+        """3.0 fresh layout: only ``.weft/filigree/`` exists, no ``.filigree/``.
+
+        The lock must follow the resolved store dir, not a hardcoded
+        ``.filigree/`` — otherwise the read-modify-write proceeds unlocked on
+        every SessionStart of a normally-initialised 3.0 project
+        (filigree-04bad2a2bf regression).
+        """
+        weft_store = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        weft_store.mkdir(parents=True)
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        mock_lock.assert_called_once()
+        # The real artifact lands in the weft store, and no legacy husk is forged.
+        assert (weft_store / "instructions.lock").exists()
+        assert not (tmp_path / FILIGREE_DIR_NAME).exists()
+
+    def test_locks_under_weft_store_when_both_layouts_present(self, tmp_path: Path) -> None:
+        """Migrated project: ``migrate_store_to_weft`` leaves the legacy
+        ``.filigree/`` husk in place beside the new ``.weft/filigree/``.
+
+        Mutual exclusion requires ONE deterministic lock location per project
+        across all racing processes. resolve_store_dir's precedence puts the
+        weft store ahead of the legacy dir, so the lock must land there — a
+        naive "lock whichever dir exists" would let two processes split between
+        ``.filigree/`` and ``.weft/filigree/`` and silently lose exclusion.
+        """
+        weft_store = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        weft_store.mkdir(parents=True)
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()  # legacy husk left by migration
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        mock_lock.assert_called_once()
+        assert (weft_store / "instructions.lock").exists()
+        assert not (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
+
+    def test_proceeds_unlocked_without_any_store_dir(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(target)
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+        mock_lock.assert_not_called()
+
+    def test_concurrent_injections_preserve_user_content(self, tmp_path: Path) -> None:
+        """Serialised real-flock injections must not drop surrounding user text."""
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
+        target = tmp_path / "CLAUDE.md"
+        target.write_text("# User heading\n\nUser body.\n")
+        # Two sequential injections (the lock makes concurrent ones equivalent).
+        inject_instructions(target)
+        inject_instructions(target)
+        content = target.read_text()
+        assert "User heading" in content
+        assert "User body." in content
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+
+_WARDLINE_BLOCK = "<!-- wardline:instructions:v1:abcd1234 -->\nwardline body line\n<!-- /wardline:instructions -->"
+_END = "<!-- /filigree:instructions -->"
+
+
+class TestForeignBlockSafety:
+    """filigree-bcbd4d66fd: inject_instructions must never delete a co-resident
+    sibling tool's block (wardline/legis) in a shared CLAUDE.md/AGENTS.md."""
+
+    def test_malformed_filigree_preserves_following_foreign_block(self, tmp_path: Path) -> None:
+        """The named repro: an UNCLOSED filigree block followed by a well-formed
+        wardline block. The old truncate-to-EOF deleted the wardline block."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "Before user preamble.\n"
+            "<!-- filigree:instructions:v2.9.0:deadbeef -->\n"
+            "filigree workflow body\n"  # NO filigree end marker
+            f"{_WARDLINE_BLOCK}\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        # Wardline block survives intact.
+        assert "wardline body line" in content
+        assert content.count("<!-- wardline:instructions:v1:abcd1234 -->") == 1
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        # User preamble survives; filigree block is now well-formed and singular.
+        assert "Before user preamble." in content
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+        assert content.count(_END) == 1
+
+    def test_shape2_sandwiched_foreign_block_preserved(self, tmp_path: Path) -> None:
+        """Unclosed-first filigree / wardline / closed-later filigree: the
+        well-formed `find` would jump the wardline block; bounded scan must not."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "<!-- filigree:instructions:v1:aaaaaaaa -->\n"
+            "stale filigree body 1\n"  # first block unclosed
+            f"{_WARDLINE_BLOCK}\n"
+            "<!-- filigree:instructions:v1:aaaaaaaa -->\n"
+            "stale filigree body 2\n"
+            f"{_END}\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        # The sandwiched wardline block is NOT swallowed.
+        assert "wardline body line" in content
+        assert content.count("<!-- wardline:instructions:v1:abcd1234 -->") == 1
+
+    def test_uppercase_namespace_sibling_preserved(self, tmp_path: Path) -> None:
+        """Refinement: an uppercase-namespaced sibling fence must still be seen as
+        a boundary (case-insensitive), else it is truncated to EOF as before."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(
+            "<!-- filigree:instructions:v1:deadbeef -->\n"
+            "filigree body\n"  # unclosed
+            "<!-- Wardline:instructions:v1:abcd1234 -->\n"
+            "uppercase sibling body\n"
+            "<!-- /Wardline:instructions -->\n"
+        )
+        ok, _msg = inject_instructions(target)
+        assert ok
+        content = target.read_text()
+        assert "uppercase sibling body" in content
+        assert "Wardline:instructions" in content
+
+    def test_well_formed_filigree_with_trailing_foreign_preserved(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        inject_instructions(target)  # well-formed filigree block
+        target.write_text(target.read_text().rstrip("\n") + f"\n\n{_WARDLINE_BLOCK}\n")
+        ok, _msg = inject_instructions(target)  # replace filigree in place
+        assert ok
+        content = target.read_text()
+        assert "wardline body line" in content
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+    def test_foreign_block_before_filigree_preserved(self, tmp_path: Path) -> None:
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(f"{_WARDLINE_BLOCK}\n\n")
+        inject_instructions(target)  # appends filigree after wardline
+        ok, _msg = inject_instructions(target)  # replace filigree in place
+        assert ok
+        content = target.read_text()
+        assert "wardline body line" in content
+        assert content.count("<!-- /wardline:instructions -->") == 1
+        assert content.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+    def test_bounded_recovery_is_idempotent(self, tmp_path: Path) -> None:
+        """Repeated runs over the malformed+foreign repro must converge and not
+        accumulate separators or duplicate filigree blocks."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(f"<!-- filigree:instructions:v9:deadbeef -->\nstale body\n{_WARDLINE_BLOCK}\n")
+        inject_instructions(target)
+        after_first = target.read_text()
+        inject_instructions(target)
+        after_second = target.read_text()
+        assert after_first == after_second  # fixpoint reached
+        assert after_second.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+        assert after_second.count(_END) == 1
+        assert "wardline body line" in after_second
+
+    def test_instructions_body_contains_no_foreign_fence(self) -> None:
+        """Refinement guard: the shipped filigree block must contain ONLY
+        filigree-namespace instruction fences. A foreign-looking ':instructions'
+        token in the body would create a spurious boundary and corrupt the common
+        well-formed replace path on the next inject."""
+        namespaces = {m.group(1).lower() for m in _INSTR_FENCE_RE.finditer(FILIGREE_INSTRUCTIONS)}
+        assert namespaces <= {"filigree"}, f"instructions.md body has non-filigree fence(s): {namespaces}"
+
+
 class TestInstructionsVersionFallback:
     def test_instructions_version_falls_back_to_package_version(self) -> None:
         """_instructions_version should fall back to filigree.__version__ when metadata is missing."""
@@ -230,6 +466,42 @@ class TestAtomicWritePermissions:
         assert mode & 0o044, f"new file created with overly restrictive mode {oct(mode)}"
 
 
+class TestServerModeMcpJsonModePosture:
+    """The server-mode .mcp.json carries a literal federation token, so install
+    tightens it to 0600. The success message must report the ACTUAL resulting
+    mode, never an assumed 0600 — chmod is a no-op that returns success on
+    WSL DrvFs / CIFS, where the file stays at the umask default. Claiming "mode
+    0600" there is the false-posture class d2597d0 fixed.
+    """
+
+    def test_message_reports_0600_when_chmod_takes_effect(self, tmp_path: Path) -> None:
+        ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        mcp_json = tmp_path / ".mcp.json"
+        assert stat.S_IMODE(mcp_json.stat().st_mode) == 0o600
+        assert "mode 0600" in msg
+        assert "could not tighten" not in msg
+
+    def test_message_does_not_falsely_claim_0600_when_chmod_is_a_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Simulate WSL DrvFs / CIFS: chmod returns success but does not change
+        # the bits. Only Path.chmod is no-op'd; mint_token_file uses os.chmod and
+        # is unaffected.
+        monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+        old_umask = os.umask(0o022)
+        try:
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        finally:
+            os.umask(old_umask)
+        assert ok
+        mcp_json = tmp_path / ".mcp.json"
+        actual = stat.S_IMODE(mcp_json.stat().st_mode)
+        assert actual != 0o600, "test premise broken — chmod was not actually a no-op"
+        # The message must state the real mode and NOT the false 0600 posture.
+        assert "mode 0600" not in msg
+        assert f"mode {actual:04o}" in msg
+        assert "could not tighten to 0600 on this filesystem" in msg
+
+
 class TestEnsureGitignore:
     def test_create_gitignore(self, tmp_path: Path) -> None:
         ok, _msg = ensure_gitignore(tmp_path)
@@ -248,10 +520,27 @@ class TestEnsureGitignore:
 
     def test_already_present(self, tmp_path: Path) -> None:
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".filigree/\n")
+        gitignore.write_text(".weft/\n.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
+
+    def test_weft_store_ignored_when_only_filigree_present(self, tmp_path: Path) -> None:
+        """A legacy-only ``.filigree/`` gitignore gains the ``.weft/`` rule too."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text(".filigree/\n")
+        ok, msg = ensure_gitignore(tmp_path)
+        assert ok
+        content = gitignore.read_text()
+        assert ".weft/" in content
+        assert "Added .weft/" in msg
+
+    def test_creates_both_rules_on_fresh_gitignore(self, tmp_path: Path) -> None:
+        ok, _msg = ensure_gitignore(tmp_path)
+        assert ok
+        content = (tmp_path / ".gitignore").read_text()
+        assert ".weft/" in content
+        assert ".filigree/" in content
 
     def test_commented_pattern_not_treated_as_ignored(self, tmp_path: Path) -> None:
         """A `#.filigree/` comment must not count as an active ignore rule."""
@@ -286,7 +575,7 @@ class TestEnsureGitignore:
     def test_root_anchored_pattern_accepted(self, tmp_path: Path) -> None:
         """`/.filigree/` is an anchored ignore rule — must be recognised as already present."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("/.filigree/\n")
+        gitignore.write_text(".weft/\n/.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
@@ -294,7 +583,7 @@ class TestEnsureGitignore:
     def test_bare_name_without_trailing_slash_accepted(self, tmp_path: Path) -> None:
         """`.filigree` (no trailing slash) matches the directory — must be recognised."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".filigree\n")
+        gitignore.write_text(".weft/\n.filigree\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
@@ -318,10 +607,150 @@ class TestEnsureGitignore:
     def test_negation_then_reignore_counts_as_ignored(self, tmp_path: Path) -> None:
         """`!.filigree/` followed by `.filigree/` re-ignores — last rule wins."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("!.filigree/\n.filigree/\n")
+        gitignore.write_text(".weft/\n!.filigree/\n.filigree/\n")
         ok, msg = ensure_gitignore(tmp_path)
         assert ok
         assert "already" in msg
+
+
+class TestEnsureFiligreeDirGitignore:
+    """The nested ``.filigree/.gitignore`` keeps ephemeral runtime files out of
+    commits when a project deliberately tracks its ``.filigree/`` dir (e.g. a
+    demo or a team that commits its issue DB). See filigree-694f777d5c.
+    """
+
+    def _make_dir(self, tmp_path: Path) -> Path:
+        filigree_dir = tmp_path / FILIGREE_DIR_NAME
+        filigree_dir.mkdir()
+        return filigree_dir
+
+    def test_creates_nested_gitignore(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        ok, _msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        nested = filigree_dir / ".gitignore"
+        assert nested.exists()
+        body = nested.read_text()
+        # Ephemeral sidecars / logs / runtime state / the per-machine secret are excluded.
+        for pattern in ("*.db-wal", "*.db-shm", "*.log", "context.md", "ephemeral.port", "federation_token"):
+            assert pattern in body, f"expected {pattern!r} in nested .gitignore"
+
+    def test_does_not_ignore_durable_files(self, tmp_path: Path) -> None:
+        """Design decision: filigree.db and config.json are DURABLE — the nested
+        file must not list them, so a tracked dir still commits the issue data.
+        """
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+        body = filigree_dir / ".gitignore"
+        lines = {ln.strip() for ln in body.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")}
+        assert DB_FILENAME not in lines
+        assert CONFIG_FILENAME not in lines
+
+    def test_git_check_ignore_semantics(self, tmp_path: Path) -> None:
+        """Verify against *real* git: ephemeral ignored, durable tracked.
+
+        Exercises the actual scenario — a project tracking its ``.filigree/``
+        dir (no root rule), relying on the nested file to keep ephemerals out.
+        """
+        if not shutil.which("git"):
+            pytest.skip("git not available")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+
+        def ignored(rel: str) -> bool:
+            return (
+                subprocess.run(
+                    ["git", "check-ignore", "-q", rel],
+                    cwd=tmp_path,
+                ).returncode
+                == 0
+            )
+
+        # Ephemeral → ignored
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db-wal")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db-shm")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.log")
+        assert ignored(f"{FILIGREE_DIR_NAME}/context.md")
+        assert ignored(f"{FILIGREE_DIR_NAME}/ephemeral.lock")
+        assert ignored(f"{FILIGREE_DIR_NAME}/filigree.db.pre-v26-bak")
+        assert ignored(f"{FILIGREE_DIR_NAME}/federation_token")  # per-machine secret, never commit
+        # Durable → NOT ignored
+        assert not ignored(f"{FILIGREE_DIR_NAME}/{DB_FILENAME}")
+        assert not ignored(f"{FILIGREE_DIR_NAME}/{CONFIG_FILENAME}")
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        ensure_filigree_dir_gitignore(filigree_dir)
+        ok, msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        assert "already" in msg
+        # No duplicate marker block.
+        body = (filigree_dir / ".gitignore").read_text()
+        assert body.count("*.db-wal") == 1
+
+    def test_preserves_user_content(self, tmp_path: Path) -> None:
+        filigree_dir = self._make_dir(tmp_path)
+        nested = filigree_dir / ".gitignore"
+        nested.write_text("# my own rule\nsecret-notes.txt\n")
+        ok, _msg = ensure_filigree_dir_gitignore(filigree_dir)
+        assert ok
+        body = nested.read_text()
+        assert "secret-notes.txt" in body
+        assert "*.db-wal" in body
+
+    def test_both_shipped_bodies_ignore_federation_token(self) -> None:
+        """The per-machine federation_token secret must be in BOTH nested-ignore
+        bodies (legacy ``.filigree/`` and consolidated ``.weft/filigree/``), or a
+        project that tracks its store dir as committed payload leaks it — the same
+        class as the .mcp.json token guard."""
+        from filigree.install import FILIGREE_DIR_GITIGNORE, WEFT_STORE_GITIGNORE
+
+        for body in (FILIGREE_DIR_GITIGNORE, WEFT_STORE_GITIGNORE):
+            lines = {ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")}
+            assert "federation_token" in lines
+
+
+class TestGitTracksProbe:
+    """`_git_tracks` degrades to ``False`` on a probe error, but the error path
+    is otherwise indistinguishable from a clean not-tracked result — which
+    silently drops the "already-tracked → git rm --cached" token warning. The
+    error case must be logged at debug to keep that distinguishable."""
+
+    def test_probe_error_returns_false_and_logs_debug(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from filigree.install_support import integrations
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise FileNotFoundError("git not on PATH")
+
+        monkeypatch.setattr(integrations.subprocess, "run", _boom)
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        assert any(".mcp.json" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records)
+
+    def test_clean_not_tracked_does_not_log(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        from filigree.install_support import integrations
+
+        subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        # A clean not-tracked result is silent — only probe *errors* log.
+        assert not any(rec.levelno == logging.DEBUG for rec in caplog.records)
+
+    def test_inconclusive_returncode_returns_false_and_logs_debug(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        # NOT a git repo: ``git ls-files`` runs but returns rc=128, which is
+        # inconclusive (not the clean rc=1 "not tracked"). That ambiguity is the
+        # same blind spot as a raised exception, so it must also log at debug.
+        from filigree.install_support import integrations
+
+        with caplog.at_level(logging.DEBUG, logger="filigree.install_support.integrations"):
+            tracked = integrations._git_tracks(tmp_path, ".mcp.json")
+        assert tracked is False
+        assert any("rc=" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records)
 
 
 class TestRunDoctor:
@@ -2307,6 +2736,13 @@ class TestDoctorConnectionLeak:
 
 
 class TestInstallMcpServerMode:
+    @pytest.fixture(autouse=True)
+    def _isolate_server_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Mint the server token into a temp dir, never the real ~/.config/filigree.
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", tmp_path / "_srvcfg")
+        for _v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(_v, raising=False)
+
     def test_server_mode_writes_streamable_http(self, tmp_path: Path) -> None:
         project_root = tmp_path
         filigree_dir = project_root / ".filigree"
@@ -2322,24 +2758,26 @@ class TestInstallMcpServerMode:
         assert server_config["type"] == "streamable-http"
         assert server_config["url"] == "http://localhost:8377/mcp/?project=test"
 
-    def test_server_mode_warns_without_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Server-mode points at the daemon's /mcp transport, which mounts only
-        when a federation bearer token is set; warn loudly if none is configured."""
-        monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
-        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
-        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
-            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
-        assert ok
-        assert "FILIGREE_FEDERATION_API_TOKEN" in msg
-        assert "404" in msg
+    def test_server_mode_embeds_literal_project_token(self, tmp_path: Path) -> None:
+        """Server-mode install embeds the LITERAL *project* federation token in the
+        header — no ${ENV} indirection, no export. The URL is project-scoped
+        (/mcp/?project=) and the daemon validates a scoped request against THAT
+        project's token (weft-23574069a1), so the embedded value must be the
+        project store-dir token — NOT the daemon home-store token."""
+        from filigree.core import resolve_store_dir
 
-    def test_server_mode_no_warning_with_federation_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With a token configured, the server-mode install message carries no warning."""
-        monkeypatch.setenv("FILIGREE_FEDERATION_API_TOKEN", "tok")
         with patch("filigree.install_support.integrations.shutil.which", return_value=None):
-            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
         assert ok
-        assert "WARNING" not in msg
+        project_token = (resolve_store_dir(tmp_path) / "federation_token").read_text().strip()
+        assert project_token
+        auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
+        assert auth == f"Bearer {project_token}"
+        assert "${" not in auth  # literal, not an env-var reference
+        # It must NOT be the daemon home-store token (the pre-fix behaviour).
+        home_token_file = tmp_path / "_srvcfg" / "federation_token"
+        if home_token_file.exists():
+            assert project_token != home_token_file.read_text().strip()
 
     def test_ethereal_mode_writes_stdio(self, tmp_path: Path) -> None:
         project_root = tmp_path
@@ -2350,6 +2788,57 @@ class TestInstallMcpServerMode:
         server_config = mcp["mcpServers"]["filigree"]
         assert server_config.get("type") == "stdio" or "command" in server_config
         assert server_config["args"] == []
+
+    def test_server_mode_mcp_json_is_owner_only(self, tmp_path: Path) -> None:
+        """The server-mode .mcp.json carries the LITERAL federation token, so it
+        must be written 0600 — matching the token file's own mode and making the
+        module's "0600" claim honest (filigree-ebfc16a090)."""
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        mode = stat.S_IMODE((tmp_path / ".mcp.json").stat().st_mode)
+        assert mode == 0o600, f"expected 0600, got {mode:#o}"
+
+    def test_server_mode_guards_mcp_json_in_gitignore(self, tmp_path: Path) -> None:
+        """Server-mode install must add a .mcp.json gitignore guard so the embedded
+        per-machine literal token never enters git history — a committed literal
+        makes every other clone 401 (filigree-ebfc16a090)."""
+        from filigree.install_support.gitignore import MCP_JSON_IGNORE_RULES, has_active_ignore
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        assert has_active_ignore(gitignore.read_text(), MCP_JSON_IGNORE_RULES)
+
+    def test_ethereal_mode_does_not_guard_mcp_json(self, tmp_path: Path) -> None:
+        """Ethereal mode writes a token-less stdio entry that is safe to commit;
+        .mcp.json is a shared suite artifact, so filigree must NOT gitignore it in
+        ethereal mode (guard is server-mode only) (filigree-ebfc16a090)."""
+        from filigree.install_support.gitignore import MCP_JSON_IGNORE_RULES, has_active_ignore
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, _msg = install_claude_code_mcp(tmp_path, mode="ethereal")
+        assert ok
+        gitignore = tmp_path / ".gitignore"
+        content = gitignore.read_text() if gitignore.exists() else ""
+        assert not has_active_ignore(content, MCP_JSON_IGNORE_RULES)
+
+    def test_server_mode_warns_when_mcp_json_already_tracked(self, tmp_path: Path) -> None:
+        """If .mcp.json is already git-tracked, the gitignore guard is a no-op for
+        it — the literal token still lands on the next commit. The install must
+        surface that as a warning (filigree-ebfc16a090)."""
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        subprocess.run(["git", "add", ".mcp.json"], cwd=tmp_path, check=True)
+
+        with patch("filigree.install_support.integrations.shutil.which", return_value=None):
+            ok, msg = install_claude_code_mcp(tmp_path, mode="server", server_port=8377)
+        assert ok
+        lower = msg.lower()
+        assert "track" in lower
+        assert "git rm --cached" in lower
 
 
 class TestCheckResult:

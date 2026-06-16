@@ -28,11 +28,11 @@ class _CanonicalThenUnavailableRegistry:
         return cast(
             ResolvedFile,
             {
-                "file_id": "clarion:file:canonical",
+                "file_id": "loomweave:file:canonical",
                 "content_hash": "hash:canonical",
                 "canonical_path": "src/canonical.py",
                 "language": language,
-                "registry_backend": "clarion",
+                "registry_backend": "loomweave",
             },
         )
 
@@ -117,7 +117,7 @@ class TestCreateObservation:
             tmp_path / "filigree.db",
             prefix="test",
             registry=registry,
-            registry_backend="clarion",
+            registry_backend="loomweave",
         )
         try:
             db.initialize()

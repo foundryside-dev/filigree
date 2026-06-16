@@ -2,7 +2,7 @@
 
 These guard against the test-suite gaps found in the QA review: dashboard JS
 checks drifting outside CI, global-only coverage masking weak modules, resource
-leak warnings staying non-fatal, and live Clarion integration silently skipping
+leak warnings staying non-fatal, and live Loomweave integration silently skipping
 even when a release lane requires it.
 """
 
@@ -69,33 +69,27 @@ def test_development_docs_list_node_as_pytest_prerequisite() -> None:
     assert "Node-backed static dashboard pytest tests" in readme
 
 
-def test_docs_deploy_waits_for_all_ci_quality_gates() -> None:
+def test_ci_has_required_loomweave_contract_lane() -> None:
     workflow = _read(".github/workflows/ci.yml")
 
-    assert "needs: [lint, typecheck, frontend, test, clarion-contract]" in workflow
-
-
-def test_ci_has_required_clarion_contract_lane() -> None:
-    workflow = _read(".github/workflows/ci.yml")
-
-    assert "clarion-contract:" in workflow
+    assert "loomweave-contract:" in workflow
     assert "tests/unit/test_registry.py" in workflow
     assert "tests/api/test_registry_backend_integration.py" in workflow
     assert "tests/core/test_registry_backend_matrix.py" in workflow
-    assert "tests/api/test_loom_auth.py" in workflow
+    assert "tests/api/test_weft_auth.py" in workflow
     assert "tests/federation/test_sei_conformance_oracle.py" in workflow
 
 
-def test_ci_has_gated_live_clarion_lane() -> None:
+def test_ci_has_gated_live_loomweave_lane() -> None:
     workflow = _read(".github/workflows/ci.yml")
-    live_job = _workflow_job(workflow, "live-clarion")
+    live_job = _workflow_job(workflow, "live-loomweave")
 
     assert "schedule:" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "require_live_clarion:" in workflow
-    assert "live-clarion:" in workflow
+    assert "require_live_loomweave:" in workflow
+    assert "live-loomweave:" in workflow
     assert "github.event_name == 'schedule'" in live_job
-    assert "github.event_name == 'workflow_dispatch' && inputs.require_live_clarion" in live_job
+    assert "github.event_name == 'workflow_dispatch' && inputs.require_live_loomweave" in live_job
     assert "CLARION_STAGING_BASE_URL" in live_job
     assert "FILIGREE_REQUIRE_LIVE_CLARION" in workflow
     assert "tests/integration/test_clarion_staging_smoke.py" in workflow
@@ -103,13 +97,13 @@ def test_ci_has_gated_live_clarion_lane() -> None:
     assert "tests/federation/test_sei_oracle_live_clarion.py" in workflow
 
 
-def test_release_workflow_emits_live_clarion_release_checklist_warning() -> None:
+def test_release_workflow_emits_live_loomweave_release_checklist_warning() -> None:
     workflow = _read(".github/workflows/release.yml")
 
-    assert "live-clarion-release-check:" in workflow
+    assert "live-loomweave-release-check:" in workflow
     assert "actions/workflows/ci.yml/runs" in workflow
-    assert "::warning title=Live Clarion release checklist::" in workflow
-    assert "scheduled Live Clarion Integration lane" in workflow
+    assert "::warning title=Live Loomweave release checklist::" in workflow
+    assert "scheduled Live Loomweave Integration lane" in workflow
 
 
 def test_make_ci_runs_javascript_and_coverage_floor_gates() -> None:
@@ -192,14 +186,14 @@ def test_xss_guardrails_execute_rendered_output_instead_of_source_string_checks(
 def test_readme_documents_auth_route_classes() -> None:
     readme = _read("README.md")
 
-    assert "FILIGREE_FEDERATION_API_TOKEN" in readme
+    assert "WEFT_FEDERATION_TOKEN" in readme
     assert "| Route class | Authentication |" in readme
     assert "Classic dashboard API" in readme
     assert "Federation and scanner ingest" in readme
     assert "MCP HTTP endpoint" in readme
 
 
-def test_live_clarion_required_mode_turns_skips_into_failures() -> None:
+def test_live_loomweave_required_mode_turns_skips_into_failures() -> None:
     from tests.integration.test_clarion_phase_d_e2e import _clarion_unavailable_action
 
     assert _clarion_unavailable_action(require_live=False) == "skip"

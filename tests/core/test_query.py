@@ -123,6 +123,96 @@ class TestListIssuesFilters:
         assert all(i.type == "bug" and i.priority == 0 for i in results)
 
 
+class TestListIssuesPriorityRange:
+    """N-6: list_issues priority_min/priority_max range filters (claim-verb pattern)."""
+
+    def test_priority_min_excludes_lower(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        p2 = db.create_issue("Medium", priority=2)
+        results = db.list_issues(priority_min=2)
+        ids = {i.id for i in results}
+        assert p2.id in ids
+        assert p0.id not in ids
+        assert all(i.priority >= 2 for i in results)
+
+    def test_priority_max_excludes_higher(self, db: FiligreeDB) -> None:
+        p1 = db.create_issue("High", priority=1)
+        p3 = db.create_issue("Low", priority=3)
+        results = db.list_issues(priority_max=1)
+        ids = {i.id for i in results}
+        assert p1.id in ids
+        assert p3.id not in ids
+        assert all(i.priority <= 1 for i in results)
+
+    def test_p0_included_with_zero_bounds(self, db: FiligreeDB) -> None:
+        """Priority 0 is valid — `is not None` semantics, never truthiness."""
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("High", priority=1)
+        results = db.list_issues(priority_min=0, priority_max=0)
+        assert [i.id for i in results] == [p0.id]
+
+    def test_min_and_max_combined(self, db: FiligreeDB) -> None:
+        db.create_issue("P0", priority=0)
+        p1 = db.create_issue("P1", priority=1)
+        p3 = db.create_issue("P3", priority=3)
+        db.create_issue("P4", priority=4)
+        results = db.list_issues(priority_min=1, priority_max=3)
+        ids = {i.id for i in results}
+        assert ids == {p1.id, p3.id}
+
+    def test_min_greater_than_max_returns_empty(self, db: FiligreeDB) -> None:
+        """min > max yields an empty list, no error (claim-verb semantics)."""
+        db.create_issue("P2", priority=2)
+        assert db.list_issues(priority_min=3, priority_max=1) == []
+
+    def test_exact_priority_filter_unchanged(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("Normal", priority=2)
+        results = db.list_issues(priority=0)
+        assert any(i.id == p0.id for i in results)
+        assert all(i.priority == 0 for i in results)
+
+
+class TestGetReadyPriorityRange:
+    """N-6: get_ready priority_min/priority_max range filters."""
+
+    def test_priority_range_filters(self, db: FiligreeDB) -> None:
+        db.create_issue("P0", priority=0)
+        p1 = db.create_issue("P1", priority=1)
+        p2 = db.create_issue("P2", priority=2)
+        db.create_issue("P4", priority=4)
+        ready = db.get_ready(priority_min=1, priority_max=2)
+        assert {i.id for i in ready} == {p1.id, p2.id}
+
+    def test_p0_included_at_max_zero(self, db: FiligreeDB) -> None:
+        p0 = db.create_issue("Critical", priority=0)
+        db.create_issue("Medium", priority=2)
+        ready = db.get_ready(priority_max=0)
+        assert [i.id for i in ready] == [p0.id]
+
+    def test_min_greater_than_max_returns_empty(self, db: FiligreeDB) -> None:
+        db.create_issue("P2", priority=2)
+        assert db.get_ready(priority_min=3, priority_max=1) == []
+
+    def test_range_still_excludes_assigned(self, db: FiligreeDB) -> None:
+        claimed = db.create_issue("Claimed", priority=1)
+        db.claim_issue(claimed.id, assignee="agent")
+        free = db.create_issue("Free", priority=1)
+        ready = db.get_ready(priority_min=1, priority_max=1)
+        ids = {i.id for i in ready}
+        assert free.id in ids
+        assert claimed.id not in ids
+
+    def test_range_still_excludes_blocked(self, db: FiligreeDB) -> None:
+        blocker = db.create_issue("Blocker", priority=1)
+        blocked = db.create_issue("Blocked", priority=1)
+        db.add_dependency(blocked.id, blocker.id)
+        ready = db.get_ready(priority_min=1, priority_max=1)
+        ids = {i.id for i in ready}
+        assert blocker.id in ids
+        assert blocked.id not in ids
+
+
 class TestListIssuesSorting:
     """list_issues supports explicit sort fields and directions."""
 
@@ -388,6 +478,21 @@ class TestStats:
         assert stats["blocked_count"] == 0
         assert stats["ready_count"] == len(ready_ids)
 
+    def test_wip_blocked_issue_counts_in_stats_blocked_count(self, db: FiligreeDB) -> None:
+        # Dogfood-4 B3: stats_get said blocked_count 0 while work_blocked returned
+        # a claimed wip-category issue — two definitions of "blocked". There is
+        # ONE now: stats must agree with get_blocked, wip included.
+        blocker = db.create_issue("Blocker", type="task")
+        blocked = db.create_issue("Blocked", type="task")
+        db.update_issue(blocked.id, status="in_progress")
+        db.add_dependency(blocked.id, blocker.id)
+
+        stats = db.get_stats()
+        blocked_ids = {i.id for i in db.get_blocked()}
+
+        assert blocked.id in blocked_ids
+        assert stats["blocked_count"] == len(blocked_ids)
+
 
 class TestGetStatsByCategory:
     """Verify get_stats() includes category-level counts (WFT-FR-060)."""
@@ -544,6 +649,39 @@ class TestGetStatsEmptyDoneStates:
             # With no done states, B blocks A, so A is blocked and B is ready
             assert stats["blocked_count"] >= 1
 
+    def test_get_stats_no_open_states_still_counts_blocked(self, db: FiligreeDB) -> None:
+        """F2 corner: when NO open-category states are registered,
+        _resolve_open_blocker_predicates() returns None and get_stats used to
+        short-circuit blocked_count to 0. But blocked_count/get_blocked() no
+        longer depend on open states (blocked = any not-done issue with a
+        not-done blocker, wip included), so the two surfaces diverged for a
+        wip/done-only template. get_stats must compute blocked_count from the
+        same not-done predicate get_blocked() uses and agree with it."""
+        blocker = db.create_issue("Blocker", type="task")
+        blocked = db.create_issue("Blocked", type="task")
+        db.update_issue(blocked.id, status="in_progress")  # wip-category, not done
+        db.add_dependency(blocked.id, blocker.id)
+
+        original_method = db._get_type_states_for_category
+
+        def mock_get_states(category: str) -> list[tuple[str, str]]:
+            if category == "open":
+                return []  # no open-category (type, state) pairs registered
+            return original_method(category)
+
+        with patch.object(db, "_get_type_states_for_category", side_effect=mock_get_states):
+            # Sanity: this configuration drives _resolve_open_blocker_predicates
+            # to return None, exercising the short-circuit branch.
+            assert db._resolve_open_blocker_predicates() is None
+            stats = db.get_stats()
+            blocked_ids = {i.id for i in db.get_blocked()}
+            # The wip issue blocked by a not-done blocker must be surfaced by
+            # get_blocked AND counted by stats — the two must agree.
+            assert blocked.id in blocked_ids
+            assert stats["blocked_count"] == len(blocked_ids)
+            assert stats["blocked_count"] >= 1
+            assert stats["ready_count"] == 0  # readiness is still open-only
+
 
 class TestFTS5SpecialCharacters:
     """FTS5 search should handle special characters gracefully."""
@@ -595,6 +733,52 @@ class TestFTS5SpecialCharacters:
         # Plain word tokens still use FTS and continue to work.
         results = db.search_issues("Scratch")
         assert any(i.id == target.id for i in results), "plain word query stays on FTS path"
+
+    def test_search_substring_arm_matches_labels(self, db: FiligreeDB) -> None:
+        """Dogfood-4 B5: two issues carried the exact label searched for and
+        search returned 0 — the substring arm never looked at labels. Label
+        vocabulary is kebab-case so a label query always lands on the LIKE arm;
+        that arm now searches labels too."""
+        tagged = db.create_issue("Throwaway probe", type="task")
+        db.add_label(tagged.id, "dogfood-exercise")
+        db.create_issue("Unrelated", type="task")
+
+        results = db.search_issues("dogfood-exercise")
+        assert any(i.id == tagged.id for i in results), "label-only match must surface on the LIKE arm"
+        assert db.count_search_results("dogfood-exercise") >= 1
+
+    def test_search_bareword_label_only_match_surfaces(self, db: FiligreeDB) -> None:
+        """No-dead-by-design: a SINGLE-WORD label (no punctuation) routes to the
+        FTS arm, which indexes only title/description — so a bareword query that
+        exactly names a label used to silently miss it, while kebab-case labels
+        (which carry a hyphen, landing on the LIKE arm) matched. The FTS arm now
+        UNIONs label-LIKE hits, and count_search_results stays in lockstep."""
+        tagged = db.create_issue("Throwaway probe with no matching words", type="task")
+        db.add_label(tagged.id, "backend")
+        # A decoy whose title/description never mentions 'backend'.
+        db.create_issue("Unrelated frontend styling", type="task")
+
+        results = db.search_issues("backend")
+        assert any(i.id == tagged.id for i in results), "single-word label-only match must surface even though it routes to FTS"
+        # search and count stay in lockstep.
+        assert db.count_search_results("backend") >= 1
+
+    def test_search_bareword_fts_and_label_both_surface(self, db: FiligreeDB) -> None:
+        """A bareword query must surface BOTH title/description FTS hits and
+        label-only hits in one result set (union), deduped."""
+        by_title = db.create_issue("urgent triage required", type="task")
+        by_label = db.create_issue("Routine cleanup", type="task")
+        db.add_label(by_label.id, "urgent")
+        both = db.create_issue("urgent regression", type="task")
+        db.add_label(both.id, "urgent")
+        db.create_issue("calm unrelated work", type="task")
+
+        ids = {i.id for i in db.search_issues("urgent")}
+        assert {by_title.id, by_label.id, both.id}.issubset(ids)
+        # 'both' must appear exactly once despite matching FTS and label.
+        result_ids = [i.id for i in db.search_issues("urgent")]
+        assert result_ids.count(both.id) == 1
+        assert db.count_search_results("urgent") == 3
 
     def test_search_status_category_filter_excludes_done(self, db: FiligreeDB) -> None:
         """Senior-user MCP review run e P2.7: status_category filter scopes search.

@@ -17,9 +17,10 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import tomllib
 import uuid as _uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 
 from filigree.db_annotations import (
     VALID_ANNOTATION_INTENTS,
@@ -35,6 +36,8 @@ from filigree.db_files import (
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
     FilesMixin,
     _normalize_scan_path,
 )
@@ -47,28 +50,28 @@ from filigree.db_schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 from filigree.db_workflow import WorkflowMixin
 from filigree.models import _EMPTY_TS, FileRecord, Issue, ScanFinding
 from filigree.registry import (
-    DEFAULT_CLARION_TOKEN_ENV,
+    DEFAULT_LOOMWEAVE_TOKEN_ENV,
     BatchQuery,
     BatchResolution,
-    ClarionCapabilities,
-    ClarionRegistry,
     LocalRegistry,
+    LoomweaveCapabilities,
+    LoomweaveRegistry,
     RegistryProtocol,
     RegistryUnavailableError,
     RegistryVersionMismatchError,
     ResolvedFile,
-    normalize_clarion_base_url,
-    probe_clarion_capabilities,
+    normalize_loomweave_base_url,
+    probe_loomweave_capabilities,
     resolve_files_batch_via_loop,
-    validate_clarion_capabilities,
+    validate_loomweave_capabilities,
 )
 from filigree.types.core import (
     AssocType,
-    ClarionConfig,
     FileRecordDict,
     FindingStatus,
     ISOTimestamp,
     IssueDict,
+    LoomweaveConfig,
     PaginatedResult,
     ProjectConfig,
     RegistryBackend,
@@ -92,9 +95,10 @@ __all__ = [
     "VALID_ASSOC_TYPES",
     "VALID_FINDING_STATUSES",
     "VALID_SEVERITIES",
+    "VALID_SUPPRESSION_FILTERS",
+    "VALID_WARDLINE_FINDING_KINDS",
     "_EMPTY_TS",
     "AssocType",
-    "ClarionRegistry",
     "FileRecord",
     "FileRecordDict",
     "FindingStatus",
@@ -102,6 +106,7 @@ __all__ = [
     "Issue",
     "IssueDict",
     "LocalRegistry",
+    "LoomweaveRegistry",
     "PaginatedResult",
     "ProjectConfig",
     "RegistryProtocol",
@@ -121,6 +126,17 @@ DB_FILENAME = "filigree.db"
 CONFIG_FILENAME = "config.json"
 CONF_FILENAME = ".filigree.conf"
 SUMMARY_FILENAME = "context.md"
+
+# WEFT federation store convention (filigree-37e3f26145). The machine-owned
+# store moves from ``.filigree/`` to ``.weft/filigree/``. ``.weft/`` is the
+# shared federation dir (co-owned by sibling members); filigree owns exactly
+# its ``.weft/filigree/`` subtree and is its sole writer. ``.filigree/``
+# remains the frozen legacy layout (kept readable for back-compat).
+WEFT_DIR_NAME = ".weft"
+WEFT_MEMBER_SUBDIR = "filigree"
+WEFT_TOML_FILENAME = "weft.toml"
+# The store dir for a relative ``store_dir`` override defaults here.
+LEGACY_MOVED_BREADCRUMB = "MOVED"
 
 # Schema version for .filigree.conf — bump if the file format changes incompatibly.
 CONF_VERSION = 1
@@ -307,11 +323,16 @@ def _resolve_to_main_worktree(start: Path) -> Path:
         git_path = parent / ".git"
         conf_path = parent / CONF_FILENAME
         legacy_dir = parent / FILIGREE_DIR_NAME
+        weft_store = parent / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
         has_conf = conf_path.is_file()
         has_legacy_dir = legacy_dir.is_dir()
-        if has_conf or has_legacy_dir:
+        has_weft_store = weft_store.is_dir()
+        if has_conf or has_weft_store or has_legacy_dir:
             main_worktree = _main_worktree_from_git_path(git_path) if git_path.exists() else None
-            if main_worktree is not None and not _has_local_filigree_config(legacy_dir):
+            # A worktree is its own project only when it carries local config
+            # metadata (in either the federation store or the legacy dir).
+            has_local = _has_local_filigree_config(weft_store) or _has_local_filigree_config(legacy_dir)
+            if main_worktree is not None and not has_local:
                 return main_worktree
             return start
         if not git_path.exists():
@@ -366,7 +387,38 @@ def _main_worktree_from_git_path(git_path: Path) -> Path | None:
     main_git_dir = gitdir.parent.parent
     if main_git_dir.name != ".git" or not main_git_dir.is_dir():
         return None
+    # Bidirectional verification: git records a ``gitdir`` back-pointer in the
+    # admin dir that names *this* worktree's ``.git`` file. Requiring it to
+    # resolve back to ``git_path`` defeats two failure modes — an attacker-
+    # controlled ``.git`` file (an untrusted clone could otherwise redirect
+    # discovery onto an arbitrary victim project) and stale pointers left after
+    # ``git worktree remove`` or an admin-dir rename. On any mismatch or read
+    # failure we decline to redirect and let ``.git`` stand as a boundary.
+    if not _worktree_back_pointer_matches(gitdir, git_path):
+        return None
     return main_git_dir.parent
+
+
+def _worktree_back_pointer_matches(admin_dir: Path, git_path: Path) -> bool:
+    """Return whether *admin_dir*'s ``gitdir`` back-pointer resolves to *git_path*.
+
+    Git's linked-worktree bookkeeping is bidirectional: the worktree's ``.git``
+    file points at ``<main>/.git/worktrees/<name>`` (``admin_dir``), and that
+    admin dir contains a ``gitdir`` file holding the absolute path back to the
+    worktree's ``.git`` file. A genuine worktree round-trips; a spoofed or stale
+    pointer does not. A missing or unreadable back-pointer counts as no match.
+    """
+    back_pointer_file = admin_dir / "gitdir"
+    try:
+        recorded = back_pointer_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not recorded:
+        return False
+    try:
+        return Path(recorded).resolve() == git_path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _classify_git_entry(git_path: Path) -> str:
@@ -380,6 +432,676 @@ def _classify_git_entry(git_path: Path) -> str:
     if _main_worktree_from_git_path(git_path) is not None:
         return "worktree_pointer"
     return "gitdir_file"
+
+
+class WeftConfigUnreadableError(RuntimeError):
+    """``weft.toml`` is present but cannot be parsed (bad TOML / non-UTF-8 / I/O error).
+
+    Passive, read-only paths (discovery, ``resolve_store_dir``) swallow this and
+    boot on built-in defaults (C-9c). The **mutating** init/install path must
+    NOT: an unreadable config may hide an operator ``[filigree].store_dir`` pin,
+    and treating "broken" as "absent" there would skip the don't-auto-migrate
+    guard and relocate the store somewhere the operator never chose. So the write
+    path raises this and refuses rather than guessing.
+    """
+
+
+def _load_weft_filigree_table(project_root: Path) -> dict[str, Any] | None:
+    """Strict reader for the ``[filigree]`` table in ``project_root/weft.toml``.
+
+    Returns the table dict, ``{}`` when the file exists but has no (or a non-dict)
+    ``[filigree]`` table, or ``None`` when the file is **absent**. Raises
+    :class:`WeftConfigUnreadableError` when the file is **present but unreadable**
+    (TOML syntax error, non-UTF-8 bytes — tomllib decodes UTF-8 internally — or an
+    OS read error). This is the primitive that distinguishes "absent" from
+    "broken"; callers choose whether to tolerate the latter.
+
+    Reads only from *project_root* — no walk-up. Discovery has already settled
+    the project root; an independent walk would constitute a second anchor.
+    """
+    path = project_root / WEFT_TOML_FILENAME
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        msg = f"weft.toml present but unreadable at {path}: {exc}"
+        raise WeftConfigUnreadableError(msg) from exc
+    table = data.get(WEFT_MEMBER_SUBDIR)
+    if not isinstance(table, dict):
+        return {}
+    return table
+
+
+def read_weft_filigree_table(project_root: Path) -> dict[str, Any]:
+    """Lenient read of the operator-authored ``[filigree]`` table from ``weft.toml``.
+
+    Mirrors legis' ``_weft_legis_config`` (the federation reference): returns an
+    empty dict when ``weft.toml`` is absent, carries no ``[filigree]`` table, or
+    cannot be parsed. ``weft.toml`` is **enrich-only, never load-bearing** — a
+    missing or malformed file must still boot on built-in defaults (convention
+    C-9c). This function is strictly **read-only**: filigree never writes
+    ``weft.toml`` (it is operator-authored / written only by ``weft init``).
+
+    Boot-on-defaults is right for **passive discovery**; the mutating init path
+    must instead distinguish absent from broken via :func:`_load_weft_filigree_table`
+    (it raises on unreadable) so it never auto-migrates over a config it can't read.
+    """
+    try:
+        table = _load_weft_filigree_table(project_root)
+    except WeftConfigUnreadableError as exc:
+        # Surface for diagnosis, but never hard-fail on a read-only/discovery path.
+        logger.warning("%s; using built-in defaults", exc)
+        return {}
+    return table if table is not None else {}
+
+
+def resolve_store_dir(project_root: Path) -> Path:
+    """Resolve the machine-owned store dir for *project_root* (single source of truth).
+
+    Resolution order (highest precedence first):
+      1. ``weft.toml`` ``[filigree].store_dir`` operator override. Only a
+         **project-relative, under-root** path is honoured (resolved against
+         *project_root*). An absolute path, a ``..``-escaping path, a non-string,
+         or an empty value is ignored (warn + fall back): filigree threads the
+         store dir through the ``.filigree.conf`` ``db`` field, whose trust
+         boundary forbids absolute / escaping paths, so such a value cannot be
+         represented consistently and is never honoured half-way.
+      2. ``.weft/filigree/`` if it exists — UNLESS legacy ``.filigree/`` is still
+         canonical. Legacy stays canonical when it holds the DB and either
+         (a) weft is an empty husk (no DB) — an aborted migration can leave an
+         empty ``.weft/filigree/`` behind, and selecting it would let a confless
+         open stamp a fresh empty DB over the live legacy data (data loss); or
+         (b) the install is CONFLESS (no ``.filigree.conf``) — for a confless
+         install migration's legacy-DB delete is the de-facto commit point, so
+         legacy stays canonical (writes flow there) until that delete, even once
+         a weft DB exists. A CONF install's ``.filigree.conf`` ``db`` field is
+         its commit marker, so the conf-present path keeps the plain DB-presence
+         tie-break and is unchanged (filigree-6f4b6dcd78).
+      3. legacy ``.filigree/`` (back-compat; also the bare fallback that a fresh
+         install's default ``db`` literal points beside before the dir exists).
+
+    Pure read — never writes, never raises. ``find_filigree_anchor`` calls this
+    from **both** the conf and confless branches, so
+    ``anchor.store_dir == resolve_store_dir(anchor.project_root)`` by
+    construction — the no-split-brain guarantee.
+    """
+    override = read_weft_filigree_table(project_root).get("store_dir")
+    if isinstance(override, str) and override:
+        candidate = Path(override)
+        # Narrow to project-relative, under-root paths. filigree threads the
+        # store dir through the .filigree.conf ``db`` field, whose trust boundary
+        # already forbids absolute / escaping paths — so an absolute or
+        # ``..``-escaping store_dir cannot be represented consistently and is
+        # ignored (warn + fall back to the default), never honoured half-way.
+        if candidate.is_absolute():
+            logger.warning(
+                "weft.toml [filigree].store_dir is absolute (%s); ignoring (must be project-relative) and using the default store.",
+                override,
+            )
+        else:
+            resolved = (project_root / candidate).resolve()
+            try:
+                resolved.relative_to(project_root.resolve())
+            except ValueError:
+                logger.warning(
+                    "weft.toml [filigree].store_dir %r escapes the project root; ignoring and using the default store.",
+                    override,
+                )
+            else:
+                return project_root / candidate
+    weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    legacy = project_root / FILIGREE_DIR_NAME
+    # Prefer the federation store — but NOT while legacy is still canonical. The
+    # choice keys on DB *presence*, not bare dir existence (a busy- or copy-
+    # aborted migration can leave an empty ``.weft/filigree/`` behind, the dir
+    # being created before the abortable copy). Two cases keep legacy canonical;
+    # see the keep_legacy comment below. A genuinely fresh weft install
+    # (config.json, DB not yet stamped, no legacy) is unaffected — its
+    # legacy_db guard is False.
+    weft_db_present = (weft_store / DB_FILENAME).is_file()
+    legacy_db_present = (legacy / DB_FILENAME).is_file()
+    # For a CONFLESS install there is no .filigree.conf to mark the migration
+    # commit point, so migrate_store_to_weft's legacy-DB delete (step 4) is the
+    # de-facto commit. Until that delete, legacy stays canonical: a confless
+    # writer must keep routing to legacy even once a weft DB exists, otherwise a
+    # write lands in weft and migrate's unconditional re-copy clobbers it from
+    # the still-canonical legacy DB (data loss — filigree-6f4b6dcd78). A CONF
+    # install's .filigree.conf ``db`` field is its commit marker, so when the
+    # conf is present keep_legacy collapses to the original DB-presence tie-break
+    # (legacy_db_present and not weft_db_present) — conf installs are unchanged.
+    conf_present = (project_root / CONF_FILENAME).is_file()
+    keep_legacy = legacy_db_present and (not weft_db_present or not conf_present)
+    if weft_store.is_dir() and not keep_legacy:
+        return weft_store
+    if legacy.is_dir():
+        return legacy
+    # Neither layout materialised yet (e.g. a fresh project_root): the canonical
+    # default is the federation store, where a new install will create it.
+    return weft_store
+
+
+class StoreMigrationBusyError(RuntimeError):
+    """A live writer holds the DB, so migration cannot safely checkpoint it."""
+
+
+class StoreMigrationConfUnreadableError(RuntimeError):
+    """``.filigree.conf`` is present but unreadable when a store migration needs it.
+
+    The mutating migration path (:func:`migrate_store_to_weft`) rewrites the
+    conf's ``db`` field — preserving ``prefix`` / ``project_name`` / registry
+    settings — and then deletes the legacy DB. A corrupt conf can be neither
+    rewritten (parsing it back is a prerequisite for preserving those fields) nor
+    trusted to reveal a relocated custom ``db`` layout we must not disturb. So,
+    mirroring the strict ``weft.toml`` read (I1, :class:`WeftConfigUnreadableError`),
+    we refuse BEFORE any filesystem mutation rather than treat broken-as-confless
+    or crash mid-migration with a half-published weft husk. The conf and legacy
+    store are left untouched; a re-run converges once the conf is readable.
+    """
+
+
+@contextlib.contextmanager
+def _migration_write_fence(legacy_db: Path) -> Iterator[None]:
+    """Hold an exclusive write fence on *legacy_db* across the copy→unlink window.
+
+    DEFENSE-IN-DEPTH, NOT a full close of the ad-hoc-writer race
+    (filigree-39c6958f31). The MANDATORY backstop is the documented quiesce — stop
+    every writer before the one-time 2.x→3.0 migration (docs/UPGRADING.md, "Stop
+    ALL writers before upgrading — this is mandatory, not advisory") — plus the
+    daemon detect-and-refuse (:func:`_refuse_if_daemon_serving`) for long-lived
+    *idle* daemon connections that hold no lock. This fence narrows the residual
+    by taking ``BEGIN IMMEDIATE`` on the legacy DB and HOLDING it across the whole
+    snapshot→unlink window. Two genuine wins:
+
+      * **Refuse-on-already-active.** If a writer already holds the lock, the
+        ``BEGIN IMMEDIATE`` below fails and we raise :class:`StoreMigrationBusyError`
+        BEFORE any filesystem mutation (no half-published weft husk), replacing the
+        old copy-time checkpoint-busy guard with a window-wide one.
+      * **Short-/zero-timeout writers.** A writer that tries to commit during the
+        hold and whose ``busy_timeout`` expires first gets ``SQLITE_BUSY`` (a
+        *visible* error) instead of silently racing the copy.
+
+    Readers are unaffected (WAL) and a pure reader loses nothing — the snapshot
+    captured every committed page.
+
+    KNOWN RESIDUAL (intentionally NOT closed here; this is why quiesce is
+    mandatory). A writer that *opens* the legacy DB and blocks on the fence DURING
+    the hold, with a ``busy_timeout`` longer than the sub-second hold (FiligreeDB
+    sets ``PRAGMA busy_timeout=5000`` = 5 s), will, AFTER the fence
+    releases, acquire the lock and COMMIT — onto the now-unlinked (orphaned) inode,
+    since the unlink ran under the fence. POSIX keeps an open fd writing to a
+    deleted inode, so that commit succeeds *silently* and is unreachable from the
+    migrated store. The migration cannot prevent a writer it does not cooperate
+    with from writing to a file it already holds open; the fence relocates this
+    loss from "during the window" to "after release" but does not eliminate it.
+    Empirically confirmed (the discriminating thread test, 2026-06-09). Closing it
+    for real would require the writer's cooperation (a shared lease/quiesce
+    protocol), which is what the mandatory operator quiesce stands in for.
+
+    On exit the no-op transaction is rolled back and the connection closed; the
+    rollback is a clean release even though the backing files were unlinked under
+    the lock, because the open fd keeps the inode alive until ``close()`` (POSIX).
+    """
+    conn = sqlite3.connect(str(legacy_db), timeout=2.0)
+    conn.isolation_level = None  # explicit BEGIN/ROLLBACK control
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            msg = f"Cannot migrate {legacy_db}: another process holds the database. Close other filigree sessions and re-run."
+            raise StoreMigrationBusyError(msg) from exc
+        yield
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        with contextlib.suppress(sqlite3.Error):
+            conn.close()
+
+
+def _snapshot_copy_sqlite_locked(src_db: Path, dest_db: Path) -> None:
+    """Snapshot *src_db* → *dest_db* via the SQLite online-backup API, atomic publish.
+
+    The CALLER MUST hold the migration write fence (:func:`_migration_write_fence`)
+    on *src_db* — this routine assumes no writer can mutate the source mid-copy.
+
+    The backup API reads *src_db* through a real connection, so it folds
+    WAL-resident committed pages into the snapshot (a plain main-file copy would
+    orphan ``-wal`` frames) and copies page 1 verbatim, preserving the FILG
+    ``application_id`` — all WITHOUT an explicit ``wal_checkpoint(TRUNCATE)``,
+    which cannot run while the fence is held (it returns busy / self-conflicts).
+    Backup runs from a fresh *reader* connection, never the fence holder: a
+    ``backup()`` whose source connection itself holds ``BEGIN IMMEDIATE`` hangs.
+
+    We **copy, not move**: the legacy DB stays valid until the caller rewrites the
+    conf to point here, so the migration is crash-convergent (a re-run resumes).
+    The publish is **atomic at the destination**: stage to a unique temp in the
+    dest dir, then ``os.replace`` (mirroring :func:`_atomic_copy_file`), so
+    ``dest_db`` only ever appears complete — a crash leaves only the temp, never a
+    torn DB a re-run's existence guard would mistake for a finished copy.
+    """
+    dest_db.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest_db.parent, prefix=dest_db.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    src = sqlite3.connect(str(src_db), timeout=5.0)
+    try:
+        dst = sqlite3.connect(str(tmp))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+        os.replace(tmp, dest_db)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    finally:
+        src.close()
+
+
+def _atomic_copy_file(src: Path, dest: Path) -> None:
+    """Copy *src* → *dest* atomically (stage to a dest-dir temp, ``os.replace``).
+
+    Mirrors the publish in :func:`_snapshot_copy_sqlite_locked` for the small
+    metadata sidecars (config.json, INSTALL_VERSION, summary, federation_token):
+    ``dest`` only ever appears complete, and an overwrite of an existing ``dest``
+    is atomic. ``copy2`` to a temp in the dest dir keeps the byte copy
+    cross-device safe while ``os.replace`` stays a same-filesystem atomic rename.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(str(src), str(tmp))
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _atomic_copy_tree(src: Path, dest: Path) -> None:
+    """Copy directory *src* → *dest* atomically (stage to a dest-dir temp, ``os.replace``).
+
+    The directory analogue of :func:`_atomic_copy_file` for the migration's metadata
+    sub-trees (``scanners/``, ``templates/``). ``shutil.copytree`` straight to the
+    final path is *non-atomic*: a crash (SIGKILL/power loss) mid-copy leaves a
+    *partial* directory at ``dest`` that a re-run's ``not dest.exists()`` existence
+    guard then mistakes for a finished copy and skips — publishing the partial
+    (filigree-197be8b501, the same torn-then-skip defect already fixed for the DB
+    and the metadata files). Instead copytree into a unique temp dir in the parent,
+    then ``os.replace`` to publish: ``dest`` only ever appears *complete*, and a
+    crash leaves only the temp (cleaned up), never a partial that the guard skips.
+
+    The caller keeps its copy-once guard (``not dest.exists()``) — durable config
+    sub-trees do not drift mid-migration — but that guard is now SAFE because a
+    present ``dest`` is always a finished copy, never a torn one.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(dir=dest.parent, prefix=dest.name + "."))
+    try:
+        # ``mkdtemp`` already created ``tmp`` (empty); ``dirs_exist_ok`` lets
+        # copytree populate it rather than refuse the existing target.
+        shutil.copytree(str(src), str(tmp), dirs_exist_ok=True)
+        os.replace(tmp, dest)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
+    """Best-effort: the project's ephemeral dashboard port if one is live, else ``None``.
+
+    A session-scoped ephemeral dashboard (``filigree dashboard`` without
+    ``--server-mode``) binds the project's deterministic port and holds a
+    ``FiligreeDB`` connection on the legacy store. An *idle* such process holds no
+    DB lock at migration time, so a lock/checkpoint probe cannot see it — we probe
+    its deterministic port instead. The probe is portable (a localhost bind-attempt
+    plus one HTTP GET, no ``lsof``/procfs) and BEST-EFFORT: it only ever
+    *contributes* a refusal; any error returns ``None`` and never blocks migration.
+
+    A bound port alone is NOT enough: ``compute_port`` hashes into a 1000-port
+    window shared with whatever else runs on the box, and treating any listener
+    as a dashboard false-refused real migrations when an unrelated daemon held
+    the colliding port (filigree-d5aa3bfe3d). So the listener must positively
+    identify itself: ``GET /api/health`` (ungated, see ``dashboard_auth``) must
+    answer ``mode == "ethereal"`` — the ephemeral dashboard's self-identification
+    since v1.3.0. ``mode == "server"`` is a server-mode daemon that happens to
+    sit in the window; whether it serves *this* project is the registry tier's
+    decision (:func:`_live_filigree_daemon_for_project`), not the port probe's.
+    A pre-1.3.0 dashboard (no ``mode``) reads as unidentified → proceed; the
+    migration's write-fence + quiesce backstops cover that residual.
+    """
+    import urllib.request
+
+    from filigree import ephemeral
+
+    port = ephemeral.compute_port(project_root / FILIGREE_DIR_NAME)
+    # A *free* (bindable) port means nothing is listening → no ephemeral dashboard.
+    if ephemeral._is_port_free(port):
+        return None
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as resp:
+            payload = json.loads(resp.read(4096))
+    except Exception:
+        # Non-HTTP listener, connection refused at HTTP level, timeout, or
+        # garbage body: not identifiable as a filigree dashboard → proceed.
+        return None
+    if isinstance(payload, dict) and payload.get("mode") == "ethereal":
+        return port
+    return None
+
+
+def _live_filigree_daemon_for_project(project_root: Path) -> int | None:
+    """Return the port of a live filigree daemon serving *project_root*, else ``None``.
+
+    Registry-based detection, NOT lock-based: an idle daemon holds no DB lock but
+    still has an open connection that can commit *after* migration unlinks the
+    legacy DB (orphaning that write). ``BEGIN EXCLUSIVE`` would not see such an idle
+    connection, so we consult the daemon registry + a deterministic port probe:
+      * server-mode (B1): the shared daemon is alive (PID-verified ``daemon_status``)
+        AND ``server.json`` registers a store dir whose project root is *project_root*.
+      * ephemeral (B2): the project's deterministic dashboard port is bound AND
+        the listener answers ``/api/health`` as a filigree ethereal dashboard.
+
+    A still-open in-session MCP/stdio connection (B3) cannot be detected from here;
+    that residual is documented in the upgrade notes.
+    """
+    from filigree import server
+
+    project_root = project_root.resolve()
+
+    status = server.daemon_status()
+    if status.running:
+        config = server.read_server_config()
+        for store_key in config.projects:
+            try:
+                key_root = server._project_root_from_store_dir(Path(store_key)).resolve()
+            except (OSError, ValueError):
+                continue
+            if key_root == project_root:
+                return status.port
+
+    return _ephemeral_dashboard_port_if_live(project_root)
+
+
+def _refuse_if_daemon_serving(project_root: Path) -> None:
+    """Raise :class:`StoreMigrationBusyError` when a live filigree daemon serves
+    *project_root* — it holds an open connection on the legacy DB and could commit
+    to it during/after migration, orphaning that write on the about-to-be-unlinked
+    inode (filigree-031f9a413f). BEST-EFFORT: detection that itself fails must never
+    crash migration, so any error is swallowed and migration proceeds.
+    """
+    try:
+        port = _live_filigree_daemon_for_project(project_root)
+    except Exception:
+        # Detection is best-effort; never let it crash migration.
+        logger.debug("Daemon-liveness detection failed for %s; proceeding", project_root, exc_info=True)
+        return
+    if port is not None:
+        msg = (
+            f"Cannot migrate {project_root / FILIGREE_DIR_NAME}: a filigree dashboard/server appears to be "
+            f"running for this project (port {port}). It holds an open connection on the legacy database and "
+            f"could write to it during migration, losing that write. Stop the dashboard/server "
+            f"(`filigree server stop`, or close the ephemeral dashboard) and re-run `filigree init`."
+        )
+        raise StoreMigrationBusyError(msg)
+
+
+def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
+    """Migrate a legacy ``.filigree/`` store forward to ``.weft/filigree/``.
+
+    **Explicit only** — call from ``filigree init`` / ``install``, never from
+    passive discovery (discovery must stay write-free for read-only mounts).
+
+    Returns ``(store_dir, migrated)``. ``migrated`` is ``True`` only when a
+    vanilla legacy install (DB at ``.filigree/filigree.db``) was actually copied
+    forward this call. No-ops (returning the resolved store dir,
+    ``migrated=False``) when:
+      * an operator ``weft.toml`` ``[filigree].store_dir`` override is set — the
+        operator pins a custom store; we never auto-migrate over their choice
+        (the override is a project-relative under-root path; absolute / escaping
+        values are ignored by :func:`resolve_store_dir`, not honoured here),
+      * the migration already completed (idempotent re-run), or
+      * there is no legacy install, or
+      * the operator relocated the DB outside ``.filigree/`` via the conf's
+        ``db`` field — a custom layout we must not disturb.
+
+    **Crash-convergent.** We COPY the DB (preserving FILG ``application_id``),
+    then rewrite the conf, then remove the legacy DB. The conf-pinned legacy DB
+    is canonical until the conf commits to the weft destination, so a crash at
+    any step leaves a consistent state the next explicit run resumes. Because
+    legacy stays canonical until that commit — and may take writes after an
+    interrupted copy — step 1 re-copies it forward *unconditionally* rather than
+    trusting a weft copy that merely looks intact (which could be stale); the
+    atomic publish makes that refresh safe and cheap. The committed case is
+    fenced off by the top guard, so re-copy never fires post-commit.
+    """
+    weft_store = project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    legacy_dir = project_root / FILIGREE_DIR_NAME
+    conf_path = project_root / CONF_FILENAME
+    weft_db = weft_store / DB_FILENAME
+    legacy_db = legacy_dir / DB_FILENAME
+
+    # Operator override pins a custom store — never auto-migrate over it. Read
+    # weft.toml STRICTLY here (unlike passive discovery): a present-but-unreadable
+    # config might hide a ``store_dir`` pin, so conflating "broken" with "absent"
+    # would skip this guard and relocate the store the operator never chose. Refuse
+    # — raise before any filesystem mutation — rather than guess (I1).
+    #
+    # Override-asymmetry note (#2): ANY non-empty ``store_dir`` is treated as an
+    # operator pin and we no-op here, even when the value is invalid (absolute /
+    # ``..``-escaping). That asymmetry vs :func:`resolve_store_dir` (which *ignores*
+    # an invalid override and falls through) is intentional and harmless: this
+    # no-op mutates nothing, and resolve_store_dir then reads the SAME legacy store
+    # this leaves canonical — so the worst case is a functional surprise (migration
+    # silently skipped on a typo'd pin), never data loss. Declining to migrate is
+    # the safe side of the ambiguity; honouring an invalid pin would be the unsafe one.
+    override = (_load_weft_filigree_table(project_root) or {}).get("store_dir")
+    if isinstance(override, str) and override:
+        return resolve_store_dir(project_root), False
+
+    if not legacy_dir.is_dir():
+        return resolve_store_dir(project_root), False
+
+    def _conf_db() -> Path | None:
+        if not conf_path.is_file():
+            return None
+        try:
+            db_rel = str(read_conf(conf_path)["db"])
+            return (conf_path.parent / db_rel).resolve()
+        except (OSError, ValueError):
+            return None
+
+    conf_db = _conf_db()
+    # Completed already (conf points at the weft DB and it exists) → idempotent.
+    if weft_db.is_file() and conf_db == weft_db.resolve():
+        return weft_store, False
+    # Confless completion: a confless project has no conf to point at the weft DB,
+    # so the check above can never fire for it (conf_db is None). When its legacy
+    # DB is already gone and the weft DB exists, migration has fully completed —
+    # re-running must be an idempotent no-op. Without this the confless path falls
+    # through to a needless re-copy (migrated=True) or, with a live daemon, a
+    # spurious StoreMigrationBusyError despite nothing being left to migrate. This
+    # stays confless-SPECIFIC: a confful crash-mid-rename (conf_db points at the
+    # now-deleted legacy DB, weft present) keeps conf_db non-None and must still
+    # fall through below to rewrite the conf.
+    if conf_db is None and weft_db.is_file() and not legacy_db.is_file():
+        return weft_store, False
+
+    # Only migrate the vanilla layout (DB inside .filigree/, or a half-finished
+    # prior run whose legacy DB is already gone). An operator who relocated the
+    # DB elsewhere via the conf keeps their custom layout untouched.
+    current_db = conf_db if conf_db is not None else legacy_db.resolve()
+    if current_db not in {legacy_db.resolve(), weft_db.resolve()}:
+        return resolve_store_dir(project_root), False
+    if not legacy_db.is_file() and not weft_db.is_file():
+        # Nothing to carry forward (e.g. conf with no DB yet) — leave as-is.
+        return resolve_store_dir(project_root), False
+
+    # We have now DECIDED to migrate (legacy present, not idempotent-complete,
+    # vanilla layout). DETECT-AND-REFUSE (registry-based quiesce, B1/B2): a live
+    # daemon holds an open legacy-DB connection that can commit *after* our copy
+    # and *after* our unlink, orphaning that write on the deleted inode. No
+    # copy-time guard can close that — the write has not happened yet at copy time
+    # — so we refuse up front and tell the operator to stop it. Runs BEFORE any
+    # mutation so a refusal never litters a weft husk. Best-effort: detection that
+    # itself fails never blocks migration (filigree-031f9a413f).
+    _refuse_if_daemon_serving(project_root)
+
+    # Second pre-mutation gate: a present .filigree.conf must be READABLE before
+    # we touch the filesystem. Steps 1-2 publish the weft DB + copy metadata, and
+    # step 3 rewrites the conf's `db` field *preserving* prefix / project_name /
+    # registry settings — which is impossible without first parsing the conf back.
+    # The lenient `_conf_db()` above deliberately swallows a corrupt conf to None
+    # for the idempotency/layout DECISIONS (so a completed-but-later-corrupted
+    # confless state still no-ops); here, having DECIDED to mutate, we re-read it
+    # STRICTLY and refuse — mirroring the weft.toml strict read (I1) and the
+    # don't-auto-migrate-over-a-config-you-can't-read rule (a corrupt conf may pin
+    # a relocated custom `db` we must not clobber). Refusing now, before step 1,
+    # leaves the conf + legacy store byte-identical (no half-published weft husk,
+    # no raw traceback at step 3); a re-run converges once the conf is readable.
+    # filigree-obs-85b37a7cdc.
+    conf_data: dict[str, Any] | None = None
+    if conf_path.is_file():
+        try:
+            conf_data = read_conf(conf_path)
+        except (OSError, ValueError) as exc:
+            msg = f"Cannot migrate store: {conf_path} is present but unreadable ({exc}). Fix or remove the file, then re-run."
+            raise StoreMigrationConfUnreadableError(msg) from exc
+
+    # Do NOT pre-create weft_store here: the fence below can abort
+    # (StoreMigrationBusyError before any mutation), and an empty .weft/filigree/
+    # left behind would be picked up as canonical by a confless open and stamped
+    # with a fresh empty DB (data loss — resolve_store_dir now also defends
+    # against this, but we avoid littering the husk in the first place). The dir
+    # is created inside _snapshot_copy_sqlite_locked, AFTER the fence is acquired;
+    # the metadata loop and conf rewrite below only run once weft_store exists
+    # (legacy_db present → copy created it; legacy_db absent → weft_db present,
+    # so the dir already exists).
+    #
+    # WRITE FENCE (filigree-39c6958f31): acquire BEGIN IMMEDIATE on the legacy DB
+    # and HOLD it across steps 1-4 (snapshot → conf-rewrite → unlink). This is
+    # DEFENSE-IN-DEPTH, not a full close of the ad-hoc-writer race — the MANDATORY
+    # backstop is the documented operator quiesce (docs/UPGRADING.md) plus
+    # _refuse_if_daemon_serving for idle daemons. The fence's real wins: a writer
+    # ALREADY active makes acquisition raise StoreMigrationBusyError here (before
+    # any mutation, no weft husk — superseding the old copy-time checkpoint-busy
+    # check), and short-/zero-busy_timeout writers get a visible SQLITE_BUSY rather
+    # than racing the copy. The KNOWN RESIDUAL (see _migration_write_fence): a
+    # writer that opens legacy and blocks on the fence during the hold commits to
+    # the orphaned inode AFTER release — silently lost, which is exactly what the
+    # mandatory quiesce exists to prevent. When legacy_db is already gone (resumed
+    # migration, weft DB present) there is nothing to fence or unlink.
+    db_fence = _migration_write_fence(legacy_db) if legacy_db.is_file() else contextlib.nullcontext()
+    with db_fence:
+        # 1. Snapshot the DB forward while the legacy DB exists. Re-copy is
+        #    *unconditional* — NOT gated on the destination looking valid. Until the
+        #    conf commits to weft, the conf-pinned legacy DB is canonical and may
+        #    have taken writes since an interrupted copy, so a weft copy that merely
+        #    *looks* intact can be stale; publishing it (then deleting legacy) would
+        #    silently lose those writes. The atomic publish in
+        #    _snapshot_copy_sqlite_locked makes an unconditional refresh safe and
+        #    cheap, and the committed case already short-circuited at the top guard,
+        #    so this never re-copies post-commit. (legacy gone but weft present →
+        #    nothing to copy from; the existing weft DB is the survivor.)
+        if legacy_db.is_file():
+            _snapshot_copy_sqlite_locked(legacy_db, weft_db)
+        # 2. Copy durable + runtime metadata beside the DB. config.json must follow
+        #    so the enabled_packs fallback resolves; federation_token must follow so
+        #    sibling continuity (and token rotation) survives.
+        #
+        #    M1 — symmetry with the DB re-copy, WITHOUT introducing a clobber. The DB
+        #    (step 1) re-copies unconditionally because legacy stays canonical until
+        #    the conf commit, so a resumed migration must refresh from it. The small
+        #    metadata FILES need the SAME refresh, or a resumed migration ships stale
+        #    metadata (e.g. a federation_token rotated on legacy between an interrupted
+        #    run and its resume) — copy-once froze them at first-copy. But the canonical
+        #    source differs by install shape: a CONFLESS install keeps legacy canonical
+        #    until step 4 deletes the legacy DB, whereas a CONF install's conf flips
+        #    canonicality to weft the moment step 1 lands the weft DB. So we re-copy
+        #    from legacy ONLY while legacy is still the resolved canonical store;
+        #    otherwise weft may already hold fresher metadata (a write that resolved to
+        #    weft) and an unconditional re-copy would clobber it (the exact data-loss
+        #    we must not introduce). Directories (scanners/templates) stay copy-once
+        #    (durable config does not drift mid-migration) but copy ATOMICALLY via
+        #    _atomic_copy_tree — a raw copytree to the final path is torn-then-skipped
+        #    by the existence guard on a crash mid-copy (filigree-197be8b501).
+        legacy_canonical = resolve_store_dir(project_root).resolve() == legacy_dir.resolve()
+        metadata_files = (CONFIG_FILENAME, "INSTALL_VERSION", SUMMARY_FILENAME, "federation_token")
+        metadata_dirs = ("scanners", "templates")
+        for name in metadata_files:
+            src = legacy_dir / name
+            dest = weft_store / name
+            if not src.is_file():
+                continue
+            # Re-copy from legacy while it is canonical (mirrors the DB); else copy-once
+            # so a fresher weft copy is never clobbered.
+            if legacy_canonical or not dest.exists():
+                _atomic_copy_file(src, dest)
+        for name in metadata_dirs:
+            src = legacy_dir / name
+            dest = weft_store / name
+            if src.is_dir() and not dest.exists():
+                _atomic_copy_tree(src, dest)
+        # 3. Rewrite the conf to point at the destination — only now that a valid DB
+        #    exists there. (Idempotent: skip if it already points at the weft DB.)
+        #    Reuses `conf_data` from the strict pre-mutation read above: it is None
+        #    for a confless install (nothing to rewrite) and a parsed dict otherwise,
+        #    so this never re-reads a file the gate already proved readable.
+        new_db_rel = f"{WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/{DB_FILENAME}"
+        if conf_data is not None and conf_data.get("db") != new_db_rel:
+            conf_data["db"] = new_db_rel
+            write_conf(conf_path, conf_data)
+        # 4. Remove the now-superseded legacy DB (+ sidecars) so discovery never sees
+        #    a stale second database. Done last and STILL UNDER THE FENCE: until here
+        #    the legacy DB was the live one, and while the fence is held no writer can
+        #    commit to it. (A writer that blocked on the fence still commits to the
+        #    orphaned inode after release — the known residual the quiesce backstops;
+        #    see _migration_write_fence.) The rest of the legacy dir is an auditable husk.
+        for suffix in ("", "-wal", "-shm"):
+            stale = legacy_dir / (DB_FILENAME + suffix)
+            if stale.is_file():
+                stale.unlink()
+    # Also remove the per-machine federation_token secret from the husk: it was
+    # copied forward in step 2, the husk has no use for it, and a project that
+    # tracks .filigree/ as committed payload (root rule removed) would otherwise
+    # leave a (now-dead) secret behind a nested-ignore that an old pre-rule install
+    # may not carry. Same secret-hygiene class as the .mcp.json token guard.
+    husk_token = legacy_dir / "federation_token"
+    try:
+        husk_token.unlink(missing_ok=True)
+    except OSError as exc:
+        # Non-fatal: the live token was forwarded in step 2, so a copy left in
+        # the husk is a hygiene gap, not data loss — never fail the migration
+        # over it. But ``missing_ok=True`` already absorbs the absent-file case,
+        # so any OSError reaching here is a *real* failure (e.g. PermissionError)
+        # that leaves a now-dead per-machine secret behind with zero signal.
+        # Warn so the operator can clean it up.
+        logger.warning("Could not remove dead federation_token from legacy husk %s: %s", husk_token, exc)
+    # Auditable, non-destructive breadcrumb — never delete the legacy dir.
+    (legacy_dir / LEGACY_MOVED_BREADCRUMB).write_text(
+        f"This store was migrated to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/.\n"
+        f"The legacy {FILIGREE_DIR_NAME}/ directory is intentionally left in place.\n"
+    )
+    return weft_store, True
+
+
+class FiligreeAnchor(NamedTuple):
+    """The resolved project anchor: where the project is and where its store lives.
+
+    ``conf_path`` is the ``.filigree.conf`` when one exists, else ``None`` for a
+    dir-only (confless) anchor. ``store_dir`` is the resolved machine-owned store
+    directory (``resolve_store_dir(project_root)``) — the single source of truth
+    for config.json / runtime metadata, independent of where a conf's ``db``
+    field relocates the database.
+    """
+
+    project_root: Path
+    conf_path: Path | None
+    store_dir: Path
 
 
 def find_filigree_conf(start: Path | None = None) -> Path:
@@ -424,21 +1146,30 @@ def find_filigree_conf(start: Path | None = None) -> Path:
     raise ProjectNotInitialisedError(msg)
 
 
-def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
-    """Walk up from *start* for either a v2.0 conf or a legacy ``.filigree/`` dir.
+def find_filigree_anchor(start: Path | None = None, *, include_legacy_dir: bool = True) -> FiligreeAnchor:
+    """Walk up from *start* for a conf, a ``.weft/filigree/`` store, or a legacy dir.
 
-    Returns a ``(project_root, conf_path)`` pair. ``conf_path`` is the path
-    to the resolved ``.filigree.conf`` file when one exists, or ``None`` for a
-    legacy install (``.filigree/`` present, no conf yet). The walk is
-    closer-first: a child anchor wins over an ancestor regardless of type.
+    Returns a :class:`FiligreeAnchor` ``(project_root, conf_path, store_dir)``.
+    ``conf_path`` is the resolved ``.filigree.conf`` when one exists, or ``None``
+    for a dir-only install. ``store_dir`` is ``resolve_store_dir(project_root)``
+    — the resolved machine-owned store directory. The walk is closer-first: a
+    child anchor wins over an ancestor regardless of type. Within a directory,
+    precedence is conf > ``.weft/filigree/`` > legacy ``.filigree/``.
 
     Pure read — never writes. Use this when discovery must work on read-only
     mounts (inspection commands, ``filigree doctor``, and explicit
-    legacy-compatible code paths). Implicit agent startup surfaces use the
-    stricter :func:`find_filigree_conf` path so a legacy ancestor is not
-    treated as a project attachment signal. To force a backfill, run
+    legacy-compatible code paths). Implicit agent startup surfaces pass
+    ``include_legacy_dir=False`` so a bare legacy ``.filigree/`` ancestor is
+    not treated as a project attachment signal — their consent anchor is a
+    conf or a ``.weft/filigree/`` store. To force a forward-migration, run
     ``filigree init`` (or another explicit write path) on a writable copy of
     the project.
+
+    Args:
+        include_legacy_dir: when ``False``, the legacy ``.filigree/`` directory
+            is not considered a valid anchor (conf and ``.weft/filigree/`` still
+            are). The ``.git``-boundary ``ForeignDatabaseError`` guard is
+            unaffected either way.
 
     When *start* sits inside a git linked worktree, discovery is redirected
     to the main worktree root so the worktree's ``.git`` file is not
@@ -460,44 +1191,59 @@ def find_filigree_anchor(start: Path | None = None) -> tuple[Path, Path | None]:
         if conf.is_file():
             if git_boundary is not None:
                 raise ForeignDatabaseError(cwd=orig, found_anchor=conf, git_boundary=git_boundary)
-            return parent, conf
-        legacy_dir = parent / FILIGREE_DIR_NAME
-        if legacy_dir.is_dir():
+            return FiligreeAnchor(parent, conf, resolve_store_dir(parent))
+        weft_store = parent / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        if weft_store.is_dir():
             if git_boundary is not None:
-                raise ForeignDatabaseError(cwd=orig, found_anchor=legacy_dir, git_boundary=git_boundary)
-            return parent, None
+                raise ForeignDatabaseError(cwd=orig, found_anchor=weft_store, git_boundary=git_boundary)
+            return FiligreeAnchor(parent, None, resolve_store_dir(parent))
+        # Operator store_dir override (weft.toml ``[filigree].store_dir``): a
+        # confless override install's store lives outside ``.weft/filigree/``, so
+        # the literal rung above misses it. Honour the resolved override when it
+        # exists and is neither the default weft store nor the legacy dir — legacy
+        # stays gated by ``include_legacy_dir`` below (no-legacy-consent).
+        override_store = resolve_store_dir(parent)
+        if override_store.is_dir() and override_store not in (weft_store, parent / FILIGREE_DIR_NAME):
+            if git_boundary is not None:
+                raise ForeignDatabaseError(cwd=orig, found_anchor=override_store, git_boundary=git_boundary)
+            return FiligreeAnchor(parent, None, override_store)
+        if include_legacy_dir:
+            legacy_dir = parent / FILIGREE_DIR_NAME
+            if legacy_dir.is_dir():
+                if git_boundary is not None:
+                    raise ForeignDatabaseError(cwd=orig, found_anchor=legacy_dir, git_boundary=git_boundary)
+                return FiligreeAnchor(parent, None, resolve_store_dir(parent))
         if git_boundary is None and (parent / ".git").exists():
             git_boundary = parent
     msg = (
-        f"No {CONF_FILENAME} or {FILIGREE_DIR_NAME}/ found in {orig} or any parent directory. "
+        f"No {CONF_FILENAME}, {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ or {FILIGREE_DIR_NAME}/ "
+        f"found in {orig} or any parent directory. "
         f"Run `filigree init` here to create one, or `filigree doctor` to diagnose."
     )
     raise ProjectNotInitialisedError(msg)
 
 
 def find_filigree_root(start: Path | None = None) -> Path:
-    """Return the project's ``.filigree/`` directory (back-compat helper).
+    """Return the project's machine-owned **store** directory (metadata dir).
 
-    Locates the project via :func:`find_filigree_conf` (the v2.0 anchor) and
-    returns the ``.filigree/`` directory next to that conf. The contract is
-    "the literal ``.filigree/`` directory" — every caller in this codebase
-    concatenates ``SUMMARY_FILENAME``, ``ephemeral.pid``, or ``DB_FILENAME``
-    onto the result, or does ``.parent`` to derive the project root, so the
-    return value must point at ``conf.parent / .filigree``, regardless of any
-    custom ``db`` location declared in the conf.
+    Resolves the anchor via :func:`find_filigree_anchor` and returns its
+    ``store_dir`` — ``.weft/filigree/`` for federation-layout installs, legacy
+    ``.filigree/`` for back-compat installs, or an operator ``store_dir``
+    override. Every caller concatenates ``SUMMARY_FILENAME``, ``ephemeral.pid``,
+    ``config.json``, ``scanners/`` etc. onto the result; under the WEFT store
+    consolidation those runtime files live in the resolved store dir, so
+    returning ``store_dir`` (not the literal ``.filigree/``) keeps them in one
+    place regardless of layout.
 
-    The conf's ``db`` field can still relocate the database itself; callers
-    that need the actual DB path should use :meth:`FiligreeDB.from_conf`.
+    The store dir is resolved **independently** of any custom ``db`` location a
+    conf declares (the conf's ``db`` may relocate only the database file).
+    Callers that need the actual DB path should use :meth:`FiligreeDB.from_conf`
+    / :meth:`FiligreeDB.from_anchor`.
 
     Resolves through :func:`find_filigree_anchor` so legacy installs (which
     have no conf yet) are still discoverable without writing.
-
-    New code should prefer :func:`find_filigree_anchor` plus
-    :meth:`FiligreeDB.from_conf` / :meth:`FiligreeDB.from_filigree_dir` over
-    this helper.
     """
-    project_root, _conf_path = find_filigree_anchor(start)
-    return project_root / FILIGREE_DIR_NAME
+    return find_filigree_anchor(start).store_dir
 
 
 def read_conf(conf_path: Path) -> dict[str, Any]:
@@ -624,12 +1370,12 @@ VALID_MODES: frozenset[str] = frozenset({"ethereal", "server"})
 VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[RegistryBackend, ...]", get_args(RegistryBackend)))
 
 
-class _ClarionLocalFallbackRegistry:
-    """Try Clarion first, then fall back to local IDs for availability failures."""
+class _LoomweaveLocalFallbackRegistry:
+    """Try Loomweave first, then fall back to local IDs for availability failures."""
 
     @staticmethod
     def _should_fallback(exc: RegistryUnavailableError) -> bool:
-        # ``invalid_response`` means Clarion was reachable but violated the
+        # ``invalid_response`` means Loomweave was reachable but violated the
         # resolver contract. Treat that as a fail-closed protocol error rather
         # than an availability failure; falling back locally could mask
         # security-bearing outcomes such as ``briefing_blocked`` embedded in an
@@ -654,10 +1400,10 @@ class _ClarionLocalFallbackRegistry:
             if not self._should_fallback(exc):
                 raise
             logger.warning(
-                "Clarion registry backend unavailable; using local file registry fallback",
+                "Loomweave registry backend unavailable; using local file registry fallback",
                 extra={
-                    "registry_backend": "clarion",
-                    "clarion_base_url": self._base_url,
+                    "registry_backend": "loomweave",
+                    "loomweave_base_url": self._base_url,
                     "path": path,
                     "url": exc.url,
                     "cause_kind": exc.cause_kind,
@@ -671,7 +1417,7 @@ class _ClarionLocalFallbackRegistry:
         *,
         actor: str = "",
     ) -> BatchResolution:
-        """Whole-batch fallback semantics: if Clarion is unreachable for the
+        """Whole-batch fallback semantics: if Loomweave is unreachable for the
         batch, every item in the batch resolves through ``LocalRegistry`` and
         a single WARN log captures the cause.
 
@@ -679,7 +1425,7 @@ class _ClarionLocalFallbackRegistry:
         from a *successful* batch call pass through verbatim — those are not
         availability failures and must NOT be silently re-attached locally
         (briefing-blocked in particular is a security-bearing refusal).
-        Likewise, reachable malformed Clarion responses (``cause_kind``
+        Likewise, reachable malformed Loomweave responses (``cause_kind``
         ``invalid_response``) fail closed instead of falling back because they
         may contain ambiguous security-bearing outcomes.
 
@@ -697,10 +1443,10 @@ class _ClarionLocalFallbackRegistry:
             if not self._should_fallback(exc):
                 raise
             logger.warning(
-                "Clarion registry backend unavailable for batch resolve; using local file registry fallback",
+                "Loomweave registry backend unavailable for batch resolve; using local file registry fallback",
                 extra={
-                    "registry_backend": "clarion",
-                    "clarion_base_url": self._base_url,
+                    "registry_backend": "loomweave",
+                    "loomweave_base_url": self._base_url,
                     "batch_size": len(queries),
                     "url": exc.url,
                     "cause_kind": exc.cause_kind,
@@ -721,10 +1467,10 @@ class _ClarionLocalFallbackRegistry:
 
 
 def _apply_allow_local_fallback_override(
-    clarion_config: ClarionConfig | None,
+    loomweave_config: LoomweaveConfig | None,
     override: bool | None,
-) -> ClarionConfig | None:
-    """Apply a ``--allow-local-fallback`` startup override to a clarion config.
+) -> LoomweaveConfig | None:
+    """Apply a ``--allow-local-fallback`` startup override to a loomweave config.
 
     Returns the input untouched when ``override is None`` (no flag passed).
     Otherwise produces a new dict with ``allow_local_fallback`` set to the
@@ -733,55 +1479,72 @@ def _apply_allow_local_fallback_override(
     probe runs.
     """
     if override is None:
-        return clarion_config
-    merged: ClarionConfig = dict(clarion_config or {})  # type: ignore[assignment]
+        return loomweave_config
+    merged: LoomweaveConfig = dict(loomweave_config or {})  # type: ignore[assignment]
     merged["allow_local_fallback"] = override
     return merged
 
 
-def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_clarion_base_url: bool = True) -> None:
+def _migrate_legacy_registry_config(raw: dict[str, Any]) -> None:
+    """Rename-on-load shim (3.0 Loomweave/Weft rebrand).
+
+    A deployed ``.filigree.conf`` still carrying the pre-3.0 ``clarion`` names
+    loads as ``loomweave`` without a manual edit: ``registry_backend: "clarion"``
+    becomes ``"loomweave"`` and a ``[clarion]`` section moves to ``[loomweave]``.
+    One-shot and in place. There is no reverse shim — once the config is
+    re-saved it carries the new names, and a bare ``"clarion"`` value is no
+    longer a valid backend.
+    """
+    if raw.get("registry_backend") == "clarion":
+        raw["registry_backend"] = "loomweave"
+    if "clarion" in raw and "loomweave" not in raw:
+        raw["loomweave"] = raw.pop("clarion")
+
+
+def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_loomweave_base_url: bool = True) -> None:
     """Validate ADR-014 registry backend settings in project config."""
+    _migrate_legacy_registry_config(raw)
     if "registry_backend" in raw:
         backend = raw["registry_backend"]
         if not isinstance(backend, str) or backend not in VALID_REGISTRY_BACKENDS:
             msg = f"{source}: 'registry_backend' must be one of {sorted(VALID_REGISTRY_BACKENDS)}, got {backend!r}"
             raise ValueError(msg)
 
-    if "clarion" not in raw:
-        if raw.get("registry_backend") == "clarion":
-            msg = f"{source}: 'clarion.base_url' is required when registry_backend is 'clarion'"
+    if "loomweave" not in raw:
+        if raw.get("registry_backend") == "loomweave":
+            msg = f"{source}: 'loomweave.base_url' is required when registry_backend is 'loomweave'"
             raise ValueError(msg)
         return
-    clarion = raw["clarion"]
-    if not isinstance(clarion, dict):
-        msg = f"{source}: 'clarion' must be a JSON object, got {type(clarion).__name__}: {clarion!r}"
+    loomweave = raw["loomweave"]
+    if not isinstance(loomweave, dict):
+        msg = f"{source}: 'loomweave' must be a JSON object, got {type(loomweave).__name__}: {loomweave!r}"
         raise ValueError(msg)
-    allowed_clarion_keys = {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
-    unknown_clarion_keys = sorted(set(clarion) - allowed_clarion_keys)
-    if unknown_clarion_keys:
-        msg = f"{source}: unknown clarion setting(s): {', '.join(unknown_clarion_keys)}"
+    allowed_loomweave_keys = {"base_url", "timeout_seconds", "allow_local_fallback", "token_env"}
+    unknown_loomweave_keys = sorted(set(loomweave) - allowed_loomweave_keys)
+    if unknown_loomweave_keys:
+        msg = f"{source}: unknown loomweave setting(s): {', '.join(unknown_loomweave_keys)}"
         raise ValueError(msg)
-    if require_clarion_base_url and raw.get("registry_backend") == "clarion" and "base_url" not in clarion:
-        msg = f"{source}: 'clarion.base_url' is required when registry_backend is 'clarion'"
+    if require_loomweave_base_url and raw.get("registry_backend") == "loomweave" and "base_url" not in loomweave:
+        msg = f"{source}: 'loomweave.base_url' is required when registry_backend is 'loomweave'"
         raise ValueError(msg)
-    if "base_url" in clarion:
+    if "base_url" in loomweave:
         try:
-            normalize_clarion_base_url(cast("str", clarion["base_url"]))
+            normalize_loomweave_base_url(cast("str", loomweave["base_url"]))
         except ValueError as exc:
             msg = f"{source}: {exc}"
             raise ValueError(msg) from exc
-    if "timeout_seconds" in clarion:
-        timeout = clarion["timeout_seconds"]
+    if "timeout_seconds" in loomweave:
+        timeout = loomweave["timeout_seconds"]
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-            msg = f"{source}: 'clarion.timeout_seconds' must be a positive number, got {timeout!r}"
+            msg = f"{source}: 'loomweave.timeout_seconds' must be a positive number, got {timeout!r}"
             raise ValueError(msg)
-    if "allow_local_fallback" in clarion and not isinstance(clarion["allow_local_fallback"], bool):
-        msg = f"{source}: 'clarion.allow_local_fallback' must be a boolean, got {clarion['allow_local_fallback']!r}"
+    if "allow_local_fallback" in loomweave and not isinstance(loomweave["allow_local_fallback"], bool):
+        msg = f"{source}: 'loomweave.allow_local_fallback' must be a boolean, got {loomweave['allow_local_fallback']!r}"
         raise ValueError(msg)
-    if "token_env" in clarion:
-        token_env = clarion["token_env"]
+    if "token_env" in loomweave:
+        token_env = loomweave["token_env"]
         if not isinstance(token_env, str) or not token_env.strip():
-            msg = f"{source}: 'clarion.token_env' must be a non-empty string naming an env var, got {token_env!r}"
+            msg = f"{source}: 'loomweave.token_env' must be a non-empty string naming an env var, got {token_env!r}"
             raise ValueError(msg)
 
 
@@ -976,12 +1739,14 @@ class FiligreeDB(
         template_registry: TemplateRegistry | None = None,
         check_same_thread: bool = True,
         project_root: str | Path | None = None,
+        meta_dir: str | Path | None = None,
         registry: RegistryProtocol | None = None,
         registry_backend: RegistryBackend = "local",
-        clarion_config: ClarionConfig | None = None,
-        skip_clarion_capability_probe: bool = False,
+        loomweave_config: LoomweaveConfig | None = None,
+        skip_loomweave_capability_probe: bool = False,
+        verified_actor: str | None = None,
     ) -> None:
-        # ``skip_clarion_capability_probe`` exists for unit tests that stand up
+        # ``skip_loomweave_capability_probe`` exists for unit tests that stand up
         # stub HTTP servers serving only ``/api/v1/files``; production callers
         # should leave it ``False`` so ADR-014's fail-closed handshake runs.
         self.db_path = Path(db_path)
@@ -994,8 +1759,21 @@ class FiligreeDB(
             self.project_root: Path | None = Path(project_root)
         elif self.db_path.parent.name == FILIGREE_DIR_NAME:
             self.project_root = self.db_path.parent.parent
+        elif self.db_path.parent.name == WEFT_MEMBER_SUBDIR and self.db_path.parent.parent.name == WEFT_DIR_NAME:
+            # ``.weft/filigree/filigree.db`` → project root is two dirs up from
+            # the store dir. The federation-layout analogue of the legacy
+            # ``.filigree/`` auto-derive above.
+            self.project_root = self.db_path.parent.parent.parent
         else:
             self.project_root = None
+        # ``meta_dir`` is the machine-owned store/metadata directory (config.json,
+        # scanners/, ephemeral.pid, context.md, templates/). The anchor-aware
+        # constructors (``from_anchor`` / ``from_conf`` / ``from_filigree_dir``)
+        # pass the resolved ``store_dir`` explicitly so a conf-relocated DB still
+        # points metadata at the store dir, not at ``db_path.parent``. The bare
+        # fallback (``db_path.parent``) only fires for direct ``FiligreeDB(...)``
+        # construction in tests / fresh init, where the two coincide.
+        self.meta_dir: Path = Path(meta_dir) if meta_dir is not None else self.db_path.parent
         if enabled_packs is not None and isinstance(enabled_packs, str):
             msg = f"enabled_packs must be a list of strings, not a bare string: {enabled_packs!r}"
             raise TypeError(msg)
@@ -1003,10 +1781,15 @@ class FiligreeDB(
         self.enabled_packs = self._enabled_packs_override if self._enabled_packs_override is not None else ["core", "planning", "release"]
         self._conn: sqlite3.Connection | None = None
         self._check_same_thread = check_same_thread
+        # ADR-012 (schema v24): the transport-verified identity for this session,
+        # set once at the entry point (CLI get_db / MCP _init_db). None = no
+        # transport proof; every runtime insert stamps this into verified_*.
+        # ``borrow_for_worker_thread`` propagates it for free via copy.copy.
+        self._verified_actor: str | None = verified_actor
         # Whether this instance owns (and must close) ``self.registry``.
         # ``borrow_for_worker_thread`` clones share the registry by reference
         # and set this False so tearing the clone down never closes the
-        # parent's Clarion client. See ``_close_registry``.
+        # parent's Loomweave client. See ``_close_registry``.
         self._owns_registry = True
         self._template_registry: TemplateRegistry | None = template_registry
         if registry_backend not in VALID_REGISTRY_BACKENDS:
@@ -1015,26 +1798,26 @@ class FiligreeDB(
         _validate_registry_settings(
             {
                 "registry_backend": registry_backend,
-                "clarion": dict(clarion_config or {}),
+                "loomweave": dict(loomweave_config or {}),
             },
             source=self.db_path,
-            require_clarion_base_url=registry is None,
+            require_loomweave_base_url=registry is None,
         )
         self.registry_backend = registry_backend
-        self.clarion_config = cast("ClarionConfig", dict(clarion_config or {}))
-        self.allow_local_fallback = bool(self.clarion_config.get("allow_local_fallback", False))
-        # Clarion capability-probe state — populated by the startup probe (or by
-        # ``reprobe_clarion_capabilities`` later). ``clarion_instance_rotated`` is
+        self.loomweave_config = cast("LoomweaveConfig", dict(loomweave_config or {}))
+        self.allow_local_fallback = bool(self.loomweave_config.get("allow_local_fallback", False))
+        # Loomweave capability-probe state — populated by the startup probe (or by
+        # ``reprobe_loomweave_capabilities`` later). ``loomweave_instance_rotated`` is
         # set when a mid-session re-probe sees a different ``instance_id`` than
         # the startup probe; it is read by ``GET /api/files/_schema`` so the
-        # dashboard can surface a "Clarion was re-indexed; stored file IDs may
+        # dashboard can surface a "Loomweave was re-indexed; stored file IDs may
         # be stale" banner without a separate endpoint.
-        self.clarion_capabilities: ClarionCapabilities | None = None
-        self.clarion_instance_id: str | None = None
-        self.clarion_api_version: int | None = None
-        self.clarion_instance_rotated: bool = False
+        self.loomweave_capabilities: LoomweaveCapabilities | None = None
+        self.loomweave_instance_id: str | None = None
+        self.loomweave_api_version: int | None = None
+        self.loomweave_instance_rotated: bool = False
         if registry is not None:
-            backend_displaced = registry_backend == "clarion"
+            backend_displaced = registry_backend == "loomweave"
             registry_displaced = registry.is_displaced()
             if registry_displaced != backend_displaced:
                 msg = (
@@ -1043,26 +1826,26 @@ class FiligreeDB(
                 )
                 raise ValueError(msg)
             self.registry = registry
-            if self.allow_local_fallback and registry_backend == "clarion":
+            if self.allow_local_fallback and registry_backend == "loomweave":
                 self.enable_local_registry_fallback()
-        elif registry_backend == "clarion":
-            base_url_value = self.clarion_config.get("base_url")
+        elif registry_backend == "loomweave":
+            base_url_value = self.loomweave_config.get("base_url")
             if not isinstance(base_url_value, str) or not base_url_value:
-                msg = "clarion.base_url is required when registry_backend is 'clarion'"
+                msg = "loomweave.base_url is required when registry_backend is 'loomweave'"
                 raise ValueError(msg)
-            base_url = normalize_clarion_base_url(base_url_value)
-            self.clarion_config["base_url"] = base_url
-            timeout_seconds = float(self.clarion_config.get("timeout_seconds", 5))
-            auth_token = self._resolve_clarion_auth_token()
+            base_url = normalize_loomweave_base_url(base_url_value)
+            self.loomweave_config["base_url"] = base_url
+            timeout_seconds = float(self.loomweave_config.get("timeout_seconds", 5))
+            auth_token = self._resolve_loomweave_auth_token()
             # Pass auth_token only when set — keeps test fakes that monkeypatch
-            # ClarionRegistry with the older 2-arg signature working without
+            # LoomweaveRegistry with the older 2-arg signature working without
             # forcing every test to add a keyword argument they don't use.
             registry_kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
             if auth_token is not None:
                 registry_kwargs["auth_token"] = auth_token
-            self.registry = ClarionRegistry(base_url, **registry_kwargs)
-            if not skip_clarion_capability_probe:
-                self._run_initial_clarion_capability_probe(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
+            self.registry = LoomweaveRegistry(base_url, **registry_kwargs)
+            if not skip_loomweave_capability_probe:
+                self._run_initial_loomweave_capability_probe(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
             if self.allow_local_fallback:
                 self.enable_local_registry_fallback()
         else:
@@ -1080,67 +1863,67 @@ class FiligreeDB(
         reference, so without this rebind a worker-thread clone would mint local
         file ids through the PARENT's (shared, event-loop) connection — a
         cross-thread ``sqlite3.Connection`` misuse (``SQLITE_MISUSE``). Rebind
-        the local registry, or the local-fallback half of a Clarion fallback
+        the local registry, or the local-fallback half of a Loomweave fallback
         wrapper, so id minting uses this clone's private connection. The shared
-        Clarion ``_primary`` (the ``httpx.Client``) is kept by reference and is
+        Loomweave ``_primary`` (the ``httpx.Client``) is kept by reference and is
         never closed by the non-owning clone.
         """
         registry = self.registry
         if isinstance(registry, LocalRegistry):
             self.registry = self._make_local_registry()
-        elif isinstance(registry, _ClarionLocalFallbackRegistry):
-            self.registry = _ClarionLocalFallbackRegistry(
+        elif isinstance(registry, _LoomweaveLocalFallbackRegistry):
+            self.registry = _LoomweaveLocalFallbackRegistry(
                 registry._primary,
                 self._make_local_registry(),
                 base_url=registry._base_url,
             )
 
-    def _clarion_base_url(self) -> str | None:
-        """Return the configured Clarion base URL, or ``None`` if absent.
+    def _loomweave_base_url(self) -> str | None:
+        """Return the configured Loomweave base URL, or ``None`` if absent.
 
-        ``ClarionConfig`` is ``TypedDict(total=False)`` so ``.get("base_url")``
+        ``LoomweaveConfig`` is ``TypedDict(total=False)`` so ``.get("base_url")``
         is typed as ``str | None``; this wrapper centralises the access so
         callers don't have to re-derive the contract at each call site.
         """
-        value = self.clarion_config.get("base_url")
+        value = self.loomweave_config.get("base_url")
         if not isinstance(value, str) or not value:
             return None
         return value
 
-    def _clarion_timeout_seconds(self) -> float:
-        """Return the configured Clarion HTTP timeout in seconds."""
-        return float(self.clarion_config.get("timeout_seconds", 5))
+    def _loomweave_timeout_seconds(self) -> float:
+        """Return the configured Loomweave HTTP timeout in seconds."""
+        return float(self.loomweave_config.get("timeout_seconds", 5))
 
-    def _resolve_clarion_auth_token(self) -> str | None:
-        """Resolve the Bearer token for Clarion calls from the configured env var.
+    def _resolve_loomweave_auth_token(self) -> str | None:
+        """Resolve the Bearer token for Loomweave calls from the configured env var.
 
-        Per the Clarion 1.0 cross-product contract: ``ClarionConfig.token_env``
-        names the env var (default ``CLARION_LOOM_TOKEN``); if it resolves to
+        Per the Loomweave 1.0 cross-product contract: ``LoomweaveConfig.token_env``
+        names the env var (default ``WEFT_TOKEN``); if it resolves to
         a non-empty value, send ``Authorization: Bearer <token>``; if it is
         unset or empty, send no auth header. When ``token_env`` was set
         explicitly in config but the env var is missing or empty, emit a WARN
         so operators can notice silent loopback-only fallback.
         """
-        token_env_name = self.clarion_config.get("token_env", DEFAULT_CLARION_TOKEN_ENV)
-        token_env_was_explicit = "token_env" in self.clarion_config
+        token_env_name = self.loomweave_config.get("token_env", DEFAULT_LOOMWEAVE_TOKEN_ENV)
+        token_env_was_explicit = "token_env" in self.loomweave_config
         value = os.environ.get(token_env_name, "")
         if value:
             return value
         if token_env_was_explicit:
             logger.warning(
-                "Clarion token_env %r is configured but the environment variable is missing or empty; "
-                "sending no Authorization header. Clarion will accept on loopback bind and reject on non-loopback.",
+                "Loomweave token_env %r is configured but the environment variable is missing or empty; "
+                "sending no Authorization header. Loomweave will accept on loopback bind and reject on non-loopback.",
                 token_env_name,
-                extra={"token_env": token_env_name, "clarion_base_url": self.clarion_config.get("base_url", "")},
+                extra={"token_env": token_env_name, "loomweave_base_url": self.loomweave_config.get("base_url", "")},
             )
         return None
 
-    def _run_initial_clarion_capability_probe(self, base_url: str, *, timeout_seconds: float, auth_token: str | None = None) -> None:
-        """Probe Clarion's ``_capabilities`` endpoint at startup and capture identity.
+    def _run_initial_loomweave_capability_probe(self, base_url: str, *, timeout_seconds: float, auth_token: str | None = None) -> None:
+        """Probe Loomweave's ``_capabilities`` endpoint at startup and capture identity.
 
         Fail-closed semantics per ADR-014 §7:
         - api_version mismatch always raises (no fallback can save a wire-break).
-        - reachable Clarion that declines the registry-backend role raises
+        - reachable Loomweave that declines the registry-backend role raises
           ``RegistryUnavailableError`` (transient; respects ``allow_local_fallback``).
         - probe-time HTTP/network failure raises ``RegistryUnavailableError``
           (caller's ``allow_local_fallback`` decides whether to downgrade).
@@ -1151,140 +1934,167 @@ class FiligreeDB(
         ``__init__``.
         """
         try:
-            capabilities = probe_clarion_capabilities(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
-            validate_clarion_capabilities(capabilities, base_url=base_url)
+            capabilities = probe_loomweave_capabilities(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
+            validate_loomweave_capabilities(capabilities, base_url=base_url)
         except RegistryVersionMismatchError:
             raise
         except RegistryUnavailableError as exc:
             if self.allow_local_fallback:
                 logger.warning(
-                    "Clarion capability probe failed at startup; allow_local_fallback=true, "
-                    "auto-creates will route through LocalRegistry until Clarion recovers",
+                    "Loomweave capability probe failed at startup; allow_local_fallback=true, "
+                    "auto-creates will route through LocalRegistry until Loomweave recovers",
                     extra={
                         "url": exc.url,
                         "cause_kind": exc.cause_kind,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
                 return
             raise
-        self.clarion_capabilities = capabilities
-        self.clarion_instance_id = capabilities["instance_id"]
-        self.clarion_api_version = capabilities["api_version"]
+        self.loomweave_capabilities = capabilities
+        self.loomweave_instance_id = capabilities["instance_id"]
+        self.loomweave_api_version = capabilities["api_version"]
         logger.info(
-            "Clarion capability probe succeeded",
+            "Loomweave capability probe succeeded",
             extra={
-                "clarion_base_url": base_url,
+                "loomweave_base_url": base_url,
                 "instance_id": capabilities["instance_id"],
                 "api_version": capabilities["api_version"],
             },
         )
 
-    def reprobe_clarion_capabilities(self) -> ClarionCapabilities | None:
+    def reprobe_loomweave_capabilities(self) -> LoomweaveCapabilities | None:
         """Re-issue the capability probe and flag a banner on instance_id rotation.
 
-        Returns ``None`` if this DB is not running in ``clarion`` mode, or if
-        Clarion is unreachable (the unavailability is logged at WARN; callers
+        Returns ``None`` if this DB is not running in ``loomweave`` mode, or if
+        Loomweave is unreachable (the unavailability is logged at WARN; callers
         that need fail-closed behaviour should call ``resolve_file`` instead,
         which already has the strict policy). Returns the probe payload
         otherwise.
 
-        On instance_id rotation — Clarion was re-indexed mid-session and any
-        stored Clarion file IDs may be stale — sets
-        ``clarion_instance_rotated=True`` and logs at WARN. The dashboard
+        On instance_id rotation — Loomweave was re-indexed mid-session and any
+        stored Loomweave file IDs may be stale — sets
+        ``loomweave_instance_rotated=True`` and logs at WARN. The dashboard
         surfaces this through ``GET /api/files/_schema``.
         """
-        if self.registry_backend != "clarion":
+        if self.registry_backend != "loomweave":
             return None
-        base_url_value = self._clarion_base_url()
+        base_url_value = self._loomweave_base_url()
         if base_url_value is None:
             return None
-        timeout_seconds = self._clarion_timeout_seconds()
-        auth_token = self._resolve_clarion_auth_token()
+        timeout_seconds = self._loomweave_timeout_seconds()
+        auth_token = self._resolve_loomweave_auth_token()
         try:
-            capabilities = probe_clarion_capabilities(base_url_value, timeout_seconds=timeout_seconds, auth_token=auth_token)
-            validate_clarion_capabilities(capabilities, base_url=base_url_value)
+            capabilities = probe_loomweave_capabilities(base_url_value, timeout_seconds=timeout_seconds, auth_token=auth_token)
+            validate_loomweave_capabilities(capabilities, base_url=base_url_value)
         except RegistryUnavailableError as exc:
             logger.warning(
-                "Clarion capability re-probe unreachable",
+                "Loomweave capability re-probe unreachable",
                 extra={
                     "url": exc.url,
                     "cause_kind": exc.cause_kind,
-                    "registry_backend": "clarion",
+                    "registry_backend": "loomweave",
                 },
             )
             return None
-        previous_instance_id = self.clarion_instance_id
-        self.clarion_capabilities = capabilities
-        self.clarion_instance_id = capabilities["instance_id"]
-        self.clarion_api_version = capabilities["api_version"]
+        previous_instance_id = self.loomweave_instance_id
+        self.loomweave_capabilities = capabilities
+        self.loomweave_instance_id = capabilities["instance_id"]
+        self.loomweave_api_version = capabilities["api_version"]
         if previous_instance_id is not None and previous_instance_id != capabilities["instance_id"]:
-            self.clarion_instance_rotated = True
+            self.loomweave_instance_rotated = True
             logger.warning(
-                "Clarion instance_id rotated mid-session; stored Clarion file IDs may be stale",
+                "Loomweave instance_id rotated mid-session; stored Loomweave file IDs may be stale",
                 extra={
                     "previous_instance_id": previous_instance_id,
                     "current_instance_id": capabilities["instance_id"],
-                    "clarion_base_url": base_url_value,
+                    "loomweave_base_url": base_url_value,
                 },
             )
         return capabilities
 
     def enable_local_registry_fallback(self) -> None:
-        """Allow Clarion projects to use local IDs only after Clarion is unavailable."""
-        if self.registry_backend != "clarion":
+        """Allow Loomweave projects to use local IDs only after Loomweave is unavailable."""
+        if self.registry_backend != "loomweave":
             return
         self.allow_local_fallback = True
-        if isinstance(self.registry, _ClarionLocalFallbackRegistry):
+        if isinstance(self.registry, _LoomweaveLocalFallbackRegistry):
             return
         if not self.registry.is_displaced():
             msg = "Cannot enable local fallback for a non-displaced registry"
             raise ValueError(msg)
-        self.registry = _ClarionLocalFallbackRegistry(
+        self.registry = _LoomweaveLocalFallbackRegistry(
             self.registry,
             self._make_local_registry(),
-            base_url=self._clarion_base_url() or "",
+            base_url=self._loomweave_base_url() or "",
         )
 
     @classmethod
-    def from_filigree_dir(
+    def from_store_dir(
         cls,
-        filigree_dir: Path,
+        store_dir: Path,
         *,
+        project_root: Path,
         check_same_thread: bool = True,
         allow_local_fallback_override: bool | None = None,
     ) -> FiligreeDB:
-        """Create a FiligreeDB from an existing ``.filigree/`` directory.
+        """Create a FiligreeDB from a confless store directory + explicit project root.
+
+        The generalised opener for a dir-only (confless) anchor — legacy
+        ``.filigree/`` or federation ``.weft/filigree/``. ``store_dir`` is where
+        ``config.json`` and ``filigree.db`` live; ``project_root`` is passed
+        explicitly (NOT inferred from ``store_dir.parent``, which is wrong for
+        ``.weft/filigree/`` — two segments deep).
 
         When ``config.json`` is missing or omits the ``prefix`` key, fall back
-        to the project directory's own name rather than the hardcoded
-        ``"filigree"`` default. This mirrors what ``filigree init`` writes
-        (prefix defaults to ``cwd.name``) and prevents a legacy install from
-        silently opening with the wrong identity — every write to its own
-        pre-existing issues would otherwise raise ``WrongProjectError``.
+        to ``project_root``'s own name rather than the hardcoded ``"filigree"``
+        default. This mirrors what ``filigree init`` writes (prefix defaults to
+        ``cwd.name``) and prevents a confless install from silently opening with
+        the wrong identity.
 
         ``allow_local_fallback_override`` is the dashboard / CLI escape hatch
         for ADR-014 §7: an operator passing ``--allow-local-fallback`` at
         startup wants to override whatever ``allow_local_fallback`` is in the
-        project's ``.filigree/config.json``, so the capability probe at
-        ``__init__`` time downgrades to a WARN instead of aborting when
-        Clarion is offline.
+        project's ``config.json``, so the capability probe at ``__init__`` time
+        downgrades to a WARN instead of aborting when Loomweave is offline.
         """
-        config = read_config(filigree_dir)
-        configured_prefix = _raw_config_prefix(filigree_dir / CONFIG_FILENAME)
-        prefix = configured_prefix if configured_prefix is not None else (filigree_dir.parent.name or "filigree")
-        clarion_config = _apply_allow_local_fallback_override(config.get("clarion"), allow_local_fallback_override)
+        # config.json is the SOLE identity authority for a confless store (there is
+        # no conf backstop post-cutover, filigree-4bf16e64b6). A present-but-corrupt
+        # config.json must NOT be silently defaulted — that would open under the
+        # wrong prefix and write issues into the wrong namespace. Be strict here,
+        # symmetric with from_conf's read_conf (a missing config.json stays lenient:
+        # legacy ``.filigree/`` installs may have none). The raised ValueError
+        # surfaces as the standard VALIDATION envelope, like a corrupt conf.
+        config_path = store_dir / CONFIG_FILENAME
+        if config_path.is_file():
+            try:
+                json.loads(config_path.read_text())
+            except (ValueError, OSError) as exc:
+                msg = f"{config_path} exists but could not be parsed: {exc}"
+                raise ValueError(msg) from exc
+        config = read_config(store_dir)
+        configured_prefix = _raw_config_prefix(config_path)
+        prefix = configured_prefix if configured_prefix is not None else (project_root.name or "filigree")
+        loomweave_config = _apply_allow_local_fallback_override(config.get("loomweave"), allow_local_fallback_override)
         db = cls(
-            filigree_dir / DB_FILENAME,
+            store_dir / DB_FILENAME,
             prefix=prefix,
             enabled_packs=config.get("enabled_packs"),
             check_same_thread=check_same_thread,
-            project_root=filigree_dir.resolve().parent,
+            project_root=project_root.resolve(),
+            meta_dir=store_dir,
             registry_backend=config.get("registry_backend", "local"),
-            clarion_config=clarion_config,
+            loomweave_config=loomweave_config,
         )
         try:
             db.initialize()
+            # For a confless store, config.json is the authoritative source of
+            # enabled_packs — there is no conf to carry an explicit override. Mark
+            # it as project-config-derived (mirroring from_conf) so reload_templates
+            # re-reads config.json and surfaces a corrupt one as a structured error
+            # rather than silently keeping the leniently-defaulted packs
+            # (filigree-259e5b58ef; the cutover made config.json load-bearing).
+            db._enabled_packs_override = None
         except BaseException:
             # ``initialize()`` opens the connection lazily on its first line
             # (``get_schema_version()`` → ``self.conn``). If it raises before
@@ -1294,42 +2104,72 @@ class FiligreeDB(
             try:
                 db.close()
             except Exception:
-                logger.error("Failed to close database after from_filigree_dir initialize() failure", exc_info=True)
+                logger.error("Failed to close database after from_store_dir initialize() failure", exc_info=True)
             raise
         return db
+
+    @classmethod
+    def from_filigree_dir(
+        cls,
+        filigree_dir: Path,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
+        """Create a FiligreeDB from an existing legacy ``.filigree/`` directory.
+
+        Thin back-compat wrapper over :meth:`from_store_dir`: the legacy layout
+        always has ``project_root == filigree_dir.parent``. Preserved verbatim so
+        existing callers and tests keep working.
+        """
+        return cls.from_store_dir(
+            filigree_dir,
+            project_root=filigree_dir.resolve().parent,
+            check_same_thread=check_same_thread,
+            allow_local_fallback_override=allow_local_fallback_override,
+        )
 
     @classmethod
     def from_conf(
         cls,
         conf_path: Path,
         *,
+        store_dir: Path | None = None,
         check_same_thread: bool = True,
         allow_local_fallback_override: bool | None = None,
     ) -> FiligreeDB:
         """Create a FiligreeDB from a ``.filigree.conf`` anchor file (v2.0).
 
-        Resolves the DB path relative to the conf file's directory.
+        Resolves the DB path relative to the conf file's directory (the conf's
+        ``db`` field may relocate the database anywhere project-relative — the
+        fg-da8d50 fix). ``store_dir`` is the resolved machine-owned metadata
+        directory (``config.json``, runtime files); when omitted it is resolved
+        via :func:`resolve_store_dir` so the ``enabled_packs`` fallback reads
+        config from the right place (``.weft/filigree/`` or legacy ``.filigree/``),
+        **independently** of where ``db`` points.
 
-        ``allow_local_fallback_override`` — see :meth:`from_filigree_dir`.
+        ``allow_local_fallback_override`` — see :meth:`from_store_dir`.
         """
         data = read_conf(conf_path)
         db_path = (conf_path.parent / data["db"]).resolve()
+        resolved_store_dir = store_dir if store_dir is not None else resolve_store_dir(conf_path.resolve().parent)
         prefix: str = data["prefix"]
         enabled_packs = data.get("enabled_packs")
         enabled_packs_from_project_config = False
         if enabled_packs is None:
-            config = read_config(conf_path.parent / FILIGREE_DIR_NAME)
+            config = read_config(resolved_store_dir)
             enabled_packs = config.get("enabled_packs")
             enabled_packs_from_project_config = enabled_packs is not None
-        clarion_config = _apply_allow_local_fallback_override(data.get("clarion"), allow_local_fallback_override)
+        loomweave_config = _apply_allow_local_fallback_override(data.get("loomweave"), allow_local_fallback_override)
         db = cls(
             db_path,
             prefix=prefix,
             enabled_packs=enabled_packs,
             check_same_thread=check_same_thread,
             project_root=conf_path.resolve().parent,
+            meta_dir=resolved_store_dir,
             registry_backend=cast("RegistryBackend", data.get("registry_backend", "local")),
-            clarion_config=clarion_config,
+            loomweave_config=loomweave_config,
         )
         try:
             db.initialize()
@@ -1344,18 +2184,44 @@ class FiligreeDB(
         return db
 
     @classmethod
+    def from_anchor(
+        cls,
+        anchor: FiligreeAnchor,
+        *,
+        check_same_thread: bool = True,
+        allow_local_fallback_override: bool | None = None,
+    ) -> FiligreeDB:
+        """Create a FiligreeDB from a resolved :class:`FiligreeAnchor`.
+
+        The single open entry point for all runtime surfaces (CLI, dashboard,
+        MCP, hooks). Reuses :meth:`from_conf` when a conf exists, else
+        :meth:`from_store_dir` — both threaded with the anchor's resolved
+        ``store_dir`` so every surface resolves to the same metadata dir (no
+        split-brain).
+        """
+        if anchor.conf_path is not None:
+            return cls.from_conf(
+                anchor.conf_path,
+                store_dir=anchor.store_dir,
+                check_same_thread=check_same_thread,
+                allow_local_fallback_override=allow_local_fallback_override,
+            )
+        return cls.from_store_dir(
+            anchor.store_dir,
+            project_root=anchor.project_root,
+            check_same_thread=check_same_thread,
+            allow_local_fallback_override=allow_local_fallback_override,
+        )
+
+    @classmethod
     def from_project(cls, project_path: Path | None = None) -> FiligreeDB:
         """Create a FiligreeDB by discovering the project anchor from *project_path* (or cwd).
 
         Walks up via :func:`find_filigree_anchor` so legacy installs (a bare
-        ``.filigree/`` directory with no conf yet) still open without requiring
-        write access during discovery. Returns the v2.0 conf-based DB if a
-        conf is present, otherwise falls back to ``from_filigree_dir``.
+        dir with no conf yet) still open without requiring write access during
+        discovery, then opens through the single :meth:`from_anchor` entry point.
         """
-        project_root, conf_path = find_filigree_anchor(project_path)
-        if conf_path is not None:
-            return cls.from_conf(conf_path)
-        return cls.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
+        return cls.from_anchor(find_filigree_anchor(project_path))
 
     def __enter__(self) -> FiligreeDB:
         return self
@@ -1452,21 +2318,21 @@ class FiligreeDB(
         self._warn_if_registry_backend_hybrid_state()
 
     def _warn_if_registry_backend_hybrid_state(self) -> None:
-        """Warn when Clarion config and stored file rows disagree.
+        """Warn when Loomweave config and stored file rows disagree.
 
         v17 backfills legacy ``file_records`` rows as ``registry_backend='local'``.
-        A project can then switch its config to Clarion without running
+        A project can then switch its config to Loomweave without running
         ``migrate-registry``, leaving old rows under local identity while new
-        implicit paths resolve through Clarion. Startup should make that hybrid
+        implicit paths resolve through Loomweave. Startup should make that hybrid
         state visible without preventing read-only recovery commands.
         """
-        if self.registry_backend != "clarion" or self.allow_local_fallback:
+        if self.registry_backend != "loomweave" or self.allow_local_fallback:
             return
         try:
             local_count = int(
                 self.conn.execute(
                     "SELECT COUNT(*) FROM file_records WHERE registry_backend != ?",
-                    ("clarion",),
+                    ("loomweave",),
                 ).fetchone()[0]
             )
         except sqlite3.Error:
@@ -1524,6 +2390,50 @@ class FiligreeDB(
     def get_schema_version(self) -> int:
         """Return the current schema version from PRAGMA user_version."""
         return read_schema_version(self.conn)
+
+    def checkpoint_wal(self, *, busy_timeout_ms: int = 250) -> dict[str, int | bool | str]:
+        """Run an explicit ``PRAGMA wal_checkpoint(TRUNCATE)`` on this store.
+
+        SQLite reports checkpoint contention as a non-zero ``busy`` result row
+        for this pragma, not necessarily as an exception. Preserve that signal
+        in the returned payload so operator/MCP surfaces can be busy-tolerant
+        and still report the partial checkpoint result.
+        """
+        if busy_timeout_ms < 0:
+            msg = "busy_timeout_ms must be non-negative"
+            raise ValueError(msg)
+
+        wal_path = self.db_path.with_name(self.db_path.name + "-wal")
+
+        def _wal_size() -> int:
+            try:
+                return wal_path.stat().st_size
+            except FileNotFoundError:
+                return 0
+
+        wal_size_before = _wal_size()
+        old_timeout = int(self.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        try:
+            self.conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            row = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            self.conn.execute(f"PRAGMA busy_timeout={old_timeout}")
+
+        checkpoint_busy = int(row[0])
+        log_frames = int(row[1])
+        checkpointed_frames = int(row[2])
+        wal_size_after = _wal_size()
+        busy = checkpoint_busy != 0
+        return {
+            "status": "busy" if busy else "checkpointed",
+            "busy": busy,
+            "checkpoint_busy": checkpoint_busy,
+            "log_frames": log_frames,
+            "checkpointed_frames": checkpointed_frames,
+            "wal_size_before": wal_size_before,
+            "wal_size_after": wal_size_after,
+            "database": str(self.db_path),
+        }
 
     def reconnect(self, *, check_same_thread: bool = True) -> None:
         """Close the current connection so the next access reopens it with a new ``check_same_thread`` setting.
@@ -1592,12 +2502,22 @@ class FiligreeDB(
         # Borrowed clones (see ``borrow_for_worker_thread``) share the parent's
         # registry by reference and do not own it; closing such a clone — via
         # the context manager, ``close``, or ``__del__`` — must leave the
-        # parent's Clarion client open.
+        # parent's Loomweave client open.
         if not self._owns_registry:
             return
         close_registry = getattr(self.registry, "close", None)
         if callable(close_registry):
             close_registry()
+
+    def set_verified_actor(self, value: str | None) -> None:
+        """Set the transport-verified identity for this session.
+
+        Entry points (CLI ``get_db``, MCP ``_init_db``) construct the DB before
+        resolving identity, then call this. Every subsequent runtime write
+        stamps ``value`` into its ``verified_*`` column. ``None`` (the default)
+        leaves writes unverified (``verified_* = NULL``).
+        """
+        self._verified_actor = value
 
     @contextlib.contextmanager
     def borrow_for_worker_thread(self) -> Iterator[FiligreeDB]:
@@ -1616,25 +2536,25 @@ class FiligreeDB(
         rather than error) — no application-level lock is needed, and the
         worker paths run fully in parallel up to the brief write window.
 
-        The clone shares all config, the Clarion HTTP client, and the Clarion
+        The clone shares all config, the Loomweave HTTP client, and the Loomweave
         capability-probe state by reference (read-only on the worker side, so
         no second ADR-014 probe runs) but lazily opens its OWN connection on
         first ``self.conn`` access. ``check_same_thread=True`` on the clone
         turns any stray cross-thread use of that connection into a loud
         ``ProgrammingError`` rather than silent interleaving. The shared
-        Clarion ``httpx.Client`` is safe for concurrent calls, so two worker
-        clones may resolve against Clarion at the same time.
+        Loomweave ``httpx.Client`` is safe for concurrent calls, so two worker
+        clones may resolve against Loomweave at the same time.
 
         The local file-id factory is the one piece NOT shared verbatim: a
         ``LocalRegistry`` mints ids through the ``FiligreeDB`` it closed over,
         so the clone gets its factory rebound to itself
         (:meth:`_rebind_local_id_factory_to_self`) — otherwise worker-thread id
-        minting in local (or Clarion-fallback) mode would reach back into the
+        minting in local (or Loomweave-fallback) mode would reach back into the
         parent's shared connection and raise ``SQLITE_MISUSE``.
 
         The clone does NOT own the registry: exiting the context tears down
         only the private connection (commit on clean exit, rollback on an
-        in-flight transaction), never the shared Clarion client.
+        in-flight transaction), never the shared Loomweave client.
 
         MUST be entered and exited entirely within the worker thread (i.e.
         inside the ``asyncio.to_thread`` callable) so the connection is

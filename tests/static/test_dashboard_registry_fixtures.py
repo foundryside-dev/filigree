@@ -6,8 +6,8 @@ import ast
 from pathlib import Path
 
 
-def test_dashboard_api_tests_do_not_assign_clarion_backend_directly() -> None:
-    """Dashboard API tests must build Clarion DBs through FiligreeDB init validation."""
+def test_dashboard_api_tests_do_not_assign_loomweave_backend_directly() -> None:
+    """Dashboard API tests must build Loomweave DBs through FiligreeDB init validation."""
     api_tests = [
         Path("tests/api/test_files_api.py"),
         Path("tests/api/test_files_dashboard.py"),
@@ -19,8 +19,8 @@ def test_dashboard_api_tests_do_not_assign_clarion_backend_directly() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
                 continue
-            assigns_clarion = isinstance(node.value, ast.Constant) and node.value.value == "clarion"
-            if not assigns_clarion:
+            assigns_loomweave = isinstance(node.value, ast.Constant) and node.value.value == "loomweave"
+            if not assigns_loomweave:
                 continue
             if any(isinstance(target, ast.Attribute) and target.attr == "registry_backend" for target in node.targets):
                 direct_assignments.append(f"{test_path}:{node.lineno}")

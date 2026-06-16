@@ -1,7 +1,7 @@
 # MCP Senior-User Friction Review — review-f (2026-05-09)
 
 Reviewer: agent driving the live `mcp__filigree__*` surface against
-`/home/john/filigree/.filigree/`. Scratch artifacts labelled `mcp-review-scratch`
+`/home/user/filigree/.filigree/`. Scratch artifacts labelled `mcp-review-scratch`
 + `review-f` and archived at the end of the session.
 
 ## 1. Executive summary

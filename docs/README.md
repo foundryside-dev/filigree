@@ -13,7 +13,7 @@ New to filigree? Start here:
 Detailed documentation for every interface:
 
 2. **[CLI Reference](cli.md)** — All CLI commands with full parameter tables.
-3. **[MCP Server Reference](mcp.md)** — 114 tools for native AI agent interaction via Model Context Protocol.
+3. **[MCP Server Reference](mcp.md)** — 118 tools for native AI agent interaction via Model Context Protocol.
 4. **[Workflow Templates](workflows.md)** — 24 issue types across 9 packs: state machines, transitions, field schemas, and enforcement levels.
 5. **[Python API Reference](api-reference.md)** — `FiligreeDB`, `Issue`, `TemplateRegistry` for programmatic use.
 

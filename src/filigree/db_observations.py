@@ -367,8 +367,8 @@ class ObservationsMixin(DBMixinProtocol):
 
             self.conn.execute(
                 "INSERT INTO observations (id, summary, detail, file_id, file_path, line, "
-                "source_issue_id, source_finding_id, priority, actor, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source_issue_id, source_finding_id, priority, actor, verified_actor, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     obs_id,
                     summary_stripped,
@@ -380,6 +380,7 @@ class ObservationsMixin(DBMixinProtocol):
                     source_finding_id,
                     priority,
                     actor,
+                    self._verified_actor,
                     now,
                     expires,
                 ),
@@ -449,6 +450,9 @@ class ObservationsMixin(DBMixinProtocol):
             "actor": actor,
             "created_at": now,
             "expires_at": ISOTimestamp(expires),
+            # v23->v24 (ADR-012): stamp the transport-verified identity so the
+            # create-return shape matches the SELECT * read paths.
+            "verified_actor": self._verified_actor,
         }
 
     def list_observations(
@@ -837,8 +841,8 @@ class ObservationsMixin(DBMixinProtocol):
             if obs.get("detail"):
                 comment += f"\n\n{obs['detail']}"
             self.conn.execute(
-                "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-                (issue_id, actor, comment, now),
+                "INSERT INTO comments (issue_id, author, verified_author, text, created_at) VALUES (?, ?, ?, ?, ?)",
+                (issue_id, actor, self._verified_actor, comment, now),
             )
             self.conn.execute("DELETE FROM observations WHERE id = ?", (obs_id,))
             self.conn.commit()

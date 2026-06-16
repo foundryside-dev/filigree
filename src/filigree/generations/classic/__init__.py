@@ -7,6 +7,6 @@ wiring and ``docs/federation/contracts.md`` for the stability guarantee.
 
 Shape types for the classic generation live in
 ``filigree.types.api`` (the existing 1.x types); this subpackage is
-present so the generation has a symmetric shape with loom and so any
+present so the generation has a symmetric shape with weft and so any
 future classic-only adapter work has a home.
 """

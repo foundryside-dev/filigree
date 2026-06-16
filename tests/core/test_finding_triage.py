@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 from filigree.core import FiligreeDB
+from filigree.types.core import make_issue_id
 
 
 def _seed_findings(db: FiligreeDB) -> dict[str, str]:
@@ -34,6 +35,120 @@ class TestGetFinding:
     def test_not_found_raises(self, db: FiligreeDB) -> None:
         with pytest.raises(KeyError):
             db.get_finding("no-such-id")
+
+
+class TestFindingSuppressionState:
+    """Wardline's suppression verdict is lifted from
+    ``metadata.wardline.suppression_state`` onto the top-level finding read
+    surface (``get_finding`` / ``list_findings_global``) so triage can tell an
+    accepted/suppressed defect from open work without parsing nested metadata.
+    Independent of issue-linkage: a finding can be baselined while unlinked."""
+
+    def _seed_suppressed(self, db: FiligreeDB, state: str = "baselined") -> str:
+        db.register_file("src/s.py", language="python")
+        result = db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/s.py",
+                    "rule_id": "WLN-EXAMPLE",
+                    "severity": "high",
+                    "message": "an accepted defect",
+                    "metadata": {"wardline": {"suppression_state": state}},
+                }
+            ],
+        )
+        return result["new_finding_ids"][0]
+
+    def test_finding_without_wardline_meta_has_null_suppression_state(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        finding = db.get_finding(ids["obo"])
+        assert finding["suppression_state"] is None
+
+    def test_suppressed_finding_surfaces_state_via_get_and_list(self, db: FiligreeDB) -> None:
+        fid = self._seed_suppressed(db, state="baselined")
+        finding = db.get_finding(fid)
+        # Surfaced at the top level — no nested-metadata parsing needed.
+        assert finding["suppression_state"] == "baselined"
+        # ...and it is independent of issue-linkage (unlinked but still suppressed).
+        assert finding["issue_id"] is None
+        # The same lift rides the project-wide finding_list read path.
+        listed = db.list_findings_global(file_id=finding["file_id"])["findings"]
+        assert len(listed) == 1
+        assert listed[0]["suppression_state"] == "baselined"
+
+
+class TestFindingIssueStatus:
+    """N6 (weft-c815d5e77d): the finding read surfaces carry the linked issue's
+    status (and its ``close_reason`` resolution when closed), so a finding linked
+    to a dismissed (``not_a_bug``) issue reads as triaged, not open work."""
+
+    def test_unlinked_finding_has_null_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        finding = db.get_finding(ids["obo"])
+        assert finding["issue_status"] is None
+        assert finding["issue_resolution"] is None
+
+    def test_linked_finding_surfaces_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_id"] == issue.id
+        # Freshly promoted bug sits at its initial open state.
+        assert finding["issue_status"] == issue.status
+        assert finding["issue_resolution"] is None
+
+    def test_dismissed_issue_surfaces_not_a_bug_and_resolution(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="intentional/by-design", actor="human")
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_status"] == "not_a_bug"
+        assert finding["issue_resolution"] == "intentional/by-design"
+
+    def test_list_findings_global_carries_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        db.close_issue(issue.id, status="not_a_bug", reason="dup", actor="human")
+        listed = db.list_findings_global(issue_id=issue.id)
+        assert len(listed["findings"]) == 1
+        f0 = listed["findings"][0]
+        assert f0["issue_status"] == "not_a_bug"
+        assert f0["issue_resolution"] == "dup"
+
+    def test_list_findings_global_status_filter_unambiguous_after_join(self, db: FiligreeDB) -> None:
+        # Regression guard: the finding-status filter must not collide with
+        # issues.status after the LEFT JOIN (both tables have a ``status`` column).
+        ids = _seed_findings(db)
+        db.promote_finding_to_issue(ids["sqli"], actor="t")
+        listed = db.list_findings_global(status="open")
+        assert len(listed["findings"]) == 3
+        assert all(f["status"] == "open" for f in listed["findings"])
+
+    def test_get_findings_paginated_carries_issue_status(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        issue = db.promote_finding_to_issue(ids["sqli"], actor="t")["issue"]
+        files = db.list_files_paginated(limit=1)
+        file_id = files["results"][0]["id"]
+        page = db.get_findings_paginated(file_id=file_id, limit=10)
+        linked = next(f for f in page["results"] if f["id"] == ids["sqli"])
+        assert linked["issue_status"] == issue.status
+        unlinked = next(f for f in page["results"] if f["id"] == ids["obo"])
+        assert unlinked["issue_status"] is None
+
+    def test_missing_linked_issue_yields_null_status_not_crash(self, db: FiligreeDB) -> None:
+        # A finding may carry an ``issue_id`` whose issue row no longer exists
+        # (the FK is ON DELETE SET NULL, so this only arises off-contract). The
+        # LEFT JOIN must yield null rather than crash.
+        ids = _seed_findings(db)
+        db.conn.execute("PRAGMA foreign_keys = OFF")
+        db.conn.execute("UPDATE scan_findings SET issue_id = 'iss-ghost' WHERE id = ?", (ids["sqli"],))
+        db.conn.commit()
+        db.conn.execute("PRAGMA foreign_keys = ON")
+        finding = db.get_finding(ids["sqli"])
+        assert finding["issue_id"] == "iss-ghost"
+        assert finding["issue_status"] is None
+        assert finding["issue_resolution"] is None
 
 
 class TestListFindingsGlobal:
@@ -91,6 +206,332 @@ class TestListFindingsGlobal:
         _seed_findings(db)
         with pytest.raises(ValueError, match="Invalid status filter"):
             db.list_findings_global(status="bogus")
+
+
+def _seed_wardline_mix(db: FiligreeDB) -> None:
+    """Seed the dogfood-3 shape: metric telemetry noise, a real defect, a
+    baselined defect, and a non-wardline finding with no ``wardline`` metadata.
+
+    Mirrors the live distribution (FIL-2/X-5): ``kind:metric`` rows drown the
+    handful of real ``kind:defect`` rows, and a baselined defect must be
+    excludable from the actionable view.
+    """
+    db.register_file("src/app.py", language="python")
+    db.process_scan_results(
+        scan_source="wardline",
+        findings=[
+            {
+                "path": "src/app.py",
+                "rule_id": "WLN-L3-LOW-RESOLUTION",
+                "severity": "info",
+                "message": "engine telemetry",
+                "line_start": 1,
+                "metadata": {"wardline": {"kind": "metric"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-101",
+                "severity": "high",
+                "message": "a real un-suppressed defect",
+                "line_start": 10,
+                "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+            },
+            {
+                "path": "src/app.py",
+                "rule_id": "PY-WL-102",
+                "severity": "high",
+                "message": "a baselined (accepted) defect",
+                "line_start": 20,
+                "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+            },
+        ],
+    )
+    # A non-wardline, agent-reported finding: carries no ``wardline`` metadata.
+    db.process_scan_results(
+        scan_source="agent",
+        findings=[
+            {"path": "src/app.py", "rule_id": "api-misuse", "severity": "medium", "message": "agent finding", "line_start": 30},
+        ],
+    )
+
+
+class TestListFindingsGlobalKindSuppression:
+    """FIL-2/X-5: ``finding_list`` must filter on the nested wardline axes
+    (``kind``, ``suppression``) and on ``rule_id``/``qualname`` so an agent can
+    answer 'show me the real un-suppressed defects' server-side instead of
+    pulling everything and filtering nested metadata client-side."""
+
+    def test_filter_by_kind_defect(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="defect")
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        # Only the two wardline-classified defects; metric telemetry and the
+        # kind-less agent finding are excluded.
+        assert rules == ["PY-WL-101", "PY-WL-102"]
+        # The COUNT path must agree with the rows path under the metadata filter.
+        assert result["total"] == 2
+
+    def test_filter_by_kind_metric(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="metric")
+        assert [f["rule_id"] for f in result["findings"]] == ["WLN-L3-LOW-RESOLUTION"]
+        assert result["total"] == 1
+
+    def test_filter_by_suppression_active_excludes_baselined_and_keeps_metadata_less(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(suppression="active")
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        # Everything EXCEPT the baselined defect — including the metadata-less
+        # agent finding (absent suppression => active, per the promote-guard contract).
+        assert rules == ["PY-WL-101", "WLN-L3-LOW-RESOLUTION", "api-misuse"]
+        assert result["total"] == 3
+
+    def test_filter_by_suppression_baselined(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(suppression="baselined")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-102"]
+        assert result["total"] == 1
+
+    def test_no_arg_default_returns_everything_including_suppressed(self, db: FiligreeDB) -> None:
+        """Core-contract lock (filigree-2bdb878bd2): the core primitive's default
+        is 'return everything' — suppressed rows are NOT hidden here. The
+        default-hide lives only at the agent-facing surfaces (MCP/CLI), so
+        internal callers (e.g. scanner_reporting re-finding a just-ingested row)
+        keep seeing every row. If this ever flips, every internal caller silently
+        loses rows."""
+        _seed_wardline_mix(db)
+        result = db.list_findings_global()
+        rules = sorted(f["rule_id"] for f in result["findings"])
+        assert "PY-WL-102" in rules  # the baselined defect is present by default
+        assert result["total"] == 4
+
+    def test_suppression_all_is_noop_returns_everything(self, db: FiligreeDB) -> None:
+        """``suppression='all'`` is the explicit 'no suppression filter' sentinel
+        the surfaces pass to opt back in to suppressed rows. It must behave
+        identically to omitting the filter."""
+        _seed_wardline_mix(db)
+        explicit_all = db.list_findings_global(suppression="all")
+        no_arg = db.list_findings_global()
+        assert sorted(f["rule_id"] for f in explicit_all["findings"]) == sorted(f["rule_id"] for f in no_arg["findings"])
+        assert explicit_all["total"] == no_arg["total"] == 4
+
+    @pytest.mark.parametrize("offcontract", ["baselined", ["baselined"], 42])
+    def test_offcontract_nondict_wardline_classifies_as_active(self, db: FiligreeDB, offcontract: object) -> None:
+        """``metadata.wardline`` is external payload stored verbatim and may be a
+        valid-JSON-but-non-dict value (string/list/int). ``json_extract`` of
+        ``$.wardline.suppression_state`` on a non-object node returns NULL, so the
+        row must read as active (present under ``suppression='active'``, absent
+        under ``suppression='baselined'``) and must NOT raise — mirroring the
+        promote-guard's 'absent => active' contract on the query side."""
+        db.register_file("src/oc.py", language="python")
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/oc.py",
+                    "rule_id": "OC-1",
+                    "severity": "high",
+                    "message": "off-contract",
+                    "metadata": {"wardline": offcontract},
+                }
+            ],
+        )
+        active = db.list_findings_global(suppression="active")
+        assert "OC-1" in {f["rule_id"] for f in active["findings"]}
+        baselined = db.list_findings_global(suppression="baselined")
+        assert "OC-1" not in {f["rule_id"] for f in baselined["findings"]}
+
+    def test_pagination_applies_after_suppression_filter(self, db: FiligreeDB) -> None:
+        """LIMIT/OFFSET apply to the already-suppression-filtered set (the clause
+        is part of the shared WHERE), so the baselined row never leaks onto any
+        page and the pages tile the active set with no gap or overlap."""
+        _seed_wardline_mix(db)
+        active_total = db.list_findings_global(suppression="active")["total"]  # 3 of the 4 rows
+        seen: list[str] = []
+        for offset in range(active_total):
+            page = db.list_findings_global(suppression="active", limit=1, offset=offset)
+            seen.extend(f["rule_id"] for f in page["findings"])
+            assert page["total"] == active_total  # total reflects the filtered population
+        assert "PY-WL-102" not in seen  # baselined never paged in
+        assert len(seen) == len(set(seen)) == active_total  # no overlap, no gap
+
+    def test_filter_real_unsuppressed_defects_combined(self, db: FiligreeDB) -> None:
+        # The headline query the finding exists to enable.
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(kind="defect", suppression="active")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_filter_by_rule_id(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(rule_id="PY-WL-101")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_filter_by_qualname(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        result = db.list_findings_global(qualname="app.handler")
+        assert [f["rule_id"] for f in result["findings"]] == ["PY-WL-101"]
+        assert result["total"] == 1
+
+    def test_invalid_kind_raises(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        with pytest.raises(ValueError, match="Invalid kind filter"):
+            db.list_findings_global(kind="bogus")
+
+    def test_invalid_suppression_raises(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        with pytest.raises(ValueError, match="Invalid suppression filter"):
+            db.list_findings_global(suppression="bogus")
+
+    def test_corrupt_metadata_row_survives_filters(self, db: FiligreeDB) -> None:
+        """A single malformed-metadata row must not raise OperationalError under
+        the json_extract filters (the json_valid guard contract) and must
+        classify as kind-less + active."""
+        _seed_wardline_mix(db)
+        db.conn.execute("UPDATE scan_findings SET metadata = ? WHERE rule_id = ?", ("{not json", "api-misuse"))
+        db.conn.commit()
+        # kind=defect must still run and must exclude the corrupt row.
+        defects = db.list_findings_global(kind="defect")
+        assert sorted(f["rule_id"] for f in defects["findings"]) == ["PY-WL-101", "PY-WL-102"]
+        # suppression=active must still run and must INCLUDE the corrupt row
+        # (corrupt/absent => active).
+        active = db.list_findings_global(suppression="active")
+        assert "api-misuse" in {f["rule_id"] for f in active["findings"]}
+
+    def test_active_classification_shared_with_unbridged_stats(self, db: FiligreeDB) -> None:
+        """``suppression=active`` and ``unbridged_finding_stats`` share the SAME
+        suppression predicate, so the suppressed/active *classification* is
+        identical. They do NOT share the base population: ``unbridged_finding_stats``
+        restricts to open + un-bridged, while ``finding_list(suppression="active")``
+        applies no such filter — so the latter's total is a *superset*. Pin both
+        facts so the docstrings can't quietly over- or under-claim."""
+        _seed_wardline_mix(db)
+        # When every finding is open + un-bridged, the only difference between the
+        # populations is the suppressed/active split — and that split is shared,
+        # so the counts coincide here.
+        stats = db.unbridged_finding_stats()
+        active = db.list_findings_global(suppression="active")
+        assert stats["actionable"] == active["total"]
+
+        # Now introduce a terminal (fixed) active finding and a bridged active
+        # finding — both EXCLUDED from ``actionable`` (terminal / has an issue)
+        # but still un-suppressed, so still counted by ``suppression="active"``.
+        # Create the issue first (it commits) before the raw UPDATEs so we don't
+        # open a nested transaction.
+        issue = db.create_issue("bridged", type="bug")
+        db.conn.execute("UPDATE scan_findings SET status = 'fixed' WHERE rule_id = ?", ("PY-WL-101",))
+        db.conn.execute("UPDATE scan_findings SET issue_id = ? WHERE rule_id = ?", (issue.id, "api-misuse"))
+        db.conn.commit()
+        stats2 = db.unbridged_finding_stats()
+        active2 = db.list_findings_global(suppression="active")
+        # actionable shrinks (both rows leave the open+unbridged base); active is
+        # a strict superset (it never filtered them out).
+        assert active2["total"] > stats2["actionable"]
+        # The suppressed classification is unchanged on both surfaces: the
+        # baselined defect is the only suppressed row everywhere.
+        assert stats2["suppressed"] == 1
+        assert "PY-WL-102" not in {f["rule_id"] for f in active2["findings"]}
+
+
+class TestUnbridgedFindingStatsKindSplit:
+    """FIL-1: ``unbridged_finding_stats`` additively splits the actionable
+    bucket by wardline kind so engine telemetry (kind:metric etc.) does not
+    read as defect-signal in session orientation. Classification rule: a
+    finding counts as telemetry (``actionable_other``) ONLY when its kind is a
+    KNOWN non-defect kind; missing, corrupt, and unknown kinds all count
+    defect-side (``actionable_defect``) — a third-party finding without a kind
+    must never be hidden as telemetry."""
+
+    def test_split_buckets(self, db: FiligreeDB) -> None:
+        _seed_wardline_mix(db)
+        stats = db.unbridged_finding_stats()
+        # Existing keys unchanged.
+        assert stats["total"] == 4
+        assert stats["actionable"] == 3
+        assert stats["suppressed"] == 1
+        # New split: the kind:metric row is telemetry; kind:defect PY-WL-101
+        # and the kind-less agent 'api-misuse' row are defect-signal.
+        assert stats["actionable_other"] == 1
+        assert stats["actionable_defect"] == 2
+        assert stats["actionable"] == stats["actionable_defect"] + stats["actionable_other"]
+
+    def test_unknown_kind_counts_as_defect(self, db: FiligreeDB) -> None:
+        """An unknown kind value (not in the known enum) must land defect-side,
+        not be hidden as telemetry."""
+        db.register_file("src/unk.py", language="python")
+        db.process_scan_results(
+            scan_source="thirdparty",
+            findings=[
+                {
+                    "path": "src/unk.py",
+                    "rule_id": "TP-1",
+                    "severity": "high",
+                    "message": "unknown kind",
+                    "line_start": 1,
+                    "metadata": {"wardline": {"kind": "anomaly"}},
+                }
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable"] == 1
+        assert stats["actionable_defect"] == 1
+        assert stats["actionable_other"] == 0
+
+    def test_all_known_non_defect_kinds_count_as_other(self, db: FiligreeDB) -> None:
+        db.register_file("src/nd.py", language="python")
+        kinds = ["classification", "fact", "metric", "suggestion"]
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/nd.py",
+                    "rule_id": f"ND-{k}",
+                    "severity": "info",
+                    "message": k,
+                    "line_start": i + 1,
+                    "metadata": {"wardline": {"kind": k}},
+                }
+                for i, k in enumerate(kinds)
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable"] == 4
+        assert stats["actionable_other"] == 4
+        assert stats["actionable_defect"] == 0
+
+    def test_corrupt_metadata_counts_defect_side(self, db: FiligreeDB) -> None:
+        """A malformed-metadata row must not raise OperationalError and must
+        classify defect-side (corrupt => not provably telemetry)."""
+        _seed_wardline_mix(db)
+        db.conn.execute("UPDATE scan_findings SET metadata = ? WHERE rule_id = ?", ("{not json", "api-misuse"))
+        db.conn.commit()
+        stats = db.unbridged_finding_stats()
+        assert stats["actionable_defect"] == 2  # PY-WL-101 + the corrupt row
+        assert stats["actionable_other"] == 1  # the metric row, unchanged
+
+    def test_suppressed_metric_counts_suppressed_only(self, db: FiligreeDB) -> None:
+        """A baselined telemetry row increments ``suppressed`` only — it must
+        not leak into either actionable_* bucket."""
+        db.register_file("src/sm.py", language="python")
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {
+                    "path": "src/sm.py",
+                    "rule_id": "SM-1",
+                    "severity": "info",
+                    "message": "suppressed telemetry",
+                    "line_start": 1,
+                    "metadata": {"wardline": {"kind": "metric", "suppression_state": "baselined"}},
+                }
+            ],
+        )
+        stats = db.unbridged_finding_stats()
+        assert stats["suppressed"] == 1
+        assert stats["actionable"] == 0
+        assert stats["actionable_defect"] == 0
+        assert stats["actionable_other"] == 0
 
 
 class TestUpdateFinding:
@@ -217,11 +658,43 @@ class TestPromoteFindingToIssue:
 
         assert issue.type == "bug"
         assert issue.priority == 0
+        assert issue.fields["severity"] == "critical"
         assert "SQL injection" in issue.title
         assert issue.fields["source_finding_id"] == ids["sqli"]
         assert db.get_finding(ids["sqli"])["issue_id"] == issue.id
         labels = db.conn.execute("SELECT label FROM labels WHERE issue_id = ?", (issue.id,)).fetchall()
         assert any(row["label"] == "from-finding" for row in labels)
+
+    @pytest.mark.parametrize(
+        ("finding_severity", "bug_severity"),
+        [
+            ("critical", "critical"),
+            ("high", "major"),
+            ("medium", "major"),
+            ("low", "minor"),
+            ("info", "cosmetic"),
+        ],
+    )
+    def test_maps_finding_severity_to_bug_workflow_severity(
+        self,
+        db: FiligreeDB,
+        finding_severity: str,
+        bug_severity: str,
+    ) -> None:
+        result = db.process_scan_results(
+            scan_source="test-scanner",
+            findings=[
+                {
+                    "path": f"src/{finding_severity}.py",
+                    "rule_id": "R1",
+                    "severity": finding_severity,
+                    "message": "finding",
+                }
+            ],
+        )
+        issue = db.promote_finding_to_issue(result["new_finding_ids"][0])["issue"]
+
+        assert issue.fields["severity"] == bug_severity
 
     def test_reuses_existing_issue_on_retry(self, db: FiligreeDB) -> None:
         ids = _seed_findings(db)
@@ -247,6 +720,286 @@ class TestPromoteFindingToIssue:
         ids = _seed_findings(db)
         with pytest.raises(ValueError, match="actor must be a string"):
             db.promote_finding_to_issue(ids["sqli"], actor=123)  # type: ignore[arg-type]
+
+
+class TestPromoteFindingAndAttachEntity:
+    def test_creates_issue_and_attaches_entity(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        result = db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+
+        assert result["created"] is True
+        assert result["association"]["entity_id"] == "py:func:login"
+        assert result["association"]["content_hash_at_attach"] == "hash-v1"
+        assoc = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert len(assoc) == 1
+
+    def test_retry_converges_after_attach_failure(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The promote+attach pair is non-atomic but idempotent: a failure in the
+        attach step (after the issue is already promoted and committed) leaves a
+        promoted-but-unassociated issue, and re-issuing the same request converges
+        to that issue with the association now present. Guards the partial-state
+        contract documented on ``promote_finding_and_attach_entity``.
+        """
+        ids = _seed_findings(db)
+        real_attach = db.add_entity_association
+        calls = {"n": 0}
+
+        def flaky_attach(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                msg = "simulated attach failure"
+                raise RuntimeError(msg)
+            return real_attach(*args, **kwargs)
+
+        monkeypatch.setattr(db, "add_entity_association", flaky_attach)
+
+        # First attempt: promote commits, then attach raises.
+        with pytest.raises(RuntimeError, match="simulated attach failure"):
+            db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+
+        # The issue was promoted (finding linked) despite the attach failure...
+        issue_id = db.get_finding(ids["sqli"])["issue_id"]
+        assert issue_id
+        # ...but no association exists yet — the partial state the contract warns about.
+        assert db.list_entity_associations(make_issue_id(issue_id)) == []
+
+        # Retry: promote reuses the existing issue, attach now succeeds.
+        result = db.promote_finding_and_attach_entity(ids["sqli"], "py:func:login", "hash-v1")
+        assert result["issue"].id == issue_id
+        assert result["created"] is False
+        assoc = db.list_entity_associations(make_issue_id(issue_id))
+        assert len(assoc) == 1
+        assert assoc[0]["entity_id"] == "py:func:login"
+        assert assoc[0]["content_hash_at_attach"] == "hash-v1"
+
+
+def _seed_entity_finding(
+    db: FiligreeDB,
+    *,
+    metadata: dict[str, Any] | None = None,
+    file_content_hash: str = "",
+    path: str = "src/entity_mod.py",
+) -> str:
+    """Ingest one finding (optionally carrying federation metadata) and return its id.
+
+    ``file_content_hash`` simulates the loomweave-registry-mode file record,
+    where ``file_records.content_hash`` is populated by the registry resolve
+    (it stays the empty sentinel in local mode).
+    """
+    finding: dict[str, Any] = {
+        "path": path,
+        "rule_id": "LMWV-PY-UNSAFE-EVAL",
+        "severity": "high",
+        "message": "Use of eval() on untrusted input",
+        "line_start": 42,
+    }
+    if metadata is not None:
+        finding["metadata"] = metadata
+    result = db.process_scan_results(scan_source="loomweave", findings=[finding])
+    if file_content_hash:
+        db.conn.execute("UPDATE file_records SET content_hash = ? WHERE path = ?", (file_content_hash, path))
+        db.conn.commit()
+    return cast(str, result["new_finding_ids"][0])
+
+
+class TestPromoteFindingDefaultEntityAttach:
+    """B9 (weft-4a46553503): promotion attaches the finding's own entity identity by default.
+
+    A finding that carries a resolvable entity identity in its own metadata
+    (``metadata.loomweave.entity_id``) gets an entity association created as
+    part of the promote — the binding is enrichment, never load-bearing, and
+    the result always says what was attached or why not (C-10 honesty).
+    """
+
+    def test_promote_attaches_entity_from_loomweave_metadata(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:0123abcd"}},
+            file_content_hash="blake3-aaa",
+        )
+        result = db.promote_finding_to_issue(fid)
+
+        assert result["created"] is True
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is True
+        assert attachment["entity_id"] == "loomweave:eid:0123abcd"
+        assert attachment["content_hash"] == "blake3-aaa"
+        assert result["association"]["entity_id"] == "loomweave:eid:0123abcd"
+        assocs = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert len(assocs) == 1
+        assert assocs[0]["entity_id"] == "loomweave:eid:0123abcd"
+        assert assocs[0]["content_hash_at_attach"] == "blake3-aaa"
+
+    def test_promote_without_identity_behaves_as_today(self, db: FiligreeDB) -> None:
+        ids = _seed_findings(db)
+        result = db.promote_finding_to_issue(ids["sqli"])
+
+        assert result["created"] is True
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "no entity identity on finding" in attachment["reason"]
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+        # The no-identity case is the normal path for non-federated scanners —
+        # it must not mint a warning.
+        assert not result.get("warnings")
+
+    def test_promote_attach_failure_warns_but_promote_succeeds(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:feedface"}},
+            file_content_hash="blake3-bbb",
+        )
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            msg = "simulated attach failure"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(db, "add_entity_association", boom)
+        result = db.promote_finding_to_issue(fid)
+
+        assert result["created"] is True
+        assert db.get_finding(fid)["issue_id"] == result["issue"].id
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "attach failed: simulated attach failure" in attachment["reason"]
+        assert any("simulated attach failure" in w for w in result["warnings"])
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_identity_without_content_hash_reports_reason(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(db, metadata={"loomweave": {"entity_id": "loomweave:eid:nohash"}})
+        result = db.promote_finding_to_issue(fid)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert attachment["entity_id"] == "loomweave:eid:nohash"
+        assert "content hash" in attachment["reason"]
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_wardline_qualname_only_reports_unresolvable(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"wardline": {"qualname": "pkg.mod.fn", "kind": "defect"}},
+            file_content_hash="blake3-ccc",
+        )
+        result = db.promote_finding_to_issue(fid)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "pkg.mod.fn" in attachment["reason"]
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_opt_out_skips_attach(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:optout"}},
+            file_content_hash="blake3-ddd",
+        )
+        result = db.promote_finding_to_issue(fid, attach_entity=False)
+
+        attachment = result["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "attach_entity" in attachment["reason"]
+        assert "association" not in result
+        assert db.list_entity_associations(make_issue_id(result["issue"].id)) == []
+
+    def test_promote_retry_reattaches_and_refreshes_hash(self, db: FiligreeDB) -> None:
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:retry"}},
+            file_content_hash="blake3-v1",
+        )
+        first = db.promote_finding_to_issue(fid)
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-v2' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        second = db.promote_finding_to_issue(fid)
+
+        assert second["created"] is False
+        assert second["issue"].id == first["issue"].id
+        assert second["entity_attachment"]["attached"] is True
+        assocs = db.list_entity_associations(make_issue_id(first["issue"].id))
+        assert len(assocs) == 1
+        assert assocs[0]["content_hash_at_attach"] == "blake3-v2"
+
+    def test_repromote_of_dismissed_issue_does_not_rewrite_attach(self, db: FiligreeDB) -> None:
+        """Dismissed-issue guard (F1): when a finding is promoted, the issue is
+        dismissed as not_a_bug, then re-promoted by fingerprint, the idempotency
+        path returns the dismissed issue (created=False). The DEFAULT entity
+        attach must NOT run on it — re-writing content_hash_at_attach would
+        silently mutate the ADR-029 drift baseline on work meant to be left
+        untouched (now the default on every promote surface). The prior triage
+        stands; the stored hash is frozen at its dismissal-time value."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:dismissed"}},
+            file_content_hash="blake3-orig",
+        )
+        first = db.promote_finding_to_issue(fid)
+        assert first["created"] is True
+        assert first["entity_attachment"]["attached"] is True
+        issue_id = first["issue"].id
+
+        # Human dismisses the issue as not_a_bug — terminal triage decision.
+        db.close_issue(issue_id, status="not_a_bug", reason="by-design", actor="human")
+
+        # The underlying file content drifts (a later rescan would carry a new
+        # hash). If the default attach fired, it would overwrite the baseline.
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-drifted' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        again = db.promote_finding_to_issue(fid)
+
+        assert again["created"] is False
+        assert again["issue"].id == issue_id
+        assert again["issue"].status == "not_a_bug"
+        # The default attach was SKIPPED, with a named reason (C-10 honesty).
+        attachment = again["entity_attachment"]
+        assert attachment["attached"] is False
+        assert "done-category" in attachment["reason"] or "not_a_bug" in attachment["reason"]
+        assert "association" not in again
+        # The stored drift baseline is UNCHANGED — frozen at the dismissal value,
+        # not refreshed to the drifted hash.
+        assocs = db.list_entity_associations(make_issue_id(issue_id))
+        assert len(assocs) == 1
+        assert assocs[0]["content_hash_at_attach"] == "blake3-orig"
+
+    def test_repromote_of_open_issue_still_reattaches(self, db: FiligreeDB) -> None:
+        """Convergence-on-open is preserved by the F1 guard: a created=False
+        re-promote whose issue is still OPEN/wip DOES re-attach and refresh the
+        hash — only done-category early-returns are skipped."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:stillopen"}},
+            file_content_hash="blake3-v1",
+        )
+        first = db.promote_finding_to_issue(fid)
+        assert first["created"] is True
+        # Issue stays open; content drifts.
+        db.conn.execute("UPDATE file_records SET content_hash = 'blake3-v2' WHERE path = 'src/entity_mod.py'")
+        db.conn.commit()
+
+        again = db.promote_finding_to_issue(fid)
+        assert again["created"] is False
+        assert again["entity_attachment"]["attached"] is True
+        assocs = db.list_entity_associations(make_issue_id(first["issue"].id))
+        assert assocs[0]["content_hash_at_attach"] == "blake3-v2"
+
+    def test_explicit_promote_and_attach_does_not_double_attach(self, db: FiligreeDB) -> None:
+        """The explicit form stays caller-driven: the metadata-derived default
+        attach must not also fire, or a divergent caller-supplied entity would
+        leave two associations."""
+        fid = _seed_entity_finding(
+            db,
+            metadata={"loomweave": {"entity_id": "loomweave:eid:meta"}},
+            file_content_hash="blake3-eee",
+        )
+        result = db.promote_finding_and_attach_entity(fid, "loomweave:eid:explicit", "hash-explicit")
+
+        assocs = db.list_entity_associations(make_issue_id(result["issue"].id))
+        assert [a["entity_id"] for a in assocs] == ["loomweave:eid:explicit"]
+        assert "entity_attachment" not in result
 
 
 class TestProcessScanResultsBreakingChange:

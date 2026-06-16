@@ -14,6 +14,18 @@ from filigree.dashboard import STATIC_DIR, create_app
 from tests.conftest import PopulatedDB
 
 
+class TestWeftWireSurface:
+    """T1: the named generation is served under /api/weft; legacy /api/loom is gone."""
+
+    async def test_weft_routes_mounted(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/ready")
+        assert resp.status_code != 404
+
+    async def test_legacy_loom_routes_are_gone(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/loom/ready")
+        assert resp.status_code == 404
+
+
 class TestDashboardIndex:
     async def test_serves_html(self, client: AsyncClient) -> None:
         resp = await client.get("/")
@@ -72,11 +84,16 @@ class TestStatsAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert "by_status" in data
+        assert "by_category" in data
         assert "by_type" in data
         assert "ready_count" in data
         assert "blocked_count" in data
         assert "total_dependencies" in data
         assert "prefix" in data
+        # status_name_counts / status_category_counts removed in 3.0.0
+        # (filigree-e4181ae767) — public /api/stats no longer emits the aliases.
+        assert "status_name_counts" not in data
+        assert "status_category_counts" not in data
 
     async def test_stats_prefix(self, client: AsyncClient) -> None:
         resp = await client.get("/api/stats")
@@ -147,17 +164,17 @@ class TestIssuesAPI:
         assert resp.status_code == 200, resp.text
         assert resp.json()["fields"] == {"restored": True}
 
-    async def test_loom_update_issue_force_overwrite_corrupt_fields(
+    async def test_weft_update_issue_force_overwrite_corrupt_fields(
         self,
         client: AsyncClient,
         dashboard_db: PopulatedDB,
     ) -> None:
-        issue = dashboard_db.db.create_issue("Loom corrupt fields")
+        issue = dashboard_db.db.create_issue("Weft corrupt fields")
         dashboard_db.db.conn.execute("UPDATE issues SET fields = ? WHERE id = ?", (b"\xff\xfe", issue.id))
         dashboard_db.db.conn.commit()
 
         resp = await client.patch(
-            f"/api/loom/issues/{issue.id}",
+            f"/api/weft/issues/{issue.id}",
             json={"fields": {"restored": True}, "force_overwrite_corrupt": True},
         )
 
@@ -353,9 +370,9 @@ class TestCreateIssueAPI:
         assert body["code"] == "VALIDATION"
         assert "priority field" in body["error"]
 
-    async def test_loom_create_rejects_priority_like_labels(self, client: AsyncClient) -> None:
+    async def test_weft_create_rejects_priority_like_labels(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/api/loom/issues",
+            "/api/weft/issues",
             json={"title": "Bad labels", "labels": ["priority:1"]},
         )
 
@@ -462,10 +479,10 @@ class TestUpdateAPI:
         data = resp.json()
         assert data["status"] == "in_progress"
 
-    async def test_loom_update_surfaces_soft_transition_warning(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+    async def test_weft_update_surfaces_soft_transition_warning(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         issue = dashboard_db.db.create_issue("Warn me", type="bug")
 
-        resp = await client.patch(f"/api/loom/issues/{issue.id}", json={"status": "confirmed"})
+        resp = await client.patch(f"/api/weft/issues/{issue.id}", json={"status": "confirmed"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -567,10 +584,10 @@ class TestCloseReopenAPI:
         assert data["annotation_warnings"][0]["annotation_id"] == annotation["annotation_id"]
         assert data["annotation_warnings"][0]["relationship"] == "must_consider"
 
-    async def test_loom_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
-        source = dashboard_db.db.db_path.parent / "api-close-loom.py"
+    async def test_weft_close_includes_annotation_warnings(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        source = dashboard_db.db.db_path.parent / "api-close-weft.py"
         source.write_text("x = 1\n")
-        issue = dashboard_db.db.create_issue("Loom annotated close")
+        issue = dashboard_db.db.create_issue("Weft annotated close")
         annotation = dashboard_db.db.annotate_file(
             source.name,
             "Must be considered before close.",
@@ -578,7 +595,7 @@ class TestCloseReopenAPI:
             links=[{"target_type": "issue", "target_id": issue.id, "relationship": "must_consider"}],
         )
 
-        resp = await client.post(f"/api/loom/issues/{issue.id}/close", json={"reason": "completed"})
+        resp = await client.post(f"/api/weft/issues/{issue.id}/close", json={"reason": "completed"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -631,14 +648,14 @@ class TestCloseReopenAPI:
         data = resp.json()
         assert data["status_category"] == "open"
 
-    async def test_loom_reopen_bug_returns_to_last_non_done_status(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
-        issue = dashboard_db.db.create_issue("Loom bug reopen", type="bug", fields={"severity": "major"})
+    async def test_weft_reopen_bug_returns_to_last_non_done_status(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        issue = dashboard_db.db.create_issue("Weft bug reopen", type="bug", fields={"severity": "major"})
         dashboard_db.db.update_issue(issue.id, status="confirmed")
         dashboard_db.db.update_issue(issue.id, status="fixing", fields={"root_cause": "bad assumption"})
         dashboard_db.db.update_issue(issue.id, status="verifying", fields={"fix_verification": "regression added"})
         dashboard_db.db.close_issue(issue.id, reason="closed too early")
 
-        resp = await client.post(f"/api/loom/issues/{issue.id}/reopen", json={"actor": "api-test"})
+        resp = await client.post(f"/api/weft/issues/{issue.id}/reopen", json={"actor": "api-test"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -715,12 +732,12 @@ class TestClaimAPI:
         assert resp.status_code == 200
         assert resp.json()["assignee"] == ""
 
-    async def test_release_if_held_expected_assignee_loom(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+    async def test_release_if_held_expected_assignee_weft(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
 
         resp = await client.post(
-            f"/api/loom/issues/{ids['a']}/release",
+            f"/api/weft/issues/{ids['a']}/release",
             json={"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"},
         )
 
@@ -748,7 +765,7 @@ class TestClaimAPI:
         dashboard_db: PopulatedDB,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from filigree.types.api import InvalidTransitionError
+        from filigree.types.api import InvalidTransitionError, TransitionMode
 
         ids = dashboard_db.ids
         dashboard_db.db.start_work(ids["a"], assignee="agent-1", actor="agent-1")
@@ -760,11 +777,11 @@ class TestClaimAPI:
             to_state: str,
             fields: dict[str, Any],
             *,
-            backward: bool = False,
+            mode: TransitionMode = TransitionMode.FORWARD,
         ) -> Any:
-            if backward:
-                raise InvalidTransitionError(type_name, from_state, to_state=to_state, backward=True)
-            return original_validate_transition(type_name, from_state, to_state, fields, backward=backward)
+            if mode is TransitionMode.BACKWARD:
+                raise InvalidTransitionError(type_name, from_state, to_state=to_state, mode=TransitionMode.BACKWARD)
+            return original_validate_transition(type_name, from_state, to_state, fields, mode=mode)
 
         monkeypatch.setattr(dashboard_db.db.templates, "validate_transition", fail_backward_validation)
 
@@ -814,7 +831,7 @@ class TestCommentAPI:
         ("path_template", "id_field"),
         [
             ("/api/issue/{issue_id}/comments", "id"),
-            ("/api/loom/issues/{issue_id}/comments", "comment_id"),
+            ("/api/weft/issues/{issue_id}/comments", "comment_id"),
         ],
     )
     async def test_add_comment_expected_assignee_allows_coordinator(
@@ -839,7 +856,7 @@ class TestCommentAPI:
         "path_template",
         [
             "/api/issue/{issue_id}/comments",
-            "/api/loom/issues/{issue_id}/comments",
+            "/api/weft/issues/{issue_id}/comments",
         ],
     )
     async def test_add_comment_expected_assignee_must_be_string(
@@ -1206,13 +1223,13 @@ class TestBatchAPI:
         body = resp.json()
         assert body["code"] == "VALIDATION"
         assert "force=true" in body["error"]
-        # And the loom mirror behaves the same.
-        resp_loom = await client.post(
-            "/api/loom/batch/close",
+        # And the weft mirror behaves the same.
+        resp_weft = await client.post(
+            "/api/weft/batch/close",
             json={"issue_ids": [phase.id], "force": True},
         )
-        assert resp_loom.status_code == 400
-        assert resp_loom.json()["code"] == "VALIDATION"
+        assert resp_weft.status_code == 400
+        assert resp_weft.json()["code"] == "VALIDATION"
 
     async def test_http_batch_close_force_with_opt_in_works(
         self,
@@ -1612,7 +1629,7 @@ class TestMcpEndpoint:
         """The high-privilege /mcp transport is not mounted unless a federation
         bearer token is configured. The default ``client`` fixture sets no token,
         so the endpoint must be absent (404). Mount-when-configured and bearer
-        enforcement are covered in tests/api/test_loom_auth.py.
+        enforcement are covered in tests/api/test_weft_auth.py.
         """
         resp = await client.get("/mcp/")
         assert resp.status_code == 404

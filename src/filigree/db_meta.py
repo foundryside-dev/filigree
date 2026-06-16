@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _normalize_iso_to_utc, _now_iso, _retry_busy
+from filigree.db_entity_associations import _normalise_optional_signature
 from filigree.db_files import VALID_FINDING_STATUSES, VALID_SEVERITIES, _normalize_project_relative_scan_path
 from filigree.db_issues import _check_expected_assignee, _validate_fields_payload, _validate_priority_value
 from filigree.db_observations import _expires_iso
@@ -20,7 +21,7 @@ from filigree.types.planning import CommentRecord, StatsResult
 
 logger = logging.getLogger(__name__)
 
-_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "clarion"})
+_VALID_FILE_REGISTRY_BACKENDS = frozenset({"local", "loomweave"})
 
 
 class MetaMixin(DBMixinProtocol):
@@ -56,8 +57,8 @@ class MetaMixin(DBMixinProtocol):
         _check_expected_assignee(issue_id, expected_assignee, row["assignee"] or "", actor=author)
         now = _now_iso()
         cursor = self.conn.execute(
-            "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
-            (issue_id, author, text, now),
+            "INSERT INTO comments (issue_id, author, verified_author, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (issue_id, author, self._verified_actor, text, now),
         )
         rowid = cursor.lastrowid
         if rowid is None:  # pragma: no cover — INSERT always sets lastrowid
@@ -67,20 +68,68 @@ class MetaMixin(DBMixinProtocol):
 
     def get_comments(self, issue_id: str) -> list[CommentRecord]:
         rows = self.conn.execute(
-            "SELECT id, author, text, created_at FROM comments WHERE issue_id = ? ORDER BY created_at",
+            "SELECT id, author, verified_author, text, created_at FROM comments WHERE issue_id = ? ORDER BY created_at",
             (issue_id,),
         ).fetchall()
-        return [CommentRecord(id=r["id"], author=r["author"], text=r["text"], created_at=r["created_at"]) for r in rows]
+        return [
+            CommentRecord(
+                id=r["id"],
+                author=r["author"],
+                verified_author=r["verified_author"],
+                text=r["text"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
 
     def get_comment(self, comment_id: int) -> CommentRecord:
         row = self.conn.execute(
-            "SELECT id, author, text, created_at FROM comments WHERE id = ?",
+            "SELECT id, author, verified_author, text, created_at FROM comments WHERE id = ?",
             (comment_id,),
         ).fetchone()
         if row is None:
             msg = f"Comment not found: {comment_id}"
             raise KeyError(msg)
-        return CommentRecord(id=row["id"], author=row["author"], text=row["text"], created_at=row["created_at"])
+        return CommentRecord(
+            id=row["id"],
+            author=row["author"],
+            verified_author=row["verified_author"],
+            text=row["text"],
+            created_at=row["created_at"],
+        )
+
+    def list_reconciliation_debt(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List issues carrying reconciliation debt, newest debt first.
+
+        Design A defers a governed finding→issue auto-close that Legis blocks (or
+        cannot confirm) and records the deferral as a ``filigree:reconciliation``
+        comment. This is the actionable read surface over that debt.
+
+        Discriminates on ``author = RECONCILIATION_DEBT_ACTOR``, NOT a
+        ``LIKE '[reconciliation-debt]%'`` scan of the unindexed ``comments.text``
+        — so it does not depend on the human-readable prefix string and does not
+        table-scan comment bodies. One row per issue: ``issue_id``,
+        ``debt_count``, ``latest`` (newest debt timestamp). The debt comment
+        bodies are read per-issue via ``get_comments`` — this surface is the
+        index, not the full text (``MAX(text)`` would be the lexicographically
+        largest body, unrelated to the latest, so it is deliberately not exposed).
+        """
+        from filigree.finding_issue_cascade import RECONCILIATION_DEBT_ACTOR
+
+        rows = self.conn.execute(
+            """
+            SELECT issue_id,
+                   COUNT(*) AS debt_count,
+                   MAX(created_at) AS latest
+            FROM comments
+            WHERE author = ?
+            GROUP BY issue_id
+            ORDER BY latest DESC
+            LIMIT ? OFFSET ?
+            """,
+            (RECONCILIATION_DEBT_ACTOR, limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- Labels --------------------------------------------------------------
 
@@ -377,8 +426,30 @@ class MetaMixin(DBMixinProtocol):
 
         preds = self._resolve_open_blocker_predicates()
         if preds is None:
+            # No open-category states registered => nothing can be *ready*
+            # (readiness is claim-eligibility, which is open-only). But
+            # blockedness is NOT open-gated: get_blocked() surfaces any
+            # not-done issue (wip included) waiting on a not-done blocker, so a
+            # wip/done-only template can still have blocked issues. Compute
+            # blocked_count from the same not-done predicate get_blocked() uses,
+            # or the two surfaces disagree (dogfood-4 B3 corner).
             ready_count = 0
-            blocked_count = 0
+            not_done_sql, not_done_params = self._category_predicate_sql(
+                "done", type_col="i.type", status_col="i.status", include_archived=True
+            )
+            blocker_done_sql, blocker_done_params = self._category_predicate_sql(
+                "done", type_col="blocker.type", status_col="blocker.status", include_archived=True
+            )
+            if not not_done_params and not blocker_done_params:
+                blocked_count = 0
+            else:
+                blocked_count = self.conn.execute(
+                    f"SELECT COUNT(DISTINCT i.id) as cnt FROM issues i "
+                    f"JOIN dependencies d ON d.issue_id = i.id "
+                    f"JOIN issues blocker ON d.depends_on_id = blocker.id "
+                    f"WHERE NOT ({not_done_sql}) AND NOT ({blocker_done_sql})",
+                    [*not_done_params, *blocker_done_params],
+                ).fetchone()["cnt"]
         else:
             (open_sql, open_params), (blocker_done_sql, blocker_done_params) = preds
             ready_count = self.conn.execute(
@@ -392,12 +463,22 @@ class MetaMixin(DBMixinProtocol):
                 f")",
                 [*open_params, *blocker_done_params],
             ).fetchone()["cnt"]
+            # blocked_count matches get_blocked()'s definition exactly — ONE
+            # definition of "blocked" across surfaces (dogfood-4 B3: stats said 0
+            # while work_blocked returned a wip-category issue). Blocked = any
+            # NOT-done issue (open or wip — a claimed in_progress dead-end is
+            # still stuck) with at least one not-done blocker. ready_count keeps
+            # the open-only predicate: readiness is claim-eligibility, blockedness
+            # is not.
+            not_done_sql, not_done_params = self._category_predicate_sql(
+                "done", type_col="i.type", status_col="i.status", include_archived=True
+            )
             blocked_count = self.conn.execute(
                 f"SELECT COUNT(DISTINCT i.id) as cnt FROM issues i "
                 f"JOIN dependencies d ON d.issue_id = i.id "
                 f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-                f"WHERE {open_sql} AND NOT ({blocker_done_sql})",
-                [*open_params, *blocker_done_params],
+                f"WHERE NOT ({not_done_sql}) AND NOT ({blocker_done_sql})",
+                [*not_done_params, *blocker_done_params],
             ).fetchone()["cnt"]
 
         dep_count = self.conn.execute("SELECT COUNT(*) as cnt FROM dependencies").fetchone()["cnt"]
@@ -411,13 +492,6 @@ class MetaMixin(DBMixinProtocol):
         return {
             "by_status": by_status,
             "by_category": by_category,
-            # DEPRECATED (filigree-17694d2db8): exact duplicates of by_status /
-            # by_category. Retained as compatibility aliases on a wire surface
-            # (MCP get_stats / get_summary, HTTP StatsWithPrefix) per ADR-009 §7.
-            # Remove in the next major; consumers should read by_status /
-            # by_category.
-            "status_name_counts": dict(by_status),
-            "status_category_counts": dict(by_category),
             "by_type": by_type,
             "ready_count": ready_count,
             "blocked_count": blocked_count,
@@ -566,6 +640,12 @@ class MetaMixin(DBMixinProtocol):
         backfill of pre-v16 rows). ``INSERT OR IGNORE`` is retained on
         purpose for this path — imports re-applied against the same DB
         should be idempotent on the full composite key, not raise.
+
+        ADR-012: this path intentionally omits ``verified_actor`` and is the
+        Beads→Filigree one-time migration writer only (``migrate.py``), whose
+        source has no transport proof — NULL is correct there. The JSONL import
+        path uses a separate INSERT (``import_jsonl``) that *does* preserve
+        ``verified_actor``; do not reuse ``bulk_insert_event`` for JSONL ingest.
         """
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
@@ -873,7 +953,7 @@ class MetaMixin(DBMixinProtocol):
         ("comment", "SELECT * FROM comments ORDER BY created_at"),
         ("event", "SELECT * FROM events ORDER BY created_at"),
         ("file_association", "SELECT * FROM file_associations ORDER BY created_at, file_id, issue_id"),
-        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, clarion_entity_id"),
+        ("entity_association", "SELECT * FROM entity_associations ORDER BY attached_at, issue_id, loomweave_entity_id"),
         ("file_event", "SELECT * FROM file_events ORDER BY created_at, file_id"),
         ("observation", "SELECT * FROM observations ORDER BY created_at"),
         ("dismissed_observation", "SELECT * FROM dismissed_observations ORDER BY dismissed_at"),
@@ -1293,14 +1373,15 @@ class MetaMixin(DBMixinProtocol):
                 if merge:
                     created = _normalize_iso_to_utc(record.get("created_at")) or _now_iso()
                     cursor = self.conn.execute(
-                        "INSERT INTO comments (issue_id, author, text, created_at) "
-                        "SELECT ?, ?, ?, ? "
+                        "INSERT INTO comments (issue_id, author, verified_author, text, created_at) "
+                        "SELECT ?, ?, ?, ?, ? "
                         "WHERE NOT EXISTS ("
                         "  SELECT 1 FROM comments WHERE issue_id = ? AND author = ? AND text = ? AND created_at = ?"
                         ")",
                         (
                             record.get("issue_id", ""),
                             record.get("author", ""),
+                            record.get("verified_author"),
                             record.get("text", ""),
                             created,
                             record.get("issue_id", ""),
@@ -1311,10 +1392,11 @@ class MetaMixin(DBMixinProtocol):
                     )
                 else:
                     cursor = self.conn.execute(
-                        "INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO comments (issue_id, author, verified_author, text, created_at) VALUES (?, ?, ?, ?, ?)",
                         (
                             record.get("issue_id", ""),
                             record.get("author", ""),
+                            record.get("verified_author"),
                             record.get("text", ""),
                             _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         ),
@@ -1329,12 +1411,13 @@ class MetaMixin(DBMixinProtocol):
                 # (filigree-20911dfe6d)
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO events "
-                    "(issue_id, event_type, actor, old_value, new_value, comment, created_at, event_seq) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(issue_id, event_type, actor, verified_actor, old_value, new_value, comment, created_at, event_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.get("issue_id", ""),
                         record.get("event_type", ""),
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         record.get("old_value"),
                         record.get("new_value"),
                         record.get("comment", ""),
@@ -1362,11 +1445,12 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(entity_associations):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO entity_associations "
-                    "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by, migration_orphaned_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by, "
+                    "migration_orphaned_at, signature, signoff_seq, signed_content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["issue_id"],
-                        record["clarion_entity_id"],
+                        record["loomweave_entity_id"],
                         record["content_hash_at_attach"],
                         _normalize_iso_to_utc(record.get("attached_at")) or _now_iso(),
                         record.get("attached_by", ""),
@@ -1374,6 +1458,18 @@ class MetaMixin(DBMixinProtocol):
                         # verbatim across a backup/restore so an unreviewed orphan
                         # survives. Absent in pre-v22 exports → NULL.
                         record.get("migration_orphaned_at"),
+                        # Legis governed-sign-off binding (v25, B1). Opaque,
+                        # preserved verbatim; absent in pre-v25 exports → NULL.
+                        # Normalised here too (raw INSERT bypasses
+                        # add_entity_association) so a foreign/hand-built JSONL
+                        # carrying a blank signature cannot land "" in the column,
+                        # keeping governed-ness classification consistent.
+                        _normalise_optional_signature(record.get("signature")),
+                        record.get("signoff_seq"),
+                        # v27: content the signature was cut over. Threaded verbatim
+                        # so drift detection survives a backup/restore of governed
+                        # rows; absent in pre-v27 exports → NULL (read as fresh).
+                        record.get("signed_content_hash"),
                     ),
                 )
                 count += cursor.rowcount
@@ -1384,8 +1480,8 @@ class MetaMixin(DBMixinProtocol):
                 if merge:
                     created = _normalize_iso_to_utc(record.get("created_at")) or _now_iso()
                     cursor = self.conn.execute(
-                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, created_at) "
-                        "SELECT ?, ?, ?, ?, ?, ? "
+                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
                         "WHERE NOT EXISTS ("
                         "  SELECT 1 FROM file_events "
                         "  WHERE file_id = ? AND event_type = ? AND field = ? AND old_value = ? AND new_value = ? AND created_at = ?"
@@ -1396,6 +1492,10 @@ class MetaMixin(DBMixinProtocol):
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            # B4: preserve the claimed actor on round-trip; the dedup
+                            # identity (WHERE NOT EXISTS below) deliberately excludes it.
+                            record.get("actor", ""),
+                            record.get("verified_actor"),
                             created,
                             file_id,
                             record.get("event_type", "file_metadata_update"),
@@ -1407,13 +1507,17 @@ class MetaMixin(DBMixinProtocol):
                     )
                 else:
                     cursor = self.conn.execute(
-                        "INSERT INTO file_events (file_id, event_type, field, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO file_events "
+                        "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             file_id,
                             record.get("event_type", "file_metadata_update"),
                             record.get("field", ""),
                             record.get("old_value", ""),
                             record.get("new_value", ""),
+                            record.get("actor", ""),  # B4: preserve claimed actor on round-trip
+                            record.get("verified_actor"),
                             _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         ),
                     )
@@ -1433,8 +1537,8 @@ class MetaMixin(DBMixinProtocol):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO observations "
                     "(id, summary, detail, file_id, file_path, line, source_issue_id, "
-                    "source_finding_id, priority, actor, created_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_finding_id, priority, actor, verified_actor, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["id"],
                         record["summary"],
@@ -1446,6 +1550,7 @@ class MetaMixin(DBMixinProtocol):
                         source_finding_id,
                         record.get("priority", 3),
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         _normalize_iso_to_utc(record.get("created_at")) or _now_iso(),
                         _normalize_iso_to_utc(record.get("expires_at")) or _expires_iso(),
                     ),
@@ -1614,13 +1719,15 @@ class MetaMixin(DBMixinProtocol):
             for _import_index, record in enumerate(annotation_events):
                 cursor = self.conn.execute(
                     f"INSERT {conflict} INTO annotation_events "
-                    "(id, annotation_id, event_type, actor, reason, old_value, new_value, target_type, target_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, annotation_id, event_type, actor, verified_actor, reason, "
+                    "old_value, new_value, target_type, target_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record["id"],
                         record["annotation_id"],
                         record["event_type"],
                         record.get("actor", ""),
+                        record.get("verified_actor"),
                         record.get("reason", ""),
                         record.get("old_value"),
                         record.get("new_value"),

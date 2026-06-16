@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -18,7 +17,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from filigree.core import FILIGREE_DIR_NAME, read_config
+from filigree.core import read_config, resolve_store_dir
+from filigree.install_support.gitignore import (
+    MCP_JSON_IGNORE_RULES,
+    has_active_ignore,
+)
 from filigree.install_support.safe_paths import (
     UnsafeInstallPathError,
     project_path,
@@ -26,6 +29,22 @@ from filigree.install_support.safe_paths import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The server-mode ``.mcp.json`` Authorization header carries the LITERAL
+# federation token (see ``_install_mcp_server_mode``), not a ``${ENV}`` reference:
+# the env-var indirection forced an export in every client shell — recurring 401
+# toil, and the daemon validates against the same minted token. The token is
+# loopback deconfliction plumbing, not a security secret — but the literal still
+# must not enter git history: it is minted per-machine in ``.weft/filigree/``, so a
+# committed copy makes every *other* clone present one machine's token and the
+# daemon 401s the rest (the exact failure ``_doctor_federation_token_checks``
+# reports). So the artifact is chmod-tightened toward ``0600`` (best-effort: a
+# no-op that returns success on filesystems like WSL DrvFs / CIFS, so the install
+# message stats and reports the *real* mode rather than assuming 0600) AND
+# gitignore-guarded — see ``_guard_mcp_json_gitignore``. (The 0600 token *file*
+# itself lives under the already-gitignored ``.weft/``; this guard protects the
+# literal copy.)
+
 
 # ---------------------------------------------------------------------------
 # Command discovery
@@ -85,7 +104,7 @@ def _codex_server_mode_url(project_root: Path, port: int) -> str:
     """Build the streamable-HTTP URL for a project-keyed daemon route."""
     project_key = "filigree"
     try:
-        config = read_config(project_root / FILIGREE_DIR_NAME)
+        config = read_config(resolve_store_dir(project_root))
         prefix = config.get("prefix")
         if isinstance(prefix, str) and prefix.strip():
             project_key = prefix.strip()
@@ -292,26 +311,129 @@ def _install_mcp_server_mode(project_root: Path, port: int) -> tuple[bool, str]:
     except UnsafeInstallPathError as exc:
         return False, str(exc)
 
+    # Embed the LITERAL per-project federation token (not a ${ENV} reference).
+    # The URL is project-scoped (``/mcp/?project={key}``), and the server daemon
+    # validates a scoped request against THAT project's own token — not the
+    # daemon's home-store token (filigree-23574069a1). So embed the token minted
+    # in this project's store dir; mint_token_file reads the existing value (the
+    # daemon reuses it on serve). Writing the literal means the client works with
+    # zero export — the token is loopback deconfliction plumbing, not a secret.
+    from filigree.federation_token import mint_token_file
+
+    token = mint_token_file(resolve_store_dir(project_root))
     mcp_config["mcpServers"]["filigree"] = {
         "type": "streamable-http",
         "url": _codex_server_mode_url(project_root, port),
+        "headers": {"Authorization": f"Bearer {token}"},
     }
 
     mcp_json_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
-    msg = f"Wrote {mcp_json_path} (streamable-http, port {port})"
-    # Server-mode points Claude/Codex at the dashboard daemon's /mcp transport,
-    # which is only mounted when a federation bearer token is configured. Warn
-    # loudly if none is set, or the MCP endpoint will 404 at runtime.
-    if not (os.environ.get("FILIGREE_FEDERATION_API_TOKEN") or os.environ.get("FILIGREE_API_TOKEN")):
-        logger.warning(
-            "Server-mode MCP installed but no federation bearer token is set; the "
-            "daemon will not mount /mcp until FILIGREE_FEDERATION_API_TOKEN is configured."
-        )
-        msg += (
-            " (WARNING: set FILIGREE_FEDERATION_API_TOKEN and restart the daemon — "
-            "the /mcp HTTP transport is not mounted without it, so this config will 404)"
-        )
+    # The literal token makes this artifact machine-private: tighten to 0600
+    # (matching the source token file) and gitignore-guard it so it never lands
+    # in git history. Both are best-effort — the install still succeeds if the
+    # filesystem/git refuses.
+    try:
+        mcp_json_path.chmod(0o600)
+    except OSError as exc:
+        logger.warning("Could not chmod %s to 0600: %s", mcp_json_path, exc)
+    # Report the ACTUAL resulting mode, never an assumed 0600. chmod is
+    # best-effort and on filesystems like WSL DrvFs / CIFS it is a no-op that
+    # *returns success* (no OSError) while the file stays at the umask default —
+    # so conditioning on the call not raising would still misreport. Stat the
+    # file and state the real mode: claiming "mode 0600" when it is not is the
+    # false-posture class d2597d0 fixed, and must not creep back into the
+    # success message.
+    try:
+        actual_mode = mcp_json_path.stat().st_mode & 0o777
+        mode_note = "mode 0600" if actual_mode == 0o600 else f"mode {actual_mode:04o} (could not tighten to 0600 on this filesystem)"
+    except OSError:
+        mode_note = "mode unknown"
+    note = _guard_mcp_json_gitignore(project_root)
+    msg = f"Wrote {mcp_json_path} (streamable-http, port {port}; literal federation token embedded, {mode_note})"
+    if note:
+        msg += f"; {note}"
     return True, msg
+
+
+def _git_tracks(project_root: Path, relpath: str) -> bool:
+    """Return True if *relpath* is already tracked by git under *project_root*.
+
+    Best-effort: no git, no repo, or any error → False (treated as not tracked).
+    An inconclusive probe (raised exception, or a non-{0,1} return code such as a
+    missing repo or index-lock contention) is logged at debug — it is otherwise
+    indistinguishable from a clean not-tracked answer (rc 1), which silences the
+    "already-tracked → git rm --cached" token warning the caller derives from it.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "ls-files", "--error-unmatch", relpath],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        # Probe failed (no git binary, timeout, odd invocation). Degrade to
+        # "not tracked" so the install proceeds — but log it, because this is
+        # indistinguishable to the caller from a clean "not tracked" result, and
+        # a silent error here makes the "already-tracked → run git rm --cached"
+        # warning vanish on a slow/odd git, leaving a committed token unflagged.
+        logger.debug("git ls-files probe for %r failed; treating as untracked: %s", relpath, exc)
+        return False
+    if result.returncode == 0:
+        return True
+    # rc 1 is the documented "cleanly not tracked" answer (silent). Any other
+    # code (e.g. 128: not a repo, or index-lock contention) means git ran but
+    # could not give a definitive answer — same blind spot as the exception
+    # path, so log it rather than let it pass as a clean negative.
+    if result.returncode != 1:
+        logger.debug(
+            "git ls-files probe for %r returned rc=%s; treating as untracked: %s",
+            relpath,
+            result.returncode,
+            result.stderr.strip(),
+        )
+    return False
+
+
+def _guard_mcp_json_gitignore(project_root: Path) -> str | None:
+    """Ensure the project-root ``.gitignore`` ignores ``.mcp.json`` (server mode).
+
+    The server-mode ``.mcp.json`` carries the LITERAL per-machine federation
+    token; committing it makes every other clone present this machine's token
+    and the daemon 401s the rest. Appending the rule keeps the literal out of
+    git history. Returns a human-readable note (folded into the install message),
+    or ``None`` when nothing needed saying.
+
+    A ``.gitignore`` rule is a no-op on an already-*tracked* file, so if
+    ``.mcp.json`` is already committed the literal still lands on the next commit
+    — that case is surfaced as an explicit warning telling the operator to
+    ``git rm --cached`` it. Best-effort: a write/path failure degrades to a note
+    rather than failing the install.
+    """
+    notes: list[str] = []
+    try:
+        gitignore = project_path(project_root, ".gitignore")
+    except UnsafeInstallPathError as exc:
+        logger.warning("Could not resolve .gitignore for MCP guard: %s", exc)
+        gitignore = None
+    if gitignore is not None:
+        content = gitignore.read_text() if gitignore.exists() else ""
+        if has_active_ignore(content, MCP_JSON_IGNORE_RULES):
+            notes.append(".mcp.json already gitignored")
+        else:
+            block = "\n# Filigree server-mode MCP config embeds a literal federation token\n.mcp.json\n"
+            if content and not content.endswith("\n"):
+                content += "\n"
+            try:
+                gitignore.write_text((content + block).lstrip("\n"))
+                notes.append("added .mcp.json to .gitignore")
+            except OSError as exc:
+                logger.warning("Could not update .gitignore for MCP guard: %s", exc)
+    if _git_tracks(project_root, ".mcp.json"):
+        notes.append(
+            "WARNING: .mcp.json is already git-tracked — the literal token will still be committed; run `git rm --cached .mcp.json`"
+        )
+    return "; ".join(notes) if notes else None
 
 
 def install_claude_code_mcp(

@@ -325,6 +325,9 @@ class ScansMixin(DBMixinProtocol):
             **run,
             process_alive=process_alive,
             log_tail=log_tail,
+            # Posture echo: the target file(s)' current findings breakdown, so a
+            # status poll is never a vacuous run-state-only green (mirrors W2).
+            file_summary=self.get_files_findings_summary(run["file_ids"]),
         )
         if len(run["file_paths"]) > 1:
             result["data_warnings"].append(

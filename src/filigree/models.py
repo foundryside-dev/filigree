@@ -127,10 +127,10 @@ class FileRecord:
 
     ``content_hash == ''`` is the intentional sentinel for
     ``registry_backend == 'local'`` because the local backend cannot compute a
-    drift hash. Clarion-backed records must carry a non-empty hash. This
+    drift hash. Loomweave-backed records must carry a non-empty hash. This
     correlated invariant is enforced at construction by ``__post_init__`` — the
     two illegal cross combinations raise ``ValueError`` — so it holds on every
-    hydration path, not only where the Clarion registry client rejects blank
+    hydration path, not only where the Loomweave registry client rejects blank
     hashes before rows are written.
     """
 
@@ -150,7 +150,7 @@ class FileRecord:
         # The (registry_backend, content_hash) pair is a correlated invariant,
         # not two independent fields: ``local`` files carry the empty-hash
         # sentinel (the local backend cannot compute a drift hash) and
-        # ``clarion`` files must carry a non-empty hash. Reject the two illegal
+        # ``loomweave`` files must carry a non-empty hash. Reject the two illegal
         # cross combinations at construction — mirrors ScanFinding's enum guard
         # and closes the type-level hole the flat dataclass otherwise allows.
         if self.registry_backend not in _VALID_REGISTRY_BACKENDS:
@@ -209,6 +209,21 @@ class ScanFinding:
     updated_at: ISOTimestamp = _EMPTY_TS
     last_seen_at: ISOTimestamp | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # N6 (weft-c815d5e77d): the linked issue's status and resolution, surfaced
+    # via a LEFT JOIN in the finding read paths so a finding pointing at a
+    # dismissed (``not_a_bug``) issue reads as triaged, not open work. Both are
+    # ``None`` when the finding is unlinked, when the linked issue row is missing
+    # (LEFT JOIN miss), or when the read path did not join (bare ``SELECT *``).
+    issue_status: str | None = None
+    issue_resolution: str | None = None
+    # Wardline's suppression verdict, lifted out of
+    # ``metadata.wardline.suppression_state`` (``"baselined"`` | ``"waived"`` |
+    # ``"judged"`` | …) onto the read surface so an agent triaging via
+    # ``finding_list`` / the weft findings list can tell an accepted/suppressed
+    # defect from open work without parsing nested metadata. ``None`` when the
+    # finding carries no wardline suppression. Mirrors the N6 issue_status lift;
+    # populated from metadata in ``FileDBMixin._build_scan_finding``.
+    suppression_state: str | None = None
 
     def __post_init__(self) -> None:
         if self.severity not in _VALID_SEVERITIES:
@@ -243,6 +258,9 @@ class ScanFinding:
             first_seen=self.first_seen,
             updated_at=self.updated_at,
             last_seen_at=self.last_seen_at,
+            issue_status=self.issue_status,
+            issue_resolution=self.issue_resolution,
+            suppression_state=self.suppression_state,
             metadata=metadata,
             data_warnings=warnings,
         )

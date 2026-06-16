@@ -627,12 +627,12 @@ def migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
 
 
 def migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
-    """v14 -> v15: Add entity_associations table (ADR-029, Clarion B.7).
+    """v14 -> v15: Add entity_associations table (ADR-029, Loomweave B.7).
 
-    Binds Filigree issues to Clarion entities via opaque string IDs.
+    Binds Filigree issues to Loomweave entities via opaque string IDs.
     Filigree does not parse the ID grammar — the federation enrich-only
-    rule (loom.md §5) requires that Clarion's entity-ID format remain
-    Clarion's contract with itself.
+    rule (weft.md §5) requires that Loomweave's entity-ID format remain
+    Loomweave's contract with itself.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS entity_associations (
@@ -673,7 +673,7 @@ def migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
 
 
 def migrate_v18_to_v19(conn: sqlite3.Connection) -> None:
-    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Loom §3.B).
+    """v18 -> v19: Add ``scan_findings.fingerprint`` + partition the dedup index (Weft §3.B).
 
     A scanner may supply a stable per-finding ``fingerprint`` as the finding's
     cross-run identity. When present it keys lifecycle/``seen_count`` instead of
@@ -707,7 +707,7 @@ def migrate_v19_to_v20(conn: sqlite3.Connection) -> None:
 
     A hard delete (``FiligreeDB.delete_issue``) removes the issue row and all
     of its child rows, including its ``events``. Because ``GET
-    /api/loom/changes`` (``get_events_since``) INNER JOINs ``issues``, a
+    /api/weft/changes`` (``get_events_since``) INNER JOINs ``issues``, a
     hard-deleted issue is otherwise invisible to federation consumers — they
     keep a stale reference forever. ``delete_issue`` writes a tombstone row
     here in the same transaction, and the changes feed surfaces it as a
@@ -739,13 +739,13 @@ def migrate_v20_to_v21(conn: sqlite3.Connection) -> None:
     """v20 -> v21: Add ``deleted_issues.entity_ids`` (F5 entity-association amplifier).
 
     ``delete_issue`` cascades ``entity_associations`` (``ON DELETE CASCADE``), so a
-    hard delete silently drops Filigree's side of every Clarion entity binding. The
+    hard delete silently drops Filigree's side of every Loomweave entity binding. The
     v20 tombstone recorded only the issue identity, so the synthetic ``issue_deleted``
     change record could not name *which* bindings the cascade removed — a consumer
     that mirrors the reverse lookup (``list_associations_by_entity``) would keep
     returning the deleted issue and surface a user-facing phantom (filigree-f3bf56554c).
 
-    This adds a JSON-array column holding the affected ``clarion_entity_id``s,
+    This adds a JSON-array column holding the affected ``loomweave_entity_id``s,
     captured in ``delete_issue`` before the cascade and surfaced as
     ``affected_entities`` on the change record. The column is ``NOT NULL DEFAULT
     '[]'`` to match the fresh ``SCHEMA_SQL`` shape (SQLite permits a NOT NULL ADD
@@ -761,9 +761,9 @@ def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
     """v21 -> v22: Add ``entity_associations.migration_orphaned_at`` (SEI backfill).
 
     The locator→SEI value migration (ADR-038 §7, driven by ``filigree
-    sei-backfill``) rewrites each opaque ``clarion_entity_id`` from its locator to
+    sei-backfill``) rewrites each opaque ``loomweave_entity_id`` from its locator to
     the resolved SEI *in place* — the column name, wire shape, and storage
-    mechanism are unchanged. A locator that no longer resolves (Clarion answers
+    mechanism are unchanged. A locator that no longer resolves (Loomweave answers
     ``alive:false``) must be kept verbatim and flagged for human review, never
     silently dropped (the suite's no-false-green ethos).
 
@@ -775,6 +775,176 @@ def migrate_v21_to_v22(conn: sqlite3.Connection) -> None:
     the column already exists.
     """
     add_column(conn, "entity_associations", "migration_orphaned_at", "TEXT", default=None)
+
+
+def migrate_v22_to_v23(conn: sqlite3.Connection) -> None:
+    """v22 -> v23: Add caller-supplied ``entity_associations.entity_kind``.
+
+    Entity IDs are opaque external identifiers: they may be SEIs, legacy
+    locators, or non-Loomweave IDs. Filigree must not parse kind out of the ID,
+    but callers that already know the kind can now store it explicitly for UI
+    and API presentation. Empty string means unknown/not supplied.
+    """
+    add_column(conn, "entity_associations", "entity_kind", "TEXT NOT NULL", default="''")
+
+
+def migrate_v23_to_v24(conn: sqlite3.Connection) -> None:
+    """v23 -> v24: Add nullable ``verified_*`` transport-bound actor columns (ADR-012).
+
+    The ``actor``/``author`` string on a write is an unauthenticated *claim*. This
+    adds a sibling column on every runtime event-bearing table holding the
+    identity the transport *verified* (the OS user the writing process ran as), or
+    NULL when no transport proof exists. NULL is the default for all existing rows
+    (no backfill) and for every unverified or system-written row. The claimed
+    column is unchanged; the ``events`` dedup index is NOT extended — verified_actor
+    is attribution metadata, not part of event identity. Nullable (``default=None``
+    adds no DEFAULT clause); existing rows read NULL. Idempotent: ``add_column``
+    no-ops if the column already exists.
+    """
+    add_column(conn, "events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "file_events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "annotation_events", "verified_actor", "TEXT", default=None)
+    add_column(conn, "comments", "verified_author", "TEXT", default=None)
+    add_column(conn, "observations", "verified_actor", "TEXT", default=None)
+
+
+def migrate_v24_to_v25(conn: sqlite3.Connection) -> None:
+    """v24 -> v25: Add nullable ``signature`` / ``signoff_seq`` columns to
+    ``entity_associations`` (B1 — Legis governed-sign-off binding).
+
+    When Legis clears a *governed* sign-off and binds an entity-association to
+    an issue, it sends an opaque HMAC ``signature`` over
+    ``{issue_id, entity_id, content_hash, signoff_seq}`` plus the
+    ``signoff_seq``. Both are OPTIONAL on the wire — Legis omits them when no
+    key is configured — so both columns are nullable (``default=None`` adds no
+    DEFAULT clause); existing rows and non-governed bindings read NULL with no
+    backfill. Filigree stores them verbatim and never verifies the signature
+    (it has no key), exactly as it treats ``content_hash_at_attach``.
+    Idempotent: ``add_column`` no-ops if the column already exists.
+    """
+    add_column(conn, "entity_associations", "signature", "TEXT", default=None)
+    add_column(conn, "entity_associations", "signoff_seq", "INTEGER", default=None)
+
+
+def migrate_v25_to_v26(conn: sqlite3.Connection) -> None:
+    """v25 -> v26: Loomweave/Weft rebrand data pass.
+
+    Renames the entity-association column ``clarion_entity_id`` ->
+    ``loomweave_entity_id`` (SQLite's RENAME COLUMN rewrites the PRIMARY KEY
+    reference) and rewrites EVERY stored ``clarion:eid:`` SEI prefix ->
+    ``loomweave:eid:`` and finding rule-id prefix ``CLA-`` -> ``LMWV-`` in
+    place. Suffixes are preserved. Idempotent under re-run (guards on the source
+    name/prefix existing).
+
+    The SEI value is stored in more than one place — every site is rewritten so
+    a federation consumer (already on ``loomweave:eid:``) reconciling off any of
+    them matches:
+      - ``entity_associations.loomweave_entity_id`` — the binding itself.
+      - ``deleted_issues.entity_ids`` — the F5 tombstone JSON array surfaced as
+        an ``issue_deleted`` change record's ``affected_entities``; a stale
+        prefix here reproduces the phantom-reverse-lookup bug (filigree-f3bf56554c).
+      - ``events`` audit log — the entity-association add/remove/refresh events
+        carry the SEI in ``new_value`` / ``old_value`` / ``comment``.
+
+    NOTE (rule-id dedup): the ``CLA- -> LMWV-`` rewrite could in principle trip
+    the ``scan_findings`` unique dedup index if a DB straddled the cutover and
+    already held an ``LMWV-`` finding at the same (file, source, line). Filigree
+    is the last federation member to rebrand, so a real Filigree DB holds only
+    ``CLA-`` rows; if it ever collided the transaction rolls back cleanly (no
+    corruption). The v19 fingerprint-partition index makes it lower-probability.
+
+    NOTE (Legis): rewriting the SEI prefix changes the entity_id string the
+    Legis HMAC was cut over, so every stored ``signature`` becomes
+    stale-pending-reissue. Filigree never verifies the signature, so reads do
+    not break; Legis re-signs in lockstep (see the rebrand epic, T0b).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(entity_associations)").fetchall()}
+    if "clarion_entity_id" in cols and "loomweave_entity_id" not in cols:
+        rename_column(conn, "entity_associations", "clarion_entity_id", "loomweave_entity_id")
+    # Re-affirm the entity index under the new column name (drop old, recreate).
+    drop_index(conn, "ix_entity_assoc_entity")
+    add_index(conn, "ix_entity_assoc_entity", "entity_associations", ["loomweave_entity_id"])
+    # Rewrite stored SEI prefixes (clarion:eid: -> loomweave:eid:), suffix preserved.
+    conn.execute(
+        "UPDATE entity_associations SET loomweave_entity_id = "
+        "'loomweave:eid:' || substr(loomweave_entity_id, length('clarion:eid:') + 1) "
+        "WHERE loomweave_entity_id LIKE 'clarion:eid:%'"
+    )
+    # F5 deletion-tombstone affected-entity arrays (JSON text) carry the same SEI.
+    conn.execute(
+        "UPDATE deleted_issues SET entity_ids = replace(entity_ids, 'clarion:eid:', 'loomweave:eid:') "
+        "WHERE entity_ids LIKE '%clarion:eid:%'"
+    )
+    # Entity-association audit events store the SEI verbatim in new_value/old_value/comment.
+    conn.execute(
+        "UPDATE events SET "
+        "new_value = replace(new_value, 'clarion:eid:', 'loomweave:eid:'), "
+        "old_value = replace(old_value, 'clarion:eid:', 'loomweave:eid:'), "
+        "comment = replace(comment, 'clarion:eid:', 'loomweave:eid:') "
+        "WHERE new_value LIKE '%clarion:eid:%' OR old_value LIKE '%clarion:eid:%' OR comment LIKE '%clarion:eid:%'"
+    )
+    # Rewrite stored finding rule-id prefixes (CLA- -> LMWV-), suffix preserved.
+    conn.execute("UPDATE scan_findings SET rule_id = 'LMWV-' || substr(rule_id, length('CLA-') + 1) WHERE rule_id LIKE 'CLA-%'")
+
+
+def migrate_v26_to_v27(conn: sqlite3.Connection) -> None:
+    """v26 -> v27: Add nullable ``signed_content_hash`` to ``entity_associations``
+    and close the governed->ungoverned signature bypass (PR #52 security gate).
+
+    The Legis ``signature`` is an HMAC over
+    ``{issue_id, entity_id, content_hash, signoff_seq}`` — it is bound to a
+    specific content snapshot. ``signed_content_hash`` records the content_hash
+    that snapshot was, so the closure gate can tell a *fresh* governed binding
+    (signature still covers the current content) from a *drifted* one (content
+    has moved on since the sign-off) and fail closed on the latter.
+
+    Backfill: ``signed_content_hash = content_hash_at_attach WHERE
+    signature IS NOT NULL``. This is sound for existing governed rows because
+    the *old* (pre-fix) re-attach UNCONDITIONALLY clobbered ``signature`` to NULL
+    on any signatureless refresh — so any row that STILL holds a signature has
+    not been re-attached since it was signed, hence its content_hash_at_attach
+    still equals the content the signature was cut over. Non-governed rows and
+    pre-v27 DBs read NULL (the gate treats NULL as fresh — a no-op compatibility
+    shim). Additive + idempotent (``add_column`` no-ops if present).
+
+    Scope boundary: this detects CONTENT drift, not IDENTITY drift. The
+    v25->v26 rebrand rewrote entity_id (SEI prefix) in place, changing the HMAC
+    input while leaving content_hash untouched; those rows backfill as
+    content-fresh, the gate consults Legis on the network call, and Legis
+    resolves the identity drift there (it re-signs in lockstep — see
+    migrate_v25_to_v26). That is the safe path, not a bug.
+    """
+    add_column(conn, "entity_associations", "signed_content_hash", "TEXT", default=None)
+    conn.execute("UPDATE entity_associations SET signed_content_hash = content_hash_at_attach WHERE signature IS NOT NULL")
+
+
+def migrate_v27_to_v28(conn: sqlite3.Connection) -> None:
+    """v27 -> v28: Add the ``scan_source_schemes`` registry (Weft seam G4).
+
+    Records the ``fingerprint_scheme`` a scanner declares per ``scan_source`` so
+    Filigree can detect a silent scheme bump (e.g. wardline wlfp2 -> wlfp3) on
+    ingest. The dedup join is keyed on the raw fingerprint VALUE; a scheme bump
+    re-mints every fingerprint, so without this registry the new-scheme batch
+    would miss the join and the ``mark_unseen`` sweep would CASCADE-CLOSE every
+    prior-scheme finding as 'fixed' with zero error. On mismatch, ingest refuses
+    the sweep and surfaces a ``scheme_mismatch`` weft-reason instead.
+
+    Additive + idempotent: a new table only (``CREATE TABLE IF NOT EXISTS``), no
+    column add, no row rewrite. Existing rows and conformant same-scheme clients
+    see ZERO change — the table starts empty and is populated lazily on the first
+    ingest that declares a non-blank scheme for a scan_source. A scan_source that
+    never declares a scheme (legacy/blank) never gets a row, and its absence reads
+    as "no stored scheme yet" (proceed normally).
+    """
+    conn.execute(
+        """\
+        CREATE TABLE IF NOT EXISTS scan_source_schemes (
+            scan_source        TEXT PRIMARY KEY,
+            fingerprint_scheme TEXT NOT NULL DEFAULT '',
+            first_seen         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL
+        )"""
+    )
 
 
 MIGRATIONS: dict[int, MigrationFn] = {
@@ -799,6 +969,12 @@ MIGRATIONS: dict[int, MigrationFn] = {
     19: migrate_v19_to_v20,
     20: migrate_v20_to_v21,
     21: migrate_v21_to_v22,
+    22: migrate_v22_to_v23,
+    23: migrate_v23_to_v24,
+    24: migrate_v24_to_v25,
+    25: migrate_v25_to_v26,
+    26: migrate_v26_to_v27,
+    27: migrate_v27_to_v28,
 }
 
 

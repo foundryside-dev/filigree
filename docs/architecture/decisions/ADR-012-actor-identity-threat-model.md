@@ -69,7 +69,7 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
    broad for the 2.1.0 hardening pass. Tracked as a Filigree issue and
    referenced from this ADR.
 
-   **Partial lift (2026-06-03, [ADR-018](ADR-018-loom-bearer-token-auth.md)):**
+   **Partial lift (2026-06-03, [ADR-018](ADR-018-weft-bearer-token-auth.md)):**
    the **access-gate** half of HTTP authentication has since landed — opt-in
    bearer-token enforcement on the loom federation surface, active only when
    `FILIGREE_API_TOKEN` is set. That gates *access* but does **not** bind a
@@ -116,6 +116,69 @@ We adopt an explicit threat model for actor strings in Filigree 2.x:
 
 - This ADR does not change `sanitize_actor`. It documents the existing
   semantics and pins them with tests.
+
+## v24 increment — verified actor lands (schema v24, 3.0.0)
+
+This is the full lift of the **verified-actor** half of the §5 deferral that
+the "Partial lift (2026-06-03)" note anticipated. ADR-018 had already landed
+the access-gate half (opt-in bearer-token enforcement on the loom surface);
+schema v24 now binds the transport's proven identity into the audit trail for
+the two surfaces whose transport boundary is unambiguous (CLI, MCP stdio),
+while the remaining surfaces stay explicitly deferred.
+
+### What landed
+
+- **Schema (v24).** A nullable `verified_*` column is added to every runtime
+  event-bearing table: `events.verified_actor`, `file_events.verified_actor`,
+  `annotation_events.verified_actor`, `comments.verified_author`,
+  `observations.verified_actor`. The claimed `actor`/`author` value is
+  unchanged. `verified_*` holds the transport-verified identity (the OS user
+  the writing process ran as) or `NULL` when no transport proof exists — the
+  value for every historical row (no backfill), every unverified surface, and
+  every system/cascade/migration-authored write. The `events` dedup unique
+  index is **not** extended: `verified_actor` is attribution metadata, not part
+  of event identity. Migration `migrate_v23_to_v24` is additive and idempotent.
+
+- **Session-level plumbing.** The verified identity is resolved once at the
+  process entry point and held on the session (`FiligreeDB._verified_actor`,
+  `str | None`, set via `set_verified_actor()`); it propagates to worker-thread
+  clones via `copy.copy`. Resolution is `actor_identity.resolve_os_actor()`
+  (POSIX `pwd`), which returns `None` on Windows or any failure and never
+  raises.
+
+- **Entry-point resolvers.** The CLI (`get_db()`) and the MCP stdio startup
+  path (`_attempt_startup`) set the verified actor. These are the surfaces
+  whose transport boundary directly identifies an OS user.
+
+- **Conflict policy: record both, warn, never block.** Both the claimed and
+  verified identities are persisted. On mismatch a non-blocking `ACTOR_MISMATCH`
+  warning is surfaced; the write always proceeds. Placeholder framework default
+  claims (`cli`, `mcp`) are suppressed — they are not a real disagreement, so
+  they raise no warning. Two surfaces carry the warning: the CLI emits it on
+  **stderr** (always, so production stderr never pollutes `--json` stdout);
+  MCP injects a top-level `warnings` array into the tool-response envelope
+  (`_inject_warnings`). The MCP `add_comment` result also exposes
+  `verified_author` via `comment_to_mcp`.
+
+- **Backup/restore preserves, does not re-stamp.** `export_jsonl` carries
+  `verified_*` (it is a `SELECT *`); `import_jsonl` preserves the stored value
+  on restore (`record.get`) for all five tables. Restore reproduces the
+  original verified identity rather than re-stamping it with the importer's.
+
+### Explicitly out of scope (still deferred)
+
+- **MCP-HTTP peer identity.** The MCP-over-HTTP transport does not yet bind a
+  proven peer identity into `verified_*`. Only MCP stdio is covered.
+- **HTTP dashboard authentication.** The dashboard remains unauthenticated;
+  binding a verified actor there is still future work (the access-gate half is
+  ADR-018's bearer token; the verified-actor half here does not extend to it).
+- **The Loom federation wire shape.** `CommentRecordLoom` and the
+  `/api/loom/...` projections deliberately do **not** carry `verified_*`. The
+  federation contract is held stable via an explicit adapter; verified identity
+  is a local-audit concern, not part of the cross-product wire shape. This is a
+  decision, not an omission — re-opening it requires a federation-contract
+  revision, governed by the same cross-host trigger in the Negative
+  consequences above.
 
 ## Related
 

@@ -73,15 +73,15 @@ class TestPreviewScanTool:
 
         assert mcp_mod._filigree_dir is not None
 
-        available = _parse(await call_tool("list_available_scanners", {}))
+        available = _parse(await call_tool("scanner_available_list", {}))
         names = {item["name"] for item in available["items"]}
         assert {"codex", "claude"} <= names
 
-        enabled = _parse(await call_tool("enable_scanner", {"scanner": "codex"}))
+        enabled = _parse(await call_tool("scanner_enable", {"scanner": "codex"}))
         assert enabled["status"] == "enabled"
         assert (mcp_mod._filigree_dir / "scanners" / "codex.toml").is_file()
 
-        listed = _parse(await call_tool("list_scanners", {}))
+        listed = _parse(await call_tool("scanner_list", {}))
         codex = next(item for item in listed["items"] if item["name"] == "codex")
         assert codex["accepts_prompt"] is True
         assert codex["prompt_pack_aware"] is True
@@ -95,7 +95,7 @@ class TestPreviewScanTool:
         assert codex["sandbox_class"] == "tool-sandboxed"
         assert codex["language_focus"] == ["python"]
 
-        disabled = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
+        disabled = _parse(await call_tool("scanner_disable", {"scanner": "codex"}))
         assert disabled["status"] == "disabled"
         assert not (mcp_mod._filigree_dir / "scanners" / "codex.toml").exists()
 
@@ -109,7 +109,7 @@ class TestPreviewScanTool:
             '[scanner]\nname = "codex"\ndescription = "Custom scanner"\ncommand = "python custom.py"\nargs = []\nfile_types = ["py"]\n'
         )
 
-        data = _parse(await call_tool("disable_scanner", {"scanner": "codex"}))
+        data = _parse(await call_tool("scanner_disable", {"scanner": "codex"}))
 
         assert data["code"] == ErrorCode.CONFLICT
         assert "--force" in data["error"]
@@ -124,7 +124,7 @@ class TestPreviewScanTool:
         config = mcp_mod._filigree_dir / "config.toml"
         config.write_text("[local]\nkeep = true\n")
 
-        data = _parse(await call_tool("disable_scanner", {"scanner": "../config"}))
+        data = _parse(await call_tool("scanner_disable", {"scanner": "../config"}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert config.exists()
@@ -139,13 +139,13 @@ class TestPreviewScanTool:
         assert tools["scanner_enable"].inputSchema["properties"]["scanner"]["type"] == "string"
 
     async def test_preview_scan_rejects_missing_scanner(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("preview_scan", {"file_path": "preview_target.py"}))
+        data = _parse(await call_tool("scan_preview", {"file_path": "preview_target.py"}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "scanner" in data["error"]
 
     async def test_preview_scan_rejects_missing_file_path(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("preview_scan", {"scanner": "test-scanner"}))
+        data = _parse(await call_tool("scan_preview", {"scanner": "test-scanner"}))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert "file_path" in data["error"]
@@ -156,7 +156,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "test-scanner", "file_path": "preview_target.py"},
                 )
             )
@@ -197,7 +197,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "codex", "file_path": "preview_prompt.py", "prompt": "pytorch"},
                 )
             )
@@ -215,7 +215,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "test-scanner", "file_path": "preview_bad_prompt.py", "prompt": "not-a-pack"},
                 )
             )
@@ -230,7 +230,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "test-scanner", "file_path": "preview_no_prompt.py", "prompt": "security"},
                 )
             )
@@ -240,7 +240,7 @@ class TestPreviewScanTool:
             _cleanup_files(mcp_db, files)
 
     async def test_list_prompt_packs_tool(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("list_prompt_packs", {}))
+        data = _parse(await call_tool("prompt_pack_list", {}))
 
         names = {item["name"] for item in data["items"]}
         assert {"bug-hunt", "security", "typescript"} <= names
@@ -252,7 +252,7 @@ class TestPreviewScanTool:
         assert data["has_more"] is False
 
     async def test_list_prompt_packs_can_filter_by_language(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("list_prompt_packs", {"language": "python"}))
+        data = _parse(await call_tool("prompt_pack_list", {"language": "python"}))
 
         names = {item["name"] for item in data["items"]}
         assert {"bug-hunt", "security", "python-engineering", "pytorch"} <= names
@@ -287,7 +287,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "test-scanner", "file_path": "preview_port.py"},
                 )
             )
@@ -309,7 +309,7 @@ class TestPreviewScanTool:
         try:
             data = _parse(
                 await call_tool(
-                    "preview_scan",
+                    "scan_preview",
                     {"scanner": "test-scanner", "file_path": "preview_invalid_mode.py"},
                 )
             )
@@ -321,7 +321,7 @@ class TestPreviewScanTool:
     async def test_preview_scan_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "preview_scan",
+                "scan_preview",
                 {"scanner": "nonexistent", "file_path": "foo.py"},
             )
         )
@@ -330,7 +330,7 @@ class TestPreviewScanTool:
     async def test_preview_scan_known_bundled_not_enabled_points_to_enable_flow(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "preview_scan",
+                "scan_preview",
                 {"scanner": "codex", "file_path": "foo.py"},
             )
         )
@@ -345,7 +345,7 @@ class TestPreviewScanTool:
         _write_scanner_toml(mcp_db)
         data = _parse(
             await call_tool(
-                "preview_scan",
+                "scan_preview",
                 {"scanner": "test-scanner", "file_path": "../../etc/passwd"},
             )
         )
@@ -361,22 +361,48 @@ class TestGetScanStatusTool:
             file_paths=["src/a.py"],
             file_ids=["fid-1"],
         )
-        data = _parse(await call_tool("get_scan_status", {"scan_run_id": "test-run-1"}))
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": "test-run-1"}))
         assert data["id"] == "test-run-1"
         assert data["status"] == "pending"
         assert "process_alive" in data
         assert "log_tail" in data
+        # Posture echo: status carries the target file's findings breakdown (zero here).
+        assert "file_summary" in data
+        assert data["file_summary"]["total_findings"] == 0
+
+    async def test_get_scan_status_file_summary_reflects_findings(self, mcp_db: FiligreeDB) -> None:
+        fr = mcp_db.register_file("src/scanned.py", language="python")
+        mcp_db.process_scan_results(
+            scan_source="scanner",
+            findings=[
+                {"path": "src/scanned.py", "rule_id": "r1", "severity": "critical", "message": "boom"},
+                {"path": "src/scanned.py", "rule_id": "r2", "severity": "low", "message": "meh"},
+            ],
+        )
+        mcp_db.create_scan_run(
+            scan_run_id="run-fs",
+            scanner_name="scanner",
+            scan_source="scanner",
+            file_paths=["src/scanned.py"],
+            file_ids=[fr.id],
+        )
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": "run-fs"}))
+        # The vacuous-green fix: a status poll echoes the real findings posture.
+        fs = data["file_summary"]
+        assert fs["total_findings"] == 2
+        assert fs["critical"] == 1
+        assert fs["low"] == 1
 
     async def test_get_scan_status_not_found(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_scan_status", {"scan_run_id": "nonexistent"}))
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": "nonexistent"}))
         assert data["code"] == ErrorCode.NOT_FOUND
 
     async def test_get_scan_status_empty_id_rejected(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_scan_status", {"scan_run_id": ""}))
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": ""}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_get_scan_status_log_lines_validated(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_scan_status", {"scan_run_id": "x", "log_lines": 0}))
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": "x", "log_lines": 0}))
         assert data["code"] == ErrorCode.VALIDATION
 
     async def test_get_scan_status_does_not_auto_fail_dead_process(self, mcp_db: FiligreeDB) -> None:
@@ -391,7 +417,7 @@ class TestGetScanStatusTool:
         )
         mcp_db.update_scan_run_status("dead-run", "running")
         # os.kill will raise ProcessLookupError for a non-existent PID
-        data = _parse(await call_tool("get_scan_status", {"scan_run_id": "dead-run"}))
+        data = _parse(await call_tool("scan_status_get", {"scan_run_id": "dead-run"}))
         assert data["status"] == "running"
         assert data["process_alive"] is False
         assert any("appears dead" in warning for warning in data["data_warnings"])
@@ -403,8 +429,8 @@ class TestTriggerScanBatchTool:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=batch_registry_a.py",
+                    "Loomweave registry unavailable for test",
+                    url="http://loomweave.test/api/v1/files?path=batch_registry_a.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -418,7 +444,7 @@ class TestTriggerScanBatchTool:
         try:
             data = _parse(
                 await call_tool(
-                    "trigger_scan_batch",
+                    "scan_trigger_batch",
                     {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_registry_a.py"]},
                 )
             )
@@ -427,7 +453,7 @@ class TestTriggerScanBatchTool:
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "batch_registry_a.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=batch_registry_a.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=batch_registry_a.py"
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -442,7 +468,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {
                             "approve_execution": True,
                             "scanner": "test-scanner",
@@ -465,7 +491,7 @@ class TestTriggerScanBatchTool:
             with patch("filigree.scanner_runtime.subprocess.Popen") as popen:
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"scanner": "test-scanner", "file_paths": ["batch_unapproved.py"]},
                     )
                 )
@@ -485,7 +511,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_a.py", "batch_b.py"]},
                     )
                 )
@@ -507,6 +533,12 @@ class TestTriggerScanBatchTool:
                 run = mcp_db.get_scan_run(child_id)
                 assert len(run["file_paths"]) == 1
                 assert run["status"] == "running"
+            # Posture echo: each per_file entry carries the file's findings summary
+            # (fresh files → zero findings, but the key is present, not vacuous).
+            assert len(data["per_file"]) == 2
+            for pf in data["per_file"]:
+                assert "file_summary" in pf
+                assert pf["file_summary"]["total_findings"] == 0
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -521,7 +553,7 @@ class TestTriggerScanBatchTool:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_port.py"]},
                     )
                 )
@@ -542,7 +574,7 @@ class TestTriggerScanBatchTool:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {
                             "approve_execution": True,
                             "scanner": "test-scanner",
@@ -574,7 +606,7 @@ class TestTriggerScanBatchTool:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)) as popen:
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_server.py"]},
                     )
                 )
@@ -594,7 +626,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_ok.py", "batch_fail.py"]},
                     )
                 )
@@ -623,7 +655,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_all_fail.py"]},
                     )
                 )
@@ -638,13 +670,13 @@ class TestTriggerScanBatchTool:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
                 first = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
                     )
                 )
                 second = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_reserved.py"]},
                     )
                 )
@@ -668,7 +700,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {
                             "approve_execution": True,
                             "scanner": "test-scanner",
@@ -688,7 +720,7 @@ class TestTriggerScanBatchTool:
         _write_scanner_toml(mcp_db)
         data = _parse(
             await call_tool(
-                "trigger_scan_batch",
+                "scan_trigger_batch",
                 {"approve_execution": True, "scanner": "test-scanner", "file_paths": []},
             )
         )
@@ -711,7 +743,7 @@ class TestTriggerScanBatchTool:
     ) -> None:
         _write_scanner_toml(mcp_db)
 
-        data = _parse(await call_tool("trigger_scan_batch", arguments))
+        data = _parse(await call_tool("scan_trigger_batch", arguments))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == expected_error
@@ -719,7 +751,7 @@ class TestTriggerScanBatchTool:
     async def test_batch_scan_scanner_not_found(self, mcp_db: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "trigger_scan_batch",
+                "scan_trigger_batch",
                 {"approve_execution": True, "scanner": "nonexistent", "file_paths": ["foo.py"]},
             )
         )
@@ -731,7 +763,7 @@ class TestTriggerScanBatchTool:
         try:
             data = _parse(
                 await call_tool(
-                    "trigger_scan_batch",
+                    "scan_trigger_batch",
                     {
                         "approve_execution": True,
                         "scanner": "test-scanner",
@@ -754,7 +786,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {
                             "approve_execution": True,
                             "scanner": "test-scanner",
@@ -781,7 +813,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_log_a.py", "batch_log_b.py"]},
                     )
                 )
@@ -808,7 +840,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["indep_a.py", "indep_b.py", "indep_c.py"]},
                     )
                 )
@@ -834,7 +866,7 @@ class TestTriggerScanBatchTool:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["dup_a.py", "dup_a.py"]},
                     )
                 )
@@ -962,7 +994,7 @@ class TestSpawnScanLogFileFailure:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["log_fail_target.py"]},
                     )
                 )
@@ -987,7 +1019,7 @@ class TestBatchScanDbTrackingFailure:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["db_fail_a.py", "db_fail_b.py"]},
                     )
                 )
@@ -1012,7 +1044,7 @@ class TestBatchScanDbTrackingFailure:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["backfill_fail.py"]},
                     )
                 )
@@ -1043,7 +1075,7 @@ class TestBatchScanDbTrackingFailure:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["spawn_status_fail.py"]},
                     )
                 )
@@ -1071,7 +1103,7 @@ class TestBatchScanDbTrackingFailure:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan_batch",
+                        "scan_trigger_batch",
                         {"approve_execution": True, "scanner": "test-scanner", "file_paths": ["batch_immediate_status_fail.py"]},
                     )
                 )
@@ -1089,8 +1121,8 @@ class TestTriggerScanCooldownReservation:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryUnavailableError(
-                    "Clarion registry unavailable for test",
-                    url="http://clarion.test/api/v1/files?path=trigger_registry.py",
+                    "Loomweave registry unavailable for test",
+                    url="http://loomweave.test/api/v1/files?path=trigger_registry.py",
                     path=path,
                     cause_kind="network",
                 )
@@ -1103,14 +1135,14 @@ class TestTriggerScanCooldownReservation:
         mcp_db.registry = UnavailableRegistry()
         try:
             data = _parse(
-                await call_tool("trigger_scan", {"approve_execution": True, "scanner": "test-scanner", "file_path": "trigger_registry.py"})
+                await call_tool("scan_trigger", {"approve_execution": True, "scanner": "test-scanner", "file_path": "trigger_registry.py"})
             )
 
             assert data["code"] == ErrorCode.REGISTRY_UNAVAILABLE
             assert data["details"]["cause"] == "registry_unavailable"
             assert data["details"]["cause_kind"] == "network"
             assert data["details"]["path"] == "trigger_registry.py"
-            assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=trigger_registry.py"
+            assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=trigger_registry.py"
         finally:
             _cleanup_files(mcp_db, files)
 
@@ -1122,7 +1154,7 @@ class TestTriggerScanCooldownReservation:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "trigger_registry.py"},
                     )
                 )
@@ -1140,7 +1172,7 @@ class TestTriggerScanCooldownReservation:
             with patch("filigree.scanner_runtime.subprocess.Popen") as popen:
                 data = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"scanner": "test-scanner", "file_path": "trigger_unapproved.py"},
                     )
                 )
@@ -1159,7 +1191,7 @@ class TestTriggerScanCooldownReservation:
             with patch("filigree.scanner_runtime.subprocess.Popen", return_value=_FakeProc(100)):
                 first = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "reserve_target.py"},
                     )
                 )
@@ -1174,7 +1206,7 @@ class TestTriggerScanCooldownReservation:
                 # regardless of whether the first process has finished.
                 second = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "reserve_target.py"},
                     )
                 )
@@ -1189,7 +1221,7 @@ class TestTriggerScanCooldownReservation:
         try:
             data = _parse(
                 await call_tool(
-                    "trigger_scan",
+                    "scan_trigger",
                     {"approve_execution": True, "scanner": "test-scanner", "file_path": "trigger_no_prompt.py", "prompt": "security"},
                 )
             )
@@ -1217,7 +1249,7 @@ class TestTriggerScanCooldownReservation:
     ) -> None:
         _write_scanner_toml(mcp_db)
 
-        data = _parse(await call_tool("trigger_scan", arguments))
+        data = _parse(await call_tool("scan_trigger", arguments))
 
         assert data["code"] == ErrorCode.VALIDATION
         assert data["error"] == expected_error
@@ -1234,7 +1266,7 @@ class TestTriggerScanCooldownReservation:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "spawn_fail_target.py"},
                     )
                 )
@@ -1256,7 +1288,7 @@ class TestTriggerScanCooldownReservation:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "single_backfill_fail.py"},
                     )
                 )
@@ -1289,7 +1321,7 @@ class TestTriggerScanCooldownReservation:
             ):
                 data = _parse(
                     await call_tool(
-                        "trigger_scan",
+                        "scan_trigger",
                         {"approve_execution": True, "scanner": "test-scanner", "file_path": "immediate_status_fail.py"},
                     )
                 )

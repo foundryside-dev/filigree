@@ -57,7 +57,6 @@ LIVE_AGENT_DOCS = (
     "src/filigree/skills/filigree-workflow/references/workflow-patterns.md",
     "src/filigree/skills/filigree-workflow/references/team-coordination.md",
     "src/filigree/skills/filigree-workflow/examples/sprint-plan.json",
-    "CLAUDE.md",
 )
 
 # A handful of OLD tool names must NOT be flagged by the whole-word check, by
@@ -68,8 +67,8 @@ LIVE_AGENT_DOCS = (
 #     where the bare token legitimately occurs as English/CLI:
 #     docs/federation/contracts.md (the `cli_commands/observations.py` command
 #     list) and the skill's SKILL.md ("Don't observe things…"). The bare-token
-#     guard stays ACTIVE for `observe` in the other 7 files (mcp.md,
-#     instructions.md, CLAUDE.md, …) so a stale bare `observe` that should be
+#     guard stays ACTIVE for `observe` in the other 6 files (mcp.md,
+#     instructions.md, …) so a stale bare `observe` that should be
 #     `observation_create` there is still caught.
 #   - get_workflow_statuses / explain_status: in docs/federation/contracts.md
 #     these appear only as the *target* of a documented historical rename arrow

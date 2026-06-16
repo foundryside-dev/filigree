@@ -49,7 +49,6 @@ from filigree import __version__
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
-    FILIGREE_DIR_NAME,
     FiligreeDB,
     ProjectNotInitialisedError,
     find_filigree_anchor,
@@ -63,8 +62,16 @@ from filigree.types.api import SchemaVersionMismatchError
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 8377
-FEDERATION_API_ENV_VAR = "FILIGREE_FEDERATION_API_TOKEN"
-LEGACY_API_ENV_VAR = "FILIGREE_API_TOKEN"
+# Canonical inbound federation bearer env var (3.0.0). Gates Filigree's own
+# /api/weft/* + /mcp HTTP surface. Federation plumbing → Weft prefix. The two
+# FILIGREE_*_API_TOKEN names are deprecated aliases read as a soft fallback so
+# existing exports keep working; scheduled for removal post-1.0. (Distinct from
+# the OUTBOUND registry token WEFT_TOKEN in registry.py.)
+WEFT_FEDERATION_ENV_VAR = "WEFT_FEDERATION_TOKEN"
+FEDERATION_API_ENV_VAR = "FILIGREE_FEDERATION_API_TOKEN"  # deprecated alias
+LEGACY_API_ENV_VAR = "FILIGREE_API_TOKEN"  # deprecated alias
+# Read order: canonical first, then deprecated aliases.
+FEDERATION_TOKEN_ENV_VARS = (WEFT_FEDERATION_ENV_VAR, FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR)
 
 logger = logging.getLogger(__name__)
 
@@ -79,21 +86,82 @@ _config: dict[str, Any] = {}
 _DASHBOARD_STATE_ATTR = "filigree_dashboard_state"
 
 
-def _resolve_federation_api_token() -> tuple[str, str | None]:
-    """Resolve the opt-in bearer token for federation/MCP HTTP surfaces."""
-    empty_envs: list[str] = []
-    for env_name in (FEDERATION_API_ENV_VAR, LEGACY_API_ENV_VAR):
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        token = raw.strip()
-        if token:
-            return token, env_name
-        empty_envs.append(env_name)
+def _resolve_federation_api_token(store_dir: Path | None = None) -> tuple[str, str | None]:
+    """Resolve the bearer token for the federation/MCP HTTP surfaces (read-only).
 
-    for env_name in empty_envs:
-        logger.warning("%s is set but empty/whitespace — loom federation auth is NOT enabled from that variable", env_name)
-    return "", None
+    3-tier: ``$WEFT_FEDERATION_TOKEN`` (+ deprecated aliases) → the daemon's
+    minted ``<store_dir>/federation_token`` → off. *store_dir* is the served
+    project's store dir (ethereal) or ``~/.config/filigree/`` (server mode); the
+    file is minted at daemon boot (see :func:`run`), never here, so this stays a
+    pure read. Returns ``(token, source)`` where *source* is the env-var name,
+    the file-source label, or ``None``.
+    """
+    from filigree.federation_token import resolve_federation_token
+
+    return resolve_federation_token(store_dir)
+
+
+def _mint_and_guard_federation_token(mint_dir: Path, *, allow_env_pin: bool) -> bool:
+    """Mint the daemon's federation token and guard against a *silently-open* serve.
+
+    Fail-LOUD, not silently-open. :func:`mint_token_file` is best-effort: a write
+    failure (read-only mount, full disk) logs quietly and returns the in-memory
+    token — which :func:`run` would otherwise DISCARD, leaving ``create_app`` to
+    re-resolve from the now-absent file → tier-3 → federation auth silently OFF on
+    the (loopback) bind, exactly when the operator expects it ON. Either way the
+    failure is now made loud (stderr *and* the structured logger launchers tail).
+
+    *allow_env_pin* gates the in-memory tier-1 fallback, and is the ETHEREAL
+    single-project posture only. There, on a persist failure with no operator env
+    token, pinning the daemon's own token into the process env (tier 1) keeps the
+    expected posture — that daemon serves exactly one project, so a process-scoped
+    pin is correct and bounded. In SERVER mode it MUST be ``False``: the
+    home/server token must never become a tier-1 env pin, which
+    :func:`dashboard_auth.build_auth_middleware` would accept across EVERY project
+    scope, breaking the per-project scoping invariant (F1 / filigree-23574069a1).
+    Server mode therefore warns loudly but fails open on its unscoped surface
+    rather than minting cross-project authority (per-project scoped tokens are
+    resolved independently and are unaffected). Availability/observability, not
+    hardening (C-8): a present env token already wins, and a persisted mint is
+    untouched (no warning, no env mutation).
+
+    Returns ``True`` iff it pinned the env var, so the caller can unset it in its
+    ``finally`` for in-process cleanup symmetry.
+    """
+    from filigree.federation_token import (
+        WEFT_FEDERATION_ENV_VAR,
+        mint_token_file,
+        read_env_token,
+        read_token_file,
+    )
+
+    minted = mint_token_file(mint_dir)
+    env_tok, _ = read_env_token()
+    if not (minted and not env_tok and read_token_file(mint_dir) != minted):
+        return False
+    if allow_env_pin:
+        posture = (
+            "Federation auth will use an in-memory token for THIS daemon only; same-host siblings "
+            "cannot read it and will get 401 until the store dir is writable."
+        )
+    else:
+        posture = (
+            "Federation auth on the daemon's unscoped surface is OFF until the store dir is writable "
+            "(per-project scoped tokens are unaffected). The token is NOT promoted to a cross-project "
+            "credential in server mode."
+        )
+    msg = (
+        f"could not persist the federation token to {mint_dir}/federation_token. {posture} "
+        "Fix the mount/permissions and restart, or export WEFT_FEDERATION_TOKEN."
+    )
+    # Dual-emit (stderr + structured log) so a launcher capturing only the
+    # filigree log still sees it — mirroring run()'s schema-mismatch branch.
+    print(f"WARNING: {msg}", file=sys.stderr)
+    logger.warning("federation_token_persist_failed: %s", msg)
+    if allow_env_pin:
+        os.environ[WEFT_FEDERATION_ENV_VAR] = minted
+        return True
+    return False
 
 
 def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) -> dict[str, Any]:
@@ -101,7 +169,7 @@ def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) ->
         "federation": {
             "enabled": federation_enabled,
             "token_env": token_env,
-            "protected_paths": ["/api/loom/*", "/api/scan-results", "/api/observations", "/api/v1/scan-results"],
+            "protected_paths": ["/api/weft/*", "/api/scan-results", "/api/observations", "/api/v1/scan-results", "/api/v1/observations"],
         },
         "mcp_http": {
             "enabled": federation_enabled,
@@ -115,6 +183,22 @@ def _dashboard_auth_scope(*, federation_enabled: bool, token_env: str | None) ->
         "dashboard_ui": {
             "enabled": False,
             "note": "The local dashboard UI remains open under the loopback trust boundary.",
+        },
+        # ADR-012 actor-verification posture for the HTTP transport. Writes via any
+        # dashboard/weft HTTP route are unverified: the `actor` field is a
+        # self-asserted claim and verified_actor/verified_author land NULL (only
+        # CLI / MCP-stdio stamp a transport-verified actor). Surfaced here — the
+        # canonical posture surface — so the dropped verification is discoverable
+        # instead of silent. The federation token gates *access*, not *identity*
+        # (C-8); transport-bound identity verification is deferred (filigree-81d3971467).
+        "actor_verification": {
+            "verified": False,
+            "deferral": "filigree-81d3971467",
+            "note": (
+                "HTTP writes are unverified: 'actor' is an unauthenticated self-asserted claim and "
+                "verified_actor/verified_author are NULL. Only CLI and MCP-stdio stamp a transport-verified "
+                "actor. Transport-bound identity verification for HTTP is deferred to filigree-81d3971467."
+            ),
         },
     }
 
@@ -192,17 +276,26 @@ def _open_db_for_filigree_dir(
     ``--allow-local-fallback`` flag flows into the ADR-014 capability probe
     *before* it runs at ``FiligreeDB.__init__`` — otherwise a project whose
     config disables fallback would fail to construct against an offline
-    Clarion even though the operator just asked for fallback at startup.
+    Loomweave even though the operator just asked for fallback at startup.
     """
-    conf_path = filigree_dir.parent / CONF_FILENAME
+    # *filigree_dir* is a resolved store dir (legacy ``.filigree/``, federation
+    # ``.weft/filigree/``, or an arbitrary-depth weft.toml ``store_dir`` override).
+    # The conf anchor sits at the PROJECT ROOT, which is NOT recoverable from the
+    # store dir alone for a multi-segment override — reverse-deriving by stripping
+    # segments yields the wrong root. Resolve through the canonical anchor walk
+    # (which reads weft.toml) so the project root is correct for every layout (I2).
+    project_root = find_filigree_anchor(filigree_dir).project_root
+    conf_path = project_root / CONF_FILENAME
     if conf_path.is_file():
         return FiligreeDB.from_conf(
             conf_path,
+            store_dir=filigree_dir,
             check_same_thread=check_same_thread,
             allow_local_fallback_override=allow_local_fallback_override,
         )
-    return FiligreeDB.from_filigree_dir(
+    return FiligreeDB.from_store_dir(
         filigree_dir,
+        project_root=project_root,
         check_same_thread=check_same_thread,
         allow_local_fallback_override=allow_local_fallback_override,
     )
@@ -500,6 +593,31 @@ class ProjectStore:
                 return ""
             return next(iter(self._projects))
 
+    def store_dir_for(self, key: str) -> Path | None:
+        """Return the CANONICAL store dir for *key* (where its federation token
+        lives), or ``None`` if unknown.
+
+        The per-project federation token lives in the *canonical* store dir, which
+        after WEFT consolidation is ``.weft/filigree/`` — NOT necessarily the
+        ``.filigree/`` path registered in ``server.json``. Resolve it through the
+        project anchor exactly as ``get_db`` opens the DB, so the auth middleware
+        reads the token from the same store the DB lives in. Reading the registered
+        legacy path directly silently broke per-project token auth for any project
+        whose token only lives in the consolidated store — the F1 resolver
+        (filigree-23574069a1) predated consolidation (follow-up: weft-…).
+        """
+        with self._lock:
+            info = self._projects.get(key)
+        if info is None:
+            return None
+        registered = Path(info["path"])
+        # find_filigree_anchor does filesystem I/O — resolve OUTSIDE the lock.
+        try:
+            return find_filigree_anchor(registered).store_dir
+        except Exception:
+            logger.warning("store_dir_for(%s): anchor resolution failed; using registered path", key, exc_info=True)
+            return registered
+
 
 _project_store: ProjectStore | None = None
 
@@ -561,12 +679,12 @@ def _create_project_router() -> APIRouter:
     - **classic** — every currently-existing endpoint at its existing
       path (mostly unprefixed, with the ``POST /v1/scan-results``
       outlier). Frozen; no URL moves, no shape changes.
-    - **loom** — new in 2.0, attached under a ``/loom`` sub-prefix so
-      the full path becomes ``/api/loom/<endpoint>`` after the
+    - **weft** — new in 2.0, attached under a ``/weft`` sub-prefix so
+      the full path becomes ``/api/weft/<endpoint>`` after the
       app-level ``/api`` prefix. Empty in Phase B of the federation
       work package; Phase C fills it endpoint-by-endpoint.
     - **living surface** — un-prefixed ``/api/<endpoint>`` aliases of
-      the current recommended generation (loom as of 2026-04-26), per
+      the current recommended generation (weft as of 2026-04-26), per
       ``docs/federation/contracts.md``. Added per-endpoint in Phase C
       where the path does not collide with classic. Each module
       contributes only the aliases it owns; only ``files`` participates
@@ -590,13 +708,13 @@ def _create_project_router() -> APIRouter:
     router.include_router(releases.create_classic_router())
     router.include_router(entities.create_classic_router())
 
-    # Loom generation — new in 2.0 under /loom. Empty in Phase B.
-    router.include_router(analytics.create_loom_router(), prefix="/loom")
-    router.include_router(issues.create_loom_router(), prefix="/loom")
-    router.include_router(files.create_loom_router(), prefix="/loom")
-    router.include_router(releases.create_loom_router(), prefix="/loom")
+    # Weft generation — new in 2.0 under /weft. Empty in Phase B.
+    router.include_router(analytics.create_weft_router(), prefix="/weft")
+    router.include_router(issues.create_weft_router(), prefix="/weft")
+    router.include_router(files.create_weft_router(), prefix="/weft")
+    router.include_router(releases.create_weft_router(), prefix="/weft")
 
-    # Living surface — un-prefixed loom aliases; per-endpoint adoption.
+    # Living surface — un-prefixed weft aliases; per-endpoint adoption.
     router.include_router(files.create_living_surface_router())
     router.include_router(analytics.create_living_surface_router())
 
@@ -632,8 +750,18 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     )
 
     # Resolve federation auth before MCP setup so the high-privilege
-    # streamable-HTTP transport is only mounted when it can be protected.
-    _api_token, _api_token_env = _resolve_federation_api_token()
+    # streamable-HTTP transport is only mounted when it can be protected. Tier-2
+    # (the minted file) lives in the daemon's own store: the served project's
+    # store dir (ethereal) or the server config dir (server mode). Read-only here
+    # — the file is minted at daemon boot (run()), so create_app (which tests
+    # invoke directly) never writes.
+    if server_mode:
+        from filigree.server import SERVER_CONFIG_DIR
+
+        _token_store_dir: Path | None = SERVER_CONFIG_DIR
+    else:
+        _token_store_dir = dashboard_state.db.meta_dir if dashboard_state.db is not None else None
+    _api_token, _api_token_env = _resolve_federation_api_token(_token_store_dir)
 
     # --- MCP streamable-HTTP setup (optional, token-protected only) ---
     _mcp_handler: ASGIApp | None = None
@@ -735,17 +863,39 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         allow_headers=["*"],
     )
 
-    # Opt-in bearer-token auth for the loom federation surface (ADR-018).
-    # Active only when FILIGREE_FEDERATION_API_TOKEN (or legacy
-    # FILIGREE_API_TOKEN) is set; otherwise the middleware is not installed for
-    # loom routes. The MCP HTTP transport is never mounted without this token.
+    # Opt-in bearer-token auth for the weft federation surface (ADR-018).
+    # Active only when WEFT_FEDERATION_TOKEN (or a deprecated FILIGREE_*_API_TOKEN
+    # alias) is set; otherwise the middleware is not installed for
+    # weft routes. The MCP HTTP transport is never mounted without this token.
     # Added after CORS so CORS remains inner and still decorates
-    # classic/dashboard responses; loom OPTIONS preflight passes through.
+    # classic/dashboard responses; weft OPTIONS preflight passes through.
     app.state.auth_scope = _dashboard_auth_scope(federation_enabled=bool(_api_token), token_env=_api_token_env)
     if _api_token:
         from filigree.dashboard_auth import build_auth_middleware
+        from filigree.federation_token import FEDERATION_TOKEN_ENV_VARS, read_token_file
 
-        app.add_middleware(build_auth_middleware(_api_token))
+        # Tier-1 operator pin: the daemon token counts as a cross-project pin only
+        # when it was resolved from the environment, not from the home-store file.
+        # A home-store file token is NOT a valid credential for a project-scoped
+        # request (filigree-23574069a1) — only that project's own token or an env
+        # pin is.
+        _env_pin = _api_token if _api_token_env in FEDERATION_TOKEN_ENV_VARS else ""
+
+        _resolver: Callable[[str], str] | None = None
+        if server_mode:
+
+            def _resolve_project_token(key: str) -> str:
+                store = dashboard_state.project_store
+                if store is None:
+                    return ""
+                store_dir = store.store_dir_for(key)
+                return read_token_file(store_dir) if store_dir is not None else ""
+
+            _resolver = _resolve_project_token
+
+        app.add_middleware(
+            build_auth_middleware(_api_token, env_pin=_env_pin, project_token_resolver=_resolver),
+        )
         logger.info(
             "federation bearer auth enabled via %s; dashboard UI and classic API routes remain open",
             _api_token_env,
@@ -770,22 +920,67 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         app.include_router(router, prefix="/api/p/{project_key}")
         app.include_router(router, prefix="/api")
 
-        # Middleware: extract project_key from path and set ContextVar
+        # Middleware: resolve the project scope (path /api/p/{key}/… OR a
+        # ?project= query on a federation path) and set the ContextVar that
+        # _get_db and _require_federation_scope read. Honoring ?project= for the
+        # whole federation API makes /api/weft/… scope the same way /mcp does.
         from starlette.middleware.base import BaseHTTPMiddleware
+
+        from filigree.dashboard_auth import extract_federation_scope, is_weft_scoped_path
+        from filigree.dashboard_routes.common import _error_response
+        from filigree.types.api import ErrorCode
 
         class ProjectMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
                 path = request.url.path
-                # Match /api/p/{key}/… — extract the key segment
-                if path.startswith("/api/p/"):
-                    parts = path.split("/", 5)  # ['', 'api', 'p', key, ...]
-                    if len(parts) >= 4 and parts[3]:
-                        token = dashboard_state.current_project_key.set(parts[3])
-                        try:
-                            return await call_next(request)
-                        finally:
-                            dashboard_state.current_project_key.reset(token)
-                return await call_next(request)
+                is_mcp = path == "/mcp" or path.startswith("/mcp/")
+                key = extract_federation_scope(path, request.query_params.get("project"))
+                if key is not None:
+                    token = dashboard_state.current_project_key.set(key)
+                    try:
+                        response = await call_next(request)
+                        # Name the project this request actually resolved to, so a
+                        # misroute (client scoped the wrong key) cannot read as
+                        # success. An unknown key 404s in _get_db before any write,
+                        # so a 2xx here means the row landed in `key`. Echoed across
+                        # BOTH the federation and classic surfaces — a scoped
+                        # classic write (/api/p/{key}/issues) is just as silent
+                        # about its destination otherwise (filigree-b62d865dad).
+                        # Skip /mcp — its streaming transport owns its own headers.
+                        if not is_mcp:
+                            response.headers["X-Filigree-Project"] = key
+                        return response
+                    finally:
+                        dashboard_state.current_project_key.reset(token)
+                # Unscoped. A federation WRITE must not silently fall back to the
+                # daemon's default project (the filigree-7a399b8124 contamination):
+                # fail closed. The classic surface stays lenient — the dashboard's
+                # no-project default view legitimately writes to /api and relies on
+                # default-project resolution, so fail-closing it would break "close
+                # issue" from that view. /mcp is excluded — it carries protocol
+                # messages and self-scopes via ?project= at the transport.
+                is_federation = is_weft_scoped_path(path) and not is_mcp
+                if request.method not in ("GET", "HEAD", "OPTIONS") and is_federation:
+                    return _error_response(
+                        "Ambiguous federation write in server mode: scope to a project — use POST /api/p/{project_key}/weft/… or add ?project={key}.",
+                        ErrorCode.VALIDATION,
+                        400,
+                    )
+                response = await call_next(request)
+                # C-10(a) honest-seams: an unscoped request silently resolves to
+                # the daemon's default project; echo which project it actually hit
+                # so a defaulted read OR classic write is not silent about its
+                # destination. filigree-b62d865dad extends this from the federation
+                # read seam to the whole classic surface (the unscoped classic
+                # write was previously invisible). Federation writes never reach
+                # here — they fail closed above — so this never masks a federation
+                # misroute. /mcp owns its own headers.
+                if not is_mcp:
+                    store = dashboard_state.project_store
+                    default_key = store.default_key if store is not None else ""
+                    if default_key:
+                        response.headers["X-Filigree-Project"] = default_key
+                return response
 
         app.add_middleware(ProjectMiddleware)
     else:
@@ -933,13 +1128,13 @@ def main(
 
     ``allow_http_force_close`` (2.1.0 §1.1) opts the dashboard into
     accepting ``force=true`` on ``POST /api/batch/close`` and
-    ``POST /api/loom/batch/close``. Without it those routes reject
+    ``POST /api/weft/batch/close``. Without it those routes reject
     ``force=true`` with 400/VALIDATION — the workflow escape lane can only
     be used by the CLI or MCP, never by a passing HTTP client.
 
     ``allow_local_fallback`` is an ADR-014 recovery flag for single-project
-    ethereal mode: when the project is configured for Clarion registry mode
-    but Clarion is unavailable, auto-create paths use ``LocalRegistry``.
+    ethereal mode: when the project is configured for Loomweave registry mode
+    but Loomweave is unavailable, auto-create paths use ``LocalRegistry``.
     """
     import uvicorn
 
@@ -971,17 +1166,17 @@ def main(
         logger.info("Server mode: loaded %d project(s)", n)
     else:
         try:
-            project_root, _conf_path = find_filigree_anchor()
-            filigree_dir = project_root / FILIGREE_DIR_NAME
+            anchor = find_filigree_anchor()
+            filigree_dir = anchor.store_dir
             config = read_config(filigree_dir)
             _config.update(config)
-            db = _open_db_for_filigree_dir(
-                filigree_dir,
+            db = FiligreeDB.from_anchor(
+                anchor,
                 check_same_thread=False,
                 allow_local_fallback_override=True if allow_local_fallback else None,
             )
-            if allow_local_fallback and db.registry_backend == "clarion":
-                logger.warning("dashboard started with --allow-local-fallback; clarion registry is bypassed for auto-creates")
+            if allow_local_fallback and db.registry_backend == "loomweave":
+                logger.warning("dashboard started with --allow-local-fallback; loomweave registry is bypassed for auto-creates")
                 db.enable_local_registry_fallback()
             _db = db
         except SchemaVersionMismatchError as exc:
@@ -1015,6 +1210,22 @@ def main(
             print(f"Error opening project database: {exc}", file=sys.stderr)
             print("Run `filigree doctor` for diagnosis.", file=sys.stderr)
             sys.exit(1)
+
+    # First-serve federation-token mint (tier 2). Auto-provision the daemon's own
+    # token file so single-host federation auth works with zero operator toil; the
+    # env var stays the cross-host override. Mints into the daemon's own subtree —
+    # the served project's store dir (ethereal) or the server config dir (server
+    # mode). Done here at real serve only, never in create_app (tests call that
+    # directly and must not write to a shared/real dir).
+    _pinned_token_env = False
+    if server_mode:
+        from filigree.server import SERVER_CONFIG_DIR
+
+        # Server mode: never pin (F1 — a home/server token must not become a
+        # cross-project tier-1 credential). Warn loudly only.
+        _mint_and_guard_federation_token(SERVER_CONFIG_DIR, allow_env_pin=False)
+    elif _db is not None:
+        _pinned_token_env = _mint_and_guard_federation_token(_db.meta_dir, allow_env_pin=True)
 
     app = create_app(server_mode=server_mode)
 
@@ -1056,3 +1267,11 @@ def main(
         _db = None
         _allow_http_force_close = False
         _config.clear()
+        # Cleanup symmetry: if THIS run synthesised an in-memory federation-token
+        # env pin (ethereal persist-failure fallback), unset it so a later
+        # in-process run() does not inherit a stale tier-1 token that masks a
+        # since-recovered mount or a fresh file (matches the global reset above).
+        if _pinned_token_env:
+            from filigree.federation_token import WEFT_FEDERATION_ENV_VAR
+
+            os.environ.pop(WEFT_FEDERATION_ENV_VAR, None)

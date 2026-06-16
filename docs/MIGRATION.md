@@ -3,7 +3,10 @@
 Step-by-step run sheet for migrating a project from [beads](https://github.com/steveyegge/beads) (`bd`) to filigree. Designed for both AI agents and humans.
 
 For Filigree version upgrades, including the 2.0.x to 2.1.0 in-place upgrade,
-see [UPGRADING.md](UPGRADING.md).
+see [UPGRADING.md](UPGRADING.md). Consumers migrating across the 3.0.0 major
+boundary (MCP tool-name namespacing, the Loomweave/Weft rebrand, `get_stats`
+key removal) should read the
+[3.0.0 consumer migration guide](MIGRATION-3.0.md).
 
 ## Background
 
@@ -44,7 +47,7 @@ uv add filigree
 ### Option C: From source
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync
 ```

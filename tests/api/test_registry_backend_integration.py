@@ -24,10 +24,10 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
         assert schema_response.status_code == 200
         schema = schema_response.json()
         assert schema["config_flags"]["registry_backend"] == db.registry_backend
-        assert schema["config_flags"]["registry_backend_features"] == ["local", "clarion"]
+        assert schema["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
 
         ingest_response = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "ruff",
                 "findings": [
@@ -39,16 +39,16 @@ async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
         return ingest_response.json()
 
 
-@pytest.mark.parametrize("registry_backend", ["local", "clarion"])
-async def test_loom_scan_results_resolves_file_identity_over_registry_backends(tmp_path: Path, registry_backend: str) -> None:
-    if registry_backend == "clarion":
+@pytest.mark.parametrize("registry_backend", ["local", "loomweave"])
+async def test_weft_scan_results_resolves_file_identity_over_registry_backends(tmp_path: Path, registry_backend: str) -> None:
+    if registry_backend == "loomweave":
         with clarion_stub() as (base_url, state):
             db = FiligreeDB(
                 tmp_path / "filigree.db",
                 prefix="test",
                 check_same_thread=False,
-                registry_backend="clarion",
-                clarion_config={"base_url": base_url, "timeout_seconds": 1},
+                registry_backend="loomweave",
+                loomweave_config={"base_url": base_url, "timeout_seconds": 1},
             )
             db.initialize()
             try:
@@ -64,7 +64,7 @@ async def test_loom_scan_results_resolves_file_identity_over_registry_backends(t
                 assert file_record is not None
                 assert file_record.id == "core:file:stub@src/phase_d.py"
                 assert file_record.content_hash == "sha256:src/phase_d.py"
-                assert file_record.registry_backend == "clarion"
+                assert file_record.registry_backend == "loomweave"
             finally:
                 dash_module._db = None
                 db.close()
@@ -87,20 +87,20 @@ async def test_loom_scan_results_resolves_file_identity_over_registry_backends(t
         db.close()
 
 
-async def test_loom_scan_results_falls_back_to_local_when_clarion_goes_down(
+async def test_weft_scan_results_falls_back_to_local_when_loomweave_goes_down(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """ADR-014 §7: clarion-mode + allow_local_fallback=true + Clarion-down at write time.
+    """ADR-014 §7: loomweave-mode + allow_local_fallback=true + Loomweave-down at write time.
 
     Exercise the recovery path end-to-end through ``FiligreeDB``:
-    - Stub Clarion is up at startup so the capability probe succeeds.
+    - Stub Loomweave is up at startup so the capability probe succeeds.
     - Stub is shut down before the scan-results POST.
     - The auto-create succeeds via ``LocalRegistry``.
     - A ``registry_local_fallback`` event is written.
     - A WARN log carries ``cause_kind`` and the failing URL.
 
-    Without this test the ``_ClarionLocalFallbackRegistry`` wrapper is only
+    Without this test the ``_LoomweaveLocalFallbackRegistry`` wrapper is only
     unit-tested in isolation; this asserts it is actually wired through
     ``FiligreeDB`` at the HTTP boundary.
     """
@@ -109,8 +109,8 @@ async def test_loom_scan_results_falls_back_to_local_when_clarion_goes_down(
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={
+            registry_backend="loomweave",
+            loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 0.5,
                 "allow_local_fallback": True,
@@ -136,7 +136,7 @@ async def test_loom_scan_results_falls_back_to_local_when_clarion_goes_down(
         ).fetchone()
         assert event is not None
         assert event["field"] == "registry_backend"
-        assert event["old_value"] == "clarion"
+        assert event["old_value"] == "loomweave"
         assert event["new_value"] == "local"
 
         # WARN log carries the network cause_kind and the failing URL.
@@ -150,15 +150,15 @@ async def test_loom_scan_results_falls_back_to_local_when_clarion_goes_down(
         db.close()
 
 
-async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tmp_path: Path) -> None:
+async def test_weft_scan_results_does_not_block_event_loop_for_other_handlers(tmp_path: Path) -> None:
     """CONTRACT-E: a slow scan-results POST must not block the event loop;
     OTHER endpoints (here ``GET /api/scan-runs``) must complete during the
-    Clarion HTTP wait.
+    Loomweave HTTP wait.
 
     This test verifies the responsiveness property by interleaving a fast read
     endpoint with a slow scan-results POST. Parallelism between two concurrent
     scan-results POSTs is verified separately by
-    ``test_concurrent_loom_scan_results_run_in_parallel``.
+    ``test_concurrent_weft_scan_results_run_in_parallel``.
     """
     import asyncio
     import http.server
@@ -169,7 +169,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
 
     latency_seconds = 0.3
 
-    class LatentClarionHandler(http.server.BaseHTTPRequestHandler):
+    class LatentLoomweaveHandler(http.server.BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = jsonmod.dumps(payload).encode()
             self.send_response(status)
@@ -210,7 +210,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
         def log_message(self, format: str, *args: object) -> None:
             return
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LatentClarionHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LatentLoomweaveHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -219,8 +219,8 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={"base_url": base_url, "timeout_seconds": 5},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
         try:
@@ -232,7 +232,7 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
                     "scan_source": "ruff",
                     "findings": [{"path": "src/a.py", "rule_id": "R1", "severity": "low", "message": "m"}],
                 }
-                scan_task = asyncio.create_task(client.post("/api/loom/scan-results", json=scan_body))
+                scan_task = asyncio.create_task(client.post("/api/weft/scan-results", json=scan_body))
                 # Tiny yield so scan-results starts its HTTP wait, then issue
                 # an unrelated GET — it must complete well before scan-results does.
                 await asyncio.sleep(0.05)
@@ -257,21 +257,21 @@ async def test_loom_scan_results_does_not_block_event_loop_for_other_handlers(tm
         thread.join(timeout=1)
 
 
-async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> None:
-    """Two concurrent scan-results POSTs overlap their Clarion HTTP round-trips
+async def test_concurrent_weft_scan_results_run_in_parallel(tmp_path: Path) -> None:
+    """Two concurrent scan-results POSTs overlap their Loomweave HTTP round-trips
     instead of serialising.
 
     This is the parallelism half of filigree-d4237f486f. The correctness half
     (no cross-thread shared-connection race) was closed earlier by
     ``borrow_for_worker_thread``; the residual ``_SCAN_RESULTS_LOCK`` that
     serialised the two worker WRITE paths has been removed. Each call does its
-    Clarion batch resolution (the slow part) BEFORE opening any write
+    Loomweave batch resolution (the slow part) BEFORE opening any write
     transaction, so with no app-level lock the two resolutions overlap and the
     tiny write windows serialise only briefly at the WAL writer lock
     (``busy_timeout`` absorbs the wait — no SQLITE_BUSY/IntegrityError).
 
     Overlap is proven deterministically rather than by wall-clock: a
-    ``threading.Barrier(2)`` inside the stub Clarion resolve handler forces BOTH
+    ``threading.Barrier(2)`` inside the stub Loomweave resolve handler forces BOTH
     POSTs' batch resolutions to be in flight at the same instant before either
     is allowed to return. If the app still serialised the two paths (the old
     lock behaviour), only one resolution would ever reach the barrier, it would
@@ -284,13 +284,13 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
     import threading
     from urllib.parse import urlparse as _urlparse
 
-    # Rendezvous for the two scan-results POSTs' Clarion batch resolutions. The
+    # Rendezvous for the two scan-results POSTs' Loomweave batch resolutions. The
     # capabilities probe is a GET, so exactly two requests hit do_POST — 2 is
     # both the floor we require and the ceiling that can be reached.
     resolve_barrier = threading.Barrier(2, timeout=5)
     barrier_broken: list[str] = []
 
-    class LatentClarionHandler(http.server.BaseHTTPRequestHandler):
+    class LatentLoomweaveHandler(http.server.BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = jsonmod.dumps(payload).encode()
             self.send_response(status)
@@ -340,7 +340,7 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
         def log_message(self, format: str, *args: object) -> None:
             return
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LatentClarionHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LatentLoomweaveHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -349,8 +349,8 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={"base_url": base_url, "timeout_seconds": 5},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
         try:
@@ -368,8 +368,8 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
 
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 resp_a, resp_b = await asyncio.gather(
-                    client.post("/api/loom/scan-results", json=scan_body(0)),
-                    client.post("/api/loom/scan-results", json=scan_body(1)),
+                    client.post("/api/weft/scan-results", json=scan_body(0)),
+                    client.post("/api/weft/scan-results", json=scan_body(1)),
                 )
 
             # The barrier was satisfied: both resolutions overlapped. A serialised
@@ -393,7 +393,7 @@ async def test_concurrent_loom_scan_results_run_in_parallel(tmp_path: Path) -> N
 
 async def test_scan_ingest_adopts_committed_id_on_local_minted_id_collision(tmp_path: Path) -> None:
     """C1 regression (db_files.py:977-982). Under concurrent same-path ingest in
-    local / Clarion-fallback mode, ``LocalRegistry.resolve_file`` mints a *fresh*
+    local / Loomweave-fallback mode, ``LocalRegistry.resolve_file`` mints a *fresh*
     arbitrary id per call (registry.py). When two ingests pre-resolve the same
     new path before either writes, they mint different ids; the winner commits
     and the loser must adopt the committed row's id — the minted id is arbitrary,
@@ -511,8 +511,8 @@ async def test_concurrent_same_path_local_scan_results_do_not_raise(tmp_path: Pa
 
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp_a, resp_b = await asyncio.gather(
-                client.post("/api/loom/scan-results", json=scan_body(0)),
-                client.post("/api/loom/scan-results", json=scan_body(1)),
+                client.post("/api/weft/scan-results", json=scan_body(0)),
+                client.post("/api/weft/scan-results", json=scan_body(1)),
             )
 
         assert resp_a.status_code == 200, resp_a.text
@@ -537,7 +537,7 @@ async def test_concurrent_same_path_local_scan_results_do_not_raise(tmp_path: Pa
         db.close()
 
 
-async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_path: Path) -> None:
+async def test_weft_scan_results_makes_single_batch_call_for_300_findings(tmp_path: Path) -> None:
     """CONTRACT-1: a scan-results POST with 300 unfamiliar paths makes exactly
     ``ceil(300/256) = 2`` batch HTTP calls (not 300 GET calls)."""
     findings = [{"path": f"src/file_{i:04d}.py", "rule_id": "E501", "severity": "low", "message": "msg"} for i in range(300)]
@@ -546,8 +546,8 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={"base_url": base_url, "timeout_seconds": 5},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 5},
         )
         db.initialize()
         try:
@@ -556,7 +556,7 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
-                    "/api/loom/scan-results",
+                    "/api/weft/scan-results",
                     json={"scan_source": "ruff", "findings": findings},
                 )
             assert response.status_code == 200, response.text
@@ -569,11 +569,11 @@ async def test_loom_scan_results_makes_single_batch_call_for_300_findings(tmp_pa
             db.close()
 
 
-async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
+async def test_weft_scan_results_briefing_blocked_path_bypasses_fallback(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """CONTRACT-3: a briefing-blocked path (Clarion 1.0 returns 403 +
+    """CONTRACT-3: a briefing-blocked path (Loomweave 1.0 returns 403 +
     ``code: BRIEFING_BLOCKED``) must NOT fall back to local, even with
     ``allow_local_fallback=true``. Falling back would silently re-attach
     the secret-bearing file under a local file_id, defeating the briefing
@@ -589,8 +589,8 @@ async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
             tmp_path / "filigree.db",
             prefix="test",
             check_same_thread=False,
-            registry_backend="clarion",
-            clarion_config={
+            registry_backend="loomweave",
+            loomweave_config={
                 "base_url": base_url,
                 "timeout_seconds": 1,
                 "allow_local_fallback": True,
@@ -604,7 +604,7 @@ async def test_loom_scan_results_briefing_blocked_path_bypasses_fallback(
             with caplog.at_level(logging.WARNING, logger="filigree.core"):
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
-                        "/api/loom/scan-results",
+                        "/api/weft/scan-results",
                         json={
                             "scan_source": "ruff",
                             "findings": [

@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-DEFAULT_INSTANCE_ID = "test-clarion-instance"
+DEFAULT_INSTANCE_ID = "test-loomweave-instance"
 DEFAULT_API_VERSION = 1
 
 
@@ -45,7 +45,7 @@ class ClarionStubState:
     # after that many probes (so e.g. ``=1`` flips the answer on the *second*
     # probe — the typical mid-session-rotation test pattern).
     rotate_after_capability_probes: int | None = None
-    rotated_instance_id: str = "test-clarion-instance-rotated"
+    rotated_instance_id: str = "test-loomweave-instance-rotated"
     # When a Clarion-side file is briefing-blocked, Clarion 1.0 returns
     # HTTP 403 with body ``{"code": "BRIEFING_BLOCKED", ...}``. The set holds
     # paths to simulate that state. Filigree must raise
@@ -76,7 +76,7 @@ class ClarionStubState:
     sei_version: int = 1
     # locator -> alive SEI. A submitted locator absent here resolves to the
     # ``not_found`` channel (orphaned); a submitted SEI-shaped string (reserved
-    # ``clarion:eid:`` prefix) is rejected into the ``invalid`` channel (REQ-F-02).
+    # ``loomweave:eid:`` prefix) is rejected into the ``invalid`` channel (REQ-F-02).
     sei_by_locator: dict[str, str] = field(default_factory=dict)
     # Locators to force into the ``invalid`` channel even though they are not
     # SEI-shaped — models a malformed locator Clarion's validate_locator rejects.
@@ -123,7 +123,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             """Mirror Clarion's ``POST /api/v1/identity/resolve:batch`` (ADR-038).
 
             Resolved locators map to ``{sei, current_locator, content_hash, alive}``;
-            SEI-shaped inputs (reserved ``clarion:eid:`` prefix) are rejected into
+            SEI-shaped inputs (reserved ``loomweave:eid:`` prefix) are rejected into
             ``invalid`` (REQ-F-02); everything else falls to ``not_found``.
             """
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -145,7 +145,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             invalid: list[str] = []
             not_found: list[str] = []
             for locator in locators:
-                if not isinstance(locator, str) or locator.startswith("clarion:eid:") or locator in state.invalid_locators:
+                if not isinstance(locator, str) or locator.startswith("loomweave:eid:") or locator in state.invalid_locators:
                     invalid.append(locator)
                     continue
                 sei = state.sei_by_locator.get(locator)

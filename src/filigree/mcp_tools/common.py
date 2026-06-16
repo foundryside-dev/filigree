@@ -21,7 +21,16 @@ from filigree.registry_errors import RegistryPublicError, registry_error_respons
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
-from filigree.types.api import ErrorCode, ErrorResponse, ListResponse, ReadyIssue, SlimIssue, TransitionError, TransitionHint
+from filigree.types.api import (
+    ErrorCode,
+    ErrorResponse,
+    InvalidTransitionError,
+    ListResponse,
+    ReadyIssue,
+    SlimIssue,
+    TransitionError,
+    TransitionHint,
+)
 from filigree.validation import sanitize_actor
 
 logger = logging.getLogger(__name__)
@@ -82,6 +91,30 @@ def _text(content: object) -> list[TextContent]:
     if isinstance(content, str):
         return [TextContent(type="text", text=content)]
     return [TextContent(type="text", text=json.dumps(content, indent=2, default=str))]
+
+
+def _inject_warnings(result: list[TextContent], warnings: list[dict[str, Any]]) -> list[TextContent]:
+    """Add a top-level ``warnings`` array to a tool's JSON envelope.
+
+    Post-processing hook so warning producers (e.g. ADR-012 actor mismatch) need
+    not touch every handler. Parses the first text element; if it is a JSON
+    object, appends to (or creates) its ``warnings`` list. Bare-string and
+    non-object responses are returned untouched. Never raises.
+    """
+    if not warnings or not result:
+        return result
+    first = result[0]
+    if first.type != "text":
+        return result
+    try:
+        payload = json.loads(first.text)
+    except (json.JSONDecodeError, ValueError):
+        return result  # bare-string response — leave untouched
+    if not isinstance(payload, dict):
+        return result
+    existing = payload.get("warnings")
+    payload["warnings"] = (existing if isinstance(existing, list) else []) + warnings
+    return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str)), *result[1:]]
 
 
 def _registry_error_text(exc: RegistryPublicError, *, action: str) -> list[TextContent]:
@@ -156,11 +189,11 @@ def _apply_has_more(items: list[Any], effective_limit: int) -> tuple[list[Any], 
 def _list_response(items: list[Any], *, has_more: bool, next_offset: int | None = None) -> ListResponse[Any]:
     """Build a unified ``ListResponse[T]`` envelope for MCP list tools.
 
-    Mirrors the loom HTTP ``list_response`` adapter:
+    Mirrors the weft HTTP ``list_response`` adapter:
     ``next_offset`` is present only when ``has_more`` is True. Defined here
-    rather than reusing the loom adapter to keep the MCP surface free of
+    rather than reusing the weft adapter to keep the MCP surface free of
     generation-layer dependencies (per the operating principle "MCP reflects
-    the living surface only", not "MCP imports loom").
+    the living surface only", not "MCP imports weft").
     """
     body: ListResponse[Any] = {"items": items, "has_more": has_more}
     if has_more and next_offset is not None:
@@ -218,6 +251,7 @@ def _build_transition_error(
     *,
     include_ready: bool = True,
     valid_transitions: list[TransitionHint] | None = None,
+    exc: BaseException | None = None,
 ) -> TransitionError:
     """Build a structured error dict with valid-transition hints.
 
@@ -225,8 +259,27 @@ def _build_transition_error(
     the issue from SQLite, so a backend exception during error construction
     must not mask the caller's original invalid_transition payload (see
     filigree-55c5347992).
+
+    When ``exc`` is a typed :class:`InvalidTransitionError`, the wire ``error``
+    string is replaced with its generic ``safe_message`` and the source-state
+    recovery fields (``current_status`` / ``type_name`` / ``to_state``) are
+    added so an agent can still self-correct from a probe-safe string
+    (filigree-d25e75cebf). Untyped transition errors (raw ``ValueError`` routed
+    here by the message heuristic, or ``AmbiguousTransitionError``) keep the
+    passed ``error`` unchanged.
     """
+    if isinstance(exc, InvalidTransitionError):
+        error = exc.safe_message
     data: TransitionError = {"error": error, "code": ErrorCode.INVALID_TRANSITION}
+    if isinstance(exc, InvalidTransitionError):
+        data["current_status"] = exc.current_status
+        data["type_name"] = exc.type_name
+        if exc.to_state is not None:
+            data["to_state"] = exc.to_state
+        if exc.next_action is not None:
+            data["next_action"] = exc.next_action
+        if exc.missing_fields:
+            data["missing_fields"] = exc.missing_fields
     if valid_transitions is not None:
         data["valid_transitions"] = valid_transitions
         try:

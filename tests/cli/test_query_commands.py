@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.types.api import ErrorCode
 from tests.cli.conftest import _extract_id
 
 
@@ -214,6 +215,71 @@ class TestJsonOutput:
         data = json.loads(result.output)
         assert [item["issue_id"] for item in data["items"]] == [low_id, high_id]
 
+    def test_list_json_priority_range(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """N-6: --priority-min/--priority-max filter the list output."""
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        mid = runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        mid_id = _extract_id(mid.output)
+        result = runner.invoke(cli, ["list", "--priority-min", "1", "--priority-max", "3", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [mid_id]
+
+    def test_list_json_priority_max_zero_includes_p0(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Priority 0 is valid — a max of 0 must not be treated as unset."""
+        runner, _ = cli_in_project
+        p0 = runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        p0_id = _extract_id(p0.output)
+        runner.invoke(cli, ["create", "Normal", "--priority", "2"])
+        result = runner.invoke(cli, ["list", "--priority-max", "0", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [p0_id]
+
+    def test_list_issues_alias_accepts_priority_range(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        mid = runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        mid_id = _extract_id(mid.output)
+        result = runner.invoke(cli, ["list-issues", "--priority-min", "1", "--priority-max", "3", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [mid_id]
+
+    def test_list_json_priority_min_gt_max_returns_empty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """min > max is not an error — it just matches nothing (claim-verb semantics)."""
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        result = runner.invoke(cli, ["list", "--priority-min", "3", "--priority-max", "1", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["items"] == []
+
+    def test_list_priority_exact_plus_range_conflict_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Exact --priority combined with a range bound is ambiguous → VALIDATION."""
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "-p", "2", "--priority-min", "1", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == ErrorCode.VALIDATION
+        assert "priority" in data["error"]
+
+    def test_list_priority_exact_plus_max_conflict_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "--priority", "2", "--priority-max", "3", "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == ErrorCode.VALIDATION
+
+    def test_list_priority_exact_plus_range_conflict_plain(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["list", "-p", "2", "--priority-min", "1"])
+        assert result.exit_code != 0
+        # Pin the actual conflict path, not just any nonzero exit (e.g. a
+        # Click usage error would otherwise satisfy this test).
+        assert "cannot be combined" in result.output
+
     def test_list_json_invalid_sort_by_returns_validation_envelope(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
 
@@ -239,6 +305,46 @@ class TestJsonOutput:
         item = data["items"][0]
         assert set(item.keys()) == {"issue_id", "title", "status", "priority", "type", "startable"}
         assert item["startable"] is True
+
+    def test_ready_json_priority_range(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """N-6: ready --priority-min/--priority-max filter the ready queue."""
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        mid = runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        mid_id = _extract_id(mid.output)
+        result = runner.invoke(cli, ["ready", "--priority-min", "1", "--priority-max", "3", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [mid_id]
+
+    def test_ready_json_priority_max_zero_includes_p0(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Priority 0 is valid — a max of 0 must not be treated as unset."""
+        runner, _ = cli_in_project
+        p0 = runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        p0_id = _extract_id(p0.output)
+        runner.invoke(cli, ["create", "Normal", "--priority", "2"])
+        result = runner.invoke(cli, ["ready", "--priority-max", "0", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [p0_id]
+
+    def test_get_ready_alias_accepts_priority_range(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Critical", "--priority", "0"])
+        mid = runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        mid_id = _extract_id(mid.output)
+        result = runner.invoke(cli, ["get-ready", "--priority-min", "1", "--priority-max", "3", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert [item["issue_id"] for item in data["items"]] == [mid_id]
+
+    def test_ready_json_priority_min_gt_max_returns_empty(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Mid", "--priority", "2"])
+        result = runner.invoke(cli, ["ready", "--priority-min", "3", "--priority-max", "1", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["items"] == []
 
     def test_ready_json_include_context_adds_parent_context(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -295,10 +401,11 @@ class TestJsonOutput:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "by_status" in data
-        # DEPRECATED (filigree-17694d2db8) aliases, retained on the CLI JSON
-        # wire surface per ADR-009 §7: still present, still duplicates.
-        assert data["status_name_counts"] == data["by_status"]
-        assert data["status_category_counts"] == data["by_category"]
+        assert "by_category" in data
+        # status_name_counts / status_category_counts removed in 3.0.0
+        # (filigree-e4181ae767) — gone from the CLI JSON surface too.
+        assert "status_name_counts" not in data
+        assert "status_category_counts" not in data
 
     def test_search_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project

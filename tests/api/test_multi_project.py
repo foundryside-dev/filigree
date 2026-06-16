@@ -33,6 +33,49 @@ class TestProjectStore:
         with pytest.raises(KeyError):
             project_store.get_db("nonexistent")
 
+    def test_store_dir_for_resolves_canonical_weft_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """store_dir_for must return the CANONICAL store dir (where the federation
+        token lives) — .weft/filigree/ after consolidation — NOT the legacy
+        .filigree/ path registered in server.json. The F1 per-project token
+        resolver reads this dir; if it returns the legacy path, a project whose
+        token only lives in the consolidated store fails auth (the incompleteness
+        behind weft-7a399b8124's strict-auth on a real WEFT-consolidated deploy).
+        It must agree with get_db, which already opens the .weft DB.
+        """
+        import json
+
+        from filigree.core import CONF_FILENAME, write_conf, write_config
+
+        config_dir = tmp_path / ".config" / "filigree"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        proj = tmp_path / "proj"
+        legacy = proj / ".filigree"  # registered path (no DB here post-migration)
+        legacy.mkdir(parents=True)
+        write_config(legacy, {"prefix": "acme", "version": 1})
+        weft = proj / ".weft" / "filigree"  # canonical store: DB + token live here
+        weft.mkdir(parents=True)
+        db = FiligreeDB(weft / "filigree.db", prefix="acme", check_same_thread=False)
+        db.initialize()
+        db.close()
+        write_conf(
+            proj / CONF_FILENAME,
+            {"version": 1, "project_name": "acme", "prefix": "acme", "db": ".weft/filigree/filigree.db"},
+        )
+        (config_dir / "server.json").write_text(json.dumps({"port": 8377, "projects": {str(legacy): {"prefix": "acme"}}}))
+
+        store = ProjectStore()
+        store.load()
+        try:
+            resolved = store.store_dir_for("acme")
+            assert resolved == weft, f"expected canonical .weft store, got {resolved}"
+            # Must agree with where get_db actually opens the DB.
+            assert store.get_db("acme").db_path.parent == weft
+        finally:
+            store.close_all()
+
     def test_get_db_closes_connection_on_init_failure(self, project_store: ProjectStore) -> None:
         """Bug filigree-6128be: DB connection must be closed if initialize() fails."""
         from unittest.mock import patch
@@ -255,13 +298,13 @@ class TestProjectStore:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         def _bad_config(_filigree_dir: Path, *, check_same_thread: bool = True) -> FiligreeDB:
-            raise ValueError("clarion.base_url must use http(s)")
+            raise ValueError("loomweave.base_url must use http(s)")
 
         monkeypatch.setattr(dash_module, "_open_db_for_filigree_dir", _bad_config)
-        with caplog.at_level("WARNING", logger="filigree.dashboard"), pytest.raises(ValueError, match=r"clarion\.base_url"):
+        with caplog.at_level("WARNING", logger="filigree.dashboard"), pytest.raises(ValueError, match=r"loomweave\.base_url"):
             project_store.get_db("alpha")
         assert "Invalid project configuration" in caplog.text
-        assert "clarion.base_url must use http(s)" in caplog.text
+        assert "loomweave.base_url must use http(s)" in caplog.text
 
     def test_load_skips_missing_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import json
@@ -306,14 +349,14 @@ class TestProjectStore:
         """filigree-732f6b31e4: concurrent first get_db() must open exactly once.
 
         Without the internal lock, two threads each pass the cache-miss check
-        and each call ``FiligreeDB.from_filigree_dir`` (which migrates and
+        and each call ``FiligreeDB.from_store_dir`` (which migrates and
         seeds-inserts), only the loser's handle gets cached, and the winner's
         handle is leaked unclosed.
         """
         import threading
         from unittest.mock import patch
 
-        original = FiligreeDB.from_filigree_dir
+        original = FiligreeDB.from_store_dir
         opened: list[FiligreeDB] = []
         opened_lock = threading.Lock()
         gate = threading.Event()
@@ -334,7 +377,7 @@ class TestProjectStore:
             with results_lock:
                 results.append(db)
 
-        with patch.object(FiligreeDB, "from_filigree_dir", side_effect=slow_open):
+        with patch.object(FiligreeDB, "from_store_dir", side_effect=slow_open):
             t1 = threading.Thread(target=worker)
             t2 = threading.Thread(target=worker)
             t1.start()
@@ -344,7 +387,7 @@ class TestProjectStore:
             t1.join(timeout=5.0)
             t2.join(timeout=5.0)
 
-        assert len(opened) == 1, f"from_filigree_dir called {len(opened)}x, expected 1 (race / leak)"
+        assert len(opened) == 1, f"from_store_dir called {len(opened)}x, expected 1 (race / leak)"
         assert len(results) == 2
         assert results[0] is results[1], "both threads must observe the same cached handle"
         assert project_store._dbs["alpha"] is opened[0]
@@ -617,6 +660,125 @@ class TestMultiProjectRouting:
         assert body["code"] != ErrorCode.INTERNAL
 
 
+_SCAN_BODY = {
+    "scan_source": "wardline",
+    "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "line_start": 10}],
+}
+
+
+class TestServerModeFederationWriteScope:
+    """weft-7a399b8124: a federation write must resolve to the CALLER's project;
+    an unscoped write fails closed instead of silently hitting the home project.
+    """
+
+    async def test_unscoped_federation_write_fails_closed(self, multi_client: AsyncClient) -> None:
+        """POST /api/weft/scan-results with no project scope → 400, not a home write.
+
+        The 400 alone is not enough: the contamination this fix prevents is a
+        silently-landed row, so assert ZERO findings were written to EITHER
+        project (fail-closed means the write never reached any DB).
+        """
+        resp = await multi_client.post("/api/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == ErrorCode.VALIDATION
+        assert "scope to a project" in body["error"]
+
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        assert alpha.json()["items"] == [], "unscoped write must not land in the default project"
+        assert bravo.json()["items"] == [], "unscoped write must not land in any project"
+
+    async def test_scoped_write_unknown_key_404_before_any_write(self, multi_client: AsyncClient) -> None:
+        """Criterion 3: a scoped write to an UNKNOWN project key 404s before any
+        write, so a 2xx is proof the destination resolved to a real project.
+        No row lands in any registered project."""
+        resp = await multi_client.post("/api/p/nosuchproject/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 404, resp.text
+
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        assert alpha.json()["items"] == []
+        assert bravo.json()["items"] == []
+
+    async def test_unscoped_living_alias_write_fails_closed(self, multi_client: AsyncClient) -> None:
+        """The living-surface alias POST /api/scan-results also fails closed."""
+        resp = await multi_client.post("/api/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == ErrorCode.VALIDATION
+
+    async def test_path_scoped_write_lands_in_that_project_only(self, multi_client: AsyncClient) -> None:
+        """A path-scoped write creates findings in the named project, names it in
+        the response header, and does NOT touch the other project."""
+        resp = await multi_client.post("/api/p/bravo/weft/scan-results", json=_SCAN_BODY)
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "bravo"
+
+        bravo = await multi_client.get("/api/p/bravo/weft/findings")
+        alpha = await multi_client.get("/api/p/alpha/weft/findings")
+        assert len(bravo.json()["items"]) == 1
+        assert alpha.json()["items"] == []  # untouched — no contamination
+
+    async def test_query_scoped_write_routes_like_path(self, multi_client: AsyncClient) -> None:
+        """?project= scopes the federation API uniformly with /mcp."""
+        resp = await multi_client.post("/api/weft/scan-results?project=alpha", json=_SCAN_BODY)
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        alpha = await multi_client.get("/api/weft/findings?project=alpha")
+        assert len(alpha.json()["items"]) == 1
+
+    async def test_unscoped_read_stays_lenient(self, multi_client: AsyncClient) -> None:
+        """Reads keep the default-project fallback — only writes fail closed."""
+        resp = await multi_client.get("/api/weft/issues")
+        assert resp.status_code == 200, resp.text
+
+    async def test_unscoped_read_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """C-10(a) honest-seams: an unscoped read silently resolves to the
+        default project, so the response must name which project it hit — a
+        defaulted read is not allowed to be silent about its destination."""
+        resp = await multi_client.get("/api/weft/issues")
+        assert resp.status_code == 200, resp.text
+        # alpha is the first-loaded project => the resolved default.
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+
+
+class TestServerModeClassicWriteScope:
+    """filigree-b62d865dad: the classic surface (``/api/issue...``) must name
+    the project it actually resolved to, just like the federation surface.
+
+    Unlike federation writes, classic writes do NOT fail closed when unscoped —
+    the dashboard's no-project default view legitimately writes to ``/api`` and
+    relies on default-project resolution. The honest-seams contract is therefore
+    satisfied by *echoing* the resolved project so a misroute is detectable,
+    not by rejecting the write.
+    """
+
+    async def test_unscoped_classic_write_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """An unscoped classic write resolves to the default project (alpha) and
+        must echo X-Filigree-Project so the silent default-resolution is
+        detectable — and the row must land in alpha, not bravo."""
+        resp = await multi_client.post("/api/issues", json={"title": "classic write"})
+        assert resp.status_code == 201, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        # Routing proof: the created issue carries the default project's prefix.
+        assert resp.json()["id"].startswith("alpha-"), resp.json()
+
+    async def test_scoped_classic_write_echoes_scoped_project(self, multi_client: AsyncClient) -> None:
+        """A path-scoped classic write names the scoped project in the header
+        and lands in that project."""
+        resp = await multi_client.post("/api/p/bravo/issues", json={"title": "scoped classic"})
+        assert resp.status_code == 201, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "bravo"
+        assert resp.json()["id"].startswith("bravo-"), resp.json()
+
+    async def test_unscoped_classic_read_echoes_resolved_default_project(self, multi_client: AsyncClient) -> None:
+        """An unscoped classic read also resolves to the default and echoes it,
+        uniform with the federation read seam."""
+        resp = await multi_client.get("/api/issues")
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+
+
 class TestServerModeCrossProjectReadBlocking:
     """2.1.0 §1.3: in multi-project server mode, read endpoints reject
     foreign-prefix IDs at the route boundary with 404/safe_message.
@@ -643,11 +805,11 @@ class TestServerModeCrossProjectReadBlocking:
         assert "bravo" not in body["error"]
         assert "alpha" not in body["error"]
 
-    async def test_dashboard_server_mode_blocks_cross_project_loom_read(self, multi_client: AsyncClient) -> None:
-        """The loom mirror enforces the same guard."""
+    async def test_dashboard_server_mode_blocks_cross_project_weft_read(self, multi_client: AsyncClient) -> None:
+        """The weft mirror enforces the same guard."""
         from filigree.core import WrongProjectError
 
-        resp = await multi_client.get("/api/p/alpha/loom/issues/bravo-deadbeef00")
+        resp = await multi_client.get("/api/p/alpha/weft/issues/bravo-deadbeef00")
         assert resp.status_code == 404, resp.text
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body

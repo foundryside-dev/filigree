@@ -244,6 +244,122 @@ class TestStartWorkCli:
         assert data["code"] == "VALIDATION"
 
 
+class TestStartWorkIdentityDefaulting:
+    """FIL-3 (filigree-3028a8d0f8): --assignee defaults from an *explicitly provided* actor.
+
+    `filigree --actor X start-work <id>` and `filigree start-work <id> --actor Y`
+    must claim as the actor; with neither flag, the error names both options.
+    The implicit group default actor ("cli") must NOT be used as an assignee.
+    """
+
+    def test_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Group actor start"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-x", "start-work", issue_id, "--json"])
+
+        assert result.exit_code == 0, result.output
+        # result.stdout excludes the ADR-012 actor-mismatch warning on stderr.
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-x"
+        assert data["status"] == "in_progress"
+
+    def test_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Post-verb actor start"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--actor", "agent-y", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-y"
+        assert data["status"] == "in_progress"
+
+    def test_no_identity_json_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "No identity start"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
+
+    def test_no_identity_plain_text_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "No identity start plain"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["start-work", issue_id])
+
+        assert result.exit_code == 1
+        assert "--assignee" in result.output
+        assert "--actor" in result.output
+
+    def test_explicit_assignee_still_wins_over_group_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Pre-existing shape preserved: with --assignee given, attribution stays assignee-derived."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Assignee wins"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-x", "start-work", issue_id, "--assignee", "yvonne", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "yvonne"
+
+
+class TestStartNextWorkIdentityDefaulting:
+    """FIL-3: start-next-work mirrors start-work identity defaulting."""
+
+    def test_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Group actor next", "-p", "0", "--type", "task"])
+
+        result = runner.invoke(cli, ["--actor", "agent-x", "start-next-work", "--type", "task", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-x"
+        assert data["status"] == "in_progress"
+
+    def test_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Post-verb actor next", "-p", "0", "--type", "task"])
+
+        result = runner.invoke(cli, ["start-next-work", "--type", "task", "--actor", "agent-y", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-y"
+        assert data["status"] == "in_progress"
+
+    def test_no_identity_json_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["start-next-work", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
+
+    def test_no_identity_plain_text_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["start-next-work"])
+
+        assert result.exit_code == 1
+        assert "--assignee" in result.output
+        assert "--actor" in result.output
+
+
 class TestStartNextWorkCli:
     def test_happy_path_claims_highest_priority(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """start-next-work claims the highest-priority ready issue."""

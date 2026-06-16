@@ -43,11 +43,11 @@ def test_error_code_enum_members() -> None:
     # typed SchemaVersionMismatchError and the catch-all except-Exception
     # paths have dedicated codes rather than aliasing onto IO/VALIDATION.
     # FILE_REGISTRY_DISPLACED is the ADR-014 direct-registration
-    # conflict code for projects whose file registry is owned by Clarion.
-    # CLARION_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
-    # Clarion advertises an api_version this Filigree was not built for.
-    # BRIEFING_BLOCKED is the Clarion 1.0 cross-product code (CONTRACT-3):
-    # Clarion returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
+    # conflict code for projects whose file registry is owned by Loomweave.
+    # LOOMWEAVE_REGISTRY_VERSION_MISMATCH is ADR-014 §4: emitted when
+    # Loomweave advertises an api_version this Filigree was not built for.
+    # BRIEFING_BLOCKED is the Loomweave 1.0 cross-product code (CONTRACT-3):
+    # Loomweave returns 403 + ``{"code": "BRIEFING_BLOCKED"}`` for files it
     # intentionally withholds; surfaces as HTTP 403 to the dashboard caller
     # and MUST NOT engage the local-registry fallback.
     expected = {
@@ -61,8 +61,8 @@ def test_error_code_enum_members() -> None:
         "INVALID_API_URL",
         "FILE_REGISTRY_DISPLACED",
         "REGISTRY_UNAVAILABLE",
-        "CLARION_REGISTRY_VERSION_MISMATCH",
-        "CLARION_OUT_OF_SYNC",
+        "LOOMWEAVE_REGISTRY_VERSION_MISMATCH",
+        "LOOMWEAVE_OUT_OF_SYNC",
         "BRIEFING_BLOCKED",
         "STOP_FAILED",
         "SCHEMA_MISMATCH",
@@ -144,32 +144,45 @@ def test_transition_errors_exist() -> None:
     from filigree.types.api import (
         AmbiguousTransitionError,
         InvalidTransitionError,
+        TransitionMode,
     )
 
     exc1 = AmbiguousTransitionError("X", ["fixing", "reviewing"])
     assert "fixing" in str(exc1)
     assert isinstance(exc1, ValueError)
 
-    exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", backward=True)
+    exc2 = InvalidTransitionError("X", "confirmed", to_state="triage", mode=TransitionMode.BACKWARD)
     assert "confirmed" in str(exc2)
     enriched = exc2.with_valid_transitions([{"to": "open", "category": "open", "ready": True}])
     assert enriched is not exc2
     assert str(enriched) == str(exc2)
-    assert enriched.backward is True
+    assert enriched.mode is TransitionMode.BACKWARD
     assert enriched.valid_transitions == [{"to": "open", "category": "open", "ready": True}]
 
 
 def test_invalid_transition_details_omits_uncomputed_transitions() -> None:
     from filigree.types.api import InvalidTransitionError, invalid_transition_details
 
+    # filigree-d25e75cebf: details always carry the source state (so the wire
+    # string can be the generic safe_message without losing recovery info);
+    # valid_transitions is appended only once computed.
     exc = InvalidTransitionError("X", "confirmed", to_state="closed")
-    assert invalid_transition_details(exc) is None
+    assert invalid_transition_details(exc) == {
+        "type_name": "X",
+        "current_status": "confirmed",
+        "to_state": "closed",
+    }
 
     enriched = exc.with_valid_transitions([])
-    assert invalid_transition_details(enriched) == {"valid_transitions": []}
+    assert invalid_transition_details(enriched) == {
+        "type_name": "X",
+        "current_status": "confirmed",
+        "to_state": "closed",
+        "valid_transitions": [],
+    }
 
 
-def test_scan_ingest_response_loom_concrete_shape() -> None:
+def test_scan_ingest_response_weft_concrete_shape() -> None:
     """Regression: subclassing ``BatchResponse[str]`` did two bad things at
     runtime — it (1) left ``succeeded`` as ``list[~_T]`` instead of
     ``list[str]`` because TypedDict + ``Generic`` substitution is not
@@ -180,57 +193,70 @@ def test_scan_ingest_response_loom_concrete_shape() -> None:
     Pin the concrete shape: exactly four required keys, ``succeeded``
     typed as ``list[str]``, no ``newly_unblocked``.
     """
-    from filigree.generations.loom.types import ScanIngestResponseLoom, ScanStats
+    from filigree.generations.weft.types import ScanIngestResponseWeft, ScanStats
 
-    hints = get_type_hints(ScanIngestResponseLoom)
-    assert set(hints.keys()) == {"succeeded", "failed", "stats", "warnings"}
+    hints = get_type_hints(ScanIngestResponseWeft)
+    # ``weft_reasons`` is the one additive (NotRequired) field: a PDR-0023
+    # weft-reason carrier list, omitted on the clean path so a same-scheme
+    # client sees the byte-identical 4-key envelope. It must stay OPTIONAL —
+    # promoting it to required would break every clean-scan consumer.
+    assert set(hints.keys()) == {"succeeded", "failed", "stats", "warnings", "weft_reasons"}
     assert hints["succeeded"] == list[str]
     assert hints["failed"] == list[BatchFailure]
     assert hints["stats"] is ScanStats
     assert hints["warnings"] == list[str]
     # newly_unblocked must NOT appear — scan ingest cannot unblock issues.
     assert "newly_unblocked" not in hints
-    assert ScanIngestResponseLoom.__required_keys__ == {
+    # ``weft_reasons`` is declared ``NotRequired``, but ``from __future__ import
+    # annotations`` stringifies the marker so CPython's TypedDict machinery
+    # cannot strip it at class-creation time — it lands in ``__required_keys__``
+    # (the same artifact that puts ``newly_unblocked`` there for
+    # ``BatchCloseResponseWeft``). Wire-level optionality is what actually
+    # guards back-compat and is asserted by the adapter test
+    # (``test_scheme_mismatch_surfaced_on_weft_wire`` in
+    # tests/core/test_scan_finding_fingerprint.py): the clean path OMITS the key.
+    assert ScanIngestResponseWeft.__required_keys__ == {
         "succeeded",
         "failed",
         "stats",
         "warnings",
+        "weft_reasons",
     }
-    assert ScanIngestResponseLoom.__optional_keys__ == frozenset()
+    assert ScanIngestResponseWeft.__optional_keys__ == frozenset()
 
 
-def test_batch_close_response_loom_succeeded_supports_full() -> None:
-    """Regression: ``BatchCloseResponseLoom.succeeded`` was pinned to
-    ``list[SlimIssueLoom]`` even though the C5 contract (and the handler
-    in ``dashboard_routes/issues.py``) returns full ``IssueLoom`` items
+def test_batch_close_response_weft_succeeded_supports_full() -> None:
+    """Regression: ``BatchCloseResponseWeft.succeeded`` was pinned to
+    ``list[SlimIssueWeft]`` even though the C5 contract (and the handler
+    in ``dashboard_routes/issues.py``) returns full ``IssueWeft`` items
     when ``response_detail=full``. ``newly_unblocked[]`` stays slim per
     the locked C5 rule (``docs/federation/contracts.md`` §C5).
     """
     from typing import get_args, get_origin
 
-    from filigree.generations.loom.types import (
-        BatchCloseResponseLoom,
-        IssueLoom,
-        SlimIssueLoom,
+    from filigree.generations.weft.types import (
+        BatchCloseResponseWeft,
+        IssueWeft,
+        SlimIssueWeft,
     )
 
-    hints = get_type_hints(BatchCloseResponseLoom)
+    hints = get_type_hints(BatchCloseResponseWeft)
     assert set(hints.keys()) == {"succeeded", "failed", "newly_unblocked"}
 
-    # succeeded is list[SlimIssueLoom | IssueLoom] — both projections legal.
+    # succeeded is list[SlimIssueWeft | IssueWeft] — both projections legal.
     # PEP 604 unions surface as types.UnionType, while typing.Union[...] is
     # typing.Union; comparing get_args(elem) is robust to both.
     succeeded_t = hints["succeeded"]
     assert get_origin(succeeded_t) is list
     (elem_t,) = get_args(succeeded_t)
-    assert set(get_args(elem_t)) == {SlimIssueLoom, IssueLoom}
+    assert set(get_args(elem_t)) == {SlimIssueWeft, IssueWeft}
 
     # newly_unblocked stays slim-only by C5 contract.
     # (Optionality is asserted at the wire-shape level by the parity test
     # in tests/util/test_generation_parity.py — `from __future__ import
     # annotations` strips PEP 655 ``NotRequired`` markers from
     # ``__optional_keys__`` so we cannot check optionality here.)
-    assert hints["newly_unblocked"] == list[SlimIssueLoom]
+    assert hints["newly_unblocked"] == list[SlimIssueWeft]
 
 
 def test_errorcode_to_http_status_is_exhaustive() -> None:

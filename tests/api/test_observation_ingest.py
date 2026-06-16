@@ -2,7 +2,7 @@
 
 Covers:
 - POST /api/v1/observations (classic alias)
-- POST /api/loom/observations (loom generation)
+- POST /api/weft/observations (weft generation)
 - POST /api/observations (living surface alias)
 - Input validation (missing summary, invalid priority, invalid line, non-project-relative paths)
 - Idempotency (duplicate inserts return 200 and the existing mapped record)
@@ -47,12 +47,12 @@ async def client(test_db: FiligreeDB) -> AsyncClient:
 
 
 class TestObservationIngest:
-    async def test_loom_list_does_not_sweep_expired_observations(self, test_db: FiligreeDB, client: AsyncClient) -> None:
+    async def test_weft_list_does_not_sweep_expired_observations(self, test_db: FiligreeDB, client: AsyncClient) -> None:
         obs = test_db.create_observation("expired HTTP scratchpad")
         test_db.conn.execute("UPDATE observations SET expires_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", obs["id"]))
         test_db.conn.commit()
 
-        resp = await client.get("/api/loom/observations")
+        resp = await client.get("/api/weft/observations")
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["items"] == []
@@ -81,20 +81,20 @@ class TestObservationIngest:
         assert data["priority"] == 2
         assert data["actor"] == "reporter-1"
 
-    async def test_loom_ingest_success(self, client: AsyncClient) -> None:
+    async def test_weft_ingest_success(self, client: AsyncClient) -> None:
         payload = {
-            "summary": "Loom test observation",
-            "detail": "More loom context",
+            "summary": "Weft test observation",
+            "detail": "More weft context",
             "file_path": "src/api.py",
             "line": 10,
             "priority": 3,
             "actor": "reporter-2",
         }
-        resp = await client.post("/api/loom/observations", json=payload)
+        resp = await client.post("/api/weft/observations", json=payload)
         assert resp.status_code == 201, resp.text
         data = resp.json()
         assert "observation_id" in data
-        assert data["summary"] == "Loom test observation"
+        assert data["summary"] == "Weft test observation"
         assert data["file_path"] == "src/api.py"
         assert data["line"] == 10
         assert data["priority"] == 3

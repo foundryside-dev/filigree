@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
-from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, read_config
+from filigree.core import DB_FILENAME, read_config
 from tests.cli.conftest import _extract_id
 
 
@@ -22,8 +22,9 @@ class TestInit:
         try:
             result = cli_runner.invoke(cli, ["init"])
             assert result.exit_code == 0
-            assert (tmp_path / FILIGREE_DIR_NAME).is_dir()
-            assert (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).exists()
+            store = tmp_path / ".weft" / "filigree"
+            assert store.is_dir()
+            assert (store / DB_FILENAME).exists()
         finally:
             os.chdir(original)
 
@@ -33,7 +34,7 @@ class TestInit:
         try:
             result = cli_runner.invoke(cli, ["init", "--prefix", "myproj"])
             assert result.exit_code == 0
-            config = read_config(tmp_path / FILIGREE_DIR_NAME)
+            config = read_config(tmp_path / ".weft" / "filigree")
             assert config["prefix"] == "myproj"
         finally:
             os.chdir(original)
@@ -42,7 +43,7 @@ class TestInit:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["init"])
         assert result.exit_code == 0
-        assert "already exists" in result.output
+        assert "already initialized" in result.output
 
 
 class TestCreate:
@@ -257,7 +258,10 @@ class TestUpdateAndClose:
         result = runner.invoke(cli, ["--actor", "other-agent", "update", issue_id, "--priority", "0", "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
@@ -326,6 +330,28 @@ class TestUpdateAndClose:
         assert len(data["failed"]) == 1
         assert data["failed"][0]["id"] == "test-nonexistent"
 
+    def test_close_invalid_transition_json_includes_valid_transitions(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """`close --json` on a blocked transition must carry the structured
+        valid_transitions hint (like `update`/`release`), not a bare envelope,
+        and the message must inline the reachable state rather than naming a
+        tool to go call."""
+        runner, _ = cli_in_project
+        created = runner.invoke(cli, ["create", "Close blocked", "--type", "bug", "--json"])
+        issue_id = json.loads(created.output)["issue_id"]
+        assert runner.invoke(cli, ["update", issue_id, "--status", "confirmed"]).exit_code == 0
+        assert runner.invoke(cli, ["update", issue_id, "--status", "fixing"]).exit_code == 0
+
+        result = runner.invoke(cli, ["close", issue_id, "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["code"] == "INVALID_TRANSITION"
+        assert "valid_transitions" in data
+        assert "verifying" in {t["to"] for t in data["valid_transitions"]}
+        # Facts inlined into the message; no deferral to a (renamed) tool/method.
+        assert "verifying" in data["error"]
+        assert "get_valid_transitions" not in result.output
+
     def test_close_json_all_success(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r1 = runner.invoke(cli, ["create", "A"])
@@ -391,7 +417,10 @@ class TestUpdateAndClose:
         result = runner.invoke(cli, ["--actor", "other-agent", "close", issue_id, "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
@@ -461,7 +490,10 @@ class TestReopen:
         result = runner.invoke(cli, ["--actor", "other-agent", "reopen", held_id, free_id, "--json"])
 
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert {item["issue_id"] for item in data["succeeded"]} == {held_id, free_id}
         assert data["failed"] == []
 
@@ -496,7 +528,10 @@ class TestCommentsCli:
         result = runner.invoke(cli, ["--actor", "cli-commenter", "add-comment", issue_id, "My comment", "--json"])
 
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["issue_id"] == issue_id
         assert data["comment"]["comment_id"] == data["comment_id"]
         assert data["comment"]["author"] == "cli-commenter"
@@ -531,7 +566,10 @@ class TestCommentsCli:
         result = runner.invoke(cli, ["--actor", "other-agent", "add-comment", issue_id, "note", "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
@@ -639,7 +677,10 @@ class TestLabelCli:
         result = runner.invoke(cli, ["--actor", "other-agent", "add-label", "needs-review", issue_id, "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
@@ -652,7 +693,10 @@ class TestLabelCli:
         result = runner.invoke(cli, ["--actor", "other-agent", "remove-label", issue_id, "needs-review", "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-holder", "expected": "other-agent"}
 
@@ -744,6 +788,48 @@ class TestClaimCli:
         data = json.loads(result.output)
         assert data["code"] == "VALIDATION"
 
+    def test_claim_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: `filigree --actor X claim <id>` works without --assignee."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Group actor claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["--actor", "agent-g", "claim", issue_id, "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-g"
+
+    def test_claim_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: the ActorCommand post-verb --actor also satisfies the identity."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "Post-verb actor claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["claim", issue_id, "--actor", "agent-p", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-p"
+
+    def test_claim_no_identity_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: omitting both flags fails, naming --assignee and --actor (json + plain)."""
+        runner, _ = cli_in_project
+        r = runner.invoke(cli, ["create", "No identity claim"])
+        issue_id = _extract_id(r.output)
+
+        result = runner.invoke(cli, ["claim", issue_id, "--json"])
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
+
+        plain = runner.invoke(cli, ["claim", issue_id])
+        assert plain.exit_code == 1
+        assert "--assignee" in plain.output
+        assert "--actor" in plain.output
+
     def test_heartbeat_work_json_refreshes_claim(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "Heartbeat CLI"])
@@ -762,7 +848,10 @@ class TestClaimCli:
         result = runner.invoke(cli, ["--actor", "agent-1", "heartbeat-work", issue_id, "--json"])
 
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["issue_id"] == issue_id
         assert datetime.fromisoformat(data["last_heartbeat_at"]) > datetime.fromisoformat(old)
 
@@ -849,7 +938,10 @@ class TestClaimCli:
         )
 
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["assignee"] == "agent-new"
         assert data["claimed_at"] is not None
 
@@ -903,6 +995,38 @@ class TestClaimNextCli:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["status"] == "empty"
+
+    def test_claim_next_group_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """FIL-3: `filigree --actor X claim-next` works without --assignee."""
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Actor-only claim-next", "--type", "task", "-p", "0"])
+
+        result = runner.invoke(cli, ["--actor", "agent-g", "claim-next", "--type", "task", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-g"
+
+    def test_claim_next_post_verb_actor_only_claims_as_actor(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        runner.invoke(cli, ["create", "Post-verb claim-next", "--type", "task", "-p", "0"])
+
+        result = runner.invoke(cli, ["claim-next", "--type", "task", "--actor", "agent-p", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["assignee"] == "agent-p"
+
+    def test_claim_next_no_identity_names_both_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+
+        result = runner.invoke(cli, ["claim-next", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["code"] == "VALIDATION"
+        assert "--assignee" in data["error"]
+        assert "--actor" in data["error"]
 
     def test_claim_next_json_empty_includes_reason(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """filigree-0e8dadbfcc: empty --json must mirror MCP ClaimNextEmptyResponse.
@@ -1002,7 +1126,10 @@ class TestReleaseCli:
         result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["issue_id"] == issue_id
         assert data["assignee"] == ""
 
@@ -1018,7 +1145,10 @@ class TestReleaseCli:
         )
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["assignee"] == ""
 
     def test_release_if_held_rejects_other_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
@@ -1030,7 +1160,10 @@ class TestReleaseCli:
         result = runner.invoke(cli, ["--actor", "agent-1", "release", issue_id, "--if-held", "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["code"] == "CONFLICT"
         assert "agent-2" in data["error"]
         assert data["details"] == {"issue_id": issue_id, "observed": "agent-2", "expected": "agent-1"}
@@ -1060,7 +1193,10 @@ class TestReleaseCli:
         result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--json"])
 
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["succeeded"] == []
         assert data["failed"][0]["id"] == issue_id
         assert "simulated release failure" in data["failed"][0]["error"]
@@ -1127,7 +1263,10 @@ class TestReleaseCli:
         result = runner.invoke(cli, ["--actor", "agent-1", "release-my-claims", "--dry-run", "--json"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        # Read clean stdout: a genuine --actor differing from the OS user emits a
+        # non-blocking ACTOR_MISMATCH warning on stderr, merged into result.output
+        # by CliRunner in Click 8.3.1 (ADR-012).
+        data = json.loads(result.stdout)
         assert data["dry_run"] is True
         assert calls == []
 

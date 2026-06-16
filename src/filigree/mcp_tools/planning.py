@@ -96,6 +96,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         "default": False,
                         "description": "Include parent_issue_id and parent_title on each ready item.",
                     },
+                    "priority_min": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Minimum priority (0=critical)",
+                    },
+                    "priority_max": {"type": "integer", "minimum": 0, "maximum": 4, "description": "Maximum priority"},
                 },
             },
         ),
@@ -407,9 +414,17 @@ async def _handle_get_ready(arguments: dict[str, Any]) -> list[TextContent]:
     include_context = args.get("include_context", False)
     if not isinstance(include_context, bool):
         return _text(ErrorResponse(error="include_context must be a boolean", code=ErrorCode.VALIDATION))
+    priority_min = args.get("priority_min")
+    pmin_err = _validate_int_range(priority_min, "priority_min", min_val=0, max_val=4)
+    if pmin_err:
+        return pmin_err
+    priority_max = args.get("priority_max")
+    pmax_err = _validate_int_range(priority_max, "priority_max", min_val=0, max_val=4)
+    if pmax_err:
+        return pmax_err
 
     tracker = get_db()
-    issues = tracker.get_ready()
+    issues = tracker.get_ready(priority_min=priority_min, priority_max=priority_max)
     parent_titles = _parent_titles_by_id(tracker, issues) if include_context else {}
     items = []
     for i in issues:

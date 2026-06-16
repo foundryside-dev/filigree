@@ -118,6 +118,21 @@ def _validate_scanner_accepts_prompt(cfg: Any, prompt: str) -> ErrorResponse | N
     )
 
 
+def _active_project_root() -> Path:
+    """The active DB's authoritative project root for path-relative computations.
+
+    The anchor-aware constructors set ``project_root`` (resolved). It is correct
+    for an arbitrary-depth weft.toml ``store_dir`` override, unlike reverse-deriving
+    it from the store dir by stripping segments (``store_dir.parent`` /
+    ``store_dir_to_project_root``), which assumes a fixed canonical depth (I2).
+    """
+    project_root = get_db().project_root
+    if project_root is None:
+        msg = "active database has no resolved project root"
+        raise ValueError(msg)
+    return project_root
+
+
 def _scanner_path(filigree_dir: Path, scanner_name: str) -> Path:
     return filigree_dir / "scanners" / f"{scanner_name}.toml"
 
@@ -219,6 +234,26 @@ def register(
                             "'slim' (default) returns the flat ScanFinding plus ``finding_result`` "
                             "and ``observation_id`` (if a paired observation was created). 'full' "
                             "additionally includes the batch-style ingest stats."
+                        ),
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional opaque external entity ID (SEI or legacy locator) to bind to "
+                            "this finding at report time (ADR-029, SEAM SEI-on-create). Stamped into "
+                            "metadata.loomweave.entity_id — the same key finding_promote reads to "
+                            "auto-attach the entity association — so an agent-reported finding lands ON "
+                            "the spine. Not parsed by Filigree. Mutually exclusive with entity_symbol."
+                        ),
+                    },
+                    "entity_symbol": {
+                        "type": "string",
+                        "description": (
+                            "Optional symbol/qualname (Loomweave locator) resolved to a stable SEI via "
+                            "Loomweave at report time, then stamped into metadata.loomweave.entity_id "
+                            "(ADR-029 L2). Requires a Loomweave registry backend with SEI support; an "
+                            "input that resolves to zero or many returns a weft-reason unresolved_input "
+                            "and does NOT create the finding. Mutually exclusive with entity_id."
                         ),
                     },
                 },
@@ -492,7 +527,7 @@ def _load_scanner_or_error(filigree_dir: Path, scanner_name: str) -> tuple[Any |
             )
             error = f"Bundled scanner {scanner_name!r} is not enabled in this project"
         else:
-            details["hint"] = "Call scanner_available_list to see bundled scanners that can be enabled."
+            details["hint"] = f"Bundled scanners that can be enabled: {', '.join(sorted(BUNDLED_SCANNERS))}."
             error = f"Scanner {scanner_name!r} not found"
         return None, ErrorResponse(
             error=error,
@@ -518,7 +553,7 @@ async def _handle_list_scanners(arguments: dict[str, Any]) -> list[TextContent]:
     if load_errors:
         # Surface load errors via the logger now that the response envelope is
         # the strict ListResponse[T]. Drops the legacy ``errors`` and ``hint``
-        # siblings per the loom precedent.
+        # siblings per the weft precedent.
         for msg in load_errors:
             _logger.warning("list_scanners load error: %s", msg)
     items = [s.to_dict() for s in scanners]
@@ -664,6 +699,61 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
     if args.get("category"):
         finding["metadata"] = {"category": args["category"]}
 
+    # SEAM SEI-on-create (ADR-029). entity_id (L1) is the direct opaque bind;
+    # entity_symbol (L2) is resolved to a stable SEI via Loomweave first, then
+    # bound. They are mutually exclusive — one finding, one binding source. The
+    # resolved id is stamped into metadata.loomweave.entity_id, the exact key
+    # finding_promote's _entity_identity_from_finding reads to auto-attach the
+    # ADR-029 entity association — so the spine-join happens at report time and
+    # survives to promotion, with no separate attach call.
+    tracker = get_db()
+    entity_id = args.get("entity_id")
+    entity_symbol = args.get("entity_symbol")
+    if entity_id is not None and not isinstance(entity_id, str):
+        return _text(ErrorResponse(error="entity_id must be a string", code=ErrorCode.VALIDATION))
+    if entity_symbol is not None and not isinstance(entity_symbol, str):
+        return _text(ErrorResponse(error="entity_symbol must be a string", code=ErrorCode.VALIDATION))
+    has_entity_id = entity_id is not None and entity_id.strip() != ""
+    has_entity_symbol = entity_symbol is not None and entity_symbol.strip() != ""
+    if has_entity_id and has_entity_symbol:
+        return _text(
+            ErrorResponse(
+                error="Pass either entity_id (opaque bind) or entity_symbol (Loomweave-resolved), not both.",
+                code=ErrorCode.VALIDATION,
+            )
+        )
+
+    # L2: resolve entity_symbol -> SEI BEFORE storing the finding. A symbol that
+    # resolves to zero/many (or whose transport is unavailable/stale) returns a
+    # weft-reason and creates NOTHING — never an unbound-but-looks-bound finding.
+    if has_entity_symbol and entity_symbol is not None:
+        from filigree.sei_backfill import resolve_symbol_to_sei
+
+        resolution = resolve_symbol_to_sei(tracker, entity_symbol)
+        if resolution.reason_class is not None:
+            return _text(
+                ErrorResponse(
+                    error=f"entity_symbol {entity_symbol!r} did not resolve: {resolution.cause}",
+                    code=ErrorCode.VALIDATION,
+                    details={
+                        "weft_reason": {
+                            "reason_class": resolution.reason_class,
+                            "cause": resolution.cause,
+                            "fix": resolution.fix,
+                        }
+                    },
+                )
+            )
+        entity_id = resolution.sei
+        has_entity_id = True
+
+    if has_entity_id and entity_id is not None:
+        # Merge into any existing metadata (e.g. category) without clobbering it.
+        existing_meta = finding.get("metadata")
+        meta = existing_meta if isinstance(existing_meta, dict) else {}
+        meta["loomweave"] = {"entity_id": entity_id}
+        finding["metadata"] = meta
+
     actor = ""
     if "actor" in args:
         actor, actor_error = _validate_actor(args.get("actor"))
@@ -678,7 +768,6 @@ async def _handle_report_finding(arguments: dict[str, Any]) -> list[TextContent]
             ErrorResponse(error="'response_detail' must be 'slim' or 'full'", code=ErrorCode.VALIDATION),
         )
 
-    tracker = get_db()
     try:
         outcome = report_scanner_finding(
             tracker,
@@ -800,13 +889,13 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         if ext and ext not in cfg.file_types:
             file_type_warning = f"Warning: file extension {ext!r} not in scanner's declared file_types {cfg.file_types}. Proceeding anyway."
 
-    canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
+    canonical_path = str(target.relative_to(_active_project_root()))
 
     try:
         file_record = tracker.register_file(canonical_path)
     except (RegistryResolutionError, RegistryUnavailableError) as exc:
         return _registry_error_text(exc, action="triggering scan")
-    project_root = filigree_dir.parent
+    project_root = _active_project_root()
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     scan_run_id = f"{scanner_name}-{ts}-{secrets.token_hex(3)}"
 
@@ -876,7 +965,7 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
 
     proc = spawn_result["proc"]
     scan_log_path = spawn_result["scan_log_path"]
-    log_rel = str(scan_log_path.relative_to(filigree_dir.parent))
+    log_rel = str(scan_log_path.relative_to(_active_project_root()))
 
     # Backfill PID/log onto the reservation and transition to running.
     try:
@@ -958,6 +1047,11 @@ async def _handle_trigger_scan(arguments: dict[str, Any]) -> list[TextContent]:
         "sandbox_summary": cfg.sandbox_summary(),
         "sandbox_class": cfg.sandbox_class(),
         **cfg.risk_metadata(),
+        # Posture echo (mirrors W2): the file's current findings breakdown so a
+        # "triggered" response is never a vacuous run-state-only green. At trigger
+        # time this is the pre-scan posture; poll scan_status_get for the updated
+        # breakdown once results are ingested.
+        "file_summary": tracker.get_file_findings_summary(file_record.id),
         "message": (
             f"Scan triggered with run_id={scan_run_id!r}. "
             f"Results will be POSTed to {api_url}. "
@@ -1049,7 +1143,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         if not target.is_file():
             skipped.append({"file_path": fp, "reason": "File not found"})
             continue
-        cp = str(target.relative_to(filigree_dir.resolve().parent))
+        cp = str(target.relative_to(_active_project_root()))
         if cp in seen_canonical:
             skipped.append({"file_path": fp, "reason": "duplicate"})
             continue
@@ -1086,7 +1180,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             return _registry_error_text(exc, action="triggering batch scan")
         file_ids.append(file_record.id)
 
-    project_root = filigree_dir.parent
+    project_root = _active_project_root()
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
     # batch_id is a caller-facing correlation string; each file also gets its
     # own scan_run_id so per-file lifecycles (PID, log, completion) don't
@@ -1203,7 +1297,7 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
         spawn_result = entry["spawn_result"]
         proc = spawn_result["proc"]
         scan_log_path = spawn_result["scan_log_path"]
-        log_rel = str(scan_log_path.relative_to(filigree_dir.parent))
+        log_rel = str(scan_log_path.relative_to(_active_project_root()))
         try:
             tracker.set_scan_run_spawn_info(entry["scan_run_id"], pid=proc.pid, log_path=log_rel)
             tracker.update_scan_run_status(entry["scan_run_id"], "running")
@@ -1277,6 +1371,8 @@ async def _handle_trigger_scan_batch(arguments: dict[str, Any]) -> list[TextCont
             "file_id": entry["file_id"],
             "pid": entry["pid"],
             "log_path": entry["log_rel"],
+            # Per-file posture echo (mirrors W2 / the single-scan response).
+            "file_summary": tracker.get_file_findings_summary(entry["file_id"]),
         }
         for entry in finalized
     ]
@@ -1375,8 +1471,8 @@ async def _handle_preview_scan(arguments: dict[str, Any]) -> list[TextContent]:
     if prompt_support_err is not None:
         return _text(prompt_support_err)
 
-    canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
-    project_root = filigree_dir.parent
+    canonical_path = str(target.relative_to(_active_project_root()))
+    project_root = _active_project_root()
     api_resolution, api_resolution_err = _resolve_scanner_api_url_or_error(filigree_dir)
     if api_resolution_err is not None:
         return _text(api_resolution_err)

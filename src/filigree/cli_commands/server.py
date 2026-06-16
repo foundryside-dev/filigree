@@ -8,6 +8,23 @@ from pathlib import Path
 import click
 
 
+def _resolve_store_dir_arg(project_path: Path) -> Path:
+    """Resolve the store dir for a ``server register``/``unregister`` argument.
+
+    Accepts a project root (resolves to ``.weft/filigree/`` or legacy
+    ``.filigree/``) or a store dir passed directly. Layout-aware so a
+    federation-layout project registers its real store, not a phantom
+    ``<root>/.filigree``.
+    """
+    from filigree.core import FILIGREE_DIR_NAME, WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR, resolve_store_dir
+
+    if project_path.name == FILIGREE_DIR_NAME:
+        return project_path
+    if project_path.name == WEFT_MEMBER_SUBDIR and project_path.parent.name == WEFT_DIR_NAME:
+        return project_path
+    return resolve_store_dir(project_path)
+
+
 def _reload_server_daemon_if_running() -> tuple[bool, str]:
     """POST /api/reload to a running daemon so it picks up server.json changes."""
     from filigree.server import daemon_status
@@ -88,9 +105,9 @@ def server_register(path: str) -> None:
     from filigree.server import register_project
 
     project_path = Path(path).resolve()
-    filigree_dir = project_path / ".filigree" if project_path.name != ".filigree" else project_path
+    filigree_dir = _resolve_store_dir_arg(project_path)
     if not filigree_dir.is_dir():
-        click.echo(f"No .filigree/ found at {project_path}", err=True)
+        click.echo(f"No filigree store (.weft/filigree/ or .filigree/) found at {project_path}", err=True)
         sys.exit(1)
     try:
         register_project(filigree_dir)
@@ -117,7 +134,7 @@ def server_unregister(path: str) -> None:
     from filigree.server import unregister_project
 
     project_path = Path(path).resolve()
-    filigree_dir = project_path / ".filigree" if project_path.name != ".filigree" else project_path
+    filigree_dir = _resolve_store_dir_arg(project_path)
     try:
         unregister_project(filigree_dir)
     except Exception as e:

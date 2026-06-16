@@ -1,7 +1,7 @@
 {
   "verdict": "CHANGES_REQUESTED",
   "summary": "Plan has 12 blocking issues after deduplication (from 19 raw findings across 4 reviewers). Most critical: Task 7 breaks 135 existing test usages without a migration strategy, hand-rolled TOML serialization is both injection-vulnerable and spec-noncompliant, stop_daemon has a PID-reuse kill-foreign-process hazard, and the /api/reload + /mcp/ endpoints required by server mode are entirely absent from the plan. 14 warnings should be addressed.",
-  "plan_file": "/home/john/filigree/docs/plans/2026-02-22-server-ethereal-modes.md",
+  "plan_file": "/home/user/filigree/docs/plans/2026-02-22-server-ethereal-modes.md",
   "reviewed_at": "2026-02-22T18:00:00Z",
   "reviewers": ["reality", "architecture", "quality", "systems"],
   "blocking_issues": [

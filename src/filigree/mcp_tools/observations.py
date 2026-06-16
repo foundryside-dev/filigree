@@ -429,7 +429,7 @@ async def _handle_list_observations(arguments: dict[str, Any]) -> list[TextConte
         return _text(ErrorResponse(error=f"Database error: {e}", code=ErrorCode.IO))
     observations, has_more = _apply_has_more(observations, effective_limit)
     next_offset = offset + len(observations) if has_more else None
-    # Drops the legacy ``stats`` sibling per the loom precedent (Phase C4 dropped
+    # Drops the legacy ``stats`` sibling per the weft precedent (Phase C4 dropped
     # it on the HTTP side); consumers needing observation stats use
     # ``tracker.observation_stats()`` via a dedicated tool.
     return _text(_list_response([observation_to_mcp(obs) for obs in observations], has_more=has_more, next_offset=next_offset))

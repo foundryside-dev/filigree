@@ -241,7 +241,7 @@ class TestBundledScanners:
         for scanner in BUNDLED_SCANNERS.values():
             assert "--api-token-env" in scanner.args
             index = scanner.args.index("--api-token-env")
-            assert scanner.args[index + 1] == "FILIGREE_FEDERATION_API_TOKEN"
+            assert scanner.args[index + 1] == "WEFT_FEDERATION_TOKEN"
 
 
 # ── validate_scanner_command ─────────────────────────────────────────

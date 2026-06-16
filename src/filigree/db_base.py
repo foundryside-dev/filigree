@@ -14,15 +14,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
 
 from filigree.models import FileRecord, Issue
+from filigree.types.api import TransitionMode
 from filigree.types.core import AssocType, ISOTimestamp, RegistryBackend, ScanRunStatus, StatusCategory
 from filigree.types.events import EventType
 
 if TYPE_CHECKING:
+    from filigree.db_entity_associations import EntityAssociationRow
     from filigree.registry import RegistryProtocol
     from filigree.templates import TemplateRegistry, TransitionOption
     from filigree.types.api import BatchFailure
-    from filigree.types.core import ObservationDict, ObservationLinkDict, ScanFindingDict
-    from filigree.types.files import ScanRunDict
+    from filigree.types.core import (
+        ContentHash,
+        IssueId,
+        LoomweaveEntityId,
+        ObservationDict,
+        ObservationLinkDict,
+        ScanFindingDict,
+    )
+    from filigree.types.files import FindingsSummary, ScanRunDict
     from filigree.types.planning import CommentRecord
 
 logger = logging.getLogger(__name__)
@@ -275,6 +284,11 @@ class DBMixinProtocol(Protocol):
     # Project root set by from_filigree_dir / from_conf.  ``None`` for legacy
     # direct-path construction — consumers that need it must fall back.
     project_root: Path | None
+    # Machine-owned store/metadata dir (``.weft/filigree/`` or legacy
+    # ``.filigree/``), set by the anchor-aware constructors; defaults to
+    # ``db_path.parent`` for bare construction. Single source of truth for
+    # config.json / runtime-file location, independent of a relocated ``db``.
+    meta_dir: Path
     prefix: str
     registry: RegistryProtocol
     # ADR-014 — always populated by ``FiligreeDB.__init__`` (defaults to
@@ -283,6 +297,10 @@ class DBMixinProtocol(Protocol):
     registry_backend: RegistryBackend
     allow_local_fallback: bool
     _conn: sqlite3.Connection | None
+    # ADR-012 (schema v24): transport-verified session identity. Mixins read
+    # this directly when stamping verified_* columns. Set on FiligreeDB.__init__
+    # (defaults to None); never None-guarded at insert sites.
+    _verified_actor: str | None
     _template_registry: TemplateRegistry | None
     _enabled_packs_override: list[str] | None
 
@@ -355,6 +373,9 @@ class DBMixinProtocol(Protocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        entity_id: str | None = None,
+        entity_kind: str | None = None,
+        content_hash: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 
@@ -373,7 +394,7 @@ class DBMixinProtocol(Protocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
         _skip_begin: bool = False,
     ) -> Issue: ...
 
@@ -398,6 +419,8 @@ class DBMixinProtocol(Protocol):
         status: str | None = None,
         type: str | None = None,
         priority: int | None = None,
+        priority_min: int | None = None,
+        priority_max: int | None = None,
         parent_id: str | None = None,
         assignee: str | None = None,
         label: str | list[str] | None = None,
@@ -445,7 +468,7 @@ class DBMixinProtocol(Protocol):
 
     # -- PlanningMixin -------------------------------------------------------
 
-    def get_ready(self) -> list[Issue]: ...
+    def get_ready(self, *, priority_min: int | None = None, priority_max: int | None = None) -> list[Issue]: ...
     def label_subtree(self, parent_id: str, *, label: str) -> tuple[list[dict[str, str]], list[BatchFailure]]: ...
     def _resolve_open_blocker_predicates(
         self,
@@ -467,6 +490,24 @@ class DBMixinProtocol(Protocol):
     def get_file(self, file_id: str) -> FileRecord: ...
     def add_file_association(self, file_id: str, issue_id: str, assoc_type: AssocType, *, actor: str = "") -> None: ...
     def get_finding(self, finding_id: str) -> ScanFindingDict: ...
+    def get_files_findings_summary(self, file_ids: list[str]) -> FindingsSummary: ...
+
+    # -- EntityAssociationsMixin ---------------------------------------------
+
+    def add_entity_association(
+        self,
+        issue_id: IssueId,
+        entity_id: LoomweaveEntityId,
+        content_hash: ContentHash,
+        *,
+        actor: str = "",
+        entity_kind: str | None = None,
+        signature: str | None = None,
+        signoff_seq: int | None = None,
+        _skip_begin: bool = False,
+    ) -> EntityAssociationRow: ...
+
+    def list_entity_associations(self, issue_id: IssueId) -> list[EntityAssociationRow]: ...
 
     # -- ObservationsMixin ---------------------------------------------------
 

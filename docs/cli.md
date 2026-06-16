@@ -1,6 +1,6 @@
 # CLI Reference
 
-Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command but not by setup/diagnostic commands like `install`, `doctor`, and `session-context`, which produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
+Most data commands support `--json` for machine-readable output (`--json` is supported by every issue/observation/file/finding/scanner/planning command and by `doctor`; setup commands like `install` and session bootstrap commands like `session-context` produce human-only output). The `--actor` flag sets identity for the audit trail (default: `cli`) and works in either position — before the verb (`filigree --actor X update …`, group-level) or after it (`filigree update … --actor X`, per-verb). The post-verb value overrides the group-level one.
 
 ## Contents
 
@@ -85,8 +85,11 @@ filigree install --skills                  # Install Claude Code skills only
 filigree install --codex-skills            # Install Codex skills only
 filigree install --mode=server             # Switch MCP/hook configuration to server mode
 filigree doctor                            # Health check
-filigree doctor --fix                      # Auto-fix what's possible
+filigree doctor --fix                      # Repair local bindings and stale dashboard pointers
+filigree doctor --fix --json               # Machine-readable repair summary
 filigree doctor --verbose                  # Show all checks including passed
+filigree db checkpoint                     # Truncate-checkpoint the current SQLite WAL
+filigree db checkpoint --json              # Machine-readable checkpoint result
 ```
 
 ### `init`
@@ -124,9 +127,35 @@ are reported with `filigree scanner enable <name> --force`, and enabled bundled
 scanners whose runner command is missing point at `uv tool install --upgrade
 filigree`.
 
+`doctor --fix` repairs local agent bindings and stale dashboard pointers only:
+Claude/Codex MCP registration, Claude Code hooks, and stale ephemeral dashboard
+PID/port files. It does not apply schema migrations, refresh generated context,
+rewrite docs/instruction files, update `.gitignore`, change scanner
+registrations, or mutate issues, observations, files, scan findings, scanner
+results, or entity associations.
+
+In JSON mode, `doctor` emits the shared agent-readiness summary contract:
+
+```json
+{
+  "ok": true,
+  "checks": [
+    {"id": "mcp.registration", "status": "ok", "fixed": false},
+    {"id": "dashboard.port", "status": "fixed", "fixed": true}
+  ],
+  "next_actions": []
+}
+```
+
+The status vocabulary is `ok`, `failed`, and `fixed`. Stable check IDs include
+`dashboard.port`, `mcp.registration`, `api.availability`, `auth.config`,
+`scanner.results`, and `entity_associations.routes`; Filigree may include
+additional product-specific IDs for local setup checks.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `--fix` | flag | Auto-fix what's possible |
+| `--fix` | flag | Repair local bindings and stale dashboard pointers |
+| `--json` | flag | Emit the shared machine-readable doctor summary |
 | `--verbose` | flag | Show all checks including passed |
 
 ## Automation and Server
@@ -743,11 +772,10 @@ filigree events <id>                        # Event history for one issue
 ### `stats`
 
 Project statistics: counts by literal status name (`by_status`), template
-status category (`by_category`), type, ready, and blocked. JSON also includes
-the **deprecated** `status_name_counts` and `status_category_counts` maps —
-exact duplicates of `by_status` and `by_category` (filigree-17694d2db8), kept as
-compatibility aliases per ADR-009 §7 and scheduled for removal in the next
-major. Read `by_status` / `by_category`.
+status category (`by_category`), type, ready, and blocked. The deprecated
+`status_name_counts` / `status_category_counts` JSON aliases (exact duplicates
+of `by_status` / `by_category`) were **removed in 3.0.0**
+(filigree-e4181ae767). Read `by_status` / `by_category`.
 
 ### `metrics`
 
@@ -1021,8 +1049,16 @@ List code-health findings. Output: `ListResponse[T]` (`{items, has_more}`).
 | `--status` | string | Filter by status |
 | `--severity` | string | Filter by severity |
 | `--scan-source` | string | Filter by scanner |
+| `--scan-run-id` | string | Filter by scan run |
+| `--issue-id` | string | Filter by linked issue |
+| `--rule-id` | string | Filter by rule/check ID (exact) |
+| `--kind` | string | Filter by wardline finding kind (`defect`/`fact`/`classification`/`metric`/`suggestion`); `--kind defect` excludes engine telemetry |
+| `--qualname` | string | Filter by wardline qualified name (exact) |
+| `--suppression` | string | Filter by suppression. **Defaults to `active`** (un-suppressed/actionable) so accepted findings are hidden from the work view; pass `all` to include them, or `baselined`/`waived`/`judged` to select a specific accepted verdict |
 | `--limit` | integer | Max results |
 | `--offset` | integer | Skip first N results |
+
+By default `list-findings` shows only **active** (un-suppressed) findings — a wardline-baselined/waived/judged finding is an already-accepted defect, not open work, so it is hidden unless you pass `--suppression all` (or a specific verdict).
 
 ### `get-finding`
 
@@ -1046,12 +1082,21 @@ Records the global `--actor` in the finding's `updated_by` field.
 
 ### `promote-finding`
 
-Promote a finding to an observation.
+Promote a finding directly to a tracked issue and link the finding to it.
+When the finding carries an entity identity in its own metadata
+(`metadata.loomweave.entity_id`) and its file record carries a content hash,
+the ADR-029 entity association is attached by default (dogfood-4 B9); the
+output always says what was attached or why not (`entity_attachment`). The
+attach is enrichment — a failure is reported as a warning, never a promote
+failure.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `finding-id` | string | Finding ID (positional) |
-| `--priority` | 0-4 | Priority for the created observation |
+| `--priority` | 0-4 | Priority for the created issue (default: inferred from severity) |
+| `--label` | string | Label to add to the created issue (repeatable) |
+| `--attach-entity/--no-attach-entity` | flag | Attach the finding's own entity identity as an entity association (default: on) |
+| `--actor` | string | Actor identity (defaults to global `--actor`) |
 
 ### `dismiss-finding`
 
@@ -1254,6 +1299,13 @@ changes, refresh managed project registrations with `filigree scanner enable
 <name> --force`; `filigree doctor` reports bundled registrations that look
 stale.
 
+Scanner POSTs that need `GET /api/scan-runs` history must send a globally
+unique, non-empty `scan_run_id`. Empty run IDs are accepted for
+fire-and-forget findings but are intentionally absent from scan-run history.
+Filigree does not ingest raw SARIF at this endpoint; SARIF adapters must map
+SARIF `partialFingerprints` or `fingerprints` into each posted
+`finding.fingerprint` before sending scan-results.
+
 ### `trigger-scan`
 
 Trigger a single-file scan.
@@ -1392,6 +1444,17 @@ Remove old events for archived issues.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--keep` | integer | 50 | Keep N most recent events per archived issue |
+
+### `db checkpoint`
+
+Run `PRAGMA wal_checkpoint(TRUNCATE)` on the current project store. The command
+reports SQLite's busy result, log/checkpointed frame counts, and WAL byte sizes
+before and after the checkpoint. A busy checkpoint exits successfully with
+`status: "busy"` in JSON mode so operators can retry after other readers exit.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--json` | flag | Emit `{status, busy, checkpoint_busy, log_frames, checkpointed_frames, wal_size_before, wal_size_after, database}` |
 
 ### `migrate`
 

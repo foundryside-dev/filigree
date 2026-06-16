@@ -1,7 +1,7 @@
 {
   "verdict": "CHANGES_REQUESTED",
   "summary": "Shuttle architecture design has 6 blocking issues with strong cross-reviewer convergence on three structural problems: (1) the Section 11.5 planning-pack deprecation is presented as a clean cut but breaks pack dependency graphs and orphans types/relations (caught by all 4 reviewers); (2) prose_blocks 'append-only with mutable cache column' is internally inconsistent (caught by all 4); (3) the Loom federation peer is treated as a scheduling note but is a hard prerequisite whose URI scheme is a one-way door (caught by Architecture, Quality, Systems). Specialist findings include a non-expressible polymorphic FK (Systems), total absence of test strategy and observability (Quality), and Wardline being aspirational while presented as a peer (Reality). 28 warnings consolidated to 14. The design is salvageable but requires structural revision plus splitting into 3 documents (Shuttle proper, filigree planning-pack deprecation plan, Loom URI scheme spec) before implementation begins.",
-  "plan_file": "/home/john/filigree/docs/plans/2026-05-17-shuttle-design.md",
+  "plan_file": "/home/user/filigree/docs/plans/2026-05-17-shuttle-design.md",
   "reviewed_at": "2026-05-17T00:00:00Z",
   "reviewers": ["reality", "architecture", "quality", "systems"],
   "convergence_signal": {

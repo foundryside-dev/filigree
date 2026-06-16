@@ -6,14 +6,14 @@ has its own subpackage here:
 
 - ``filigree.generations.classic`` — pre-federation HTTP API, frozen at
   its existing URLs (mostly ``/api/*``, with one ``/api/v1/`` outlier).
-- ``filigree.generations.loom`` — new in 2.0, at ``/api/loom/*``, using
+- ``filigree.generations.weft`` — new in 2.0, at ``/api/weft/*``, using
   the unified ``BatchResponse`` / ``ListResponse`` envelopes, the closed
   ``ErrorCode`` enum, and the ``issue_id`` vocabulary.
 
 Each subpackage contains:
 
 - ``types.py`` — generation-specific TypedDicts (classic may re-export
-  from ``filigree.types.api``; loom declares its own).
+  from ``filigree.types.api``; weft declares its own).
 - ``adapters.py`` — thin, data-only shape transformations from internal
   domain objects to the generation's wire shape. Adapters have no
   business logic; if you find yourself writing an ``if generation ==``

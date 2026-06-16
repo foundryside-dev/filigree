@@ -117,7 +117,7 @@ class TestScanIngestStatusCode:
 
         resp = await client.post("/api/v1/scan-results", json=payload)
 
-        assert resp.status_code == 400
+        assert resp.status_code == 413
         body = resp.json()
         assert body.get("code") == "VALIDATION"
         assert "at most 1000 findings" in body["error"]
@@ -211,7 +211,7 @@ class TestAddDependencyValidation:
 
 
 class TestSearchOversizedOffset:
-    """Both /api/search and /api/loom/search must reject offsets above
+    """Both /api/search and /api/weft/search must reject offsets above
     SQLite's signed-int64 OFFSET bind limit with 400 VALIDATION, not 500."""
 
     async def test_classic_search_huge_offset_returns_400(self, client: AsyncClient) -> None:
@@ -221,8 +221,8 @@ class TestSearchOversizedOffset:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_search_huge_offset_returns_400(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/loom/search", params={"q": "x", "offset": "9223372036854775808"})
+    async def test_weft_search_huge_offset_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/search", params={"q": "x", "offset": "9223372036854775808"})
         assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
         body = resp.json()
         assert body["code"] == "VALIDATION", body
@@ -239,7 +239,7 @@ class TestSearchOversizedOffset:
 
 
 class TestRemoveDependencyForeignPrefix:
-    """Both classic and loom remove-dependency routes must convert a
+    """Both classic and weft remove-dependency routes must convert a
     foreign-prefix WrongProjectError into 400 VALIDATION, not 500."""
 
     async def test_classic_remove_dependency_foreign_prefix_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
@@ -257,12 +257,12 @@ class TestRemoveDependencyForeignPrefix:
         assert body["code"] == "VALIDATION", body
         assert "project" in body["error"].lower()
 
-    async def test_loom_remove_dependency_foreign_prefix_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+    async def test_weft_remove_dependency_foreign_prefix_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         foreign_a = "foreignproj-aaaaaaaa00"
         foreign_b = "foreignproj-bbbbbbbb00"
         resp = await client.request(
             "DELETE",
-            f"/api/loom/issues/{foreign_a}/dependencies/{foreign_b}",
+            f"/api/weft/issues/{foreign_a}/dependencies/{foreign_b}",
         )
         assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
         body = resp.json()
@@ -278,29 +278,29 @@ class TestRemoveDependencyForeignPrefix:
         body = resp.json()
         assert body["code"] == "NOT_FOUND", body
 
-    async def test_loom_remove_dependency_same_prefix_missing_source_returns_200_idempotent(
+    async def test_weft_remove_dependency_same_prefix_missing_source_returns_200_idempotent(
         self, bug_db: FiligreeDB, client: AsyncClient
     ) -> None:
-        """Loom DELETE is idempotent at the wire layer per
-        tests/fixtures/contracts/loom/issues-dep-remove.json: a missing
+        """Weft DELETE is idempotent at the wire layer per
+        tests/fixtures/contracts/weft/issues-dep-remove.json: a missing
         issue between two valid-prefix IDs returns 200 ``{"removed": false}``
         so a retried DELETE after a network glitch stays safe. Classic
         keeps the 404 behaviour above — no classic fixture pins that
         contract, and CLI/MCP surfaces still surface NOT_FOUND.
 
         Because the missing issue would otherwise be silently masked, the
-        loom-only ``issue_found`` field is ``false`` here, so a caller can
+        weft-only ``issue_found`` field is ``false`` here, so a caller can
         still detect the typo'd id programmatically.
         """
         target = bug_db.create_issue("Target")
         resp = await client.request(
             "DELETE",
-            f"/api/loom/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
+            f"/api/weft/issues/{bug_db.prefix}-0000000000/dependencies/{target.id}",
         )
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"removed": False, "issue_found": False}
 
-    async def test_loom_remove_dependency_absent_edge_existing_issues_reports_issue_found(
+    async def test_weft_remove_dependency_absent_edge_existing_issues_reports_issue_found(
         self, bug_db: FiligreeDB, client: AsyncClient
     ) -> None:
         """The genuine retry-safety case: both issues exist but no edge
@@ -313,7 +313,7 @@ class TestRemoveDependencyForeignPrefix:
         b = bug_db.create_issue("B")
         resp = await client.request(
             "DELETE",
-            f"/api/loom/issues/{a.id}/dependencies/{b.id}",
+            f"/api/weft/issues/{a.id}/dependencies/{b.id}",
         )
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"removed": False, "issue_found": True}
@@ -346,10 +346,10 @@ class TestCloseReasonTypeValidation:
         )
         assert resp.status_code == 400, resp.text
 
-    async def test_loom_close_reason_dict_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+    async def test_weft_close_reason_dict_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         issue = bug_db.create_issue("Close reason dict")
         resp = await client.post(
-            f"/api/loom/issues/{issue.id}/close",
+            f"/api/weft/issues/{issue.id}/close",
             json={"reason": {"nested": "object"}},
         )
         assert resp.status_code == 400, resp.text
@@ -379,12 +379,12 @@ class TestCloseReasonTypeValidation:
 
 
 # ---------------------------------------------------------------------------
-# Bug: /api/loom/changes since cursor not UTC-canonicalized (filigree-d808d8b70f)
+# Bug: /api/weft/changes since cursor not UTC-canonicalized (filigree-d808d8b70f)
 # ---------------------------------------------------------------------------
 
 
-class TestLoomChangesSinceUTCNormalization:
-    """``/api/loom/changes`` must canonicalize ``since`` to UTC before
+class TestWeftChangesSinceUTCNormalization:
+    """``/api/weft/changes`` must canonicalize ``since`` to UTC before
     SQLite text-compares it against stored ``created_at`` (which is stored as
     ``+00:00`` ISO). Otherwise an offset-bearing ``since`` representing the
     same instant returns different events than a UTC ``since``.
@@ -408,8 +408,8 @@ class TestLoomChangesSinceUTCNormalization:
         # Same instant, expressed with a -05:00 offset.
         offset_since = "2026-01-15T10:31:00-05:00"
 
-        utc_resp = await client.get("/api/loom/changes", params={"since": utc_since})
-        offset_resp = await client.get("/api/loom/changes", params={"since": offset_since})
+        utc_resp = await client.get("/api/weft/changes", params={"since": utc_since})
+        offset_resp = await client.get("/api/weft/changes", params={"since": offset_since})
 
         assert utc_resp.status_code == 200, utc_resp.text
         assert offset_resp.status_code == 200, offset_resp.text
@@ -427,19 +427,19 @@ class TestLoomChangesSinceUTCNormalization:
 
 
 # ---------------------------------------------------------------------------
-# Bug: /api/loom/changes accepts ?offset= but discards it (filigree-f0f47f5b9d)
+# Bug: /api/weft/changes accepts ?offset= but discards it (filigree-f0f47f5b9d)
 # ---------------------------------------------------------------------------
 
 
-class TestLoomChangesOffsetRejected:
-    """The contract (``tests/fixtures/contracts/loom/changes.json``) declares
+class TestWeftChangesOffsetRejected:
+    """The contract (``tests/fixtures/contracts/weft/changes.json``) declares
     the cursor is ``since``; ``offset`` is not exposed. The handler must
     therefore reject ``?offset=`` instead of silently discarding it.
     """
 
     async def test_offset_query_param_returns_400(self, client: AsyncClient) -> None:
         resp = await client.get(
-            "/api/loom/changes",
+            "/api/weft/changes",
             params={"since": "2000-01-01T00:00:00+00:00", "offset": "10"},
         )
         assert resp.status_code == 400, resp.text
@@ -451,7 +451,7 @@ class TestLoomChangesOffsetRejected:
         # offset is not part of this endpoint's surface — even an explicit
         # ``offset=0`` should be rejected, not silently accepted.
         resp = await client.get(
-            "/api/loom/changes",
+            "/api/weft/changes",
             params={"since": "2000-01-01T00:00:00+00:00", "offset": "0"},
         )
         assert resp.status_code == 400, resp.text
@@ -459,13 +459,13 @@ class TestLoomChangesOffsetRejected:
         assert body["code"] == "VALIDATION"
 
 
-class TestLoomChangesCompoundCursor:
+class TestWeftChangesCompoundCursor:
     async def test_has_more_uses_since_cursor_not_next_offset(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         bug_db.create_issue("API cursor page A")
         bug_db.create_issue("API cursor page B")
 
         resp = await client.get(
-            "/api/loom/changes",
+            "/api/weft/changes",
             params={"since": "2000-01-01T00:00:00+00:00", "limit": "1"},
         )
 
@@ -490,7 +490,7 @@ class TestLoomChangesCompoundCursor:
         bug_db.conn.commit()
 
         resp = await client.get(
-            "/api/loom/changes",
+            "/api/weft/changes",
             params={"since": tied_timestamp, "after_event_id": str(cursor), "limit": "1"},
         )
 
@@ -501,7 +501,7 @@ class TestLoomChangesCompoundCursor:
         assert body["next_event_id"] == expected
 
 
-class TestLoomChangesHeartbeatFiltering:
+class TestWeftChangesHeartbeatFiltering:
     async def test_heartbeat_events_are_excluded_by_default(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
         issue = bug_db.create_issue("API heartbeat filtering")
         bug_db.conn.execute(
@@ -515,7 +515,7 @@ class TestLoomChangesHeartbeatFiltering:
         bug_db.conn.commit()
 
         resp = await client.get(
-            "/api/loom/changes",
+            "/api/weft/changes",
             params={"since": "2000-01-01T00:00:00+00:00"},
         )
 
@@ -533,7 +533,7 @@ class TestLoomChangesHeartbeatFiltering:
 
 
 class TestSearchMalformedPaginationFlatEnvelope:
-    """Both /api/search and /api/loom/search use FastAPI int coercion for
+    """Both /api/search and /api/weft/search use FastAPI int coercion for
     limit/offset, which produces FastAPI's 422 ``{detail: [...]}`` envelope on
     malformed values — bypassing the flat ``{error, code}`` envelope contract
     pinned by tests/test_error_envelope_contract.py. Handlers must parse the
@@ -555,15 +555,15 @@ class TestSearchMalformedPaginationFlatEnvelope:
         assert body.get("code") == "VALIDATION", body
         assert "detail" not in body, body
 
-    async def test_loom_search_malformed_limit_returns_flat_400(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/loom/search", params={"q": "x", "limit": "foo"})
+    async def test_weft_search_malformed_limit_returns_flat_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/search", params={"q": "x", "limit": "foo"})
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body.get("code") == "VALIDATION", body
         assert "detail" not in body, body
 
-    async def test_loom_search_malformed_offset_returns_flat_400(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/loom/search", params={"q": "x", "offset": "bar"})
+    async def test_weft_search_malformed_offset_returns_flat_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/search", params={"q": "x", "offset": "bar"})
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body.get("code") == "VALIDATION", body
@@ -601,16 +601,16 @@ class TestPatchStatusTypeValidation:
         assert resp.status_code == 200, resp.text
         assert resp.json()["title"] == "renamed"
 
-    async def test_loom_patch_status_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        issue = bug_db.create_issue("Loom status null")
-        resp = await client.patch(f"/api/loom/issues/{issue.id}", json={"status": None})
+    async def test_weft_patch_status_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Weft status null")
+        resp = await client.patch(f"/api/weft/issues/{issue.id}", json={"status": None})
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_patch_status_int_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        issue = bug_db.create_issue("Loom status int")
-        resp = await client.patch(f"/api/loom/issues/{issue.id}", json={"status": 42})
+    async def test_weft_patch_status_int_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Weft status int")
+        resp = await client.patch(f"/api/weft/issues/{issue.id}", json={"status": 42})
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body["code"] == "VALIDATION", body
@@ -625,10 +625,10 @@ class TestPatchStatusTypeValidation:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_batch_update_status_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        issue = bug_db.create_issue("Loom batch status null")
+    async def test_weft_batch_update_status_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Weft batch status null")
         resp = await client.post(
-            "/api/loom/batch/update",
+            "/api/weft/batch/update",
             json={"issue_ids": [issue.id], "status": None},
         )
         assert resp.status_code == 400, resp.text
@@ -645,8 +645,8 @@ class TestBatchUpdateBodyValidation:
         assert body["code"] == "VALIDATION"
         assert "fields" in body["error"]
 
-    async def test_loom_batch_update_assignee_must_be_string_even_with_empty_ids(self, client: AsyncClient) -> None:
-        resp = await client.post("/api/loom/batch/update", json={"issue_ids": [], "assignee": 42})
+    async def test_weft_batch_update_assignee_must_be_string_even_with_empty_ids(self, client: AsyncClient) -> None:
+        resp = await client.post("/api/weft/batch/update", json={"issue_ids": [], "assignee": 42})
 
         assert resp.status_code == 400
         body = resp.json()
@@ -667,11 +667,11 @@ class TestPatchParentIdNullValidation:
         assert "parent_id" in body["error"]
         assert bug_db.get_issue(child.id).parent_id == parent.id
 
-    async def test_loom_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        parent = bug_db.create_issue("Loom parent")
-        child = bug_db.create_issue("Loom child", parent_id=parent.id)
+    async def test_weft_patch_parent_id_null_returns_400(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        parent = bug_db.create_issue("Weft parent")
+        child = bug_db.create_issue("Weft child", parent_id=parent.id)
 
-        resp = await client.patch(f"/api/loom/issues/{child.id}", json={"parent_id": None})
+        resp = await client.patch(f"/api/weft/issues/{child.id}", json={"parent_id": None})
 
         assert resp.status_code == 400, resp.text
         body = resp.json()
@@ -690,13 +690,13 @@ class TestPatchParentIdNullValidation:
         assert bug_db.get_issue(child.id).parent_id is None
 
 
-class TestLoomIssueDetailIncludeFilesShape:
-    async def test_include_files_uses_loom_file_assoc_shape(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        issue = bug_db.create_issue("Loom include files")
-        file_record = bug_db.register_file("src/loom_file_shape.py")
+class TestWeftIssueDetailIncludeFilesShape:
+    async def test_include_files_uses_weft_file_assoc_shape(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
+        issue = bug_db.create_issue("Weft include files")
+        file_record = bug_db.register_file("src/weft_file_shape.py")
         bug_db.add_file_association(file_record.id, issue.id, "bug_in")
 
-        resp = await client.get(f"/api/loom/issues/{issue.id}", params={"include_files": "true"})
+        resp = await client.get(f"/api/weft/issues/{issue.id}", params={"include_files": "true"})
 
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -708,9 +708,9 @@ class TestLoomIssueDetailIncludeFilesShape:
         assert assoc["issue_id"] == issue.id
 
 
-class TestLoomIssueEventsPagination:
+class TestWeftIssueEventsPagination:
     async def test_issue_events_offset_advances_page(self, bug_db: FiligreeDB, client: AsyncClient) -> None:
-        issue = bug_db.create_issue("Loom events page")
+        issue = bug_db.create_issue("Weft events page")
         bug_db.conn.execute(
             "UPDATE events SET created_at = ? WHERE issue_id = ?",
             ("2025-01-01T00:00:00+00:00", issue.id),
@@ -725,8 +725,8 @@ class TestLoomIssueEventsPagination:
         ).lastrowid
         bug_db.conn.commit()
 
-        page1 = await client.get(f"/api/loom/issues/{issue.id}/events", params={"limit": "1"})
-        page2 = await client.get(f"/api/loom/issues/{issue.id}/events", params={"limit": "1", "offset": "1"})
+        page1 = await client.get(f"/api/weft/issues/{issue.id}/events", params={"limit": "1"})
+        page2 = await client.get(f"/api/weft/issues/{issue.id}/events", params={"limit": "1", "offset": "1"})
 
         assert page1.status_code == 200, page1.text
         assert page2.status_code == 200, page2.text
@@ -761,9 +761,9 @@ class TestWriteRoutesWrongProjectError:
         assert body["code"] == "VALIDATION", body
         assert "project" in body["error"].lower()
 
-    async def test_loom_claim_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+    async def test_weft_claim_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
         resp = await client.post(
-            f"/api/loom/issues/{self._FOREIGN_A}/claim",
+            f"/api/weft/issues/{self._FOREIGN_A}/claim",
             json={"assignee": "alice"},
         )
         assert resp.status_code == 400, resp.text
@@ -776,8 +776,8 @@ class TestWriteRoutesWrongProjectError:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_release_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
-        resp = await client.post(f"/api/loom/issues/{self._FOREIGN_A}/release", json={})
+    async def test_weft_release_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.post(f"/api/weft/issues/{self._FOREIGN_A}/release", json={})
         assert resp.status_code == 400, resp.text
         body = resp.json()
         assert body["code"] == "VALIDATION", body
@@ -791,9 +791,9 @@ class TestWriteRoutesWrongProjectError:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_add_dependency_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+    async def test_weft_add_dependency_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
         resp = await client.post(
-            f"/api/loom/issues/{self._FOREIGN_A}/dependencies",
+            f"/api/weft/issues/{self._FOREIGN_A}/dependencies",
             json={"depends_on": self._FOREIGN_B},
         )
         assert resp.status_code == 400, resp.text
@@ -809,9 +809,9 @@ class TestWriteRoutesWrongProjectError:
         body = resp.json()
         assert body["code"] == "VALIDATION", body
 
-    async def test_loom_add_comment_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
+    async def test_weft_add_comment_foreign_prefix_returns_400(self, client: AsyncClient) -> None:
         resp = await client.post(
-            f"/api/loom/issues/{self._FOREIGN_A}/comments",
+            f"/api/weft/issues/{self._FOREIGN_A}/comments",
             json={"text": "hi"},
         )
         assert resp.status_code == 400, resp.text
@@ -859,7 +859,7 @@ class TestWriteRoutesWrongProjectError:
         ("method", "path", "json_body", "foreign_fragments"),
         [
             ("post", "/api/issue/foreignproj-aaaaaaaa00/reopen", {}, ("foreignproj", "test")),
-            ("post", "/api/loom/issues/foreignproj-aaaaaaaa00/reopen", {}, ("foreignproj", "test")),
+            ("post", "/api/weft/issues/foreignproj-aaaaaaaa00/reopen", {}, ("foreignproj", "test")),
             (
                 "post",
                 "/api/issues",
@@ -868,7 +868,7 @@ class TestWriteRoutesWrongProjectError:
             ),
             (
                 "post",
-                "/api/loom/issues",
+                "/api/weft/issues",
                 {"title": "bad parent", "parent_id": "foreignproj-aaaaaaaa00"},
                 ("foreignproj", "test"),
             ),
@@ -895,7 +895,7 @@ class TestWriteRoutesWrongProjectError:
 
 
 class TestReleaseClaimErrorRouting:
-    async def test_residual_value_error_is_validation_for_classic_and_loom_release(
+    async def test_residual_value_error_is_validation_for_classic_and_weft_release(
         self,
         bug_db: FiligreeDB,
         client: AsyncClient,
@@ -908,7 +908,7 @@ class TestReleaseClaimErrorRouting:
 
         monkeypatch.setattr(bug_db, "release_claim", raise_validation)
 
-        for path in (f"/api/issue/{issue.id}/release", f"/api/loom/issues/{issue.id}/release"):
+        for path in (f"/api/issue/{issue.id}/release", f"/api/weft/issues/{issue.id}/release"):
             resp = await client.post(path, json={"actor": "agent"})
             body = resp.json()
             assert resp.status_code == 400

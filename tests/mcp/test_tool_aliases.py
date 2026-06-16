@@ -1,11 +1,13 @@
-"""MCP tool-name namespacing (Phase-1 aliasing) — surface + seam tests.
+"""MCP tool-name namespacing (Phase-2 removal) — surface + seam tests.
 
 The wire surface (``list_tools``) serves ONLY the namespaced ``<entity>_<verb>``
-names. Both the new and the legacy/old name resolve through ``call_tool`` (the
-old name stays the internal canonical identity), so the served rename does not
-break callers still using the legacy names, and every downstream guard —
-including the ``get_mcp_status`` degraded-mode exemptions — keeps working when
-reached via the new name.
+names, and at the 3.0 major boundary the legacy flat names were REMOVED from the
+wire (ADR-016 Phase 2): a caller using one now gets the standard Unknown-tool
+NOT_FOUND envelope. The old name remains the *internal* canonical identity (so
+the tier markers and read-only/destructive hints survive — plan §5.1.1), but it
+is no longer an accepted wire name. Every downstream guard — including the
+``get_mcp_status`` degraded-mode exemptions — keeps working when reached via the
+new name.
 """
 
 from __future__ import annotations
@@ -19,23 +21,37 @@ from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 from tests.mcp._helpers import _parse
 
 
-class TestBothNamesResolve:
-    async def test_old_and_new_name_return_same_result(self, mcp_db: FiligreeDB) -> None:
-        issue = mcp_db.create_issue("Alias round-trip")
+class TestNewNameResolvesOldNameRemoved:
+    async def test_new_name_resolves(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Namespaced name resolves")
 
-        via_old = _parse(await call_tool("get_issue", {"issue_id": issue.id}))
         via_new = _parse(await call_tool("issue_get", {"issue_id": issue.id}))
 
-        assert via_old == via_new
         assert via_new["issue_id"] == issue.id
+
+    async def test_old_name_is_removed_not_found(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Legacy name removed")
+
+        # Phase 2 (ADR-016, 3.0): the legacy flat name no longer resolves — it
+        # returns the standard Unknown-tool NOT_FOUND envelope, never the issue.
+        result = _parse(await call_tool("get_issue", {"issue_id": issue.id}))
+        assert result["code"] == ErrorCode.NOT_FOUND
+        assert "get_issue" in result["error"]
+
+    async def test_every_old_name_is_removed(self, mcp_db: FiligreeDB) -> None:
+        # Sweep the whole legacy surface: not one old name may still dispatch.
+        for old_name in RENAME_MAP:
+            result = _parse(await call_tool(old_name, {}))
+            assert result["code"] == ErrorCode.NOT_FOUND, f"legacy name {old_name!r} still resolves"
+            assert old_name in result["error"]
 
 
 class TestServedSurface:
     async def test_list_tools_serves_exactly_the_new_names(self) -> None:
         names = [tool.name for tool in await list_tools()]
 
-        assert len(names) == 114
-        assert len(set(names)) == 114, "served names must be unique"
+        assert len(names) == 118
+        assert len(set(names)) == 118, "served names must be unique"
         # Every served name is a NEW name; no OLD name leaks onto the surface.
         assert set(names) == set(RENAME_MAP.values())
         assert set(names) & set(RENAME_MAP.keys()) == set()
@@ -57,9 +73,10 @@ class TestArgValidationThroughNewName:
         data = _parse(result)
         assert data["code"] == ErrorCode.VALIDATION
 
-        # Same behaviour through the old name.
+        # The old name is removed: it short-circuits to NOT_FOUND before arg
+        # validation ever runs, regardless of the (now irrelevant) arguments.
         result_old = await call_tool("get_issue", {"issue_id": issue.id, "not_a_real_arg": 1})
-        assert _parse(result_old)["code"] == ErrorCode.VALIDATION
+        assert _parse(result_old)["code"] == ErrorCode.NOT_FOUND
 
 
 class TestDegradedModeReachability:
@@ -71,7 +88,7 @@ class TestDegradedModeReachability:
     exempt. Two of the three exemptions are exercised here:
 
     * ``_schema_mismatch`` (startup found a v+1 DB), and
-    * ``_registry_startup_error`` (Clarion advertised an incompatible registry
+    * ``_registry_startup_error`` (Loomweave advertised an incompatible registry
       API version).
 
     The third — the per-call runtime-drift gate (live ``PRAGMA user_version``
@@ -116,15 +133,15 @@ class TestDegradedModeReachability:
 
         # mcp_status_get -> get_mcp_status stays exempt from the registry guard,
         # so the diagnostic status payload is served (status field +
-        # full diagnostics), NOT the bare CLARION_REGISTRY_VERSION_MISMATCH envelope.
+        # full diagnostics), NOT the bare LOOMWEAVE_REGISTRY_VERSION_MISMATCH envelope.
         status = _parse(await call_tool("mcp_status_get", {}))
         assert status["status"] == "registry_version_mismatch"
-        assert status["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert status["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
         assert "runtime" in status
 
         # A normal tool IS blocked with the registry-mismatch envelope, via the new name.
         blocked = _parse(await call_tool("issue_get", {"issue_id": "anything"}))
-        assert blocked["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert blocked["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
 
 
 class TestServedTaggingIntegrity:

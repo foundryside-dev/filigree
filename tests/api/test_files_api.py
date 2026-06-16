@@ -16,7 +16,8 @@ from tests.conftest import PopulatedDB
 
 _OLD_TS = "2020-01-01T00:00:00+00:00"  # well past any clean-stale cutoff
 
-_CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loom" / "findings-clean-stale.json"
+_CLEAN_STALE_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "weft" / "findings-clean-stale.json"
+_SCAN_RESULTS_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "weft" / "scan-results.json"
 
 
 class TestFilesSchemaAPI:
@@ -38,6 +39,13 @@ class TestFilesSchemaAPI:
         data = resp.json()
         assert "bug_in" in data["valid_association_types"]
         assert "scan_finding" in data["valid_association_types"]
+
+    async def test_schema_returns_finding_filter_axes(self, client: AsyncClient) -> None:
+        """FIL-2/X-5: the nested wardline filter vocabularies are discoverable."""
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+        assert set(data["valid_finding_kinds"]) == {"defect", "fact", "classification", "metric", "suggestion"}
+        assert set(data["valid_suppression_filters"]) == {"all", "active", "baselined", "waived", "judged"}
 
     async def test_schema_returns_valid_sort_fields(self, client: AsyncClient) -> None:
         resp = await client.get("/api/files/_schema")
@@ -65,26 +73,60 @@ class TestFilesSchemaAPI:
 
         assert data["config_flags"] == {
             "registry_backend": "local",
-            "registry_backend_features": ["local", "clarion"],
+            "registry_backend_features": ["local", "loomweave"],
             "allow_local_fallback": False,
             # F-1: probe identity is unset under local-mode; the keys are still
             # emitted so the dashboard JS does not need a separate code path.
-            "clarion_instance_id": None,
-            "clarion_api_version": None,
-            "clarion_instance_rotated": False,
+            "loomweave_instance_id": None,
+            "loomweave_api_version": None,
+            "loomweave_instance_rotated": False,
         }
 
-    async def test_schema_config_flags_reflect_project_backend(self, clarion_fallback_client: AsyncClient) -> None:
-        resp = await clarion_fallback_client.get("/api/files/_schema")
+    async def test_schema_exposes_scan_results_payload_limits(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files/_schema")
+        assert resp.status_code == 200
         data = resp.json()
 
-        assert data["config_flags"]["registry_backend"] == "clarion"
-        assert data["config_flags"]["registry_backend_features"] == ["local", "clarion"]
+        assert data["scan_results_limits"] == {
+            "max_findings_per_request": 1000,
+            "max_scanned_paths_per_request": 100_000,
+            "max_finding_text_length": 20_000,
+            "chunking_guidance": "Split larger scan output into multiple POST /api/weft/scan-results requests.",
+        }
+
+        scan_results = next(ep for ep in data["endpoints"] if ep["path"] == "/api/v1/scan-results")
+        assert scan_results["request_body"]["max_findings_per_request"] == 1000
+
+    async def test_schema_config_flags_reflect_project_backend(self, loomweave_fallback_client: AsyncClient) -> None:
+        resp = await loomweave_fallback_client.get("/api/files/_schema")
+        data = resp.json()
+
+        assert data["config_flags"]["registry_backend"] == "loomweave"
+        assert data["config_flags"]["registry_backend_features"] == ["local", "loomweave"]
         assert data["config_flags"]["allow_local_fallback"] is True
 
 
+class TestScanResultsPayloadLimits:
+    @pytest.mark.parametrize("path", ["/api/v1/scan-results", "/api/weft/scan-results", "/api/scan-results"])
+    async def test_over_limit_findings_returns_structured_contract(self, client: AsyncClient, path: str) -> None:
+        findings = [{"path": f"src/{i}.py", "rule_id": "WLN-1", "message": "m"} for i in range(1001)]
+
+        resp = await client.post(path, json={"scan_source": "wardline", "findings": findings})
+
+        assert resp.status_code == 413
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "1000" in body["error"]
+        assert body["details"] == {
+            "field": "findings",
+            "limit": 1000,
+            "actual": 1001,
+            "chunking_guidance": "Split larger scan output into multiple POST /api/weft/scan-results requests.",
+        }
+
+
 class TestScanResultsRegistryErrors:
-    async def test_scan_results_returns_not_found_for_unknown_clarion_file(
+    async def test_scan_results_returns_not_found_for_unknown_loomweave_file(
         self,
         client: AsyncClient,
         dashboard_db: PopulatedDB,
@@ -92,9 +134,9 @@ class TestScanResultsRegistryErrors:
         class MissingFileRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
                 raise RegistryFileNotFoundError(
-                    "Clarion registry could not resolve file at http://clarion.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
+                    "Loomweave registry could not resolve file at http://loomweave.test/api/v1/files?path=missing.py: HTTP 404 not indexed",
                     status_code=404,
-                    url="http://clarion.test/api/v1/files?path=missing.py",
+                    url="http://loomweave.test/api/v1/files?path=missing.py",
                 )
 
             def is_displaced(self) -> bool:
@@ -115,7 +157,7 @@ class TestScanResultsRegistryErrors:
         assert body["code"] == "NOT_FOUND"
         assert "HTTP 404 not indexed" in body["error"]
 
-    @pytest.mark.parametrize("path", ["/api/v1/scan-results", "/api/loom/scan-results", "/api/scan-results"])
+    @pytest.mark.parametrize("path", ["/api/v1/scan-results", "/api/weft/scan-results", "/api/scan-results"])
     async def test_scan_results_returns_registry_unavailable_code(
         self,
         client: AsyncClient,
@@ -124,7 +166,7 @@ class TestScanResultsRegistryErrors:
     ) -> None:
         class UnavailableRegistry:
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                raise RegistryUnavailableError("Clarion registry unavailable for test")
+                raise RegistryUnavailableError("Loomweave registry unavailable for test")
 
             def is_displaced(self) -> bool:
                 return True
@@ -216,12 +258,24 @@ class TestScanRunsAPI:
         paths = [ep["path"] for ep in data["endpoints"]]
         assert "/api/scan-runs" in paths
 
+    async def test_schema_documents_empty_scan_run_id_history_tradeoff(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/files/_schema")
+        data = resp.json()
+        scan_results = next(ep for ep in data["endpoints"] if ep["path"] == "/api/v1/scan-results")
+        scan_run_id_doc = scan_results["request_body"]["scan_run_id"]
+
+        assert "globally unique non-empty" in scan_run_id_doc
+        assert "/api/scan-runs" in scan_run_id_doc
+        assert "empty" in scan_run_id_doc
+        assert "fire-and-forget" in scan_run_id_doc
+        assert "excluded" in scan_run_id_doc
+
 
 class TestUnknownScanRunIdContract:
     """POST scan-results with a client-supplied scan_run_id Filigree has never
     seen — the permanent "tolerate-unknown" intake contract (F6, contracts.md).
 
-    Federation producers (Clarion `clarion analyze`) mint their own run_id and
+    Federation producers (Loomweave `loomweave analyze`) mint their own run_id and
     POST findings carrying it with NO prior create handshake. Filigree ingests
     the findings and reconstructs the run in GET /api/scan-runs from
     scan_findings.scan_run_id. This is a supported, permanent contract — not a
@@ -229,7 +283,7 @@ class TestUnknownScanRunIdContract:
     not only at the core-method level (TestScanRunsAPI / TestGetScanRunsCore).
 
     If this class ever needs to change, the federation contract changed: update
-    docs/federation/contracts.md §F6 and notify Loom consumers before merging.
+    docs/federation/contracts.md §F6 and notify Weft consumers before merging.
     """
 
     async def test_unknown_scan_run_id_ingests_with_200(self, client: AsyncClient) -> None:
@@ -237,8 +291,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-never-seen-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-never-seen-001",
                 "findings": [{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
             },
         )
@@ -247,7 +301,7 @@ class TestUnknownScanRunIdContract:
         assert body["findings_created"] == 1
         # The orphan run is reconstructed from scan_findings in history.
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
-        assert any(r["scan_run_id"] == "clarion-run-never-seen-001" for r in runs)
+        assert any(r["scan_run_id"] == "loomweave-run-never-seen-001" for r in runs)
 
     async def test_unknown_run_completion_is_silently_skipped(self, client: AsyncClient) -> None:
         """With complete_scan_run=True (default) an unknown run does NOT emit a
@@ -260,8 +314,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-warn-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-warn-001",
                 "findings": [{"path": "b.py", "rule_id": "C2", "severity": "high", "message": "m"}],
             },
         )
@@ -271,7 +325,7 @@ class TestUnknownScanRunIdContract:
         assert not any("not updated to 'completed'" in w for w in body["warnings"])
         # The unknown run is still reconstructed from scan_findings in history.
         runs = (await client.get("/api/scan-runs")).json()["scan_runs"]
-        assert any(r["scan_run_id"] == "clarion-run-warn-001" for r in runs)
+        assert any(r["scan_run_id"] == "loomweave-run-warn-001" for r in runs)
 
     async def test_complete_scan_run_false_suppresses_completion_warning(self, client: AsyncClient) -> None:
         """complete_scan_run=False suppresses the completion attempt entirely,
@@ -279,8 +333,8 @@ class TestUnknownScanRunIdContract:
         resp = await client.post(
             "/api/v1/scan-results",
             json={
-                "scan_source": "clarion",
-                "scan_run_id": "clarion-run-noverify-001",
+                "scan_source": "loomweave",
+                "scan_run_id": "loomweave-run-noverify-001",
                 "findings": [{"path": "c.py", "rule_id": "C3", "severity": "high", "message": "m"}],
                 "complete_scan_run": False,
             },
@@ -360,31 +414,121 @@ class TestErrorMessagesIncludeValidOptions:
         assert "nonexistent-id-xyz" in body["error"]
 
 
-class TestScanResultsFingerprintAPI:
-    """Wardline-supplied fingerprint over the wire (Loom §3.B).
+class TestWeftFindingsKindSuppressionFilters:
+    """FIL-2/X-5: GET /api/weft/findings honours the nested wardline axes
+    (``kind``, ``suppression``) and ``rule_id``/``qualname`` so a federation
+    consumer can pull only the real un-suppressed defects."""
 
-    Exercises the native-emitter contract path — POST /api/loom/scan-results —
+    async def _seed(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "WLN-METRIC",
+                        "message": "telemetry",
+                        "severity": "info",
+                        "line_start": 1,
+                        "metadata": {"wardline": {"kind": "metric"}},
+                    },
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "PY-WL-101",
+                        "message": "real defect",
+                        "severity": "high",
+                        "line_start": 10,
+                        "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+                    },
+                    {
+                        "path": "src/app.py",
+                        "rule_id": "PY-WL-102",
+                        "message": "baselined",
+                        "severity": "high",
+                        "line_start": 20,
+                        "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_filter_real_unsuppressed_defects(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?kind=defect&suppression=active")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-101"]
+
+    async def test_filter_by_suppression_baselined(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?suppression=baselined")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-102"]
+
+    async def test_default_stays_inclusive_unlike_agent_surfaces(self, client: AsyncClient) -> None:
+        """filigree-2bdb878bd2 scope guard: the default-hide of suppressed
+        findings lives ONLY at the agent surfaces (MCP/CLI). This federation
+        read API (like the dashboard) keeps the core default — return everything
+        — so changing a sibling tool's machine-read contract is never silent.
+        Federation consumers pass an explicit ``suppression=`` filter."""
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings")
+        assert resp.status_code == 200
+        rules = sorted(i["rule_id"] for i in resp.json()["items"])
+        assert rules == ["PY-WL-101", "PY-WL-102", "WLN-METRIC"]  # baselined present
+
+    async def test_suppression_all_accepted(self, client: AsyncClient) -> None:
+        """``suppression=all`` is an advertised filter value (no-op == default)."""
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?suppression=all")
+        assert resp.status_code == 200
+        assert sorted(i["rule_id"] for i in resp.json()["items"]) == ["PY-WL-101", "PY-WL-102", "WLN-METRIC"]
+
+    async def test_filter_by_kind_excludes_metric(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?kind=defect")
+        assert resp.status_code == 200
+        assert sorted(i["rule_id"] for i in resp.json()["items"]) == ["PY-WL-101", "PY-WL-102"]
+
+    async def test_filter_by_qualname(self, client: AsyncClient) -> None:
+        # Guards the "qualname" key in the route's literal filter-key tuple.
+        await self._seed(client)
+        resp = await client.get("/api/weft/findings?qualname=app.handler")
+        assert resp.status_code == 200
+        assert [i["rule_id"] for i in resp.json()["items"]] == ["PY-WL-101"]
+
+    async def test_invalid_kind_returns_validation(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/findings?kind=bogus")
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+
+class TestScanResultsFingerprintAPI:
+    """Wardline-supplied fingerprint over the wire (Weft §3.B).
+
+    Exercises the native-emitter contract path — POST /api/weft/scan-results —
     rather than only the in-process db call, so the body parser and dedup wire
     end-to-end. The ``client`` fixture uses a local registry, so file_id
-    resolution works with no Clarion present (brief §3.C composability).
+    resolution works with no Loomweave present (brief §3.C composability).
     """
 
-    async def test_fingerprint_dedup_over_loom_endpoint(self, client: AsyncClient) -> None:
+    async def test_fingerprint_dedup_over_weft_endpoint(self, client: AsyncClient) -> None:
         body = {
             "scan_source": "wardline",
             "findings": [
                 {"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "line_start": 10, "fingerprint": "fp-http"}
             ],
         }
-        first = await client.post("/api/loom/scan-results", json=body)
+        first = await client.post("/api/weft/scan-results", json=body)
         assert first.status_code == 200
 
         # Re-emit the "same" finding shifted down — same fingerprint, new line.
         body["findings"][0]["line_start"] = 40
-        second = await client.post("/api/loom/scan-results", json=body)
+        second = await client.post("/api/weft/scan-results", json=body)
         assert second.status_code == 200
 
-        listing = await client.get("/api/loom/findings?scan_source=wardline")
+        listing = await client.get("/api/weft/findings?scan_source=wardline")
         assert listing.status_code == 200
         items = listing.json()["items"]
         assert len(items) == 1
@@ -394,7 +538,7 @@ class TestScanResultsFingerprintAPI:
 
     async def test_non_string_fingerprint_rejected_over_endpoint(self, client: AsyncClient) -> None:
         resp = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "wardline",
                 "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "fingerprint": ["not", "a", "string"]}],
@@ -403,15 +547,135 @@ class TestScanResultsFingerprintAPI:
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
+    async def test_wardline_fingerprint_survives_native_ingest_readback_promote_dedup_and_lifecycle(
+        self,
+        client: AsyncClient,
+        dashboard_db: PopulatedDB,
+    ) -> None:
+        fingerprint = "wardline:sarif:partial-fingerprint:v1"
+        first = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-001",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "tainted source reaches sink",
+                        "severity": "high",
+                        "line_start": 12,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["stats"]["findings_created"] == 1
 
-class TestLoomCleanStaleFindingsAPI:
-    """POST /api/loom/findings/clean-stale — federation retention surface.
+        listing = await client.get(f"/api/weft/findings?scan_source=wardline&fingerprint={fingerprint}")
+        assert listing.status_code == 200
+        items = listing.json()["items"]
+        assert len(items) == 1
+        finding = items[0]
+        assert finding["scan_run_id"] == "wardline-native-run-001"
+        assert finding["fingerprint"] == fingerprint
 
-    Thin loom HTTP adapter over the core ``clean_stale_findings`` (ADR-015).
+        promoted = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": fingerprint, "actor": "wardline"},
+        )
+        assert promoted.status_code == 200
+        issue_id = promoted.json()["issue_id"]
+
+        second = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-002",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "same taint path after line movement",
+                        "severity": "high",
+                        "line_start": 48,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["stats"]["findings_updated"] == 1
+        assert second.json()["succeeded"] == []
+
+        listing = await client.get(f"/api/weft/findings?scan_source=wardline&fingerprint={fingerprint}")
+        finding = listing.json()["items"][0]
+        assert finding["seen_count"] == 2
+        assert finding["line_start"] == 48
+        assert finding["issue_id"] == issue_id
+        # First attribution wins: later dedup/readback must not erase the run
+        # that originally introduced this finding.
+        assert finding["scan_run_id"] == "wardline-native-run-001"
+
+        dashboard_db.db.conn.execute(
+            "UPDATE scan_findings SET status = 'unseen_in_latest', last_seen_at = ? WHERE fingerprint = ?",
+            (_OLD_TS, fingerprint),
+        )
+        dashboard_db.db.conn.commit()
+        swept = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
+        assert swept.status_code == 200
+        fixed = (await client.get(f"/api/weft/findings?scan_source=wardline&fingerprint={fingerprint}")).json()["items"][0]
+        assert fixed["status"] == "fixed"
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) == "done"
+
+        reopened = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "scan_run_id": "wardline-native-run-003",
+                "findings": [
+                    {
+                        "path": "src/flow.py",
+                        "rule_id": "WLN-TAINT",
+                        "message": "same taint path regressed",
+                        "severity": "high",
+                        "line_start": 50,
+                        "fingerprint": fingerprint,
+                    }
+                ],
+            },
+        )
+        assert reopened.status_code == 200
+        current = (await client.get(f"/api/weft/findings?scan_source=wardline&fingerprint={fingerprint}")).json()["items"][0]
+        assert current["status"] == "open"
+        assert current["seen_count"] == 3
+        assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) != "done"
+
+    def test_scan_results_fixture_pins_sarif_adapter_fingerprint_contract(self) -> None:
+        fixture = json.loads(_SCAN_RESULTS_FIXTURE.read_text())
+        adapter_contract = fixture["shape_decl"]["external_adapter_contract"]
+        assert "SARIF" in adapter_contract
+        assert "partialFingerprints" in adapter_contract
+        assert "finding.fingerprint" in adapter_contract
+
+        wardline_example = next(
+            example for example in fixture["examples"] if example["name"] == "success_wardline_sarif_adapter_fingerprint"
+        )
+        finding = wardline_example["request"]["body"]["findings"][0]
+        assert finding["fingerprint"]
+        assert "partialFingerprints" in wardline_example["note"]
+        assert wardline_example["response"]["body"]["stats"]["findings_created"] == 1
+
+
+class TestWeftCleanStaleFindingsAPI:
+    """POST /api/weft/findings/clean-stale — federation retention surface.
+
+    Thin weft HTTP adapter over the core ``clean_stale_findings`` (ADR-015).
     Soft retention: stale ``unseen_in_latest`` findings move to ``fixed``,
     scoped to a single ``scan_source``. Reuses the existing core method —
     these tests assert the wire contract and the scan_source-isolation /
-    enrich-only invariants Clarion depends on.
+    enrich-only invariants Loomweave depends on.
     """
 
     def _status_by_rule(self, db: PopulatedDB, path: str) -> dict[str, str]:
@@ -422,16 +686,16 @@ class TestLoomCleanStaleFindingsAPI:
     async def test_clean_stale_matrix(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """One seeded matrix proving scoping + enrich-only in a single sweep.
 
-        | finding                              | after clarion/30d sweep |
+        | finding                              | after loomweave/30d sweep |
         | ------------------------------------ | ----------------------- |
-        | clarion + unseen + old               | fixed (cleaned)         |
-        | clarion + unseen + recent            | kept unseen_in_latest   |
-        | clarion + open (still in latest)     | kept open (enrich-only) |
+        | loomweave + unseen + old               | fixed (cleaned)         |
+        | loomweave + unseen + recent            | kept unseen_in_latest   |
+        | loomweave + open (still in latest)     | kept open (enrich-only) |
         | wardline + unseen + old              | kept (scan_source iso)  |
         """
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[
                 {"path": "clar_old.py", "rule_id": "C-OLD", "severity": "high", "message": "m"},
                 {"path": "clar_recent.py", "rule_id": "C-RECENT", "severity": "high", "message": "m"},
@@ -452,21 +716,21 @@ class TestLoomCleanStaleFindingsAPI:
         db.conn.commit()
 
         resp = await client.post(
-            "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+            "/api/weft/findings/clean-stale",
+            json={"scan_source": "loomweave", "older_than_days": 30, "actor": "loomweave"},
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
+        assert body == {"findings_fixed": 1, "scan_source": "loomweave", "older_than_days": 30, "warnings": []}
 
-        # Only the old clarion unseen finding was swept.
+        # Only the old loomweave unseen finding was swept.
         assert self._status_by_rule(dashboard_db, "clar_old.py")["C-OLD"] == "fixed"
-        # Recent clarion unseen finding untouched.
+        # Recent loomweave unseen finding untouched.
         assert self._status_by_rule(dashboard_db, "clar_recent.py")["C-RECENT"] == "unseen_in_latest"
-        # Live (open) clarion finding untouched — enrich-only: still-present
+        # Live (open) loomweave finding untouched — enrich-only: still-present
         # findings keep their seen state.
         assert self._status_by_rule(dashboard_db, "clar_open.py")["C-OPEN"] == "open"
-        # Wardline finding untouched — scan_source isolation: a clarion-scoped
+        # Wardline finding untouched — scan_source isolation: a loomweave-scoped
         # sweep can never affect another tool's findings.
         assert self._status_by_rule(dashboard_db, "ward_old.py")["W-OLD"] == "unseen_in_latest"
 
@@ -474,7 +738,7 @@ class TestLoomCleanStaleFindingsAPI:
         """``older_than_days`` is optional; omitting it defaults to 30 (REQ-FINDING-06)."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
         )
         db.conn.execute(
@@ -482,16 +746,16 @@ class TestLoomCleanStaleFindingsAPI:
             (_OLD_TS,),
         )
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 200
-        assert resp.json() == {"findings_fixed": 1, "scan_source": "clarion", "older_than_days": 30, "warnings": []}
+        assert resp.json() == {"findings_fixed": 1, "scan_source": "loomweave", "older_than_days": 30, "warnings": []}
 
     async def test_coalesce_fallback_null_last_seen_at(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Age gate is coalesce(last_seen_at, updated_at): a NULL last_seen_at
         with an old updated_at is still swept (inherited from the core method)."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
         )
         db.conn.execute(
@@ -499,7 +763,7 @@ class TestLoomCleanStaleFindingsAPI:
             (_OLD_TS,),
         )
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 30})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "loomweave", "older_than_days": 30})
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
         assert self._status_by_rule(dashboard_db, "a.py")["C1"] == "fixed"
@@ -510,7 +774,7 @@ class TestLoomCleanStaleFindingsAPI:
         already-unseen rows, and open (live) findings are still untouched."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[
                 {"path": "u.py", "rule_id": "C-UNSEEN", "severity": "low", "message": "m"},
                 {"path": "o.py", "rule_id": "C-OPEN", "severity": "low", "message": "m"},
@@ -519,7 +783,7 @@ class TestLoomCleanStaleFindingsAPI:
         # Mark one unseen with a *recent* last_seen_at (would survive a 30-day window).
         db.conn.execute("UPDATE scan_findings SET status = 'unseen_in_latest' WHERE rule_id = 'C-UNSEEN'")
         db.conn.commit()
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion", "older_than_days": 0})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "loomweave", "older_than_days": 0})
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
         assert self._status_by_rule(dashboard_db, "u.py")["C-UNSEEN"] == "fixed"
@@ -531,7 +795,7 @@ class TestLoomCleanStaleFindingsAPI:
         sweeping a finding dismisses the observation linked to it."""
         db = dashboard_db.db
         db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "low", "message": "m"}],
             create_observations=True,
         )
@@ -547,8 +811,8 @@ class TestLoomCleanStaleFindingsAPI:
         db.conn.commit()
 
         resp = await client.post(
-            "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": 30, "actor": "clarion"},
+            "/api/weft/findings/clean-stale",
+            json={"scan_source": "loomweave", "older_than_days": 30, "actor": "loomweave"},
         )
         assert resp.status_code == 200
         assert resp.json()["findings_fixed"] == 1
@@ -558,20 +822,20 @@ class TestLoomCleanStaleFindingsAPI:
     async def test_missing_scan_source_rejected(self, client: AsyncClient) -> None:
         """scan_source is mandatory on the HTTP surface (accident-guard): the
         core method's None='all sources' mode is deliberately not reachable."""
-        resp = await client.post("/api/loom/findings/clean-stale", json={"older_than_days": 30})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"older_than_days": 30})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
     async def test_empty_scan_source_rejected(self, client: AsyncClient) -> None:
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "", "older_than_days": 30})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "", "older_than_days": 30})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
     @pytest.mark.parametrize("bad_days", [-1, True, "30", 1.5])
     async def test_invalid_older_than_days_rejected(self, client: AsyncClient, bad_days: object) -> None:
         resp = await client.post(
-            "/api/loom/findings/clean-stale",
-            json={"scan_source": "clarion", "older_than_days": bad_days},
+            "/api/weft/findings/clean-stale",
+            json={"scan_source": "loomweave", "older_than_days": bad_days},
         )
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
@@ -580,7 +844,7 @@ class TestLoomCleanStaleFindingsAPI:
         """Pin the published contract fixture against live responses (key set +
         value types), the shape-reference discipline from contracts.md."""
         fixture = json.loads(_CLEAN_STALE_FIXTURE.read_text())
-        assert fixture["_meta"]["endpoint"] == "POST /api/loom/findings/clean-stale"
+        assert fixture["_meta"]["endpoint"] == "POST /api/weft/findings/clean-stale"
 
         for example in fixture["examples"]:
             req = example["request"]
@@ -600,7 +864,7 @@ class TestLoomCleanStaleFindingsAPI:
             raise sqlite3.OperationalError("database is locked")
 
         monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 500
         assert resp.json()["code"] == "IO"
 
@@ -611,15 +875,15 @@ class TestLoomCleanStaleFindingsAPI:
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(files_routes, "_clean_stale_findings_on_private_conn", boom)
-        resp = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "clarion"})
+        resp = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "loomweave"})
         assert resp.status_code == 500
         body = resp.json()
         assert body["code"] == "INTERNAL"
         assert set(body.keys()) >= {"error", "code"}
 
 
-class TestLoomPromoteFindingAPI:
-    """POST /api/loom/findings/promote — Wardline A2 promote-by-fingerprint.
+class TestWeftPromoteFindingAPI:
+    """POST /api/weft/findings/promote — Wardline A2 promote-by-fingerprint.
 
     HTTP surface over the idempotent core ``promote_finding_to_issue``, keyed on
     ``(scan_source, fingerprint)`` (Wardline only knows its fingerprint and only
@@ -628,7 +892,7 @@ class TestLoomPromoteFindingAPI:
 
     async def _ingest(self, client: AsyncClient, fingerprint: str = "fp-http") -> None:
         resp = await client.post(
-            "/api/loom/scan-results",
+            "/api/weft/scan-results",
             json={
                 "scan_source": "wardline",
                 "findings": [{"path": "src/a.py", "rule_id": "WLN-1", "message": "m", "severity": "high", "fingerprint": fingerprint}],
@@ -636,48 +900,295 @@ class TestLoomPromoteFindingAPI:
         )
         assert resp.status_code == 200
 
-    async def test_promote_returns_issue_id_created(self, client: AsyncClient) -> None:
+    async def test_promote_returns_issue_id_created(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         await self._ingest(client)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["created"] is True
         assert body["issue_id"]
-        assert set(body.keys()) == {"issue_id", "created"}
+        assert set(body.keys()) == {"issue_id", "created", "entity_attachment"}
+        # C-10: a finding with no entity identity says so — never a silent skip.
+        assert body["entity_attachment"]["attached"] is False
+        assert "no entity identity on finding" in body["entity_attachment"]["reason"]
+        issue = dashboard_db.db.get_issue(body["issue_id"])
+        assert issue.fields["severity"] == "major"
+
+    async def test_promote_attaches_entity_by_default(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """B9 (weft-4a46553503): the plain promote attaches the finding's own
+        entity identity (metadata.loomweave.entity_id) when resolvable."""
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "loomweave",
+                "findings": [
+                    {
+                        "path": "src/ent_http.py",
+                        "rule_id": "LMWV-R1",
+                        "message": "entity-bearing finding",
+                        "severity": "high",
+                        "fingerprint": "fp-entity",
+                        "metadata": {"loomweave": {"entity_id": "loomweave:eid:http-default"}},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        # Simulate the loomweave-registry-mode file record (content hash from resolve).
+        dashboard_db.db.conn.execute("UPDATE file_records SET content_hash = 'hash-http-1' WHERE path = 'src/ent_http.py'")
+        dashboard_db.db.conn.commit()
+
+        promoted = await client.post("/api/weft/findings/promote", json={"scan_source": "loomweave", "fingerprint": "fp-entity"})
+
+        assert promoted.status_code == 200
+        body = promoted.json()
+        assert body["created"] is True
+        assert body["entity_attachment"]["attached"] is True
+        assert body["entity_attachment"]["entity_id"] == "loomweave:eid:http-default"
+        assert body["association"]["entity_id"] == "loomweave:eid:http-default"
+        rows = dashboard_db.db.list_entity_associations(body["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == "hash-http-1"
+
+    async def test_promote_attach_entity_opt_out(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "attach_entity": False},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["entity_attachment"]["attached"] is False
+        assert "attach_entity" in body["entity_attachment"]["reason"]
+        assert dashboard_db.db.list_entity_associations(body["issue_id"]) == []
+
+    async def test_promote_rejects_non_bool_attach_entity(self, client: AsyncClient) -> None:
+        await self._ingest(client)
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-http", "attach_entity": "yes"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
 
     async def test_promote_is_idempotent(self, client: AsyncClient) -> None:
         await self._ingest(client)
-        first = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
-        second = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        first = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        second = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert first.json()["created"] is True
         assert second.status_code == 200
         assert second.json()["created"] is False
         assert second.json()["issue_id"] == first.json()["issue_id"]
 
+    async def test_promote_and_attach_entity_is_idempotent(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+
+        first = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "loomweave:eid:abc123",
+                "content_hash": "hash-v1",
+                "entity_kind": "function",
+                "actor": "wardline",
+            },
+        )
+        assert first.status_code == 200
+        body = first.json()
+        assert body["created"] is True
+        assert body["association"]["entity_id"] == "loomweave:eid:abc123"
+        assert body["association"]["entity_kind"] == "function"
+
+        second = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "loomweave:eid:abc123",
+                "content_hash": "hash-v2",
+                "actor": "wardline",
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["issue_id"] == body["issue_id"]
+        assert second.json()["created"] is False
+        assert second.json()["association"]["content_hash_at_attach"] == "hash-v2"
+
+        rows = dashboard_db.db.list_entity_associations(body["issue_id"])
+        assert len(rows) == 1
+        assert rows[0]["content_hash_at_attach"] == "hash-v2"
+
+    async def test_finding_dossier_includes_file_issue_and_entity_context(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        await self._ingest(client)
+        listing = await client.get("/api/weft/findings", params={"scan_source": "wardline", "fingerprint": "fp-http"})
+        finding_id = listing.json()["items"][0]["finding_id"]
+        promoted = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-http",
+                "entity_id": "loomweave:eid:dossier",
+                "content_hash": "hash-v1",
+                "entity_kind": "function",
+            },
+        )
+        issue_id = promoted.json()["issue_id"]
+        dashboard_db.db.add_file_association(listing.json()["items"][0]["file_id"], issue_id, "scan_finding", actor="tester")
+
+        resp = await client.get(f"/api/weft/findings/{finding_id}/dossier")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["finding"]["finding_id"] == finding_id
+        assert body["file"]["file_id"] == listing.json()["items"][0]["file_id"]
+        assert body["linked_issue"]["issue_id"] == issue_id
+        assert body["entity_associations"][0]["entity_id"] == "loomweave:eid:dossier"
+        assert body["file_associations"][0]["issue_id"] == issue_id
+
+    async def test_session_evidence_bundle_actor_window(self, client: AsyncClient) -> None:
+        await self._ingest(client, fingerprint="fp-session")
+        promoted = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-session",
+                "entity_id": "loomweave:eid:session",
+                "content_hash": "hash-v1",
+                "actor": "session-agent",
+            },
+        )
+        assert promoted.status_code == 200
+
+        resp = await client.get("/api/weft/session-evidence", params={"actor": "session-agent"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["query"]["actor"] == "session-agent"
+        assert {issue["issue_id"] for issue in body["issues"]} == {promoted.json()["issue_id"]}
+        assert body["findings"]
+        assert body["entity_associations"][0]["entity_id"] == "loomweave:eid:session"
+
+    async def test_session_evidence_empty_bundle(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/weft/session-evidence", params={"actor": "no-such-agent"})
+
+        assert resp.status_code == 200
+        assert resp.json()["issues"] == []
+        assert resp.json()["findings"] == []
+        assert resp.json()["entity_associations"] == []
+
     async def test_unknown_fingerprint_404(self, client: AsyncClient) -> None:
         await self._ingest(client)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-nope"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-nope"})
         assert resp.status_code == 404
         assert resp.json()["code"] == "NOT_FOUND"
 
     async def test_unknown_scan_source_404(self, client: AsyncClient) -> None:
         await self._ingest(client)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "other", "fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "other", "fingerprint": "fp-http"})
         assert resp.status_code == 404
         assert resp.json()["code"] == "NOT_FOUND"
 
     async def test_missing_fingerprint_400(self, client: AsyncClient) -> None:
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline"})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
     async def test_blank_fingerprint_400_not_404(self, client: AsyncClient) -> None:
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "  "})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "  "})
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
     async def test_missing_scan_source_400(self, client: AsyncClient) -> None:
-        resp = await client.post("/api/loom/findings/promote", json={"fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"fingerprint": "fp-http"})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def _ingest_suppressed(self, client: AsyncClient, state: str, fingerprint: str) -> None:
+        resp = await client.post(
+            "/api/weft/scan-results",
+            json={
+                "scan_source": "wardline",
+                "findings": [
+                    {
+                        "path": "src/s.py",
+                        "rule_id": "WLN-1",
+                        "message": "m",
+                        "severity": "high",
+                        "fingerprint": fingerprint,
+                        "metadata": {"wardline": {"suppression_state": state}},
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 200
+
+    async def test_promote_suppressed_refused_400_validation(self, client: AsyncClient) -> None:
+        """weft-171fc22a50: HTTP surface refuses a suppressed finding with a
+        clean VALIDATION 400, not a 500."""
+        await self._ingest_suppressed(client, "baselined", "fp-supp-http")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-supp-http"},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "VALIDATION"
+        assert "baselined" in body["error"]
+        assert "force=true" in body["error"]
+
+    async def test_promote_suppressed_force_200_with_warning(self, client: AsyncClient) -> None:
+        await self._ingest_suppressed(client, "waived", "fp-force-http")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-force-http", "force": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["issue_id"]
+        assert any("force override" in w and "waived" in w for w in body.get("warnings", []))
+
+    async def test_promote_non_bool_force_400(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-badforce")
+        resp = await client.post(
+            "/api/weft/findings/promote",
+            json={"scan_source": "wardline", "fingerprint": "fp-badforce", "force": "yes"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "VALIDATION"
+
+    async def test_promote_and_attach_suppressed_refused_then_forced(self, client: AsyncClient) -> None:
+        """weft-171fc22a50: the promote-and-attach HTTP route also honours the
+        suppression guard and its force override."""
+        await self._ingest_suppressed(client, "judged", "fp-attach-supp")
+        base = {
+            "scan_source": "wardline",
+            "fingerprint": "fp-attach-supp",
+            "entity_id": "loomweave:eid:http",
+            "content_hash": "h1",
+        }
+        refused = await client.post("/api/weft/findings/promote-and-attach", json=base)
+        assert refused.status_code == 400
+        assert refused.json()["code"] == "VALIDATION"
+        assert "judged" in refused.json()["error"]
+        forced = await client.post("/api/weft/findings/promote-and-attach", json={**base, "force": True})
+        assert forced.status_code == 200
+        body = forced.json()
+        assert body["issue_id"]
+        assert any("force override" in w and "judged" in w for w in body.get("warnings", []))
+
+    async def test_promote_and_attach_non_bool_force_400(self, client: AsyncClient) -> None:
+        await self._ingest(client, "fp-attach-badforce")
+        resp = await client.post(
+            "/api/weft/findings/promote-and-attach",
+            json={
+                "scan_source": "wardline",
+                "fingerprint": "fp-attach-badforce",
+                "entity_id": "loomweave:eid:x",
+                "content_hash": "h",
+                "force": "yes",
+            },
+        )
         assert resp.status_code == 400
         assert resp.json()["code"] == "VALIDATION"
 
@@ -685,7 +1196,7 @@ class TestLoomPromoteFindingAPI:
     async def test_bad_priority_400(self, client: AsyncClient, bad: str) -> None:
         await self._ingest(client)
         resp = await client.post(
-            "/api/loom/findings/promote",
+            "/api/weft/findings/promote",
             json={"scan_source": "wardline", "fingerprint": "fp-http", "priority": bad},
         )
         assert resp.status_code == 400
@@ -694,7 +1205,7 @@ class TestLoomPromoteFindingAPI:
     async def test_priority_label_applied(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         await self._ingest(client, "fp-prio")
         resp = await client.post(
-            "/api/loom/findings/promote",
+            "/api/weft/findings/promote",
             json={"scan_source": "wardline", "fingerprint": "fp-prio", "priority": "P2"},
         )
         assert resp.status_code == 200
@@ -704,7 +1215,7 @@ class TestLoomPromoteFindingAPI:
     async def test_fingerprint_filter_on_get_findings(self, client: AsyncClient) -> None:
         await self._ingest(client, "fp-a")
         await self._ingest(client, "fp-b")
-        resp = await client.get("/api/loom/findings?scan_source=wardline&fingerprint=fp-b")
+        resp = await client.get("/api/weft/findings?scan_source=wardline&fingerprint=fp-b")
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert len(items) == 1
@@ -713,7 +1224,7 @@ class TestLoomPromoteFindingAPI:
     async def test_end_to_end_cascade_over_wire(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         """Promote → stale-fix → reopen-on-regress, all via HTTP (the A2 oracle)."""
         await self._ingest(client, "fp-cycle")
-        promoted = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-cycle"})
+        promoted = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-cycle"})
         issue_id = promoted.json()["issue_id"]
 
         # Drive the finding stale, then sweep it fixed via the HTTP clean-stale.
@@ -722,7 +1233,7 @@ class TestLoomPromoteFindingAPI:
             (_OLD_TS,),
         )
         dashboard_db.db.conn.commit()
-        swept = await client.post("/api/loom/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
+        swept = await client.post("/api/weft/findings/clean-stale", json={"scan_source": "wardline", "older_than_days": 30})
         assert swept.status_code == 200
         assert dashboard_db.db._resolve_status_category("bug", dashboard_db.db.get_issue(issue_id).status) == "done"
 
@@ -753,7 +1264,7 @@ class TestLoomPromoteFindingAPI:
 
         monkeypatch.setattr(FiligreeDB, "find_finding_by_fingerprint", flaky_find)
         monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", vanished)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert resp.status_code == 404
         assert resp.json()["code"] == "NOT_FOUND"
 
@@ -771,7 +1282,7 @@ class TestLoomPromoteFindingAPI:
             raise KeyError("Issue not found: just-created issue not rebuildable")
 
         monkeypatch.setattr(FiligreeDB, "promote_finding_to_issue", deep_bug)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert resp.status_code == 500
         body = resp.json()
         assert body["code"] == "INTERNAL"
@@ -785,7 +1296,7 @@ class TestLoomPromoteFindingAPI:
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(files_routes, "_promote_finding_on_private_conn", boom)
-        resp = await client.post("/api/loom/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
+        resp = await client.post("/api/weft/findings/promote", json={"scan_source": "wardline", "fingerprint": "fp-http"})
         assert resp.status_code == 500
         body = resp.json()
         assert body["code"] == "INTERNAL"

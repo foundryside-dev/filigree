@@ -46,6 +46,76 @@ def pytest_runtest_teardown() -> None:
     _close_idle_current_event_loop()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_federation_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the federation bearer token hermetic across the whole suite.
+
+    The dashboard reads ``WEFT_FEDERATION_TOKEN`` (and the deprecated aliases
+    ``FILIGREE_FEDERATION_API_TOKEN`` / ``FILIGREE_API_TOKEN``)
+    at ``create_app()`` time (T1, commit 56e2ec6) to decide whether to gate the
+    ``/api/weft`` federation surface. A developer running the local daemon
+    exports the token in their shell; without isolation it leaks into every
+    ``create_app()`` and 401s every tokenless ``/api/weft`` test — so the suite
+    passes or fails by accident of the developer's environment. Clear all three here
+    so each test controls auth explicitly: tests that exercise the gated path
+    ``monkeypatch.setenv`` their own token (which, sharing this test's
+    monkeypatch instance, is applied after this autouse delenv and wins).
+    """
+    monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+    monkeypatch.delenv("FILIGREE_FEDERATION_API_TOKEN", raising=False)
+    monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ephemeral_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make migration busy-detection hermetic across the whole suite.
+
+    ``_ephemeral_dashboard_port_if_live`` probes the project's deterministic
+    port (``8400 + sha256(store path) % 1000``), a window shared with whatever
+    real daemons run on a developer (or agent) box. Since filigree-d5aa3bfe3d
+    it verifies the listener's identity via ``/api/health``, so an unrelated
+    service can no longer trigger a spurious ``StoreMigrationBusyError``
+    (pre-fix: ~30% of full-suite runs with ~10 listeners bound across the ~38
+    migration call sites) — but the probe still performs a live bind-attempt
+    and HTTP GET against ports derived from each tmp project's fresh path
+    hash. Stub it to "no dashboard" so the suite neither depends on nor pokes
+    whatever happens to be listening; the server-registry detection tier stays
+    live but is deterministic for tmp projects (the real registry never
+    contains them). Tests exercising the probe's contract monkeypatch over
+    this (sharing this test's monkeypatch instance, their later setattr wins)
+    or call the real function directly via a module-level import.
+    """
+    monkeypatch.setattr("filigree.core._ephemeral_dashboard_port_if_live", lambda _root: None)
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _restore_cwd() -> Generator[None, None, None]:
+    """Keep the process working directory hermetic across the suite.
+
+    Hundreds of CLI/util tests ``os.chdir`` into a per-test tmp project (via
+    ``CliRunner`` flows and the ``initialized_project`` fixture) and do not all
+    restore the cwd on every path. A leaked cwd — often a since-deleted tmp dir —
+    silently breaks later tests that read repo-relative paths (``docs/mcp.md``,
+    the ``tests/api/*.py`` static guardrails), a pollution that only surfaces
+    under particular orderings. After every test, force the cwd back to the
+    repo root (derived from ``__file__``, not the possibly-already-polluted
+    live cwd) so no test inherits a prior test's chdir and the pollution cannot
+    propagate forward.
+    """
+    try:
+        yield
+    finally:
+        try:
+            current = os.getcwd()
+        except OSError:
+            current = None  # cwd was a tmp dir already cleaned up mid-test
+        if current != str(_REPO_ROOT):
+            os.chdir(_REPO_ROOT)
+
+
 @dataclass
 class PopulatedDB:
     """Wrapper around FiligreeDB with pre-seeded issue IDs.

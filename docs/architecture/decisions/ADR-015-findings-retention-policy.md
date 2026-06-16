@@ -82,5 +82,5 @@ We deliberately reject **auto-adopt** (upserting a `scan_runs` row on an unknown
 - **ADR-002** (API generations / federation posture): `docs/architecture/decisions/ADR-002-api-generations-and-federation-posture.md`.
 - **Federation contracts**: `docs/federation/contracts.md`.
 - **Core method**: `FiligreeDB.clean_stale_findings` (`src/filigree/db_files.py`); CLI `filigree finding clean-stale` (`src/filigree/cli_commands/admin.py`).
-- **Loom doctrine**: `/home/john/clarion/docs/suite/loom.md` (§3–§5 enrich-only).
+- **Loom doctrine**: `/home/user/clarion/docs/suite/loom.md` (§3–§5 enrich-only).
 - **Clarion**: tracking issue `clarion-dd29e69e0e`; REQ-FINDING-05 (scan_run lifecycle), REQ-FINDING-06 (dedup / mark_unseen).

@@ -122,11 +122,13 @@ _NICHE: frozenset[str] = frozenset(
         # admin / maintenance
         "archive_closed",
         "compact_events",
+        "checkpoint_db",
         "export_jsonl",
         "import_jsonl",
         "undo_last",
         "restart_dashboard",
         "reload_templates",
+        "list_reconciliation_debt",
         # planning internals
         "create_plan_from_file",
         "move_plan_step",
@@ -139,6 +141,7 @@ _NICHE: frozenset[str] = frozenset(
         "get_file_timeline",
         "dismiss_finding",
         "promote_finding",
+        "promote_finding_and_attach_entity",
         "update_finding",
         # annotations (whole subsystem is niche)
         "annotate_file",
@@ -166,6 +169,8 @@ _NICHE: frozenset[str] = frozenset(
         "remove_entity_association",
         "list_entity_associations",
         "list_associations_by_entity",
+        # federation consumer bindings
+        "ingest_warpline_worklist",
         # scanners
         "list_scanners",
         "list_available_scanners",

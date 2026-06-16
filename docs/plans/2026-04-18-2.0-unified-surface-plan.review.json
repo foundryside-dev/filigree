@@ -1,8 +1,8 @@
 {
   "verdict": "CHANGES_REQUESTED",
   "summary": "Plan has 6 blocking issues across all four reviewers. The central structural gap is that FiligreeDB.start_work() — the atomic operation Stage 3 builds around — does not exist and the plan does not implement it; its error hierarchy (ClaimConflictError, IssueNotFoundError) also does not exist. Additional blockers: non-existent test fixtures referenced throughout Stages 2b-5, BatchFailure vs BatchFailureDetail type collision, wrong CLI context pattern (ctx.obj[\\\"actor\\\"] vs ctx.actor), and a git add ../CLAUDE.md step that cannot work from the filigree repo. Plus 14 warnings including a schema-mismatch hotfix that should land pre-Stage-1 to relieve current dogfooding pain. Spec-traceability gaps are real: several spec NFRs (concurrent start_next_work, 2x2 idempotency, MCP warm-degraded per tool, CLI/MCP parity) are only partially covered by the plan's tests.",
-  "plan_file": "/home/john/filigree/docs/plans/2026-04-18-2.0-unified-surface-plan.md",
-  "spec_file": "/home/john/filigree/docs/plans/2026-04-18-2.0-unified-surface-design.md",
+  "plan_file": "/home/user/filigree/docs/plans/2026-04-18-2.0-unified-surface-plan.md",
+  "spec_file": "/home/user/filigree/docs/plans/2026-04-18-2.0-unified-surface-design.md",
   "reviewed_at": "2026-04-18T00:00:00Z",
   "reviewers": ["reality", "architecture", "quality", "systems"],
   "blocking_issues": [
@@ -59,12 +59,12 @@
       "title": "Task 6.8 'git add ../CLAUDE.md' cannot work from filigree repo",
       "sources": ["systems"],
       "confidence": "high",
-      "evidence": "/home/john/CLAUDE.md lives outside the filigree git worktree. A commit in the filigree repo that stages a path outside the worktree will fail. Plan currently prescribes this as a single step.",
+      "evidence": "/home/user/CLAUDE.md lives outside the filigree git worktree. A commit in the filigree repo that stages a path outside the worktree will fail. Plan currently prescribes this as a single step.",
       "severity": 2,
       "likelihood": 3,
       "reversibility": 1,
       "priority_score": 6,
-      "resolution": "Split Task 6.8 into two operations: (a) update /home/john/filigree/CLAUDE.md inside the worktree as part of the Stage 6 commit, (b) separately update /home/john/CLAUDE.md via a shell step outside git (or document it as a manual user step). Note that only /home/john/CLAUDE.md is the 'global' copy; the worktree copy is a duplicate — consider collapsing them."
+      "resolution": "Split Task 6.8 into two operations: (a) update /home/user/filigree/CLAUDE.md inside the worktree as part of the Stage 6 commit, (b) separately update /home/user/CLAUDE.md via a shell step outside git (or document it as a manual user step). Note that only /home/user/CLAUDE.md is the 'global' copy; the worktree copy is a duplicate — consider collapsing them."
     },
     {
       "id": "B6",

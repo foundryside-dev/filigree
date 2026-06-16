@@ -16,6 +16,7 @@ from filigree.server import (
     read_server_config,
     register_project,
     unregister_project,
+    unregister_projects,
     write_server_config,
 )
 
@@ -163,6 +164,116 @@ class TestProjectRegistration:
         register_project(filigree_dir)
         config = read_server_config()
         assert list(config.projects.keys()) == [str(filigree_dir.resolve())]
+
+    def test_register_project_relocation_dedups_by_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """filigree-a4925b59bb: a project that relocates its store from
+        ``.filigree`` to ``.weft/filigree`` must re-register cleanly. The stale
+        legacy store-dir key shares the project root, so it is deduped (dropped),
+        NOT treated as a same-prefix collision."""
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        root = tmp_path / "proj"
+        legacy = root / ".filigree"
+        federated = root / ".weft" / "filigree"
+        legacy.mkdir(parents=True)
+        federated.mkdir(parents=True)
+        (legacy / "config.json").write_text('{"prefix": "proj"}')
+        (federated / "config.json").write_text('{"prefix": "proj"}')
+
+        register_project(legacy)
+        register_project(federated)  # must NOT raise "Prefix collision"
+
+        config = read_server_config()
+        # The stale legacy key is gone; only the live federated store remains.
+        assert list(config.projects.keys()) == [str(federated.resolve())]
+
+
+class TestBatchUnregister:
+    """``unregister_projects`` — single-locked-pass cleanup used by doctor --fix."""
+
+    def test_removes_only_requested_keys_and_returns_removed_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        gone_a = str(tmp_path / "vanished_a" / ".filigree")
+        gone_b = str(tmp_path / "vanished_b" / ".filigree")
+        alive = str(tmp_path / "alive" / ".filigree")
+        write_server_config(
+            ServerConfig(
+                port=8377,
+                projects={
+                    gone_a: {"prefix": "a"},
+                    gone_b: {"prefix": "b"},
+                    alive: {"prefix": "c"},
+                },
+            )
+        )
+
+        removed = unregister_projects([gone_a, gone_b])
+
+        assert removed == {gone_a, gone_b}
+        remaining = read_server_config().projects
+        assert set(remaining) == {alive}
+
+    def test_matches_keys_exactly_without_resolving(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The stored key is what register wrote; a gone directory must be removed
+        # by its exact stored string, never by a re-resolve() that could diverge.
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        stored_key = str(tmp_path / "vanished" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={stored_key: {"prefix": "v"}}))
+
+        removed = unregister_projects([stored_key])
+
+        assert removed == {stored_key}
+        assert read_server_config().projects == {}
+
+    def test_unknown_keys_are_ignored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        alive = str(tmp_path / "alive" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={alive: {"prefix": "c"}}))
+
+        removed = unregister_projects([str(tmp_path / "never_registered" / ".filigree")])
+
+        assert removed == set()
+        assert set(read_server_config().projects) == {alive}
+
+    def test_empty_input_is_a_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        alive = str(tmp_path / "alive" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={alive: {"prefix": "c"}}))
+
+        removed = unregister_projects([])
+
+        assert removed == set()
+        assert set(read_server_config().projects) == {alive}
+
+    def test_uses_exclusive_lock(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_dir = tmp_path / ".config" / "filigree"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", config_dir / "server.json")
+
+        gone = str(tmp_path / "vanished" / ".filigree")
+        write_server_config(ServerConfig(port=8377, projects={gone: {"prefix": "v"}}))
+
+        lock_ops: list[int] = []
+        monkeypatch.setattr("filigree.server.portalocker.lock", lambda _fd, op: lock_ops.append(op))
+
+        unregister_projects([gone])
+
+        assert lock_ops
+        assert lock_ops[0] == portalocker.LOCK_EX
 
 
 class TestVersionEnforcement:

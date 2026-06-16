@@ -11,8 +11,8 @@ Scope (from the 2026-04-23 continuation prompt):
   the bed-down commits (11cfb80, dc3917e). Each is one test class with
   three surface invocations plus a parity assertion.
 - The ``POST /api/v1/scan-results`` envelope, which is dashboard-only but
-  is Stage 2B's highest-risk Clarion-facing hop. Pinning the error
-  envelope shape here is the pre-release gate in lieu of a Clarion
+  is Stage 2B's highest-risk Loomweave-facing hop. Pinning the error
+  envelope shape here is the pre-release gate in lieu of a Loomweave
   staging environment.
 
 Each parity test creates three isolated per-surface projects (no shared
@@ -46,7 +46,7 @@ from filigree.mcp_tools.issues import (
     _handle_get_issue,
     _handle_update_issue,
 )
-from filigree.types.api import ErrorCode
+from filigree.types.api import ClaimConflictError, ErrorCode, InvalidTransitionError
 
 _VALID_CODES: frozenset[str] = frozenset(e.value for e in ErrorCode)
 
@@ -142,12 +142,15 @@ async def dashboard_surface(tmp_path_factory: pytest.TempPathFactory) -> AsyncIt
 
 
 @pytest.fixture
-def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> FiligreeDB:
+def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Generator[FiligreeDB, None, None]:
     """Isolated MCP surface for parity tests.
 
     Patches ``mcp_server.db`` and ``mcp_server._filigree_dir`` so the MCP
-    tool handlers see a fresh project. Returns the DB so tests can seed
-    issues before invoking handlers.
+    tool handlers see a fresh project. Yields the DB so tests can seed
+    issues before invoking handlers, and closes it on teardown so the sqlite
+    connection is not left open (an unclosed connection trips the suite's
+    ``-W error`` ResourceWarning gate non-deterministically when the GC later
+    finalises it — mirrors ``dashboard_surface`` above).
     """
     tmp = tmp_path_factory.mktemp("parity-mcp")
     filigree_dir = tmp / FILIGREE_DIR_NAME
@@ -158,7 +161,8 @@ def mcp_surface(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mo
     db.initialize()
     monkeypatch.setattr(mcp_module, "db", db)
     monkeypatch.setattr(mcp_module, "_filigree_dir", filigree_dir)
-    return db
+    yield db
+    db.close()
 
 
 @pytest.fixture
@@ -598,7 +602,7 @@ class TestBatchMixedValidityParity:
         mcp_missing = "mcp-ffffffffff"
         from filigree.mcp_tools.issues import _handle_batch_update
 
-        # MCP batch_update uses "issue_ids" matching the loom HTTP /api/loom/batch/update
+        # MCP batch_update uses "issue_ids" matching the weft HTTP /api/weft/batch/update
         # vocabulary (Phase D1 alignment). This test focuses on envelope shape only.
         mcp_body = _mcp_envelope(await _handle_batch_update({"issue_ids": [mcp_real, mcp_missing], "priority": 1}))
         # Container-key pin: MCP uses "failed" pre-2b.1. Paired with the
@@ -640,31 +644,31 @@ class TestBatchMixedValidityParity:
         # Classic frozen shape: {updated, errors}. ADR-002 §8.
         assert "updated" in dash_keys, f"classic dashboard missing 'updated': {dash_keys!r}"
         assert "errors" in dash_keys, f"classic dashboard missing 'errors': {dash_keys!r}"
-        # And MUST NOT carry the unified-envelope keys (that's the loom
+        # And MUST NOT carry the unified-envelope keys (that's the weft
         # surface's job; leakage here would mean the frozen contract
         # changed).
-        assert "succeeded" not in dash_keys, f"classic dashboard leaked loom 'succeeded': {dash_keys!r}"
-        assert "failed" not in dash_keys, f"classic dashboard leaked loom 'failed': {dash_keys!r}"
+        assert "succeeded" not in dash_keys, f"classic dashboard leaked weft 'succeeded': {dash_keys!r}"
+        assert "failed" not in dash_keys, f"classic dashboard leaked weft 'failed': {dash_keys!r}"
 
-    async def test_loom_container_keys_unified(
+    async def test_weft_container_keys_unified(
         self,
         dashboard_surface: AsyncClient,
         mcp_surface: FiligreeDB,
     ) -> None:
-        """Loom-side positive-shape pin: ``/api/loom/batch/update`` and
+        """Weft-side positive-shape pin: ``/api/weft/batch/update`` and
         MCP ``batch_update`` both expose ``{succeeded, failed}``
-        (``BatchResponse[SlimIssueLoom]`` on the dashboard side,
+        (``BatchResponse[SlimIssueWeft]`` on the dashboard side,
         ``BatchResponse[SlimIssue]`` on the MCP side after Phase D1).
         What matters is that BOTH publish ``succeeded`` and ``failed``
         and that NEITHER publishes the classic-only
         ``updated``/``errors`` keys. Paired with
         ``test_classic_container_keys_frozen`` to codify ADR-002's
-        "classic is frozen, loom is the new wire shape" stance.
+        "classic is frozen, weft is the new wire shape" stance.
         """
         dash_create = await dashboard_surface.post("/api/issues", json={"title": "Real"})
         dash_real = dash_create.json()["id"]
         dash_resp = await dashboard_surface.post(
-            "/api/loom/batch/update",
+            "/api/weft/batch/update",
             json={"issue_ids": [dash_real, "dash-ffffffffff"], "priority": 1},
         )
         assert dash_resp.status_code == 200, dash_resp.text
@@ -678,13 +682,13 @@ class TestBatchMixedValidityParity:
         mcp_keys = set(mcp_body.keys())
 
         # Both surfaces publish the unified container keys.
-        assert "succeeded" in dash_keys, f"loom dashboard missing 'succeeded': {dash_keys!r}"
-        assert "failed" in dash_keys, f"loom dashboard missing 'failed': {dash_keys!r}"
+        assert "succeeded" in dash_keys, f"weft dashboard missing 'succeeded': {dash_keys!r}"
+        assert "failed" in dash_keys, f"weft dashboard missing 'failed': {dash_keys!r}"
         assert "succeeded" in mcp_keys, f"mcp missing 'succeeded': {mcp_keys!r}"
         assert "failed" in mcp_keys, f"mcp missing 'failed': {mcp_keys!r}"
         # And neither emits the classic-only keys (which would indicate drift).
-        assert "updated" not in dash_keys, f"loom dashboard leaked classic 'updated': {dash_keys!r}"
-        assert "errors" not in dash_keys, f"loom dashboard leaked classic 'errors': {dash_keys!r}"
+        assert "updated" not in dash_keys, f"weft dashboard leaked classic 'updated': {dash_keys!r}"
+        assert "errors" not in dash_keys, f"weft dashboard leaked classic 'errors': {dash_keys!r}"
         assert "updated" not in mcp_keys, f"mcp emitted unexpected 'updated': {mcp_keys!r}"
         assert "errors" not in mcp_keys, f"mcp emitted unexpected 'errors': {mcp_keys!r}"
 
@@ -692,9 +696,9 @@ class TestBatchMixedValidityParity:
 # ---------------------------------------------------------------------------
 # Scenario 9: POST /api/v1/scan-results envelope pin (Stage 2B gate).
 #
-# This route is dashboard-only — there is no Clarion staging environment,
+# This route is dashboard-only — there is no Loomweave staging environment,
 # so the parity-test module doubles as the pre-release contract for the
-# Clarion-facing ingest endpoint. Any 2B shape change that breaks these
+# Loomweave-facing ingest endpoint. Any 2B shape change that breaks these
 # invariants must update the tests and the design doc together.
 # ---------------------------------------------------------------------------
 
@@ -749,7 +753,7 @@ class TestScanResultsEnvelope:
         (``ScanIngestResult`` in src/filigree/types/files.py). A 2B task
         that changes this shape must update the test in the same commit
         and list the breakage in CHANGELOG [Unreleased] ### Changed.
-        This is the Clarion-facing gate; there is no staging env.
+        This is the Loomweave-facing gate; there is no staging env.
         """
         resp = await dashboard_surface.post(
             "/api/v1/scan-results",
@@ -761,7 +765,7 @@ class TestScanResultsEnvelope:
 
         # Exact key set from ScanIngestResult (types/files.py:138). If you
         # see this assertion fail, either the test is wrong or the route's
-        # return shape changed — in which case Clarion consumers break.
+        # return shape changed — in which case Loomweave consumers break.
         expected_keys = {
             "files_created",
             "files_updated",
@@ -804,14 +808,14 @@ class TestScanResultsEnvelope:
 #
 # Three scenarios verifying that the new E2 CLI commands and the E4
 # start-work command emit the same envelope shapes as the MCP tools and
-# (where applicable) the loom HTTP endpoints. Each test asserts:
+# (where applicable) the weft HTTP endpoints. Each test asserts:
 #   (a) the envelope keys are correct for the surface,
 #   (b) the shapes agree across surfaces,
 #   (c) error envelopes use a valid ErrorCode.
 #
 # Only surfaces where the command exists are compared:
-#   list-observations: CLI ↔ MCP  (no loom HTTP route)
-#   list-files:        CLI ↔ loom HTTP  (no MCP list-files wrapper)
+#   list-observations: CLI ↔ MCP  (no weft HTTP route)
+#   list-files:        CLI ↔ weft HTTP  (no MCP list-files wrapper)
 #   start-work:        CLI ↔ MCP  (no HTTP composed-op route)
 # ---------------------------------------------------------------------------
 
@@ -884,24 +888,24 @@ class TestListObservationsEnvelopeParity:
 
 @pytest.mark.asyncio
 class TestListFilesEnvelopeParity:
-    """CLI ``list-files --json`` and loom HTTP ``GET /api/loom/files`` agree on
+    """CLI ``list-files --json`` and weft HTTP ``GET /api/weft/files`` agree on
     ``ListResponse[T]`` shape: ``{items, has_more}`` with no legacy siblings."""
 
-    async def test_cli_loom_http_envelope_parity(
+    async def test_cli_weft_http_envelope_parity(
         self,
         dashboard_surface: AsyncClient,
         cli_surface: Callable[..., Any],
     ) -> None:
-        # Loom HTTP: empty project → zero items.
-        resp = await dashboard_surface.get("/api/loom/files")
+        # Weft HTTP: empty project → zero items.
+        resp = await dashboard_surface.get("/api/weft/files")
         assert resp.status_code == 200, resp.text
         http_body = resp.json()
-        assert "items" in http_body, f"loom-http list-files missing 'items': {http_body!r}"
-        assert "has_more" in http_body, f"loom-http list-files missing 'has_more': {http_body!r}"
+        assert "items" in http_body, f"weft-http list-files missing 'items': {http_body!r}"
+        assert "has_more" in http_body, f"weft-http list-files missing 'has_more': {http_body!r}"
         assert isinstance(http_body["items"], list)
         assert isinstance(http_body["has_more"], bool)
         for legacy_key in ("results", "total", "limit", "offset", "errors"):
-            assert legacy_key not in http_body, f"loom-http emitted legacy key '{legacy_key}': {http_body!r}"
+            assert legacy_key not in http_body, f"weft-http emitted legacy key '{legacy_key}': {http_body!r}"
 
         # CLI surface: empty project → zero items; exit 0.
         def cli_action(runner: CliRunner, _: Path) -> Any:
@@ -917,7 +921,7 @@ class TestListFilesEnvelopeParity:
 
         # Shape parity: both have the same top-level keys.
         assert set(http_body.keys()) == set(cli_body.keys()), (
-            f"list-files key set mismatch: loom-http={set(http_body.keys())} cli={set(cli_body.keys())}"
+            f"list-files key set mismatch: weft-http={set(http_body.keys())} cli={set(cli_body.keys())}"
         )
 
 
@@ -989,3 +993,123 @@ class TestStartWorkEnvelopeParity:
         mcp_keys = set(mcp_body.keys())
         cli_keys = set(cli_body.keys())
         assert mcp_keys == cli_keys, f"start-work success key set mismatch: mcp={mcp_keys} cli={cli_keys}"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8: safe_message parity for claim / transition errors
+# (filigree-d25e75cebf).
+#
+# HTTP + MCP error *strings* must be the generic safe_message; the structured
+# recovery details (assignee for claim; current state + allowed transitions
+# for transition) must still be present so an agent can self-correct. CLI is
+# the rich operator surface and keeps str(exc).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestClaimConflictSafeMessageParity:
+    async def test_parity(
+        self,
+        dashboard_surface: AsyncClient,
+        mcp_surface: FiligreeDB,
+        cli_surface: Callable[..., Any],
+    ) -> None:
+        # Dashboard: claim as agent-a, then a coordinator write expecting agent-b.
+        dash_create = await dashboard_surface.post("/api/issues", json={"title": "Claim conflict", "type": "bug"})
+        assert dash_create.status_code == 201
+        dash_id = dash_create.json()["id"]
+        claim = await dashboard_surface.post(f"/api/issue/{dash_id}/claim", json={"assignee": "agent-a"})
+        assert claim.status_code == 200, claim.text
+        dash_resp = await dashboard_surface.patch(
+            f"/api/issue/{dash_id}",
+            json={"priority": 1, "expected_assignee": "agent-b"},
+        )
+        assert dash_resp.status_code == 409, dash_resp.text
+        dash_env = dash_resp.json()
+        _assert_flat_envelope(dash_env, surface="dashboard")
+        # Wire string is the generic safe form...
+        assert dash_env["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert "agent-a" not in dash_env["error"]
+        # ...but the assignees are retained in structured details.
+        assert dash_env["details"]["observed"] == "agent-a"
+        assert dash_env["details"]["expected"] == "agent-b"
+
+        # MCP: same shape via update_issue.
+        mcp_issue = mcp_surface.create_issue("Claim conflict", type="bug")
+        mcp_surface.claim_issue(mcp_issue.id, assignee="agent-a")
+        mcp_env = _mcp_envelope(await _handle_update_issue({"issue_id": mcp_issue.id, "priority": 1, "expected_assignee": "agent-b"}))
+        _assert_flat_envelope(mcp_env, surface="mcp")
+        assert mcp_env["error"] == ClaimConflictError.SAFE_MESSAGE
+        assert mcp_env["details"]["observed"] == "agent-a"
+        assert mcp_env["details"]["expected"] == "agent-b"
+
+        # CLI: rich operator string, unchanged.
+        def cli_action(runner: CliRunner, _: Path) -> Any:
+            create = runner.invoke(cli, ["create", "Claim conflict", "--type", "bug", "--json"])
+            assert create.exit_code == 0, create.output
+            issue_id = json.loads(create.output)["issue_id"]
+            claimed = runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-a", "--json"])
+            assert claimed.exit_code == 0, claimed.output
+            return runner.invoke(
+                cli,
+                ["update", issue_id, "--priority", "1", "--expected-assignee", "agent-b", "--json"],
+            )
+
+        cli_env = _cli_envelope(cli_surface(cli_action))
+        _assert_flat_envelope(cli_env, surface="cli")
+        assert cli_env["error"] != ClaimConflictError.SAFE_MESSAGE
+        assert "agent-a" in cli_env["error"]
+        assert cli_env["details"]["observed"] == "agent-a"
+
+        # All three surfaces agree on the code.
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.CONFLICT, (
+            f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
+        )
+
+
+@pytest.mark.asyncio
+class TestInvalidTransitionSafeMessageParity:
+    async def test_parity(
+        self,
+        dashboard_surface: AsyncClient,
+        mcp_surface: FiligreeDB,
+        cli_surface: Callable[..., Any],
+    ) -> None:
+        # Dashboard: bug starts at 'triage'; reject a bogus target.
+        dash_create = await dashboard_surface.post("/api/issues", json={"title": "Transition", "type": "bug"})
+        assert dash_create.status_code == 201
+        dash_id = dash_create.json()["id"]
+        dash_resp = await dashboard_surface.patch(f"/api/issue/{dash_id}", json={"status": "fixing"})
+        assert dash_resp.status_code == 409, dash_resp.text
+        dash_env = dash_resp.json()
+        _assert_flat_envelope(dash_env, surface="dashboard")
+        assert dash_env["error"] == InvalidTransitionError.SAFE_MESSAGE
+        assert "triage" not in dash_env["error"]
+        # State + allowed-transitions retained in structured details.
+        assert dash_env["details"]["current_status"] == "triage"
+        assert dash_env["details"]["type_name"] == "bug"
+        assert "valid_transitions" in dash_env["details"]
+
+        # MCP: TransitionError carries the recovery fields top-level.
+        mcp_issue = mcp_surface.create_issue("Transition", type="bug")
+        mcp_env = _mcp_envelope(await _handle_update_issue({"issue_id": mcp_issue.id, "status": "fixing"}))
+        _assert_flat_envelope(mcp_env, surface="mcp")
+        assert mcp_env["error"] == InvalidTransitionError.SAFE_MESSAGE
+        assert mcp_env["current_status"] == "triage"
+        assert "valid_transitions" in mcp_env
+
+        # CLI: rich operator string, unchanged.
+        def cli_action(runner: CliRunner, _: Path) -> Any:
+            create = runner.invoke(cli, ["create", "Transition", "--type", "bug", "--json"])
+            assert create.exit_code == 0, create.output
+            issue_id = json.loads(create.output)["issue_id"]
+            return runner.invoke(cli, ["update", issue_id, "--status", "fixing", "--json"])
+
+        cli_env = _cli_envelope(cli_surface(cli_action))
+        _assert_flat_envelope(cli_env, surface="cli")
+        assert cli_env["error"] != InvalidTransitionError.SAFE_MESSAGE
+        assert "triage" in cli_env["error"]
+
+        assert dash_env["code"] == mcp_env["code"] == cli_env["code"] == ErrorCode.INVALID_TRANSITION, (
+            f"dashboard={dash_env['code']} mcp={mcp_env['code']} cli={cli_env['code']}"
+        )

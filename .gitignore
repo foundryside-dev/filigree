@@ -1,12 +1,14 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.venv/
+
+# Build / distribution
 dist/
 build/
-.venv/
-*.db
-*.db-wal
-*.db-shm
+
+# Test / type / lint caches
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
@@ -14,19 +16,70 @@ build/
 coverage.json
 htmlcov/
 
-# MkDocs build output (deployed via `mkdocs gh-deploy`, never committed)
-site/
+# SQLite databases (and sidecar files)
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 
+# Secrets / local environment
+.env
+.env.*
+
+# MkDocs default build output. NOTE: `site/` is now the Astro spoke-site SOURCE
+# (filigree.foundryside.dev, consuming @weft/site-kit) and is committable — its
+# own site/.gitignore ignores dist/, vendor/site-kit/, public/_site-kit/, and
+# node_modules/. If you still run `mkdocs build`, point its site_dir elsewhere
+# or ignore that path explicitly. The prior mkdocs output is preserved untracked:
+site.mkdocs-output.bak/
+
+# Node
+node_modules/
+
+# Filigree issue tracker (keep the directory marker, ignore its contents)
 .filigree/*
 !.filigree/.gitkeep
+.filigree.old/
+
+# Weft store (3.0 federation layout) — machine-owned local state; track only
+# the shareable scanner configs, mirroring the legacy .filigree/ convention.
+# The live DB is already covered by the global *.db / *.db-wal / *.db-shm rules.
+.weft/filigree/*
+!.weft/filigree/scanners/
+.weft/filigree/scanners/*
+!.weft/filigree/scanners/*.toml
+
+# Agent / tooling config (machine- or user-local)
 .claude/
-node_modules/
-.mcp.json
 .codex/
 .agents/
 .clarion/
 clarion.yaml
-.filigree.old/
+.mcp.json
+
+# Agent instruction files (untracked per-checkout)
+AGENTS.md
+CLAUDE.md
+.loomweave/instance_id
+loomweave.yaml
+wardline.yaml
+.loomweave/loomweave.lock
+.loomweave/ephemeral.port
 
 # Filigree issue tracker
 .filigree/
+
+# Filigree issue tracker
+.weft/
+
+# Legis — local working dir / config (regenerated/local; never commit)
+.weft/legis/
+
+# Internal codebase-audit scratch notes — agent working artifacts, never shipped
+READ_ONLY_CODEBASE_AUDIT_*.md
+
+# Wardline scan output (regenerated per scan; emitted to the store, never committed)
+findings.jsonl
+
+# Product ownership workspace — internal strategy, kept local (not public)
+docs/product/

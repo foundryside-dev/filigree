@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -24,9 +26,10 @@ from filigree.core import (
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     ForeignDatabaseError,
-    find_filigree_root,
+    find_filigree_anchor,
     read_conf,
     read_schema_version,
+    resolve_store_dir,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support import (
@@ -59,10 +62,122 @@ class CheckResult:
     message: str
     fix_hint: str = ""
     code: str | None = None  # machine-readable check identifier; e.g. "schema_mismatch_forward"
+    check_id: str | None = None
+    # Opaque payload an auto-fixer needs to act on this specific result when the
+    # check name is dynamic (e.g. the exact server-registry key for a vanished
+    # project, whose ``name`` is the non-unique ``Project "<prefix>"``).
+    fix_target: str | None = None
 
     @property
     def icon(self) -> str:
         return "OK" if self.passed else "!!"
+
+
+_RESERVED_SUMMARY_CHECK_IDS = (
+    "dashboard.port",
+    "mcp.registration",
+    "api.availability",
+    "auth.config",
+    "scanner.results",
+    "entity_associations.routes",
+)
+
+_CHECK_ID_BY_NAME = {
+    ".filigree/ directory": "project.directory",
+    ".filigree.conf anchor": "project.anchor",
+    "Home-directory .filigree.conf": "project.home_anchor",
+    "config.json": "project.config",
+    "filigree.db": "database.access",
+    "Schema version": "database.schema",
+    "File registry backend state": "file_registry.backend",
+    "context.md": "context.summary",
+    ".gitignore": "git.ignore",
+    "Claude Code MCP": "mcp.registration",
+    "Codex MCP": "mcp.registration",
+    "Claude Code hooks": "hooks.session_context",
+    "Claude Code skills": "skills.claude_code",
+    "Codex skills": "skills.codex",
+    "CLAUDE.md": "instructions.claude_md",
+    "AGENTS.md": "instructions.agents_md",
+    "Ephemeral PID": "dashboard.port",
+    "Ephemeral port": "dashboard.port",
+    "Server daemon": "dashboard.port",
+    "Federation token scope": "federation.token_scope",
+    "API routes": "api.availability",
+    "Auth config": "auth.config",
+    "Scan results routes": "scanner.results",
+    "Entity association routes": "entity_associations.routes",
+    "Bundled scanner registrations": "scanner.registration",
+    "Git working tree": "git.working_tree",
+    "Installation": "installation.method",
+    "Installation method": "installation.method",
+}
+
+
+def doctor_check_id(result: CheckResult) -> str:
+    """Return the stable JSON-contract check id for a human doctor result."""
+    if result.check_id:
+        return result.check_id
+    mapped = _CHECK_ID_BY_NAME.get(result.name)
+    if mapped is not None:
+        return mapped
+    normalized = re.sub(r"[^a-z0-9]+", ".", result.name.lower()).strip(".")
+    return normalized or "unknown"
+
+
+def build_doctor_summary(
+    results: list[CheckResult],
+    *,
+    fixed_check_ids: set[str] | None = None,
+    fixed_check_names: set[str] | None = None,
+) -> dict[str, Any]:
+    """Build the shared machine-readable doctor summary contract.
+
+    The contract is intentionally compact so other agent-side tools can consume
+    it without parsing Filigree's human diagnostic text.
+
+    **Check-id collapse is deliberate.** Multiple :class:`CheckResult`s that map
+    to the same ``check_id`` (e.g. the per-client "Claude Code MCP" and "Codex
+    MCP" checks both fold into ``mcp.registration``) are merged into a single
+    summary entry. The merge is order-independent and conservative: ``failed``
+    always wins, and ``fixed`` is only recorded when nothing under that id
+    failed. This keeps the machine contract coarse on purpose — consumers get a
+    stable per-concern status, not per-sub-check granularity. Callers needing to
+    know *which* sub-check failed should read the human ``results`` list, whose
+    granularity is preserved.
+    """
+    fixed = fixed_check_ids or set()
+    fixed_names = fixed_check_names or set()
+    by_id: dict[str, dict[str, Any]] = {}
+    next_actions: list[str] = []
+    seen_actions: set[str] = set()
+
+    for result in results:
+        check_id = doctor_check_id(result)
+        entry = by_id.setdefault(check_id, {"id": check_id, "status": "ok", "fixed": False})
+        if check_id in fixed or result.name in fixed_names:
+            if entry["status"] != "failed":
+                entry["status"] = "fixed"
+                entry["fixed"] = True
+            continue
+        if not result.passed:
+            entry["status"] = "failed"
+            entry["fixed"] = False
+            if result.fix_hint:
+                action = f"{check_id}: {result.fix_hint}"
+                if action not in seen_actions:
+                    next_actions.append(action)
+                    seen_actions.add(action)
+
+    for check_id in _RESERVED_SUMMARY_CHECK_IDS:
+        by_id.setdefault(check_id, {"id": check_id, "status": "ok", "fixed": False})
+
+    checks = [by_id[check_id] for check_id in sorted(by_id)]
+    return {
+        "ok": all(check["status"] != "failed" for check in checks),
+        "checks": checks,
+        "next_actions": next_actions,
+    }
 
 
 def _is_venv_binary(path: str) -> bool:
@@ -108,6 +223,57 @@ def _validate_filigree_mcp_entry(entry: object) -> dict[str, object]:
     return entry
 
 
+_ENV_REF_RE = re.compile(r"\$\{(?P<var>[A-Za-z_][A-Za-z0-9_]*)(:-(?P<default>[^}]*))?\}")
+
+
+def _unresolved_env_refs(value: str) -> list[str]:
+    """Return env-var names referenced via ``${VAR}`` in *value* that don't resolve.
+
+    A ``${VAR:-default}`` form with a non-empty literal default counts as resolved
+    (Claude Code expands to the default). Only a bare ``${VAR}`` whose variable is
+    unset/blank in the environment is unresolved. Claude Code cannot fall back
+    across two names (no nested ``${A:-${B}}``), so each bare ref is independent.
+    """
+    unresolved: list[str] = []
+    for match in _ENV_REF_RE.finditer(value):
+        var = match.group("var")
+        if os.environ.get(var, "").strip():
+            continue
+        if match.group("default"):
+            continue
+        unresolved.append(var)
+    return unresolved
+
+
+def _doctor_mcp_token_result(entry: dict[str, object]) -> CheckResult | None:
+    """Connectivity check for a streamable-http filigree entry.
+
+    If the ``Authorization`` header references an env var that doesn't resolve, the
+    transport silently 401s and the agent loses its tracker (coordinates blind).
+    Returns a failing :class:`CheckResult`, or ``None`` when not applicable/healthy.
+    This is a federation/deconfliction availability check, **not** a security check.
+    """
+    if entry.get("type") != "streamable-http":
+        return None
+    headers = entry.get("headers")
+    if not isinstance(headers, dict):
+        return None
+    auth = headers.get("Authorization")
+    if not isinstance(auth, str):
+        return None
+    unresolved = _unresolved_env_refs(auth)
+    if not unresolved:
+        return None
+    hint = "Run `filigree doctor --fix` to embed the literal federation token in the header (no env export needed)."
+    return CheckResult(
+        "Claude Code MCP",
+        False,
+        f".mcp.json Authorization header references unset env var(s): {', '.join(unresolved)} — /mcp will 401",
+        fix_hint=hint,
+        code="mcp_token_unresolved",
+    )
+
+
 def _doctor_file_registry_backend_state(
     conn: sqlite3.Connection,
     *,
@@ -118,21 +284,21 @@ def _doctor_file_registry_backend_state(
     if schema_version is None or schema_version < 17:
         return None
     settings = registry_settings or {}
-    if settings.get("registry_backend", "local") != "clarion":
+    if settings.get("registry_backend", "local") != "loomweave":
         return None
-    clarion = settings.get("clarion")
-    allow_local_fallback = bool(clarion.get("allow_local_fallback", False)) if isinstance(clarion, dict) else False
+    loomweave = settings.get("loomweave")
+    allow_local_fallback = bool(loomweave.get("allow_local_fallback", False)) if isinstance(loomweave, dict) else False
     if allow_local_fallback:
         return CheckResult(
             "File registry backend state",
             True,
-            "Clarion is configured with local fallback enabled; local file_records may be intentional during fallback.",
+            "Loomweave is configured with local fallback enabled; local file_records may be intentional during fallback.",
         )
     try:
         local_count = int(
             conn.execute(
                 "SELECT COUNT(*) FROM file_records WHERE registry_backend != ?",
-                ("clarion",),
+                ("loomweave",),
             ).fetchone()[0]
         )
     except sqlite3.Error as exc:
@@ -140,17 +306,17 @@ def _doctor_file_registry_backend_state(
             "File registry backend state",
             False,
             f"Could not inspect file registry backend state: {exc}",
-            fix_hint="Database may be corrupted. Restore from backup or run: filigree doctor --fix",
+            fix_hint="Database may be corrupted. Restore from backup.",
         )
     if local_count:
         return CheckResult(
             "File registry backend state",
             False,
-            f"Project is configured for Clarion but {local_count} file_records row(s) still use local registry identity.",
-            fix_hint="Run: filigree migrate-registry --to clarion --dry-run, then --execute after reviewing unresolved rows.",
+            f"Project is configured for Loomweave but {local_count} file_records row(s) still use local registry identity.",
+            fix_hint="Run: filigree migrate-registry --to loomweave --dry-run, then --execute after reviewing unresolved rows.",
             code="registry_backend_hybrid_state",
         )
-    return CheckResult("File registry backend state", True, "All file_records rows use Clarion registry identity.")
+    return CheckResult("File registry backend state", True, "All file_records rows use Loomweave registry identity.")
 
 
 def _is_absolute_command_path(path: str) -> bool:
@@ -228,6 +394,137 @@ def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
             fix_hint="Run: filigree scanner available",
         )
     ]
+
+
+def _route_supports(route_table: dict[str, set[str]], path: str, method: str) -> bool:
+    return method.upper() in route_table.get(path, set())
+
+
+def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[CheckResult]:
+    """Validate dashboard/API route registration without issuing mutating calls.
+
+    *project_root* lets the Auth config check resolve the tier-2 (file) federation
+    token, so an on-by-default daemon authed via ``<store_dir>/federation_token``
+    is not misreported as "auth disabled" (filigree-b09a4854d7). ``None`` skips
+    tier 2 (env-only), preserving the legacy no-arg behaviour for direct callers.
+    """
+    try:
+        from filigree.dashboard import FEDERATION_TOKEN_ENV_VARS, create_app
+
+        app = create_app(server_mode=False)
+        route_table: dict[str, set[str]] = {}
+        for route in getattr(app, "routes", []):
+            path = getattr(route, "path", "")
+            if not isinstance(path, str) or not path:
+                continue
+            methods = getattr(route, "methods", None)
+            if methods is None:
+                continue
+            route_table.setdefault(path, set()).update(str(method).upper() for method in methods)
+    except Exception as exc:
+        message = f"Could not inspect dashboard route table: {exc}"
+        return [
+            CheckResult("API routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Scan results routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Entity association routes", False, message, fix_hint="Run: filigree doctor --verbose"),
+            CheckResult("Auth config", False, message, fix_hint="Run: filigree doctor --verbose"),
+        ]
+
+    results: list[CheckResult] = []
+
+    if _route_supports(route_table, "/api/health", "GET"):
+        results.append(CheckResult("API routes", True, "GET /api/health registered"))
+    else:
+        results.append(
+            CheckResult(
+                "API routes",
+                False,
+                "GET /api/health is not registered",
+                fix_hint="Reinstall or upgrade filigree; dashboard route registration is incomplete.",
+            )
+        )
+
+    scanner_routes = (
+        ("/api/weft/scan-results", "POST"),
+        ("/api/scan-results", "POST"),
+        ("/api/files/_schema", "GET"),
+    )
+    missing_scanner = [f"{method} {path}" for path, method in scanner_routes if not _route_supports(route_table, path, method)]
+    if missing_scanner:
+        results.append(
+            CheckResult(
+                "Scan results routes",
+                False,
+                f"Missing route(s): {', '.join(missing_scanner)}",
+                fix_hint="Reinstall or upgrade filigree; scanner/result API route registration is incomplete.",
+            )
+        )
+    else:
+        results.append(CheckResult("Scan results routes", True, "scan-results and file schema routes registered"))
+
+    entity_routes = (
+        ("/api/issue/{issue_id}/entity-associations", "GET"),
+        ("/api/issue/{issue_id}/entity-associations", "POST"),
+        ("/api/issue/{issue_id}/entity-associations", "DELETE"),
+        ("/api/entity-associations", "GET"),
+    )
+    missing_entity = [f"{method} {path}" for path, method in entity_routes if not _route_supports(route_table, path, method)]
+    if missing_entity:
+        results.append(
+            CheckResult(
+                "Entity association routes",
+                False,
+                f"Missing route(s): {', '.join(missing_entity)}",
+                fix_hint="Reinstall or upgrade filigree; entity-association API route registration is incomplete.",
+            )
+        )
+    else:
+        results.append(CheckResult("Entity association routes", True, "entity-association routes registered"))
+
+    auth_envs = {name: os.environ.get(name) for name in FEDERATION_TOKEN_ENV_VARS}
+    empty_envs = sorted(name for name, value in auth_envs.items() if value is not None and not value.strip())
+    configured_envs = sorted(name for name, value in auth_envs.items() if value is not None and value.strip())
+
+    # Tier-2 resolution: since the auth flip (f7eb673) the inbound token is
+    # auto-minted to ``<store_dir>/federation_token`` and federation auth is
+    # on-by-default on that daemon even with no env var set. An env-only check
+    # misreports such a daemon as "auth disabled" and sabotages the very
+    # lockout-debugging the flip exists to support (filigree-b09a4854d7). Resolve
+    # the project store token read-only (never mints here) when a project_root is
+    # available; ``None`` keeps the legacy env-only behaviour.
+    file_token_source: str | None = None
+    if project_root is not None:
+        from filigree.core import resolve_store_dir
+        from filigree.federation_token import FEDERATION_TOKEN_FILE_SOURCE, read_token_file
+
+        if read_token_file(resolve_store_dir(project_root)):
+            file_token_source = FEDERATION_TOKEN_FILE_SOURCE
+
+    if configured_envs:
+        # A valid env token wins (tier 1) — auth is on regardless of any blank alias.
+        results.append(CheckResult("Auth config", True, f"Federation bearer auth configured via {configured_envs[0]}"))
+    elif file_token_source:
+        # Tier 2: file token authes the daemon. A blank env var is ignored (it does
+        # not enable auth and does not disable it) — surface it as a heads-up, but
+        # the daemon is authed, so this is a PASS, not a "disabled".
+        message = f"Federation bearer auth enabled via {file_token_source}"
+        if empty_envs:
+            message += f" ({', '.join(empty_envs)} set but blank — ignored; file token wins)"
+        results.append(CheckResult("Auth config", True, message))
+    elif empty_envs:
+        # Blank env var and no file token: a likely unset-by-accident worth flagging.
+        results.append(
+            CheckResult(
+                "Auth config",
+                False,
+                f"Empty auth token environment variable(s): {', '.join(empty_envs)}",
+                fix_hint=f"Unset {', '.join(empty_envs)} or set a non-empty token before starting the dashboard.",
+            )
+        )
+    else:
+        results.append(CheckResult("Auth config", True, "Federation auth disabled; loopback dashboard remains open by default"))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +616,91 @@ def _doctor_server_checks(filigree_dir: Path) -> list[CheckResult]:
                     False,
                     f"Directory gone: {path_str}",
                     fix_hint=f"Run: filigree server unregister {p.parent}",
+                    code="server_registry_orphan",
+                    # The exact stored config key, so --fix can unregister it
+                    # without re-resolving a path that no longer exists.
+                    fix_target=path_str,
                 )
             )
 
+    return results
+
+
+def _doctor_federation_token_checks(project_root: Path, mode: str) -> list[CheckResult]:
+    """Federation-token scoping checks for a multi-store server daemon.
+
+    Per-project scoped auth (filigree-23574069a1) validates a project-scoped
+    request against THAT project's own federation token (or an operator
+    ``WEFT_FEDERATION_TOKEN`` env pin) — not the daemon's home-store token. Two
+    deconfliction/availability gaps follow; both are functional, not security:
+
+    1. A project ``.mcp.json`` that still embeds a literal token the daemon won't
+       accept for this project (e.g. the old home-store token) — its scoped
+       ``/mcp/?project=`` route 401s. Repairable via ``doctor --fix``.
+    2. Tokens diverge across the home store and the project stores with no env
+       pin set, so each client must present its own project token (advisory).
+
+    Returns ``[]`` outside server mode (single store → no divergence possible).
+    """
+    from filigree.federation_token import read_env_token, read_token_file
+    from filigree.server import SERVER_CONFIG_DIR, read_server_config
+
+    if mode != "server":
+        return []
+
+    results: list[CheckResult] = []
+    env_pin, _ = read_env_token()
+    home_token = read_token_file(SERVER_CONFIG_DIR)
+    project_token = read_token_file(resolve_store_dir(project_root))
+
+    # (1) This project's .mcp.json carries a literal bearer the daemon will reject
+    # for its scoped route (neither this project's token nor the env pin).
+    auth: object = None
+    try:
+        data = json.loads((project_root / ".mcp.json").read_text())
+        auth = data["mcpServers"]["filigree"]["headers"]["Authorization"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        auth = None
+    if isinstance(auth, str) and "${" not in auth:
+        match = re.match(r"(?i)bearer\s+(\S+)", auth.strip())
+        embedded = match.group(1) if match else ""
+        valid = {t for t in (env_pin, project_token) if t}
+        if embedded and valid and embedded not in valid:
+            results.append(
+                CheckResult(
+                    "Claude Code MCP",
+                    False,
+                    ".mcp.json embeds a federation token the daemon rejects for this project's scoped /mcp route "
+                    "(neither this project's token nor a WEFT_FEDERATION_TOKEN pin) — the client will 401",
+                    fix_hint="Run `filigree doctor --fix` to embed this project's federation token in .mcp.json.",
+                    code="federation_token_mcp_home_token",
+                )
+            )
+
+    # (2) Multi-store divergence advisory (no operator env pin to unify).
+    if not env_pin:
+        config = read_server_config()
+        if len(config.projects) >= 2:
+            tokens = {read_token_file(Path(path_str)) for path_str in config.projects}
+            tokens.discard("")
+            if home_token:
+                tokens.add(home_token)
+            if len(tokens) > 1:
+                results.append(
+                    CheckResult(
+                        "Federation token scope",
+                        False,
+                        f"{len(tokens)} distinct federation tokens across the daemon home store and "
+                        f"{len(config.projects)} project store(s); with no WEFT_FEDERATION_TOKEN pin, "
+                        "each project-scoped client must present its own project token.",
+                        fix_hint=(
+                            "Optional: set WEFT_FEDERATION_TOKEN on the daemon as an operator pin accepted across all "
+                            "projects; otherwise each project's client must use that project's token "
+                            "(`filigree doctor --fix` repoints .mcp.json)."
+                        ),
+                        code="federation_token_divergence",
+                    )
+                )
     return results
 
 
@@ -387,69 +766,82 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     results: list[CheckResult] = []
     cwd = project_root or Path.cwd()
 
-    # 1. Check .filigree/ exists
-    filigree_dir = cwd / FILIGREE_DIR_NAME
-    if not filigree_dir.is_dir():
-        # Try walking up
-        try:
-            filigree_dir = find_filigree_root(cwd)
-        except ForeignDatabaseError as exc:
-            # Walk-up crossed a .git/ boundary — surface the full message so
-            # users (and agents) see exactly why we refused to open the
-            # ancestor anchor.  ``ForeignDatabaseError`` is also a
-            # ``FileNotFoundError`` so the generic handler would otherwise
-            # swallow it into a bland "No .filigree/ found" line.
-            results.append(
-                CheckResult(
-                    ".filigree/ directory",
-                    False,
-                    str(exc),
-                    fix_hint=f"Run `filigree init` in {exc.git_boundary} (this project).",
-                )
+    # 1. Resolve the project store directory (federation .weft/filigree/ or
+    # legacy .filigree/) via the single anchor resolver so project_root is
+    # correct regardless of layout (.weft/filigree/.parent is .weft, NOT root).
+    try:
+        anchor = find_filigree_anchor(cwd)
+    except ForeignDatabaseError as exc:
+        # Walk-up crossed a .git/ boundary — surface the full message so
+        # users (and agents) see exactly why we refused to open the
+        # ancestor anchor.  ``ForeignDatabaseError`` is also a
+        # ``FileNotFoundError`` so the generic handler would otherwise
+        # swallow it into a bland "No .filigree/ found" line.
+        results.append(
+            CheckResult(
+                ".filigree/ directory",
+                False,
+                str(exc),
+                fix_hint=f"Run `filigree init` in {exc.git_boundary} (this project).",
             )
-            return results  # Can't proceed without a local anchor
-        except FileNotFoundError:
-            results.append(
-                CheckResult(
-                    ".filigree/ directory",
-                    False,
-                    f"No {FILIGREE_DIR_NAME}/ found in {cwd} or parents",
-                    fix_hint="Run: filigree init",
-                )
+        )
+        return results  # Can't proceed without a local anchor
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                ".filigree/ directory",
+                False,
+                f"No {FILIGREE_DIR_NAME}/ found in {cwd} or parents",
+                fix_hint="Run: filigree init",
             )
-            return results  # Can't proceed without .filigree/
+        )
+        return results  # Can't proceed without a store dir
+    filigree_dir = anchor.store_dir
     results.append(CheckResult(".filigree/ directory", True, f"Found at {filigree_dir}"))
 
-    # 1b. Check .filigree.conf anchor (v2.0). Warn if missing — this means the
-    # project predates the conf anchor; running any filigree command will
-    # auto-backfill on first open, but flagging it lets users see it's pending.
-    project_root = filigree_dir.parent
-    conf_path = project_root / CONF_FILENAME
-    # conf_db_path is the authoritative DB location when the conf declares it;
-    # falls back to .filigree/DB_FILENAME for legacy installs or unreadable confs.
+    # 1b. Legacy .filigree.conf anchor (retired by the 3.0 config-anchor
+    # cutover, filigree-4bf16e64b6). The anchor now lives in the store's
+    # config.json, so a missing conf is the intended end state — nothing
+    # backfills it. A conf still present means this install predates the
+    # cutover; it keeps working as a discovery anchor until `filigree init`
+    # imports its fields into config.json and retires it to *.imported.
+    project_root = anchor.project_root
+    conf_path = anchor.conf_path or (project_root / CONF_FILENAME)
+    store_config_path = filigree_dir / CONFIG_FILENAME
+    # conf_db_path is the conf-declared DB location for unmigrated legacy
+    # installs (v2.x let users relocate the DB); None once the conf is retired,
+    # in which case the DB check falls back to the canonical store path.
     conf_db_path: Path | None = None
     conf_data: dict[str, Any] | None = None
     if conf_path.exists():
         try:
             conf_data = read_conf(conf_path)
             conf_db_path = (conf_path.parent / conf_data["db"]).resolve()
-            results.append(CheckResult(".filigree.conf anchor", True, f"Found at {conf_path}"))
+            results.append(
+                CheckResult(
+                    ".filigree.conf anchor",
+                    False,
+                    f"Legacy anchor still present at {conf_path} — since 3.0 the anchor lives in {store_config_path}.",
+                    fix_hint="Run `filigree init` to import it into the store config and retire it.",
+                )
+            )
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             results.append(
                 CheckResult(
                     ".filigree.conf anchor",
                     False,
                     f"Found at {conf_path} but unreadable: {exc}",
-                    fix_hint=f"Fix or regenerate {conf_path}",
+                    fix_hint=f"Fix or regenerate {conf_path}, or run `filigree init` after fixing it to import and retire it",
                 )
             )
     else:
+        retired_conf = project_root / (CONF_FILENAME + ".imported")
+        retired_note = f" (retired conf preserved as {retired_conf.name})" if retired_conf.exists() else ""
         results.append(
             CheckResult(
                 ".filigree.conf anchor",
-                False,
-                f"Missing at {conf_path} — this v2.0 anchor will be auto-written on next use.",
-                fix_hint="No action required; run any filigree command to backfill.",
+                True,
+                f"Not present — anchor lives in {store_config_path}{retired_note}",
             )
         )
 
@@ -486,7 +878,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     f"Invalid JSON: {e}",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
         except ValueError:
@@ -495,7 +887,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     "Invalid JSON shape: expected an object",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
         except OSError as exc:
@@ -504,7 +896,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "config.json",
                     False,
                     f"Found at {config_path} but unreadable: {exc}",
-                    fix_hint="Fix or regenerate .filigree/config.json",
+                    fix_hint=f"Fix or regenerate {config_path}",
                 )
             )
     else:
@@ -517,9 +909,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
             )
         )
 
-    # 3. Check filigree.db exists and is accessible. Prefer the DB path declared
-    # in .filigree.conf (v2.0 — users may relocate the DB); fall back to the
-    # legacy .filigree/filigree.db when no conf is present or it's unreadable.
+    # 3. Check filigree.db exists and is accessible. An unmigrated legacy conf
+    # may still declare a relocated DB path (v2.x back-compat); otherwise the
+    # DB lives at the canonical store path.
     db_path = conf_db_path if conf_db_path is not None else filigree_dir / DB_FILENAME
     if db_path.exists():
         conn: sqlite3.Connection | None = None
@@ -581,7 +973,10 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                             "Schema version",
                             False,
                             f"v{schema_version} (current: v{CURRENT_SCHEMA_VERSION})",
-                            fix_hint="Database schema is outdated. Run: filigree doctor --fix",
+                            fix_hint=(
+                                "Database schema is outdated. After backing up, run a normal DB command "
+                                "with the upgraded binary (for example: filigree stats)."
+                            ),
                         )
                     )
                 else:
@@ -624,7 +1019,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     "context.md",
                     False,
                     f"Found at {summary_path} but not a file",
-                    fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                    fix_hint="Run any filigree mutation command to refresh generated context.",
                 )
             )
         else:
@@ -636,7 +1031,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                         "context.md",
                         False,
                         f"Found at {summary_path} but unreadable: {exc}",
-                        fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                        fix_hint="Run any filigree mutation command to refresh generated context.",
                     )
                 )
             else:
@@ -647,7 +1042,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                             "context.md",
                             False,
                             f"Stale ({int(age_minutes)} minutes old)",
-                            fix_hint="Run any filigree mutation command to refresh, or: filigree doctor --fix",
+                            fix_hint="Run any filigree mutation command to refresh generated context.",
                         )
                     )
                 else:
@@ -658,7 +1053,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                 "context.md",
                 False,
                 "Missing",
-                fix_hint="Run: filigree doctor --fix",
+                fix_hint="Run any filigree mutation command to refresh generated context.",
             )
         )
 
@@ -666,7 +1061,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     # Uses the same gitignore-aware parser as ``ensure_gitignore`` so the two
     # paths can't drift on edge cases (comments, ``!``-negations, non-root
     # substrings) — see filigree-bc5d2af1ef for the previous divergence.
-    gitignore = (filigree_dir.parent) / ".gitignore"
+    gitignore = project_root / ".gitignore"
     if gitignore.exists():
         try:
             content = gitignore.read_text()
@@ -702,7 +1097,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 6. Check MCP configuration — Claude Code
-    mcp_json = (filigree_dir.parent) / ".mcp.json"
+    mcp_json = project_root / ".mcp.json"
     if mcp_json.exists():
         try:
             mcp = json.loads(mcp_json.read_text())
@@ -751,7 +1146,12 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     else:
                         results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json (venv path)"))
                 else:
-                    results.append(CheckResult("Claude Code MCP", True, "Configured in .mcp.json"))
+                    # streamable-http (or other non-absolute-command) entry: the
+                    # binary checks above don't apply. Verify the Authorization
+                    # header's token reference actually resolves — an unset var
+                    # silently 401s the /mcp transport (the lacuna failure).
+                    token_result = _doctor_mcp_token_result(filigree_mcp_entry)
+                    results.append(token_result or CheckResult("Claude Code MCP", True, "Configured in .mcp.json"))
         except (json.JSONDecodeError, ValueError, OSError):
             results.append(
                 CheckResult(
@@ -775,7 +1175,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     results.append(_check_codex_mcp(filigree_dir))
 
     # 8. Check Claude Code hooks
-    settings_json = (filigree_dir.parent) / ".claude" / "settings.json"
+    settings_json = project_root / ".claude" / "settings.json"
     if settings_json.exists():
         try:
             s = json.loads(settings_json.read_text())
@@ -833,7 +1233,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 9. Check Claude Code skills
-    skill_md = (filigree_dir.parent) / ".claude" / "skills" / SKILL_NAME / SKILL_MARKER
+    skill_md = project_root / ".claude" / "skills" / SKILL_NAME / SKILL_MARKER
     if skill_md.exists():
         results.append(CheckResult("Claude Code skills", True, f"{SKILL_NAME} skill installed"))
     else:
@@ -847,7 +1247,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 9b. Check Codex skills
-    codex_skill_md = (filigree_dir.parent) / ".agents" / "skills" / SKILL_NAME / SKILL_MARKER
+    codex_skill_md = project_root / ".agents" / "skills" / SKILL_NAME / SKILL_MARKER
     if codex_skill_md.exists():
         results.append(CheckResult("Codex skills", True, f"{SKILL_NAME} skill installed"))
     else:
@@ -861,7 +1261,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 10. Check CLAUDE.md has instructions
-    claude_md = (filigree_dir.parent) / "CLAUDE.md"
+    claude_md = project_root / "CLAUDE.md"
     if claude_md.exists():
         try:
             content = claude_md.read_text()
@@ -897,7 +1297,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
         )
 
     # 11. Check AGENTS.md has instructions
-    agents_md = (filigree_dir.parent) / "AGENTS.md"
+    agents_md = project_root / "AGENTS.md"
     if agents_md.exists():
         try:
             content = agents_md.read_text()
@@ -937,13 +1337,19 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     elif mode == "server":
         results.extend(_doctor_server_checks(filigree_dir))
 
-    # 13. Check scanner registration drift
+    # 12b. Federation token scope divergence (server-mode, multi-store).
+    results.extend(_doctor_federation_token_checks(project_root, mode))
+
+    # 13. Check dashboard/API route registration without mutating records.
+    results.extend(_doctor_dashboard_contract_checks(project_root))
+
+    # 14. Check scanner registration drift
     results.extend(_doctor_bundled_scanner_checks(filigree_dir))
 
-    # 14. Check git working tree status
+    # 15. Check git working tree status
     try:
         result = subprocess.run(
-            ["git", "-C", str(filigree_dir.parent), "status", "--porcelain"],
+            ["git", "-C", str(project_root), "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -974,7 +1380,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
             )
         )
 
-    # 15. Check installation method
+    # 16. Check installation method
     results.extend(_doctor_install_method())
 
     return results

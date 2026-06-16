@@ -10,7 +10,8 @@ from typing import Any
 
 import click
 
-from filigree.cli_common import ActorCommand, get_db, refresh_summary
+from filigree import governance
+from filigree.cli_common import ActorCommand, explicit_actor, get_db, refresh_summary
 from filigree.core import WrongProjectError
 from filigree.issue_payloads import issue_to_public, public_issue_with
 from filigree.types.api import (
@@ -41,6 +42,40 @@ def _resolve_and_sanitize_actor(actor: str | None, assignee: str, *, as_json: bo
             sys.exit(1)
         raise click.BadParameter(err, param_hint="'--actor'")
     return cleaned
+
+
+_CLAIM_IDENTITY_MISSING_CLI = "provide --assignee or --actor: claim verbs need a caller identity"
+
+
+def _resolve_cli_claim_assignee(
+    ctx: click.Context,
+    assignee: str | None,
+    *,
+    as_json: bool,
+    post_verb_actor: str | None = None,
+) -> str:
+    """Default an omitted ``--assignee`` from an *explicitly provided* actor (FIL-3).
+
+    Precedence: explicit ``--assignee`` > the command's own post-verb
+    ``--actor`` (start-work / start-next-work, sanitized here) > the
+    group-level explicit ``filigree --actor X`` (already sanitized by the
+    group callback). The implicit group default ("cli") never satisfies the
+    identity — accidental anonymous claims keep failing, but the error now
+    names both options. Exits 1 with a VALIDATION envelope when no identity
+    was provided.
+    """
+    if assignee is not None:
+        return assignee
+    if post_verb_actor is not None:
+        return _resolve_and_sanitize_actor(post_verb_actor, "", as_json=as_json)
+    actor = explicit_actor(ctx)
+    if actor is not None:
+        return actor
+    if as_json:
+        click.echo(json_mod.dumps({"error": _CLAIM_IDENTITY_MISSING_CLI, "code": ErrorCode.VALIDATION}))
+    else:
+        click.echo(f"Error: {_CLAIM_IDENTITY_MISSING_CLI}", err=True)
+    sys.exit(1)
 
 
 logger = logging.getLogger(__name__)
@@ -297,6 +332,8 @@ def _list_issues_impl(
     status: str | None,
     issue_type: str | None,
     priority: int | None,
+    priority_min: int | None,
+    priority_max: int | None,
     parent: str | None,
     assignee: str | None,
     label: tuple[str, ...],
@@ -309,6 +346,15 @@ def _list_issues_impl(
     as_json: bool,
 ) -> None:
     _range_check_int(priority, "priority", min_val=0, max_val=4, as_json=as_json)
+    _range_check_int(priority_min, "priority_min", min_val=0, max_val=4, as_json=as_json)
+    _range_check_int(priority_max, "priority_max", min_val=0, max_val=4, as_json=as_json)
+    if priority is not None and (priority_min is not None or priority_max is not None):
+        msg = "--priority is exact-match and cannot be combined with --priority-min/--priority-max"
+        if as_json:
+            click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.VALIDATION}))
+        else:
+            click.echo(f"Error: {msg}", err=True)
+        sys.exit(1)
     _range_check_int(limit, "limit", min_val=0, max_val=_MAX_SQLITE_OVERFETCH_LIMIT, as_json=as_json)
     _range_check_int(offset, "offset", min_val=0, max_val=_MAX_SQLITE_OFFSET, as_json=as_json)
     with get_db() as db:
@@ -318,6 +364,8 @@ def _list_issues_impl(
                 status=status,
                 type=issue_type,
                 priority=priority,
+                priority_min=priority_min,
+                priority_max=priority_max,
                 parent_id=parent,
                 assignee=assignee,
                 label=label_filter,
@@ -358,6 +406,8 @@ def _list_issues_impl(
 @click.option("--status", default=None, help="Filter by status")
 @click.option("--type", "issue_type", default=None, help="Filter by type")
 @click.option("--priority", "-p", default=None, type=int, help="Filter by priority")
+@click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
+@click.option("--priority-max", default=None, type=int, help="Maximum priority")
 @click.option("--parent", "--parent-issue-id", "parent", default=None, help="Filter by parent issue ID")
 @click.option("--assignee", default=None, help="Filter by assignee")
 @click.option("--label", "-l", multiple=True, help="Filter by label (repeatable, AND logic). Supports virtuals.")
@@ -372,6 +422,8 @@ def list_cmd(
     status: str | None,
     issue_type: str | None,
     priority: int | None,
+    priority_min: int | None,
+    priority_max: int | None,
     parent: str | None,
     assignee: str | None,
     label: tuple[str, ...],
@@ -388,6 +440,8 @@ def list_cmd(
         status,
         issue_type,
         priority,
+        priority_min,
+        priority_max,
         parent,
         assignee,
         label,
@@ -405,6 +459,8 @@ def list_cmd(
 @click.option("--status", default=None, help="Filter by status")
 @click.option("--type", "issue_type", default=None, help="Filter by type")
 @click.option("--priority", "-p", default=None, type=int, help="Filter by priority")
+@click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
+@click.option("--priority-max", default=None, type=int, help="Maximum priority")
 @click.option("--parent", "--parent-issue-id", "parent", default=None, help="Filter by parent issue ID")
 @click.option("--assignee", default=None, help="Filter by assignee")
 @click.option("--label", "-l", multiple=True, help="Filter by label (repeatable, AND logic). Supports virtuals.")
@@ -419,6 +475,8 @@ def list_issues_cmd(
     status: str | None,
     issue_type: str | None,
     priority: int | None,
+    priority_min: int | None,
+    priority_max: int | None,
     parent: str | None,
     assignee: str | None,
     label: tuple[str, ...],
@@ -435,6 +493,8 @@ def list_issues_cmd(
         status,
         issue_type,
         priority,
+        priority_min,
+        priority_max,
         parent,
         assignee,
         label,
@@ -482,6 +542,16 @@ def _update_impl(
             fields["design"] = design
 
     with get_db() as db:
+        # C1: `update --status <done>` reaches the same close as the `close`
+        # command (close routes through update_issue) — gate it the same way.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            code = ErrorCode.INTERNAL if gate.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            if as_json:
+                click.echo(json_mod.dumps({"error": gate.reason, "code": code}))
+            else:
+                click.echo(gate.reason, err=True)
+            sys.exit(1)
         try:
             issue = db.update_issue(
                 issue_id,
@@ -662,6 +732,15 @@ def close(
         ready_before = {i.id for i in db.get_ready()} if as_json else set()
         for issue_id in issue_ids:
             try:
+                # B5: a governed issue cannot be closed without verified Legis
+                # binding evidence (DECISION 3 — report + skip, don't abort).
+                gate = governance.evaluate_closure_gate(db, issue_id)
+                if not gate.allowed:
+                    code = ErrorCode.INTERNAL if gate.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+                    errors.append({"id": issue_id, "error": gate.reason, "code": code})
+                    if not as_json:
+                        click.echo(gate.reason, err=True)
+                    continue
                 annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
                 issue = db.close_issue(
                     issue_id,
@@ -700,6 +779,13 @@ def close(
                 if isinstance(e, ClaimConflictError):
                     envelope = claim_conflict_envelope(e)
                     error_item["details"] = envelope["details"]
+                elif isinstance(e, InvalidTransitionError):
+                    # Surface the structured next-step hint like update/release do,
+                    # instead of dropping it in the generic ValueError arm.
+                    enriched = _transition_error_payload(db, issue_id, e)
+                    for key in ("valid_transitions", "hint", "details"):
+                        if key in enriched:
+                            error_item[key] = enriched[key]
                 errors.append(error_item)
                 if not as_json:
                     click.echo(msg, err=True)
@@ -712,8 +798,9 @@ def close(
             if len(issue_ids) == 1 and errors and not succeeded:
                 err = errors[0]
                 error_payload: dict[str, Any] = {"error": err["error"], "code": err["code"]}
-                if "details" in err:
-                    error_payload["details"] = err["details"]
+                for key in ("details", "valid_transitions", "hint"):
+                    if key in err:
+                        error_payload[key] = err[key]
                 click.echo(json_mod.dumps(error_payload))
                 refresh_summary(db)
                 sys.exit(1)
@@ -783,11 +870,14 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
 
 @click.command(cls=ActorCommand)
 @click.argument("issue_id")
-@click.option("--assignee", required=True, help="Who is claiming (agent name)")
+@click.option("--assignee", default=None, help="Who is claiming (agent name); defaults to an explicitly provided --actor")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> None:
+def claim(ctx: click.Context, issue_id: str, assignee: str | None, as_json: bool) -> None:
     """Atomically claim an open issue or released in-progress handoff."""
+    # FIL-3: --assignee defaults from an explicit --actor (group-level or
+    # post-verb); with neither, fail naming both options.
+    assignee = _resolve_cli_claim_assignee(ctx, assignee, as_json=as_json)
     # Mirror the MCP handler's assignee pre-validation (mcp_tools/issues.py
     # lines 603-604) so a blank value surfaces as VALIDATION, not CONFLICT.
     if not assignee.strip():
@@ -834,7 +924,7 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
 
 
 @click.command("claim-next", cls=ActorCommand)
-@click.option("--assignee", required=True, help="Who is claiming")
+@click.option("--assignee", default=None, help="Who is claiming; defaults to an explicitly provided --actor")
 @click.option("--type", "type_filter", default=None, help="Filter by issue type")
 @click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
 @click.option("--priority-max", default=None, type=int, help="Maximum priority")
@@ -842,13 +932,16 @@ def claim(ctx: click.Context, issue_id: str, assignee: str, as_json: bool) -> No
 @click.pass_context
 def claim_next(
     ctx: click.Context,
-    assignee: str,
+    assignee: str | None,
     type_filter: str | None,
     priority_min: int | None,
     priority_max: int | None,
     as_json: bool,
 ) -> None:
     """Claim the highest-priority ready issue matching filters."""
+    # FIL-3: --assignee defaults from an explicit --actor (group-level or
+    # post-verb); with neither, fail naming both options.
+    assignee = _resolve_cli_claim_assignee(ctx, assignee, as_json=as_json)
     # Mirror the MCP handler (mcp_tools/issues.py lines 646-647): blank assignee
     # is bad user input, not a race. The only ValueError db.claim_next propagates
     # is "Assignee cannot be empty" (inner claim_issue errors are swallowed).
@@ -1345,20 +1438,25 @@ def delete_issue_cmd(ctx: click.Context, issue_id: str, force: bool, as_json: bo
 
 @click.command("start-work")
 @click.argument("issue_id")
-@click.option("--assignee", required=True, help="Who is starting work (agent name)")
+@click.option("--assignee", default=None, help="Who is starting work (agent name); defaults to an explicitly provided --actor")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
-@click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee; also fills an omitted --assignee)")
 @click.option("--advance", is_flag=True, help="Walk soft transitions to the nearest wip state (e.g. triage->confirmed->fixing)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def start_work(
+    ctx: click.Context,
     issue_id: str,
-    assignee: str,
+    assignee: str | None,
     target_status: str | None,
     actor: str | None,
     advance: bool,
     as_json: bool,
 ) -> None:
     """Atomically claim an issue and transition it to its wip status."""
+    # FIL-3: --assignee defaults from the command's own --actor, else from a
+    # group-level explicit --actor; with neither, fail naming both options.
+    assignee = _resolve_cli_claim_assignee(ctx, assignee, as_json=as_json, post_verb_actor=actor)
     # Mirror MCP: blank assignee is bad user input, not a race.
     if not assignee.strip():
         if as_json:
@@ -1438,16 +1536,18 @@ def start_work(
 
 
 @click.command("start-next-work")
-@click.option("--assignee", required=True, help="Who is starting work (agent name)")
+@click.option("--assignee", default=None, help="Who is starting work (agent name); defaults to an explicitly provided --actor")
 @click.option("--type", "type_filter", default=None, help="Filter by issue type")
 @click.option("--priority-min", default=None, type=int, help="Minimum priority (0=critical)")
 @click.option("--priority-max", default=None, type=int, help="Maximum priority")
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
-@click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee)")
+@click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee; also fills an omitted --assignee)")
 @click.option("--advance", is_flag=True, help="Walk soft transitions to wip so multi-hop types (e.g. triage bugs) become startable")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.pass_context
 def start_next_work(
-    assignee: str,
+    ctx: click.Context,
+    assignee: str | None,
     type_filter: str | None,
     priority_min: int | None,
     priority_max: int | None,
@@ -1457,6 +1557,9 @@ def start_next_work(
     as_json: bool,
 ) -> None:
     """Claim and start the highest-priority ready issue matching filters."""
+    # FIL-3: --assignee defaults from the command's own --actor, else from a
+    # group-level explicit --actor; with neither, fail naming both options.
+    assignee = _resolve_cli_claim_assignee(ctx, assignee, as_json=as_json, post_verb_actor=actor)
     # Mirror MCP: blank assignee is bad user input, not a race.
     if not assignee.strip():
         if as_json:

@@ -15,6 +15,12 @@ from pathlib import Path
 TOTAL_FLOOR = 85.0
 
 FILE_FLOORS = {
+    # Legis-gate, transport-identity, and governance-client logic (PR #52, T4):
+    # set a few points below measured so a single-module collapse is caught by
+    # this checker rather than hiding under the aggregate TOTAL_FLOOR.
+    "src/filigree/actor_identity.py": 95.0,
+    "src/filigree/governance.py": 90.0,
+    "src/filigree/legis_client.py": 85.0,
     "src/filigree/dashboard_auth.py": 90.0,
     "src/filigree/dashboard_routes/files.py": 75.0,
     "src/filigree/db_annotations.py": 60.0,

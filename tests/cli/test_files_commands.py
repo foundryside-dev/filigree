@@ -48,6 +48,7 @@ from click.testing import CliRunner
 
 from filigree.cli import cli
 from filigree.registry import RegistryUnavailableError, ResolvedFile
+from filigree.types.core import make_issue_id
 from tests._seeds import SeededProject
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,11 @@ _SCAN_FINDING_KEYS = frozenset(
         "line_end",
         "fingerprint",
         "issue_id",
+        # N6 (weft-c815d5e77d): linked issue's status + close_reason resolution.
+        "issue_status",
+        "issue_resolution",
+        # Wardline suppression verdict lifted from metadata.wardline.suppression_state.
+        "suppression_state",
         "seen_count",
         "created_by",
         "updated_by",
@@ -319,17 +325,17 @@ class TestDeleteFileRecordCommand:
         assert missing.exit_code != 0
         assert json.loads(missing.output)["code"] == "NOT_FOUND"
 
-    def test_delete_file_record_allowed_under_clarion_mode(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+    def test_delete_file_record_allowed_under_loomweave_mode(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, project = cli_in_project
         from filigree.cli_common import get_db
 
         with get_db() as db:
-            file_record = db.register_file("src/delete_clarion_mode.py")
+            file_record = db.register_file("src/delete_loomweave_mode.py")
 
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         result = runner.invoke(cli, ["delete-file-record", file_record.id, "--json"])
@@ -590,19 +596,19 @@ class TestRegisterFileCommand:
         assert data["path"] == "src/newfile.py"
         assert data["language"] == "python"
 
-    def test_register_file_displaced_under_clarion_mode(
+    def test_register_file_displaced_under_loomweave_mode(
         self, cli_in_project: tuple[CliRunner, Path], caplog: pytest.LogCaptureFixture
     ) -> None:
         runner, project = cli_in_project
-        conf_path = project / ".filigree.conf"
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
+        conf["registry_backend"] = "loomweave"
         # ``allow_local_fallback`` is set so the ADR-014 capability probe at
         # ``FiligreeDB.__init__`` downgrades the http://localhost:9111
         # unreachability to a WARN — the test's intent is to verify the
-        # ``register-file`` CLI displaces on a Clarion-mode project, which
-        # is a state check independent of whether Clarion is reachable.
-        conf["clarion"] = {"base_url": "http://localhost:9111", "allow_local_fallback": True}
+        # ``register-file`` CLI displaces on a Loomweave-mode project, which
+        # is a state check independent of whether Loomweave is reachable.
+        conf["loomweave"] = {"base_url": "http://localhost:9111", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         with caplog.at_level(logging.WARNING, logger="filigree.cli_commands.files"):
@@ -616,7 +622,7 @@ class TestRegisterFileCommand:
         records = [record for record in caplog.records if record.message == "file_registry_displaced_registration_rejected"]
         assert records
         assert records[0].file_path == "src/newfile.py"
-        assert records[0].registry_backend == "clarion"
+        assert records[0].registry_backend == "loomweave"
 
     def test_register_file_infers_language_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -753,7 +759,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/missing_manifest.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -766,24 +772,24 @@ class TestMigrateRegistryCommand:
                         "content_hash": "sha256:migrated",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "missing-parent" / "registry-migration.json"
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
 
         assert executed.exit_code == 1
@@ -808,7 +814,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/apply_failure.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -821,18 +827,18 @@ class TestMigrateRegistryCommand:
                         "content_hash": "sha256:migrated",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
@@ -846,7 +852,7 @@ class TestMigrateRegistryCommand:
 
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
 
         assert executed.exit_code == 1
@@ -884,7 +890,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/malformed_scan_run.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -897,21 +903,21 @@ class TestMigrateRegistryCommand:
                         "content_hash": "sha256:migrated",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
-        dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
+        dry_run = runner.invoke(cli, ["migrate-registry", "--to", "loomweave", "--dry-run", "--json"])
         assert dry_run.exit_code == 0, dry_run.output
         dry_payload = json.loads(dry_run.output)
         assert dry_payload["unresolved"][0]["scan_run_id"] == "scan-run-malformed"
@@ -920,7 +926,7 @@ class TestMigrateRegistryCommand:
         manifest = project / "registry-migration.json"
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
 
         assert executed.exit_code == 1
@@ -973,7 +979,7 @@ class TestMigrateRegistryCommand:
             json.dumps(
                 {
                     "version": 1,
-                    "to": "clarion",
+                    "to": "loomweave",
                     "project": project_identity,
                     "planned": {"old_file_id": "not-a-list"},
                 }
@@ -1011,28 +1017,28 @@ class TestMigrateRegistryCommand:
             file_record = db.register_file("src/unresolved.py")
             old_file_id = file_record.id
 
-        class FailingClarionRegistry:
+        class FailingLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
 
             def resolve_file(self, path: str, *, language: str = "", actor: str = "") -> ResolvedFile:
-                raise RuntimeError(f"Clarion cannot resolve {path}")
+                raise RuntimeError(f"Loomweave cannot resolve {path}")
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FailingClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FailingLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
 
         assert executed.exit_code == 1
@@ -1042,20 +1048,20 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             assert db.get_file(old_file_id).id == old_file_id
 
-    def test_migrate_registry_rejects_local_fallback_resolution_under_clarion_target(
+    def test_migrate_registry_rejects_local_fallback_resolution_under_loomweave_target(
         self,
         cli_in_project: tuple[CliRunner, Path],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Migration to ``clarion`` must NOT accept a local-fallback resolution.
+        """Migration to ``loomweave`` must NOT accept a local-fallback resolution.
 
-        Reproduces P1: when Clarion is unreachable and
+        Reproduces P1: when Loomweave is unreachable and
         ``allow_local_fallback=true``, the wrapping
-        ``_ClarionLocalFallbackRegistry`` silently returns a local
+        ``_LoomweaveLocalFallbackRegistry`` silently returns a local
         ``ResolvedFile`` with empty ``content_hash`` and a local-prefix
         ``file_id``. Without the guard in ``_registry_migration_plan``, the
-        plan would record those rows as ``new_registry_backend=clarion`` and
-        rewrite issue/file associations to local IDs marked as Clarion-backed.
+        plan would record those rows as ``new_registry_backend=loomweave`` and
+        rewrite issue/file associations to local IDs marked as Loomweave-backed.
         The guard surfaces such rows as ``unresolved`` so operators can
         diagnose (and the migration aborts cleanly).
         """
@@ -1067,7 +1073,7 @@ class TestMigrateRegistryCommand:
             file_record = db.register_file("src/fallback_resolves.py")
             old_file_id = file_record.id
 
-        class UnreachableClarionRegistry:
+        class UnreachableLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1083,17 +1089,17 @@ class TestMigrateRegistryCommand:
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", UnreachableClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", UnreachableLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         # Dry-run surfaces the diagnostic in the unresolved payload.
         dry_run = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--dry-run", "--json"],
+            ["migrate-registry", "--to", "loomweave", "--dry-run", "--json"],
         )
         assert dry_run.exit_code == 0, dry_run.output
         dry_data = json.loads(dry_run.output)
@@ -1108,7 +1114,7 @@ class TestMigrateRegistryCommand:
         manifest = project / "registry-migration.json"
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
         assert executed.exit_code == 1, executed.output
         data = json.loads(executed.output)
@@ -1131,7 +1137,7 @@ class TestMigrateRegistryCommand:
             source = db.register_file("src/conflict_a.py")
             existing_target = db.register_file("src/conflict_b.py")
 
-        class ConflictingClarionRegistry:
+        class ConflictingLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1145,24 +1151,24 @@ class TestMigrateRegistryCommand:
                         "content_hash": f"sha256:{path}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", ConflictingClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", ConflictingLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         manifest = project / "registry-migration.json"
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
 
         assert executed.exit_code == 1
@@ -1189,7 +1195,7 @@ class TestMigrateRegistryCommand:
                 "INSERT INTO file_records "
                 "(id, path, language, content_hash, registry_backend, first_seen, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (new_file_id, "src/rollback_fk.py", "python", "sha256:rollback", "clarion", now, now),
+                (new_file_id, "src/rollback_fk.py", "python", "sha256:rollback", "loomweave", now, now),
             )
             db.conn.execute(
                 "INSERT INTO scan_findings (id, file_id, scan_source, first_seen, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -1214,7 +1220,7 @@ class TestMigrateRegistryCommand:
             json.dumps(
                 {
                     "version": 1,
-                    "to": "clarion",
+                    "to": "loomweave",
                     "project": project_identity,
                     "planned": [
                         {
@@ -1227,7 +1233,7 @@ class TestMigrateRegistryCommand:
                             "old_content_hash": "",
                             "new_content_hash": "sha256:rollback",
                             "old_registry_backend": "local",
-                            "new_registry_backend": "clarion",
+                            "new_registry_backend": "loomweave",
                         }
                     ],
                 }
@@ -1241,7 +1247,7 @@ class TestMigrateRegistryCommand:
         assert data["code"] == "IO"
         assert "foreign-key violations" in data["error"]
         with get_db() as db:
-            assert db.get_file(new_file_id).registry_backend == "clarion"
+            assert db.get_file(new_file_id).registry_backend == "loomweave"
             with pytest.raises(KeyError):
                 db.get_file(old_file_id)
             file_id = db.conn.execute("SELECT file_id FROM scan_findings WHERE id = ?", ("finding-ok",)).fetchone()[0]
@@ -1258,11 +1264,11 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             file_record = db.register_file("src/precondition.py")
 
-        executed = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--execute", "--json"])
+        executed = runner.invoke(cli, ["migrate-registry", "--to", "loomweave", "--execute", "--json"])
 
         assert executed.exit_code == 1
         data = json.loads(executed.output)
-        assert "Project registry_backend is 'local'; set it to 'clarion' before migration" in data["error"]
+        assert "Project registry_backend is 'local'; set it to 'loomweave' before migration" in data["error"]
         with get_db() as db:
             assert db.get_file(file_record.id).registry_backend == "local"
 
@@ -1273,7 +1279,7 @@ class TestMigrateRegistryCommand:
             json.dumps(
                 {
                     "version": 1,
-                    "to": "clarion",
+                    "to": "loomweave",
                     "project": {
                         "prefix": "other",
                         "project_root": str(project.resolve()),
@@ -1303,7 +1309,7 @@ class TestMigrateRegistryCommand:
         with get_db() as db:
             db.register_file("src/default_manifest.py")
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1316,24 +1322,24 @@ class TestMigrateRegistryCommand:
                         "content_hash": "sha256:migrated",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
         subdir = project / "nested"
         subdir.mkdir()
         monkeypatch.chdir(subdir)
 
-        executed = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--execute", "--json"])
+        executed = runner.invoke(cli, ["migrate-registry", "--to", "loomweave", "--execute", "--json"])
 
         assert executed.exit_code == 0, executed.output
         payload = json.loads(executed.output)
@@ -1378,7 +1384,7 @@ class TestMigrateRegistryCommand:
 
         new_file_id = "core:file:migrated@src/migrate.py"
 
-        class FakeClarionRegistry:
+        class FakeLoomweaveRegistry:
             def __init__(self, base_url: str, *, timeout_seconds: float = 5) -> None:
                 self.base_url = base_url
                 self.timeout_seconds = timeout_seconds
@@ -1391,18 +1397,18 @@ class TestMigrateRegistryCommand:
                         "content_hash": "sha256:migrated",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
             def is_displaced(self) -> bool:
                 return True
 
-        monkeypatch.setattr("filigree.core.ClarionRegistry", FakeClarionRegistry)
-        conf_path = project / ".filigree.conf"
+        monkeypatch.setattr("filigree.core.LoomweaveRegistry", FakeLoomweaveRegistry)
+        conf_path = project / ".weft" / "filigree" / "config.json"
         conf = json.loads(conf_path.read_text())
-        conf["registry_backend"] = "clarion"
-        conf["clarion"] = {"base_url": "http://clarion.test", "allow_local_fallback": True}
+        conf["registry_backend"] = "loomweave"
+        conf["loomweave"] = {"base_url": "http://loomweave.test", "allow_local_fallback": True}
         conf_path.write_text(json.dumps(conf))
 
         return runner, project, old_file_id, new_file_id, project / "registry-migration.json"
@@ -1425,7 +1431,7 @@ class TestMigrateRegistryCommand:
         runner, _project, old_file_id, new_file_id, _manifest = self._seed_migrate_registry_project(cli_in_project, monkeypatch)
         from filigree.cli_common import get_db
 
-        dry_run = runner.invoke(cli, ["migrate-registry", "--to", "clarion", "--dry-run", "--json"])
+        dry_run = runner.invoke(cli, ["migrate-registry", "--to", "loomweave", "--dry-run", "--json"])
         assert dry_run.exit_code == 0, dry_run.output
         dry_payload = json.loads(dry_run.output)
         assert dry_payload["mode"] == "dry-run"
@@ -1444,7 +1450,7 @@ class TestMigrateRegistryCommand:
 
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
         assert executed.exit_code == 0, executed.output
         execute_payload = json.loads(executed.output)
@@ -1457,7 +1463,7 @@ class TestMigrateRegistryCommand:
         assert manifest_payload["project"] == execute_payload["project"]
 
         with get_db() as db:
-            assert db.get_file(new_file_id).registry_backend == "clarion"
+            assert db.get_file(new_file_id).registry_backend == "loomweave"
             with pytest.raises(KeyError):
                 db.get_file(old_file_id)
             self._assert_migration_references(db, new_file_id)
@@ -1472,7 +1478,7 @@ class TestMigrateRegistryCommand:
 
         executed = runner.invoke(
             cli,
-            ["migrate-registry", "--to", "clarion", "--execute", "--manifest", str(manifest), "--json"],
+            ["migrate-registry", "--to", "loomweave", "--execute", "--manifest", str(manifest), "--json"],
         )
         assert executed.exit_code == 0, executed.output
 
@@ -1568,6 +1574,127 @@ class TestListFindingsCommand:
         result = runner.invoke(cli, ["list-findings"])
         assert result.exit_code == 0
         assert "No findings" in result.output
+
+
+class TestListFindingsKindSuppression:
+    """FIL-2/X-5: the ``list-findings`` CLI exposes ``--kind``,
+    ``--suppression``, and ``--rule-id`` so an agent can filter to the real
+    un-suppressed defects on the command line."""
+
+    def _seed(self, project: Path) -> None:
+        from filigree.cli_common import get_db
+
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            with get_db() as db:
+                db.register_file("src/app.py", language="python")
+                db.process_scan_results(
+                    scan_source="wardline",
+                    findings=[
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "WLN-METRIC",
+                            "severity": "info",
+                            "message": "telemetry",
+                            "line_start": 1,
+                            "metadata": {"wardline": {"kind": "metric"}},
+                        },
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "PY-WL-101",
+                            "severity": "high",
+                            "message": "real defect",
+                            "line_start": 10,
+                            "metadata": {"wardline": {"kind": "defect", "qualname": "app.handler"}},
+                        },
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "PY-WL-102",
+                            "severity": "high",
+                            "message": "baselined",
+                            "line_start": 20,
+                            "metadata": {"wardline": {"kind": "defect", "suppression_state": "baselined"}},
+                        },
+                    ],
+                )
+                # A non-wardline (agent) finding: no wardline metadata, so
+                # active-by-absence — must stay visible under the active default
+                # (mirrors the core seed; pins NOT-suppressed semantics).
+                db.process_scan_results(
+                    scan_source="agent",
+                    findings=[
+                        {
+                            "path": "src/app.py",
+                            "rule_id": "agent-misuse",
+                            "severity": "medium",
+                            "message": "agent finding",
+                            "line_start": 30,
+                        }
+                    ],
+                )
+        finally:
+            os.chdir(original)
+
+    def _invoke(self, project: Path, *args: str) -> dict:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            result = runner.invoke(cli, ["list-findings", *args, "--json"])
+            assert result.exit_code == 0, result.output
+            return json.loads(result.output)
+        finally:
+            os.chdir(original)
+
+    def test_filter_real_unsuppressed_defects(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--kind", "defect", "--suppression", "active")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_filter_by_suppression_baselined(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--suppression", "baselined")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-102"]
+
+    def test_default_excludes_suppressed(self, initialized_project: Path) -> None:
+        """filigree-2bdb878bd2: ``list-findings`` with no ``--suppression``
+        defaults to active-only — the baselined defect is hidden from the default
+        work view."""
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project)
+        rules = {i["rule_id"] for i in data["items"]}
+        # active wardline rows + the non-wardline agent finding; NOT the baselined one.
+        assert rules == {"PY-WL-101", "WLN-METRIC", "agent-misuse"}
+        assert "PY-WL-102" not in rules
+
+    def test_suppression_all_includes_suppressed(self, initialized_project: Path) -> None:
+        """``--suppression all`` opts back in to the full set including suppressed."""
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--suppression", "all")
+        assert sorted(i["rule_id"] for i in data["items"]) == ["PY-WL-101", "PY-WL-102", "WLN-METRIC", "agent-misuse"]
+
+    def test_filter_by_rule_id(self, initialized_project: Path) -> None:
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--rule-id", "PY-WL-101")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_filter_by_qualname(self, initialized_project: Path) -> None:
+        # Guards the --qualname option + its pass-through (PY-WL-101 carries
+        # metadata.wardline.qualname='app.handler').
+        self._seed(initialized_project)
+        data = self._invoke(initialized_project, "--qualname", "app.handler")
+        assert [i["rule_id"] for i in data["items"]] == ["PY-WL-101"]
+
+    def test_invalid_kind_rejected_by_choice(self, initialized_project: Path) -> None:
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["list-findings", "--kind", "bogus", "--json"])
+            assert result.exit_code != 0
+        finally:
+            os.chdir(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1704,11 +1831,97 @@ class TestPromoteFindingCommand:
             result = runner.invoke(cli, ["promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
             data = json.loads(result.output)
-            assert set(data.keys()) == _PUBLIC_ISSUE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _PUBLIC_ISSUE_KEYS}"
+            expected_keys = _PUBLIC_ISSUE_KEYS | {"entity_attachment"}
+            assert set(data.keys()) == expected_keys, f"Shape mismatch: {set(data.keys()) ^ expected_keys}"
             assert "id" not in data
             assert data["issue_id"]
             assert "Test finding" in data["title"] or data["title"]
             assert "from-finding" in data["labels"]
+            assert data["fields"]["severity"] == "major"
+            # C-10: a finding with no entity identity says so — never a silent skip.
+            assert data["entity_attachment"]["attached"] is False
+            assert "no entity identity on finding" in data["entity_attachment"]["reason"]
+        finally:
+            os.chdir(original)
+
+    def _seed_entity_finding(self, project: Path, entity_id: str, *, content_hash: str = "hash-cli-1") -> str:
+        """Seed one loomweave finding carrying its own entity identity, with a
+        file-record content hash as the loomweave-registry mode would leave it."""
+        from filigree.cli_common import get_db
+
+        original = os.getcwd()
+        os.chdir(str(project))
+        try:
+            with get_db() as db:
+                result = db.process_scan_results(
+                    scan_source="loomweave",
+                    findings=[
+                        {
+                            "path": "src/ent_cli.py",
+                            "rule_id": "LMWV-R1",
+                            "severity": "high",
+                            "message": "entity-bearing finding",
+                            "metadata": {"loomweave": {"entity_id": entity_id}},
+                        }
+                    ],
+                )
+                if content_hash:
+                    db.conn.execute("UPDATE file_records SET content_hash = ? WHERE path = 'src/ent_cli.py'", (content_hash,))
+                    db.conn.commit()
+                return cast(str, result["new_finding_ids"][0])
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_attaches_entity_by_default(self, initialized_project: Path) -> None:
+        """B9 (weft-4a46553503): the plain promote attaches the finding's own
+        entity identity (metadata.loomweave.entity_id) when resolvable."""
+        from filigree.cli_common import get_db
+
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-default")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id, "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["entity_attachment"]["attached"] is True
+            assert data["entity_attachment"]["entity_id"] == "loomweave:eid:cli-default"
+            assert data["association"]["entity_id"] == "loomweave:eid:cli-default"
+            with get_db() as db:
+                rows = db.list_entity_associations(make_issue_id(data["issue_id"]))
+            assert len(rows) == 1
+            assert rows[0]["content_hash_at_attach"] == "hash-cli-1"
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_attach_outcome_in_plain_text(self, initialized_project: Path) -> None:
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-text")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id])
+            assert result.exit_code == 0, result.output
+            assert "Attached entity loomweave:eid:cli-text" in result.output
+        finally:
+            os.chdir(original)
+
+    def test_promote_finding_no_attach_entity_opt_out(self, initialized_project: Path) -> None:
+        from filigree.cli_common import get_db
+
+        finding_id = self._seed_entity_finding(initialized_project, "loomweave:eid:cli-optout")
+        runner = CliRunner()
+        original = os.getcwd()
+        os.chdir(str(initialized_project))
+        try:
+            result = runner.invoke(cli, ["promote-finding", finding_id, "--no-attach-entity", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["entity_attachment"]["attached"] is False
+            assert "attach_entity" in data["entity_attachment"]["reason"]
+            with get_db() as db:
+                assert db.list_entity_associations(make_issue_id(data["issue_id"])) == []
         finally:
             os.chdir(original)
 
@@ -2016,7 +2229,10 @@ class TestPromoteFindingHonoursGlobalActor:
             finding_id = initialized_project_with_finding.finding_id
             result = runner.invoke(cli, ["--actor", "bot-1", "promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
-            data = json.loads(result.output)
+            # Read clean stdout: a genuine --actor differing from the OS user
+            # emits a non-blocking ACTOR_MISMATCH warning on stderr, which
+            # CliRunner merges into result.output in Click 8.3.1 (ADR-012).
+            data = json.loads(result.stdout)
             events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
             assert events_result.exit_code == 0, events_result.output
             events = json.loads(events_result.output)["items"]
@@ -2033,7 +2249,9 @@ class TestPromoteFindingHonoursGlobalActor:
             finding_id = initialized_project_with_finding.finding_id
             result = runner.invoke(cli, ["--actor", "triager-1", "update-finding", finding_id, "--status", "acknowledged", "--json"])
             assert result.exit_code == 0, result.output
-            data = json.loads(result.output)
+            # Read clean stdout: the genuine --actor emits an ACTOR_MISMATCH
+            # warning on stderr, merged into result.output by CliRunner (ADR-012).
+            data = json.loads(result.stdout)
             assert data["finding_id"] == finding_id
             assert data["updated_by"] == "triager-1"
         finally:
@@ -2059,7 +2277,9 @@ class TestPromoteFindingHonoursGlobalActor:
                 ],
             )
             assert result.exit_code == 0, result.output
-            data = json.loads(result.output)
+            # Read clean stdout: the genuine --actor emits an ACTOR_MISMATCH
+            # warning on stderr, merged into result.output by CliRunner (ADR-012).
+            data = json.loads(result.stdout)
             events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
             assert events_result.exit_code == 0, events_result.output
             events = json.loads(events_result.output)["items"]

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from fastapi.responses import JSONResponse
 
+from filigree import governance
 from filigree.core import FiligreeDB, WrongProjectError
 from filigree.dashboard_routes.common import (
     _MAX_PAGINATION_OFFSET,
@@ -35,6 +36,7 @@ from filigree.dashboard_routes.common import (
 from filigree.db_planning import NotAMilestoneError
 from filigree.models import Issue
 from filigree.types.api import (
+    BatchFailure,
     ClaimConflictError,
     DepDetail,
     EnrichedIssueDetail,
@@ -45,6 +47,7 @@ from filigree.types.api import (
     classify_value_error,
     errorcode_to_http_status,
     invalid_transition_details,
+    safe_error_message,
 )
 from filigree.types.api import (
     classify_issue_write_error as _classify_issue_write_error,
@@ -71,6 +74,90 @@ def _issue_write_error_details(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(exc, ClaimConflictError):
         return claim_conflict_details(exc)
     return _invalid_transition_details(exc)
+
+
+def _closure_gate_block(decision: governance.GateDecision) -> JSONResponse:
+    """Render a non-PROCEED closure-gate verdict as an error response (B5).
+
+    Blocked / unavailable (governed issue, Legis says no or is offline) fail
+    closed with CONFLICT (409); a tampered-ledger integrity failure surfaces
+    as 502 so an operator notices the backend, not the issue.
+    """
+    if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE:
+        return _error_response(decision.reason, ErrorCode.INTERNAL, 502)
+    return _error_response(decision.reason, ErrorCode.CONFLICT, 409)
+
+
+def _gate_batch_failures(db: FiligreeDB, issue_ids: list[str]) -> tuple[list[str], list[BatchFailure]]:
+    """Partition *issue_ids* into (allowed_to_close, gate_failures) per DECISION 3.
+
+    A governed issue the gate rejects is pulled out and reported as a per-item
+    ``BatchFailure`` (CONFLICT for blocked/unavailable, INTERNAL for integrity
+    failure) instead of aborting the whole batch.
+
+    Gate-read contract (fail closed): only ``WrongProjectError`` is delegated
+    — it is left in ``allowed`` so the envelope-level §0.4 foreign-prefix abort
+    fires from ``batch_close`` (the foreign-prefix tests assert that top-level
+    VALIDATION abort). Any *other* ``ValueError``/``KeyError`` is a gate-read
+    failure on a possibly-governed issue, so it is reported as a per-item
+    ``BatchFailure`` (VALIDATION) and the issue is NOT routed into the close —
+    mirroring the single-close path, which fails closed. This must never let a
+    governed issue close on a gate-read error.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_closure_gate(db, issue_id)
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_close raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            # Fail closed: a gate-read error must never route a possibly-governed
+            # issue into the close. Report per-item, keep the batch alive.
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            failures.append(BatchFailure(id=issue_id, error=decision.reason, code=code))
+    return allowed, failures
+
+
+def _gate_status_change_failures(
+    db: FiligreeDB, issue_ids: list[str], requested_status: str | None
+) -> tuple[list[str], list[BatchFailure]]:
+    """Partition for ``batch_update`` (C1): gate only issues whose status write
+    would close a governed issue.
+
+    Mirrors :func:`_gate_batch_failures` but uses the status-change gate, which
+    PROCEEDs (no network) for non-closing writes — so a ``batch_update`` that
+    only changes priority/assignee, or moves issues to a non-done status, gates
+    nothing.
+
+    Same gate-read contract (fail closed): only ``WrongProjectError`` delegates
+    to ``batch_update`` (for the §0.4 envelope abort); any other
+    ``ValueError``/``KeyError`` is reported as a per-item ``BatchFailure``
+    (VALIDATION) and the issue is NOT routed into the close.
+    """
+    allowed: list[str] = []
+    failures: list[BatchFailure] = []
+    for issue_id in issue_ids:
+        try:
+            decision = governance.evaluate_status_change_gate(db, issue_id, requested_status)
+        except WrongProjectError:
+            allowed.append(issue_id)  # §0.4: let batch_update raise the envelope abort
+            continue
+        except (ValueError, KeyError) as exc:
+            failures.append(BatchFailure(id=issue_id, error=str(exc), code=ErrorCode.VALIDATION))
+            continue
+        if decision.allowed:
+            allowed.append(issue_id)
+        else:
+            code = ErrorCode.INTERNAL if decision.outcome is governance.GateOutcome.INTEGRITY_FAILURE else ErrorCode.CONFLICT
+            failures.append(BatchFailure(id=issue_id, error=decision.reason, code=code))
+    return allowed, failures
 
 
 def _fetch_all_issues(db: FiligreeDB) -> list[Issue]:
@@ -144,8 +231,8 @@ def _validate_body_string_field(
 def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     """Validate the batch-update request body.
 
-    Shared by classic ``POST /api/batch/update`` and loom
-    ``POST /api/loom/batch/update``; both generations accept the same
+    Shared by classic ``POST /api/batch/update`` and weft
+    ``POST /api/weft/batch/update``; both generations accept the same
     request shape (``issue_ids``, ``status``, ``priority``, ``assignee``,
     ``fields``, ``actor``). Returns the kwargs dict for
     ``db.batch_update`` on success, or a 400 ``JSONResponse`` on error.
@@ -194,8 +281,8 @@ def _parse_batch_update_body(body: dict[str, Any]) -> dict[str, Any] | JSONRespo
 def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = None) -> dict[str, Any] | JSONResponse:
     """Validate the batch-close request body.
 
-    Shared by classic ``POST /api/batch/close`` and loom
-    ``POST /api/loom/batch/close``. Returns kwargs for ``db.batch_close``
+    Shared by classic ``POST /api/batch/close`` and weft
+    ``POST /api/weft/batch/close``. Returns kwargs for ``db.batch_close``
     on success, or a 400 ``JSONResponse`` on error.
 
     Accepts optional ``force`` (bool) to use the template reverse/escape
@@ -251,7 +338,7 @@ def _parse_batch_close_body(body: dict[str, Any], *, request: Request | None = N
 
 
 def _parse_release_claim_body(body: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-    """Validate optional release-claim body fields shared by classic and loom."""
+    """Validate optional release-claim body fields shared by classic and weft."""
     if_held = body.get("if_held", False)
     if not isinstance(if_held, bool):
         return _error_response("if_held must be a boolean", ErrorCode.VALIDATION, 400)
@@ -476,6 +563,11 @@ def create_classic_router() -> APIRouter:
         status = _validate_body_string_field(body, "status", default=None)
         if isinstance(status, JSONResponse):
             return status
+        # C1: update can drive a governed issue into a done-category status
+        # (close routes through update) — gate it like close.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            return _closure_gate_block(gate)
         try:
             issue = db.update_issue(
                 issue_id,
@@ -499,7 +591,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/close")
@@ -525,6 +617,9 @@ def create_classic_router() -> APIRouter:
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
+            gate = governance.evaluate_closure_gate(db, issue_id)
+            if not gate.allowed:
+                return _closure_gate_block(gate)
             annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,
@@ -542,7 +637,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         result: dict[str, Any] = dict(issue.to_dict())
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
@@ -565,7 +660,7 @@ def create_classic_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/comments", status_code=201)
@@ -599,16 +694,23 @@ def create_classic_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         # Fetch just the single comment to get the real created_at timestamp
-        row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
+        # and the stored verified_author (ADR-012) so the response is truthful.
+        row = db.conn.execute("SELECT created_at, verified_author FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger = logging.getLogger(__name__)
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)
             return _error_response("Internal error: comment created but not retrievable", ErrorCode.INTERNAL, 500)
         created_at = ISOTimestamp(row["created_at"])
         return JSONResponse(
-            CommentRecord(id=comment_id, author=author, text=text, created_at=created_at),
+            CommentRecord(
+                id=comment_id,
+                author=author,
+                verified_author=row["verified_author"],
+                text=text,
+                created_at=created_at,
+            ),
             status_code=201,
         )
 
@@ -668,8 +770,10 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # C1: gate per-item any status write that would close a governed issue.
+        allowed_ids, gate_failures = _gate_status_change_failures(db, issue_ids, parsed.get("status"))
         try:
-            updated, errors = db.batch_update(issue_ids, **parsed)
+            updated, errors = db.batch_update(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: a foreign-prefix id in a batch aborts envelope-
             # level rather than producing N misleading per-item errors.
@@ -679,7 +783,7 @@ def create_classic_router() -> APIRouter:
         return JSONResponse(
             {
                 "updated": [i.to_dict() for i in updated],
-                "errors": errors,
+                "errors": [*gate_failures, *errors],
             }
         )
 
@@ -693,14 +797,17 @@ def create_classic_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # B5 DECISION 3: gate each issue first; governed issues the gate rejects
+        # are reported per-item instead of aborting the batch.
+        allowed_ids, gate_errors = _gate_batch_failures(db, issue_ids)
         try:
-            closed, errors = db.batch_close(issue_ids, **parsed)
+            closed, errors = db.batch_close(allowed_ids, **parsed)
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         return JSONResponse(
             {
                 "closed": [i.to_dict() for i in closed],
-                "errors": errors,
+                "errors": [*gate_errors, *errors],
             }
         )
 
@@ -793,10 +900,10 @@ def create_classic_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/issue/{issue_id}/release")
@@ -819,16 +926,16 @@ def create_classic_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except InvalidTransitionError as e:
             return _error_response(
-                str(e),
+                e.safe_message,
                 ErrorCode.INVALID_TRANSITION,
                 errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         return JSONResponse(issue.to_dict())
 
     @router.post("/claim-next")
@@ -848,10 +955,10 @@ def create_classic_router() -> APIRouter:
         try:
             issue = db.claim_next(assignee, actor=actor)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
         return JSONResponse(issue.to_dict())
@@ -897,22 +1004,22 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
-    """Build the loom-generation APIRouter for issue, workflow, and
+def create_weft_router() -> APIRouter:
+    """Build the weft-generation APIRouter for issue, workflow, and
     dependency endpoints.
 
     Phase C2 mounts the batch endpoints (``/batch/update``,
     ``/batch/close``); Phase C3 adds the single-issue surface (GET,
     create, update, close, reopen, claim, release, claim-next,
     comments, dependencies). See ADR-002 for the generation framing
-    and ``tests/fixtures/contracts/loom/`` for the response-shape
+    and ``tests/fixtures/contracts/weft/`` for the response-shape
     pins.
 
-    Path conventions: loom uses ``/issues/{issue_id}`` (plural,
+    Path conventions: weft uses ``/issues/{issue_id}`` (plural,
     symmetric with the ``/issues`` collection); classic uses
     ``/issue/{issue_id}`` (singular). The two never collide so
     living-surface aliases at ``/api/issues/{issue_id}`` could land
-    later — they are deliberately not added in C3 to keep the loom
+    later — they are deliberately not added in C3 to keep the weft
     surface as the single recommended entry point until federation
     consumers stabilise.
     """
@@ -921,28 +1028,28 @@ def create_loom_router() -> APIRouter:
 
     from filigree.dashboard import _get_db
     from filigree.dashboard_routes.common import _get_bool_param, _parse_pagination, _parse_response_detail
-    from filigree.generations.loom.adapters import (
-        blocked_issue_to_loom,
-        comment_record_to_loom,
-        file_assoc_to_loom,
-        issue_event_to_loom,
-        issue_to_loom,
+    from filigree.generations.weft.adapters import (
+        blocked_issue_to_weft,
+        comment_record_to_weft,
+        file_assoc_to_weft,
+        issue_event_to_weft,
+        issue_to_weft,
         list_response,
-        pack_to_loom,
-        slim_issue_to_loom,
-        type_template_to_loom,
+        pack_to_weft,
+        slim_issue_to_weft,
+        type_template_to_weft,
     )
-    from filigree.generations.loom.types import CommentRecordLoom
+    from filigree.generations.weft.types import CommentRecordWeft
 
     router = APIRouter()
 
     @router.get("/issues")
-    async def api_loom_list_issues(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List issues — ``ListResponse[IssueLoom]`` with real pagination.
+    async def api_weft_list_issues(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """List issues — ``ListResponse[IssueWeft]`` with real pagination.
 
-        Loom adds ``?limit=&offset=`` (default limit=100). Classic
+        Weft adds ``?limit=&offset=`` (default limit=100). Classic
         ``GET /api/issues`` returns every row in one shot and stays
-        unchanged. The loom variant overfetches by 1 to detect
+        unchanged. The weft variant overfetches by 1 to detect
         ``has_more`` without a separate COUNT query.
         """
         params = request.query_params
@@ -957,40 +1064,40 @@ def create_loom_router() -> APIRouter:
         has_more = len(page) > limit
         if has_more:
             page = page[:limit]
-        items = [issue_to_loom(i) for i in page]
+        items = [issue_to_weft(i) for i in page]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/ready")
-    async def api_loom_ready(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Issues ready to work (no open blockers) — ``ListResponse[IssueLoom]``.
+    async def api_weft_ready(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Issues ready to work (no open blockers) — ``ListResponse[IssueWeft]``.
 
         Returns the full result set — ``get_ready()`` is unbounded today
         and ``has_more`` is always ``false``.
         """
         issues = db.get_ready()
-        items = [issue_to_loom(i) for i in issues]
+        items = [issue_to_weft(i) for i in issues]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/blocked")
-    async def api_loom_blocked(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Issues with at least one open blocker — ``ListResponse[BlockedIssueLoom]``.
+    async def api_weft_blocked(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Issues with at least one open blocker — ``ListResponse[BlockedIssueWeft]``.
 
-        Loom-only (no classic counterpart). Returns the full result set
+        Weft-only (no classic counterpart). Returns the full result set
         — ``get_blocked()`` is unbounded today and ``has_more`` is
         always ``false``.
         """
         issues = db.get_blocked()
-        items = [blocked_issue_to_loom(i) for i in issues]
+        items = [blocked_issue_to_weft(i) for i in issues]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/search")
-    async def api_loom_search(
+    async def api_weft_search(
         request: Request,
         db: FiligreeDB = Depends(_get_db),
     ) -> JSONResponse:
-        """Full-text search — ``ListResponse[IssueLoom]``.
+        """Full-text search — ``ListResponse[IssueWeft]``.
 
-        Classic ``GET /api/search`` returns ``{results, total}``. Loom
+        Classic ``GET /api/search`` returns ``{results, total}``. Weft
         drops the running total to keep the unified envelope (consumers
         needing total can hit ``/api/stats``).
         """
@@ -1018,30 +1125,30 @@ def create_loom_router() -> APIRouter:
             return JSONResponse(list_response([], limit=limit, offset=offset, has_more=False))
         total = db.count_search_results(q)
         page = db.search_issues(q, limit=limit, offset=offset)
-        items = [issue_to_loom(i) for i in page]
+        items = [issue_to_weft(i) for i in page]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=total))
 
     @router.get("/types")
-    async def api_loom_list_types(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List registered issue types — ``ListResponse[TypeSummaryLoom]``."""
+    async def api_weft_list_types(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """List registered issue types — ``ListResponse[TypeSummaryWeft]``."""
         types = db.templates.list_types()
-        items = [type_template_to_loom(t) for t in types]
+        items = [type_template_to_weft(t) for t in types]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/packs")
-    async def api_loom_list_packs(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List enabled workflow packs — ``ListResponse[PackLoom]``.
+    async def api_weft_list_packs(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """List enabled workflow packs — ``ListResponse[PackWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Mirrors MCP's
+        Weft-only (no classic dashboard counterpart). Mirrors MCP's
         ``list_packs`` projection.
         """
         packs = sorted(db.templates.list_packs(), key=lambda p: p.pack)
-        items = [pack_to_loom(p) for p in packs]
+        items = [pack_to_weft(p) for p in packs]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/comments")
-    async def api_loom_get_comments(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Comments for an issue — ``ListResponse[CommentRecordLoom]``.
+    async def api_weft_get_comments(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Comments for an issue — ``ListResponse[CommentRecordWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) so missing
         issues do not silently return an empty list. ``db.get_comments``
@@ -1057,12 +1164,12 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         comments = db.get_comments(issue_id)
-        items = [comment_record_to_loom(c) for c in comments]
+        items = [comment_record_to_weft(c) for c in comments]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.get("/issues/{issue_id}/events")
-    async def api_loom_get_issue_events(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Event history for an issue — ``ListResponse[IssueEventLoom]``.
+    async def api_weft_get_issue_events(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Event history for an issue — ``ListResponse[IssueEventWeft]``.
 
         ``db.get_issue_events`` validates the issue exists (raises
         ``KeyError``) and accepts a ``limit``. Default 50 to match MCP
@@ -1083,12 +1190,12 @@ def create_loom_router() -> APIRouter:
         has_more = len(events) > limit
         if has_more:
             events = events[:limit]
-        items = [issue_event_to_loom(e) for e in events]
+        items = [issue_event_to_weft(e) for e in events]
         return JSONResponse(list_response(items, limit=limit, offset=offset, has_more=has_more))
 
     @router.get("/issues/{issue_id}/files")
-    async def api_loom_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """File associations for an issue — ``ListResponse[FileAssocLoom]``.
+    async def api_weft_get_issue_files(issue_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """File associations for an issue — ``ListResponse[FileAssocWeft]``.
 
         Validates the issue exists (404 ``NOT_FOUND`` if not) — the
         underlying ``db.get_issue_files`` does not. Matches the classic
@@ -1102,16 +1209,16 @@ def create_loom_router() -> APIRouter:
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         assocs = db.get_issue_files(issue_id)
-        items = [file_assoc_to_loom(a) for a in assocs]
+        items = [file_assoc_to_weft(a) for a in assocs]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     @router.post("/batch/update")
-    async def api_loom_batch_update(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Batch update issues — loom envelope.
+    async def api_weft_batch_update(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Batch update issues — weft envelope.
 
         ``response_detail=slim`` (default) keeps the historical C2 shape
-        (``BatchResponse[SlimIssueLoom]``); ``response_detail=full``
-        upgrades ``succeeded[]`` items to full ``IssueLoom``. Validation
+        (``BatchResponse[SlimIssueWeft]``); ``response_detail=full``
+        upgrades ``succeeded[]`` items to full ``IssueWeft``. Validation
         of the query param runs before body parsing so a malformed
         ``response_detail`` returns 400 even on a malformed body.
         """
@@ -1125,28 +1232,30 @@ def create_loom_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # C1: gate per-item any status write that would close a governed issue.
+        allowed_ids, gate_failures = _gate_status_change_failures(db, issue_ids, parsed.get("status"))
         try:
-            updated, errors = db.batch_update(issue_ids, **parsed)
+            updated, errors = db.batch_update(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except TypeError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        project = issue_to_loom if detail == "full" else slim_issue_to_loom
+        project = issue_to_weft if detail == "full" else slim_issue_to_weft
         return JSONResponse(
             {
                 "succeeded": [project(i) for i in updated],
-                "failed": errors,
+                "failed": [*gate_failures, *errors],
             }
         )
 
     @router.post("/batch/close")
-    async def api_loom_batch_close(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Batch close issues — loom envelope.
+    async def api_weft_batch_close(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Batch close issues — weft envelope.
 
-        ``response_detail=slim`` (default) returns ``SlimIssueLoom`` in
-        ``succeeded[]``; ``response_detail=full`` returns ``IssueLoom``.
-        ``newly_unblocked[]`` stays ``SlimIssueLoom`` regardless — it
+        ``response_detail=slim`` (default) returns ``SlimIssueWeft`` in
+        ``succeeded[]``; ``response_detail=full`` returns ``IssueWeft``.
+        ``newly_unblocked[]`` stays ``SlimIssueWeft`` regardless — it
         represents *secondary* state (consumers branch on its presence
         to decide whether to refetch); upgrading would inflate the
         response without buying federation consumers anything new. See
@@ -1167,29 +1276,32 @@ def create_loom_router() -> APIRouter:
         if isinstance(parsed, JSONResponse):
             return parsed
         issue_ids = parsed.pop("issue_ids")
+        # B5 DECISION 3: gate per-issue; rejected governed issues are reported
+        # in ``failed`` rather than aborting the batch.
+        allowed_ids, gate_errors = _gate_batch_failures(db, issue_ids)
         ready_before = {i.id for i in db.get_ready()}
         try:
-            closed, errors = db.batch_close(issue_ids, **parsed)
+            closed, errors = db.batch_close(allowed_ids, **parsed)
         except WrongProjectError as e:
             # 2.1.0 §0.4: envelope-level abort on foreign-prefix.
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
-        project = issue_to_loom if detail == "full" else slim_issue_to_loom
+        project = issue_to_weft if detail == "full" else slim_issue_to_weft
         response: dict[str, Any] = {
             "succeeded": [project(i) for i in closed],
-            "failed": errors,
+            "failed": [*gate_errors, *errors],
         }
         if newly_unblocked:
-            response["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
+            response["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(response)
 
     @router.get("/issues/{issue_id}")
-    async def api_loom_get_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Get a single issue — IssueLoom (or IssueLoomWithFiles when
+    async def api_weft_get_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Get a single issue — IssueWeft (or IssueWeftWithFiles when
         ``include_files=true``).
 
-        Loom defaults ``include_files`` to ``False`` (federation
+        Weft defaults ``include_files`` to ``False`` (federation
         consumers usually want a clean issue projection without the
         file-association payload). Classic ``GET /api/issue/{id}`` does
         not expose ``include_files`` and continues to return its
@@ -1205,14 +1317,14 @@ def create_loom_router() -> APIRouter:
             issue = db.get_issue(issue_id)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
-        body: dict[str, Any] = dict(issue_to_loom(issue))
+        body: dict[str, Any] = dict(issue_to_weft(issue))
         if include_files:
-            body["files"] = [file_assoc_to_loom(a) for a in db.get_issue_files(issue_id)]
+            body["files"] = [file_assoc_to_weft(a) for a in db.get_issue_files(issue_id)]
         return JSONResponse(body)
 
     @router.post("/issues", status_code=201)
-    async def api_loom_create_issue(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Create an issue — returns ``IssueLoom``."""
+    async def api_weft_create_issue(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Create an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1258,11 +1370,11 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except (TypeError, ValueError) as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        return JSONResponse(issue_to_loom(issue), status_code=201)
+        return JSONResponse(issue_to_weft(issue), status_code=201)
 
     @router.patch("/issues/{issue_id}")
-    async def api_loom_update_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Update issue fields — returns ``IssueLoom``."""
+    async def api_weft_update_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Update issue fields — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1294,6 +1406,11 @@ def create_loom_router() -> APIRouter:
         status = _validate_body_string_field(body, "status", default=None)
         if isinstance(status, JSONResponse):
             return status
+        # C1: update can drive a governed issue into a done-category status
+        # (close routes through update) — gate it like close.
+        gate = governance.evaluate_status_change_gate(db, issue_id, status)
+        if not gate.allowed:
+            return _closure_gate_block(gate)
         try:
             issue = db.update_issue(
                 issue_id,
@@ -1317,13 +1434,13 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        return JSONResponse(issue_to_loom(issue))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/close")
-    async def api_loom_close_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Close an issue — returns ``IssueLoom`` (or
-        ``IssueLoomWithUnblocked`` when at least one issue became ready
+    async def api_weft_close_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Close an issue — returns ``IssueWeft`` (or
+        ``IssueWeftWithUnblocked`` when at least one issue became ready
         as a result, mirroring MCP ``close_issue``).
         """
         body = await _parse_json_body(request)
@@ -1346,6 +1463,9 @@ def create_loom_router() -> APIRouter:
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
+            gate = governance.evaluate_closure_gate(db, issue_id)
+            if not gate.allowed:
+                return _closure_gate_block(gate)
             annotation_warnings = db.get_annotation_closeout_warnings(issue_id)
             issue = db.close_issue(
                 issue_id,
@@ -1363,19 +1483,19 @@ def create_loom_router() -> APIRouter:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         ready_after = db.get_ready()
         newly_unblocked = [i for i in ready_after if i.id not in ready_before]
-        result: dict[str, Any] = dict(issue_to_loom(issue))
+        result: dict[str, Any] = dict(issue_to_weft(issue))
         if annotation_warnings:
             result["annotation_warnings"] = annotation_warnings
         if newly_unblocked:
-            result["newly_unblocked"] = [slim_issue_to_loom(i) for i in newly_unblocked]
+            result["newly_unblocked"] = [slim_issue_to_weft(i) for i in newly_unblocked]
         return JSONResponse(result)
 
     @router.post("/issues/{issue_id}/reopen")
-    async def api_loom_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Reopen a closed issue — returns ``IssueLoom``."""
+    async def api_weft_reopen_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Reopen a closed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1390,12 +1510,12 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
-        return JSONResponse(issue_to_loom(issue))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/claim")
-    async def api_loom_claim_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Claim an issue — returns ``IssueLoom``."""
+    async def api_weft_claim_issue(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Claim an issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1414,15 +1534,15 @@ def create_loom_router() -> APIRouter:
         except WrongProjectError as e:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
-        return JSONResponse(issue_to_loom(issue))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/release")
-    async def api_loom_release_claim(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Release a claimed issue — returns ``IssueLoom``."""
+    async def api_weft_release_claim(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Release a claimed issue — returns ``IssueWeft``."""
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
@@ -1440,21 +1560,21 @@ def create_loom_router() -> APIRouter:
             return _error_response(e.safe_message, ErrorCode.VALIDATION, 400)
         except InvalidTransitionError as e:
             return _error_response(
-                str(e),
+                e.safe_message,
                 ErrorCode.INVALID_TRANSITION,
                 errorcode_to_http_status(ErrorCode.INVALID_TRANSITION),
                 _invalid_transition_details(e),
             )
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = _classify_release_claim_error(issue_id, e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
-        return JSONResponse(issue_to_loom(issue))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/claim-next")
-    async def api_loom_claim_next(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Claim the highest-priority ready issue — returns ``IssueLoom``,
+    async def api_weft_claim_next(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Claim the highest-priority ready issue — returns ``IssueWeft``,
         or 404 ``ErrorCode.NOT_FOUND`` when nothing is ready (matching
         classic).
         """
@@ -1472,17 +1592,17 @@ def create_loom_router() -> APIRouter:
         try:
             issue = db.claim_next(assignee, actor=actor)
         except ClaimConflictError as e:
-            return _error_response(str(e), ErrorCode.CONFLICT, 409, claim_conflict_details(e))
+            return _error_response(e.safe_message, ErrorCode.CONFLICT, 409, claim_conflict_details(e))
         except ValueError as e:
             code = classify_value_error(str(e))
-            return _error_response(str(e), code, errorcode_to_http_status(code))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _invalid_transition_details(e))
         if issue is None:
             return _error_response("No ready issues to claim", ErrorCode.NOT_FOUND, 404)
-        return JSONResponse(issue_to_loom(issue))
+        return JSONResponse(issue_to_weft(issue))
 
     @router.post("/issues/{issue_id}/comments", status_code=201)
-    async def api_loom_add_comment(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Add a comment — returns ``CommentRecordLoom`` (``comment_id``
+    async def api_weft_add_comment(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Add a comment — returns ``CommentRecordWeft`` (``comment_id``
         replaces classic's ``id``).
         """
         # See classic add-comment: prefix check first so foreign-project IDs
@@ -1511,13 +1631,13 @@ def create_loom_router() -> APIRouter:
             comment_id = db.add_comment(issue_id, text, author=author, expected_assignee=expected_assignee)
         except ValueError as e:
             code = _classify_issue_write_error(e)
-            return _error_response(str(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
+            return _error_response(safe_error_message(e), code, errorcode_to_http_status(code), _issue_write_error_details(e))
         row = db.conn.execute("SELECT created_at FROM comments WHERE id = ?", (comment_id,)).fetchone()
         if row is None:
             logger.error("Comment %d not found immediately after INSERT for issue %s", comment_id, issue_id)
             return _error_response("Internal error: comment created but not retrievable", ErrorCode.INTERNAL, 500)
         return JSONResponse(
-            CommentRecordLoom(
+            CommentRecordWeft(
                 comment_id=comment_id,
                 author=author,
                 text=text,
@@ -1527,9 +1647,9 @@ def create_loom_router() -> APIRouter:
         )
 
     @router.post("/issues/{issue_id}/dependencies")
-    async def api_loom_add_dependency(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_add_dependency(issue_id: str, request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Add a dependency. Body: ``{depends_on: str}``. Response:
-        ``{added: bool}`` (matches classic; the loom envelope adds no
+        ``{added: bool}`` (matches classic; the weft envelope adds no
         rename here because there are no entity primary keys to relabel).
         """
         body = await _parse_json_body(request)
@@ -1552,25 +1672,25 @@ def create_loom_router() -> APIRouter:
         return JSONResponse({"added": added})
 
     @router.delete("/issues/{issue_id}/dependencies/{dep_issue_id}")
-    async def api_loom_remove_dependency(
+    async def api_weft_remove_dependency(
         issue_id: str,
         dep_issue_id: str,
         actor: str = "dashboard",
         db: FiligreeDB = Depends(_get_db),
     ) -> JSONResponse:
-        """Remove a dependency. Path uses ``dep_issue_id`` (loom
+        """Remove a dependency. Path uses ``dep_issue_id`` (weft
         vocabulary); classic ``DELETE /api/issue/{id}/dependencies/{dep_id}``
         keeps its ``dep_id`` parameter name unchanged.
 
         Response: ``{removed: bool, issue_found: bool}``. ``removed`` is the
         classic boolean (an edge was actually deleted). ``issue_found`` is a
-        loom-only addition (wire-compatible per the contract's stability
+        weft-only addition (wire-compatible per the contract's stability
         clause): ``false`` exactly when a referenced issue does not exist, so
         a caller can distinguish a typo'd id from a genuinely-absent edge
         without parsing the server log.
 
-        Idempotent at the wire layer per the loom contract
-        (tests/fixtures/contracts/loom/issues-dep-remove.json). Two distinct
+        Idempotent at the wire layer per the weft contract
+        (tests/fixtures/contracts/weft/issues-dep-remove.json). Two distinct
         cases both reach 200 ``{"removed": false}``, and they differ in kind:
 
         - **Edge absent, both issues exist:** ``remove_dependency`` returns
@@ -1600,7 +1720,7 @@ def create_loom_router() -> APIRouter:
             # exactly the typo-masking path: flag it via issue_found=false, log
             # it, then honour the frozen idempotent contract.
             logger.warning(
-                "Loom dependency DELETE absorbed missing-issue KeyError (issue_id=%s dep_issue_id=%s); returning idempotent removed=false",
+                "Weft dependency DELETE absorbed missing-issue KeyError (issue_id=%s dep_issue_id=%s); returning idempotent removed=false",
                 issue_id,
                 dep_issue_id,
             )

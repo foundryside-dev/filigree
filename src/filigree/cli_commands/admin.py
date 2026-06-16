@@ -16,29 +16,41 @@ from filigree.cli_commands.files import finding_group
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     CONF_FILENAME,
-    CONF_VERSION,
+    CONFIG_FILENAME,
     DB_FILENAME,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
     FiligreeDB,
     ProjectConfig,
     ProjectNotInitialisedError,
-    find_filigree_root,
+    StoreMigrationBusyError,
+    StoreMigrationConfUnreadableError,
+    WeftConfigUnreadableError,
+    _load_weft_filigree_table,
+    find_filigree_anchor,
     get_mode,
+    migrate_store_to_weft,
     read_conf,
     read_config,
     read_schema_version,
-    write_conf,
+    resolve_store_dir,
     write_config,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
+from filigree.install_support.doctor import (
+    CheckResult,
+    build_doctor_summary,
+    doctor_check_id,
+)
 from filigree.install_support.version_marker import (
     format_schema_mismatch_guidance,
     read_install_version,
     write_install_version,
 )
 from filigree.summary import write_summary
-from filigree.types.api import SchemaVersionMismatchError
+from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 
 
 def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
@@ -59,30 +71,88 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
     help="Installation mode (default: ethereal)",
 )
 def init(prefix: str | None, name: str | None, mode: str | None) -> None:
-    """Initialize .filigree/ in the current directory."""
+    """Initialize filigree in the current directory (store at .weft/filigree/)."""
     cwd = Path.cwd()
-    filigree_dir = cwd / FILIGREE_DIR_NAME
+    # The mutating init/install path must NOT boot on defaults over an unreadable
+    # weft.toml — C-9c (boot-on-defaults) is for passive discovery only. A broken
+    # config may hide an operator [filigree].store_dir pin; silently ignoring it
+    # would create/relocate the store somewhere the operator never chose (I1). Fail
+    # fast and uniformly here, before either the fresh-install or migration branch.
+    try:
+        _load_weft_filigree_table(cwd)
+    except WeftConfigUnreadableError as exc:
+        click.echo(f"{exc}\nFix or remove weft.toml, then re-run `filigree init`.", err=True)
+        sys.exit(1)
+    conf_path = cwd / CONF_FILENAME
+    legacy_dir = cwd / FILIGREE_DIR_NAME
+    weft_store = cwd / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
 
-    if filigree_dir.exists():
-        click.echo(f"{FILIGREE_DIR_NAME}/ already exists in {cwd}")
-        previous_marker = read_install_version(filigree_dir)
-        # Still ensure DB is initialized and migrated
-        config = _read_project_config_or_exit(filigree_dir)
-        # filigree-fa6309d551: route DB open through the v2.0 anchor-aware
-        # constructors so a custom .filigree.conf `db` path is honoured.
-        # Without this, init silently migrates the legacy
-        # .filigree/filigree.db while the project's actual DB (declared in
-        # the conf) stays un-migrated.
-        conf_path = cwd / CONF_FILENAME
+    from filigree.install import ensure_filigree_dir_gitignore, ensure_weft_store_gitignore
+
+    def _store_gitignore(store: Path) -> None:
+        """Ship the nested .gitignore matching the resolved store layout."""
+        if store == legacy_dir:
+            ensure_filigree_dir_gitignore(store)
+        else:
+            ensure_weft_store_gitignore(store)
+
+    already_installed = conf_path.is_file() or weft_store.is_dir() or legacy_dir.is_dir()
+    if already_installed:
+        # Migrate a legacy .filigree/ store forward to .weft/filigree/ — this is
+        # the ONE explicit place migration happens (never on passive discovery).
+        try:
+            store_dir, migrated = migrate_store_to_weft(cwd)
+        except (StoreMigrationBusyError, StoreMigrationConfUnreadableError) as exc:
+            # Refused before any mutation — a live writer holds the DB, or the
+            # .filigree.conf is present-but-unreadable. The legacy layout is left
+            # intact; the message tells the operator what to fix.
+            click.echo(str(exc), err=True)
+            sys.exit(1)
+        if migrated:
+            click.echo(f"  Migrated store to {WEFT_DIR_NAME}/{WEFT_MEMBER_SUBDIR}/ (legacy {FILIGREE_DIR_NAME}/ left in place)")
+        else:
+            click.echo(f"filigree already initialized in {cwd} (store: {store_dir})")
+        previous_marker = read_install_version(store_dir)
+        config = _read_project_config_or_exit(store_dir)
+        # === Config-anchor cutover (filigree-4bf16e64b6) ===
+        # Reconcile the legacy ``.filigree.conf`` anchor's authoritative fields
+        # into ``.weft/filigree/config.json`` (conf-wins for the fields
+        # ``from_conf`` served — prefix/enabled_packs/registry_backend/loomweave/
+        # name; config.json keeps ``mode`` and drops ``db``), then retire the conf
+        # so the anchor becomes the presence of ``.weft/filigree/``. Idempotent and
+        # crash-convergent: config.json is written atomically BEFORE the conf is
+        # atomically renamed, so an interrupted run re-imports on the next pass and
+        # runtime keeps working off whichever anchor still exists. filigree never
+        # writes ``weft.toml`` here (C-9b). The legacy ``.filigree/`` *store* read
+        # path stays (resolve_store_dir back-compat, C-9f) — only the conf *anchor*
+        # is demoted to one-shot-import-and-retire.
         if conf_path.is_file():
             try:
                 existing_conf = read_conf(conf_path)
-                db_path = (conf_path.parent / existing_conf["db"]).resolve()
             except (json_mod.JSONDecodeError, ValueError, OSError) as exc:
                 click.echo(f"Cannot read {conf_path}: {exc}", err=True)
                 sys.exit(1)
-        else:
-            db_path = filigree_dir / DB_FILENAME
+            config["prefix"] = existing_conf["prefix"]
+            config["name"] = existing_conf.get("project_name") or config.get("name") or cwd.name
+            if "enabled_packs" in existing_conf:
+                config["enabled_packs"] = existing_conf["enabled_packs"]
+            if "registry_backend" in existing_conf:
+                config["registry_backend"] = existing_conf["registry_backend"]
+            if "loomweave" in existing_conf:
+                config["loomweave"] = existing_conf["loomweave"]
+            # ``mode`` is config.json-authoritative at runtime (``get_mode``); only
+            # carry the conf's value forward when config.json has none.
+            if "mode" not in config and "mode" in existing_conf:
+                config["mode"] = existing_conf["mode"]
+            config.pop("db", None)  # type: ignore[typeddict-item]  # strip a hand-edited db key; never stored in config.json
+            write_config(store_dir, config)
+            imported_path = cwd / (CONF_FILENAME + ".imported")
+            conf_path.rename(imported_path)  # atomic commit point of the cutover
+            click.echo(f"  Imported anchor into {store_dir / CONFIG_FILENAME}; retired {CONF_FILENAME} → {imported_path.name}")
+
+        # The conf (if any) is now retired, so the store DB is always at the
+        # canonical store path (migrate_store_to_weft already normalised it).
+        db_path = store_dir / DB_FILENAME
         # Read pre-init schema version directly so we can detect upgrades —
         # the from_* constructors call initialize() internally, which would
         # mask the old version.
@@ -94,7 +164,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             finally:
                 raw_conn.close()
         try:
-            db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
+            db = FiligreeDB.from_anchor(find_filigree_anchor(cwd))
         except SchemaVersionMismatchError as exc:
             # The DB was written by a newer filigree; this older binary
             # cannot safely touch it. Emit the same guidance text and
@@ -113,35 +183,32 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             db.close()
         if old_version is not None and new_version > old_version:
             click.echo(f"  Schema upgraded v{old_version} → v{new_version}")
-        (filigree_dir / "scanners").mkdir(exist_ok=True)
-        # filigree-f22fc98687: backfill the v2.0 anchor on legacy installs
-        # where the existing-project branch was reached without a conf. Do
-        # not overwrite an existing custom anchor.
-        if not conf_path.exists():
-            project_name = config.get("name") or cwd.name
-            backfill_conf: dict[str, object] = {
-                "version": CONF_VERSION,
-                "project_name": project_name,
-                "prefix": opened_prefix,
-                "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}",
-            }
-            conf_mode = config.get("mode")
-            if conf_mode and conf_mode != "ethereal":
-                backfill_conf["mode"] = conf_mode
-            write_conf(conf_path, backfill_conf)
-            click.echo(f"  Backfilled v2.0 anchor: {conf_path}")
+        (store_dir / "scanners").mkdir(exist_ok=True)
+        _store_gitignore(store_dir)
+        # Materialise the store's config.json identity for a confless store that
+        # has none yet — e.g. a legacy ``.filigree/`` install migrated forward,
+        # which never carried a config.json. Without it the next confless open
+        # falls back to ``project_root.name``. The conf-import branch above already
+        # wrote config.json, and normal installs already have one, so both skip
+        # this. (Replaces the retired ``.filigree.conf`` backfill — config.json is
+        # the new identity home; B4.)
+        if not (store_dir / CONFIG_FILENAME).is_file():
+            config["prefix"] = opened_prefix
+            if "name" not in config:
+                config["name"] = cwd.name
+            write_config(store_dir, config)
         # Cross-tool skew warning: if a previous marker recorded an older
         # schema, other tools / sessions pinned to that version will now
         # report SCHEMA_MISMATCH against this DB.
         if previous_marker is not None and previous_marker < CURRENT_SCHEMA_VERSION:
             click.echo(
-                f"Note: this project's previous .filigree/ used schema v{previous_marker}; "
+                f"Note: this project's previous store used schema v{previous_marker}; "
                 f"the new DB is at v{CURRENT_SCHEMA_VERSION}. Other tools or sessions "
                 f"pinned to filigree v{previous_marker} will report SCHEMA_MISMATCH against "
                 f"this DB.",
                 err=True,
             )
-        write_install_version(filigree_dir, CURRENT_SCHEMA_VERSION)
+        write_install_version(store_dir, CURRENT_SCHEMA_VERSION)
         # Update name/mode if explicitly provided
         updated = False
         if name is not None:
@@ -153,46 +220,47 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             updated = True
             click.echo(f"  Mode: {mode}")
         if updated:
-            write_config(filigree_dir, config)
+            write_config(store_dir, config)
         return
 
     prefix = prefix or cwd.name
     name = name or cwd.name
     mode = mode or "ethereal"
-    filigree_dir.mkdir()
-    (filigree_dir / "scanners").mkdir()
+    # Honour an operator weft.toml [filigree].store_dir override at creation time
+    # (it is the canonical relocation key) so the store, config, and the conf's
+    # db field all land in the SAME place. resolve_store_dir already narrowed it
+    # to a project-relative, under-root path, so relative_to(cwd) is safe and the
+    # conf can carry it as a project-relative db value.
+    store_dir = resolve_store_dir(cwd)
+    rel_store = store_dir.relative_to(cwd)
+    store_dir.mkdir(parents=True)
+    (store_dir / "scanners").mkdir()
 
+    ensure_weft_store_gitignore(store_dir)
+
+    # Fresh installs are born confless: identity lives in the store's
+    # config.json (the sole-writer subtree) and the project anchor is the
+    # presence of ``.weft/filigree/`` itself. No ``.filigree.conf`` is written
+    # — filigree only ever *reads* a legacy conf to one-shot-import-and-retire
+    # it (the already-installed branch above). ``weft.toml`` is never written.
     config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
-    write_config(filigree_dir, config)
+    write_config(store_dir, config)
 
-    # v2.0: also write the .filigree.conf anchor — this is the file agents
-    # walk up looking for, the authoritative declaration that "this folder and
-    # its subtree belong to this filigree project".
-    conf_data: dict[str, object] = {
-        "version": CONF_VERSION,
-        "project_name": name,
-        "prefix": prefix,
-        "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}",
-    }
-    if mode and mode != "ethereal":
-        conf_data["mode"] = mode
-    write_conf(cwd / CONF_FILENAME, conf_data)
-
-    db = FiligreeDB(filigree_dir / DB_FILENAME, prefix=prefix)
+    db = FiligreeDB(store_dir / DB_FILENAME, prefix=prefix, project_root=cwd, meta_dir=store_dir)
     db.initialize()
-    write_summary(db, filigree_dir / SUMMARY_FILENAME)
+    write_summary(db, store_dir / SUMMARY_FILENAME)
     db.close()
 
     # Record the schema version this project was last initialized at — used
     # by future `init` runs to warn about cross-tool schema skew.
-    write_install_version(filigree_dir, CURRENT_SCHEMA_VERSION)
+    write_install_version(store_dir, CURRENT_SCHEMA_VERSION)
 
-    click.echo(f"Initialized {FILIGREE_DIR_NAME}/ in {cwd}")
+    click.echo(f"Initialized filigree store at {rel_store.as_posix()}/ in {cwd}")
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
-    click.echo(f"  Database: {filigree_dir / DB_FILENAME}")
-    click.echo(f"  Anchor: {cwd / CONF_FILENAME}")
-    click.echo(f"  Scanners: {filigree_dir / 'scanners'}/ (add .toml files to register scanners)")
+    click.echo(f"  Database: {store_dir / DB_FILENAME}")
+    click.echo(f"  Anchor: {rel_store.as_posix()}/ (store-dir presence; confless — no .filigree.conf)")
+    click.echo(f"  Scanners: {store_dir / 'scanners'}/ (add .toml files to register scanners)")
     click.echo("\nNext: filigree install")
 
 
@@ -237,7 +305,9 @@ def install(
     With specific flags, installs only the selected components.
     """
     from filigree.install import (
+        ensure_filigree_dir_gitignore,
         ensure_gitignore,
+        ensure_weft_store_gitignore,
         inject_instructions,
         install_claude_code_hooks,
         install_claude_code_mcp,
@@ -247,13 +317,16 @@ def install(
     )
 
     try:
-        filigree_dir = find_filigree_root()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         # filigree-dad647cf35: catch the rich subclass before the generic
         # FileNotFoundError so ForeignDatabaseError's git-boundary remediation
         # message reaches the user instead of "No .filigree/ found".
         click.echo(str(exc), err=True)
         sys.exit(1)
+    filigree_dir = anchor.store_dir
+    weft_store = anchor.project_root / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+    ensure_store_gitignore = ensure_weft_store_gitignore if filigree_dir == weft_store else ensure_filigree_dir_gitignore
 
     # Update mode in config if explicitly provided
     if mode is not None:
@@ -271,7 +344,14 @@ def install(
     if mode is None:
         mode = "ethereal"
 
-    project_root = filigree_dir.parent
+    project_root = anchor.project_root
+    # Pre-seed the federation token so a single-host daemon enforces auth with
+    # zero operator toil (it reads <store>/federation_token as tier 2). Idempotent,
+    # and independent of which sub-integrations are selected below (the MCP step
+    # also negotiates one, but a token must exist even for a non-MCP install).
+    from filigree.federation_token import mint_token_file as _mint_federation_token
+
+    _mint_federation_token(filigree_dir)
     install_all = not any([claude_code, codex, claude_md, agents_md, gitignore, hooks_only, skills_only, codex_skills_only])
 
     results: list[tuple[str, bool, str]] = []
@@ -309,6 +389,11 @@ def install(
             install_all or gitignore,
             ".gitignore",
             lambda: ensure_gitignore(project_root),
+        ),
+        (
+            install_all or gitignore,
+            f"{filigree_dir.name}/.gitignore",
+            lambda: ensure_store_gitignore(filigree_dir),
         ),
         (
             install_all or hooks_only,
@@ -369,158 +454,299 @@ def install(
     click.echo('Next: filigree create "My first issue"')
 
 
+def _emit_doctor_json(
+    results: list[CheckResult],
+    *,
+    fixed_check_ids: set[str] | None = None,
+    fixed_check_names: set[str] | None = None,
+) -> None:
+    click.echo(
+        json_mod.dumps(
+            build_doctor_summary(
+                results,
+                fixed_check_ids=fixed_check_ids,
+                fixed_check_names=fixed_check_names,
+            ),
+            indent=2,
+        )
+    )
+
+
+def _remove_stale_doctor_pointer(path: Path) -> tuple[bool, str]:
+    try:
+        if path.exists():
+            path.unlink()
+            return True, f"Removed {path}"
+        return True, f"{path} already absent"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _fix_mcp_token_reference(project_root: Path) -> tuple[bool, str]:
+    """Embed this project's literal federation token into the .mcp.json filigree header.
+
+    The header historically referenced ``${WEFT_FEDERATION_TOKEN}`` (which 401s
+    unless exported in every client shell) or, in earlier server-mode installs,
+    the daemon's home-store token. The server-mode MCP URL is project-scoped
+    (``/mcp/?project={key}``), and the daemon validates a scoped request against
+    THAT project's own token — not the home store (filigree-23574069a1). So
+    ``doctor --fix`` writes the literal token minted in this project's store dir,
+    eliminating both the export and the home-token mismatch. Idempotent: a no-op
+    when the header already carries that literal.
+    """
+    mcp_path = project_root / ".mcp.json"
+    try:
+        data = json_mod.loads(mcp_path.read_text())
+        entry = data["mcpServers"]["filigree"]
+        auth = entry["headers"]["Authorization"]
+    except (OSError, json_mod.JSONDecodeError, KeyError, TypeError):
+        return False, "Could not read .mcp.json filigree Authorization header"
+    if not isinstance(auth, str):
+        return False, "filigree Authorization header is not a string"
+
+    from filigree.federation_token import mint_token_file
+
+    new_auth = f"Bearer {mint_token_file(resolve_store_dir(project_root))}"
+    if new_auth == auth:
+        return False, "filigree Authorization header already carries the literal federation token"
+
+    entry["headers"]["Authorization"] = new_auth
+    mcp_path.write_text(json_mod.dumps(data, indent=2) + "\n")
+    return True, "Embedded literal federation token in .mcp.json header (no export needed)"
+
+
+def _apply_doctor_fixes(
+    results: list[CheckResult],
+    *,
+    emit: Callable[[str], None] | None,
+) -> tuple[int, set[str], set[str]]:
+    from filigree.install import (
+        inject_instructions,
+        install_claude_code_hooks,
+        install_claude_code_mcp,
+        install_codex_mcp,
+    )
+
+    try:
+        anchor = find_filigree_anchor()
+    except ProjectNotInitialisedError as exc:
+        if emit is not None:
+            click.echo(str(exc), err=True)
+        raise click.ClickException(str(exc)) from exc
+
+    filigree_dir = anchor.store_dir
+    project_root = anchor.project_root
+    try:
+        mode = get_mode(filigree_dir)
+    except ValueError as exc:
+        if emit is not None:
+            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
+        mode = "ethereal"
+    server_port = 8377
+    if mode == "server":
+        try:
+            from filigree.server import read_server_config
+
+            server_port = read_server_config().port
+        except Exception:
+            logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
+
+    # doctor --fix generates the federation token too (not just install): mint it
+    # into the store so a single-host daemon can enforce auth on next serve (it
+    # reads <store>/federation_token as tier 2). Idempotent — only reported when it
+    # actually minted, so repeat runs stay quiet.
+    from filigree.federation_token import FEDERATION_TOKEN_FILENAME, mint_token_file, read_token_file
+
+    _had_federation_token = bool(read_token_file(filigree_dir))
+    mint_token_file(filigree_dir)
+    if emit is not None and not _had_federation_token:
+        emit(f"  OK Federation token: minted {filigree_dir.name}/{FEDERATION_TOKEN_FILENAME}")
+
+    # filigree-f57cb498d4: instruction files and the generated context.md are
+    # filigree-owned artifacts that `--fix` repairs directly. CLAUDE.md/AGENTS.md
+    # go through inject_instructions (non-destructive: it manages only its own
+    # marked block, preserving user content); context.md is regenerated from the
+    # DB. ``.gitignore`` is still deliberately NOT auto-repaired here — see
+    # test_doctor_fix_json_does_not_repair_gitignore.
+    fixable: dict[str, str] = {
+        "Claude Code MCP": "claude_code_mcp",
+        "Codex MCP": "codex_mcp",
+        "Claude Code hooks": "hooks",
+        "Ephemeral PID": "ephemeral_pid",
+        "Ephemeral port": "ephemeral_port",
+        "CLAUDE.md": "claude_md",
+        "AGENTS.md": "agents_md",
+        "context.md": "context_md",
+    }
+
+    fixed = 0
+    fixed_check_ids: set[str] = set()
+    fixed_check_names: set[str] = set()
+    for r in results:
+        if r.passed or r.name not in fixable:
+            continue
+
+        # Token-reference repair is commit-safe and targeted: migrate a deprecated
+        # token env-var NAME in the .mcp.json header to the canonical one. It must
+        # take precedence over the generic reinstall path, which would rewrite the
+        # whole entry (URL/port) and falsely report "fixed" when the real blocker is
+        # an unset env var that filigree cannot write.
+        if r.code in ("mcp_token_unresolved", "federation_token_mcp_home_token"):
+            ok, msg = _fix_mcp_token_reference(project_root)
+            if emit is not None:
+                emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            if ok:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
+            continue
+
+        fix_key = fixable[r.name]
+        ok = False
+        try:
+            if fix_key == "claude_code_mcp":
+                ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "codex_mcp":
+                ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "hooks":
+                ok, msg = install_claude_code_hooks(project_root)
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "ephemeral_pid":
+                ok, msg = _remove_stale_doctor_pointer(filigree_dir / "ephemeral.pid")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "ephemeral_port":
+                ok, msg = _remove_stale_doctor_pointer(filigree_dir / "ephemeral.port")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "claude_md":
+                ok, msg = inject_instructions(project_root / "CLAUDE.md")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "agents_md":
+                ok, msg = inject_instructions(project_root / "AGENTS.md")
+                if emit is not None:
+                    emit(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
+            elif fix_key == "context_md":
+                # Regenerate filigree's own generated snapshot. Open the DB via
+                # the v2.0 anchor-aware constructors (not get_db(), which
+                # sys.exits past this try/except on a broken DB); a genuine DB
+                # failure then surfaces as "Cannot fix context.md" and the loop
+                # continues rather than aborting the whole doctor run.
+                conf_path = project_root / CONF_FILENAME
+                db = (
+                    FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+                    if conf_path.is_file()
+                    else FiligreeDB.from_store_dir(filigree_dir, project_root=project_root)
+                )
+                try:
+                    write_summary(db, filigree_dir / SUMMARY_FILENAME)
+                finally:
+                    db.close()
+                ok, msg = True, "Regenerated context.md"
+                if emit is not None:
+                    emit(f"  OK {r.name}: {msg}")
+            if ok:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
+
+    # Stale server-registry entries (vanished project directories) carry a
+    # dynamic, non-unique check name (``Project "<prefix>"``), so they can't be
+    # routed by the name-keyed table above. Route them by their stable ``code``
+    # and unregister by the exact stored key in one locked pass. Safe to clean
+    # because the project re-registers itself on its next use; only gone-dir
+    # entries reach here (see _doctor_server_checks).
+    orphans: list[CheckResult] = []
+    orphan_keys: list[str] = []
+    for r in results:
+        target = r.fix_target
+        if not r.passed and r.code == "server_registry_orphan" and target is not None:
+            orphans.append(r)
+            orphan_keys.append(target)
+    if orphan_keys:
+        from filigree.server import unregister_projects
+
+        try:
+            removed = unregister_projects(orphan_keys)
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot clean stale server registry: {e}", err=True)
+            removed = set()
+        for r in orphans:
+            if r.fix_target in removed:
+                fixed += 1
+                fixed_check_ids.add(doctor_check_id(r))
+                fixed_check_names.add(r.name)
+                if emit is not None:
+                    emit(f"  OK {r.name}: Unregistered stale project {r.fix_target}")
+
+    return fixed, fixed_check_ids, fixed_check_names
+
+
 @click.command()
 @click.option("--fix", is_flag=True, help="Auto-fix issues where possible")
 @click.option("--verbose", is_flag=True, help="Show all checks including passed")
-def doctor(fix: bool, verbose: bool) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable doctor summary")
+def doctor(fix: bool, verbose: bool, as_json: bool) -> None:
     """Run health checks on the filigree installation."""
     from filigree.install import run_doctor
-    from filigree.summary import write_summary as _write_summary
 
     results = run_doctor()
 
     passed = sum(1 for r in results if r.passed)
     failed = sum(1 for r in results if not r.passed)
 
-    click.echo(f"filigree doctor  ──  {passed} passed  {failed} issues")
-    click.echo()
+    if not as_json:
+        click.echo(f"filigree doctor  ──  {passed} passed  {failed} issues")
+        click.echo()
 
-    for r in results:
-        if r.passed and not verbose:
-            continue
-        icon = "OK" if r.passed else "!!"
-        click.echo(f"  {icon}  {r.name}: {r.message}")
-        if not r.passed and r.fix_hint:
-            click.echo(f"       -> {r.fix_hint}")
+        for r in results:
+            if r.passed and not verbose:
+                continue
+            icon = "OK" if r.passed else "!!"
+            click.echo(f"  {icon}  {r.name}: {r.message}")
+            if not r.passed and r.fix_hint:
+                click.echo(f"       -> {r.fix_hint}")
 
     # Schema-mismatch (v+1) is a distinct exit code (3) from generic check
     # failures (1). Don't attempt --fix on this — there's nothing to fix
     # forward when the DB is newer than the installed filigree.
     if any(r.code == "schema_mismatch_forward" for r in results):
+        if as_json:
+            _emit_doctor_json(results)
         sys.exit(3)
 
     fixed = 0
+    fixed_check_ids: set[str] = set()
+    fixed_check_names: set[str] = set()
     if fix and failed > 0:
-        click.echo("\nApplying fixes...")
+        if not as_json:
+            click.echo("\nApplying fixes...")
         try:
-            filigree_dir = find_filigree_root()
-        except ProjectNotInitialisedError as exc:
-            # filigree-dad647cf35: surface the rich ForeignDatabaseError
-            # message instead of the generic "Cannot fix" line, matching
-            # scanners.py and the run_doctor() check above.
-            click.echo(str(exc), err=True)
+            fixed, fixed_check_ids, fixed_check_names = _apply_doctor_fixes(results, emit=None if as_json else click.echo)
+        except click.ClickException:
+            if as_json:
+                _emit_doctor_json(results)
             sys.exit(1)
 
-        from filigree.install import (
-            ensure_gitignore,
-            inject_instructions,
-            install_claude_code_hooks,
-            install_claude_code_mcp,
-            install_codex_mcp,
-            install_codex_skills,
-            install_skills,
-        )
-
-        project_root = filigree_dir.parent
-        try:
-            mode = get_mode(filigree_dir)
-        except ValueError as exc:
-            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
-            mode = "ethereal"
-        server_port = 8377
-        if mode == "server":
-            try:
-                from filigree.server import read_server_config
-
-                server_port = read_server_config().port
-            except Exception:
-                logging.getLogger(__name__).debug("Failed to read server port for --fix; using default", exc_info=True)
-
-        # Map check names to their fix functions
-        fixable: dict[str, tuple[str, ...]] = {
-            "context.md": ("context.md",),
-            ".gitignore": ("gitignore",),
-            "Schema version": ("schema",),
-            "Claude Code MCP": ("claude_code_mcp",),
-            "Codex MCP": ("codex_mcp",),
-            "Claude Code hooks": ("hooks",),
-            "Claude Code skills": ("skills",),
-            "Codex skills": ("codex_skills",),
-            "CLAUDE.md": ("claude_md",),
-            "AGENTS.md": ("agents_md",),
-        }
-
-        for r in results:
-            if r.passed or r.name not in fixable:
-                continue
-
-            fix_key = fixable[r.name][0]
-            ok = False
-            try:
-                if fix_key == "context.md":
-                    with get_db() as db:
-                        _write_summary(db, filigree_dir / SUMMARY_FILENAME)
-                    click.echo(f"  OK  Fixed: {r.name}")
-                    ok = True
-                elif fix_key == "schema":
-                    # filigree-fa6309d551: route DB open through the v2.0
-                    # anchor-aware constructors. Without this, --fix would
-                    # initialize/migrate a phantom .filigree/filigree.db
-                    # while the project's actual DB (declared in the conf)
-                    # stays un-migrated.
-                    conf_path = project_root / CONF_FILENAME
-                    if conf_path.is_file():
-                        conf_data = read_conf(conf_path)
-                        db_path = (conf_path.parent / conf_data["db"]).resolve()
-                    else:
-                        db_path = filigree_dir / DB_FILENAME
-                    raw_conn = sqlite3.connect(str(db_path))
-                    try:
-                        old_ver = read_schema_version(raw_conn)
-                    finally:
-                        raw_conn.close()
-                    db = FiligreeDB.from_conf(conf_path) if conf_path.is_file() else FiligreeDB.from_filigree_dir(filigree_dir)
-                    try:
-                        new_ver = db.get_schema_version()
-                    finally:
-                        db.close()
-                    if new_ver > old_ver:
-                        click.echo(f"  OK  Schema upgraded v{old_ver} → v{new_ver}")
-                    else:
-                        click.echo(f"  OK  Schema already current (v{new_ver})")
-                    ok = True
-                elif fix_key == "gitignore":
-                    ok, msg = ensure_gitignore(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "claude_code_mcp":
-                    ok, msg = install_claude_code_mcp(project_root, mode=mode, server_port=server_port)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "codex_mcp":
-                    ok, msg = install_codex_mcp(project_root, mode=mode, server_port=server_port)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "hooks":
-                    ok, msg = install_claude_code_hooks(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "skills":
-                    ok, msg = install_skills(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "codex_skills":
-                    ok, msg = install_codex_skills(project_root)
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "claude_md":
-                    ok, msg = inject_instructions(project_root / "CLAUDE.md")
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                elif fix_key == "agents_md":
-                    ok, msg = inject_instructions(project_root / "AGENTS.md")
-                    click.echo(f"  {'OK' if ok else '!!'} {r.name}: {msg}")
-                if ok:
-                    fixed += 1
-            except Exception as e:
-                click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
-
         unfixed = failed - fixed
-        if unfixed > 0:
+        if unfixed > 0 and not as_json:
             click.echo(f"\n  Fixed {fixed}/{failed} issues. {unfixed} require manual intervention.")
+
+    if as_json:
+        _emit_doctor_json(results, fixed_check_ids=fixed_check_ids, fixed_check_names=fixed_check_names)
+        if failed == 0 or (fix and (failed - fixed) == 0):
+            return
+        sys.exit(1)
 
     if failed == 0:
         click.echo("\nAll checks passed.")
@@ -574,14 +800,14 @@ def migrate(from_beads: bool, beads_db: str | None) -> None:
     is_flag=True,
     help=(
         "Permit ``force=true`` on POST /api/batch/close and "
-        "POST /api/loom/batch/close. Off by default — HTTP callers cannot "
+        "POST /api/weft/batch/close. Off by default — HTTP callers cannot "
         "use the workflow escape lane unless explicitly opted in."
     ),
 )
 @click.option(
     "--allow-local-fallback",
     is_flag=True,
-    help="When registry_backend=clarion, route file auto-creates through the local registry for recovery.",
+    help="When registry_backend=loomweave, route file auto-creates through the local registry for recovery.",
 )
 def dashboard(
     port: int | None,
@@ -664,6 +890,71 @@ def ensure_dashboard_cmd(port: int | None) -> None:
         click.echo("Warning: ensure-dashboard hook failed (run with -v for details)", err=True)
 
 
+@click.command("rotate-federation-token")
+@click.option("--json", "as_json", is_flag=True, help="JSON output")
+def rotate_federation_token(as_json: bool) -> None:
+    """Rotate this project's federation bearer token (deconfliction plumbing).
+
+    Force-(re)writes ``<store>/federation_token`` with a fresh value (0600). The
+    supported way to recover from a tier-2 sibling lockout — e.g. a daemon pinned
+    to ``WEFT_FEDERATION_TOKEN`` while a *stale* file holds a different value, so
+    same-host siblings reading the file get 401. With the env var set, rotation
+    realigns the file to it; otherwise it mints a new secret.
+
+    NOT live: the token is resolved once at daemon boot and baked into the auth
+    middleware, so a running daemon keeps serving the OLD token until it (and any
+    siblings) restart. This command tells you when that is needed.
+    """
+    from filigree.federation_token import FEDERATION_TOKEN_FILENAME, mint_token_file, read_env_token
+
+    try:
+        anchor = find_filigree_anchor()
+    except ProjectNotInitialisedError as exc:
+        if as_json:
+            click.echo(json_mod.dumps({"error": str(exc), "code": "NOT_INITIALIZED"}))
+        else:
+            click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    store_dir = anchor.store_dir
+    mint_token_file(store_dir, rotate=True)
+    token_path = store_dir / FEDERATION_TOKEN_FILENAME
+    env_tok, env_name = read_env_token()
+
+    # Always advise a restart rather than keying off daemon liveness: an ethereal
+    # single-project daemon bakes its token at boot (so it needs a restart) but is
+    # tracked by a different PID file than the server daemon, so a liveness probe
+    # would under-warn it (a false "no restart needed"). A server-mode daemon
+    # re-reads each project's scoped token live, but its unscoped home token is
+    # also baked — so "restart to be sure" is never wrong, only sometimes
+    # unnecessary. The token rotated here is the PROJECT store's.
+    restart_hint = (
+        "restart any running daemon (`filigree server restart`, or close the ethereal dashboard) "
+        "and any sibling tools so they re-read the token"
+    )
+
+    if as_json:
+        click.echo(
+            json_mod.dumps(
+                {
+                    "rotated": True,
+                    "token_path": str(token_path),
+                    "env_pinned": bool(env_tok),
+                    "env_var": env_name,
+                    "restart_required": True,
+                    "next": restart_hint,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(f"Rotated federation token → {token_path}")
+    if env_tok:
+        click.echo(f"Note: {env_name} is set and takes precedence; the file was realigned to it.")
+    click.echo(f"Next: {restart_hint}.")
+
+
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="JSON output")
 @click.option(
@@ -737,6 +1028,36 @@ def import_data(input_file: str, merge: bool, allow_foreign_ids: bool) -> None:
         if result["skipped_types"]:
             for rtype, rcount in result["skipped_types"].items():
                 click.echo(f"  Warning: skipped {rcount} record(s) with unknown type {rtype!r}", err=True)
+
+
+@click.group("db")
+def db_group() -> None:
+    """Database maintenance commands."""
+
+
+@db_group.command("checkpoint")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def db_checkpoint(as_json: bool) -> None:
+    """Run PRAGMA wal_checkpoint(TRUNCATE) on the current project store."""
+    with get_db() as db:
+        try:
+            result = db.checkpoint_wal()
+        except (ValueError, sqlite3.Error) as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": str(e), "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Checkpoint failed: {e}", err=True)
+            sys.exit(1)
+    if as_json:
+        click.echo(json_mod.dumps(result, indent=2))
+        return
+
+    status = "busy" if result["busy"] else "checkpointed"
+    click.echo(
+        f"Database WAL {status}: {result['database']} "
+        f"(busy={result['checkpoint_busy']}, frames={result['checkpointed_frames']}/{result['log_frames']}, "
+        f"wal_bytes={result['wal_size_before']}->{result['wal_size_after']})"
+    )
 
 
 @click.command("archive")
@@ -819,9 +1140,11 @@ def register(cli: click.Group) -> None:
     cli.add_command(dashboard)
     cli.add_command(ensure_dashboard_cmd)
     cli.add_command(session_context)
+    cli.add_command(rotate_federation_token)
     cli.add_command(metrics)
     cli.add_command(export_data)
     cli.add_command(import_data)
+    cli.add_command(db_group)
     cli.add_command(archive)
     cli.add_command(compact)
     # clean-stale-findings: canonical grouped form ``finding clean-stale``; the

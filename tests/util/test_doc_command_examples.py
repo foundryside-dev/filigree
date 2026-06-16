@@ -69,43 +69,72 @@ def _option_tokens(command: click.Command) -> set[str]:
 ROOT_OPTS = _option_tokens(cli)
 
 
-def _iter_command_lines() -> list[tuple[Path, int, str]]:
-    """Yield (file, line_no, logical_line) for each `filigree …` invocation.
+def _has_unbalanced_quotes(s: str) -> bool:
+    """True when *s* cannot be tokenised because a quote is left open."""
+    try:
+        shlex.split(s)
+    except ValueError:
+        return True
+    return False
 
-    Only fenced bash/shell blocks are scanned. Backslash line continuations
-    are joined into one logical line. ``line_no`` points at the line where the
+
+def _command_lines_in_text(text: str, path: Path) -> list[tuple[Path, int, str]]:
+    """Extract (path, line_no, logical_line) for each `filigree …` invocation in
+    one doc's *text*.
+
+    Only fenced bash/shell blocks are scanned. Two kinds of line continuation are
+    joined into one logical line: trailing-``\\`` continuations, and open-quote
+    continuations — a quoted argument that spans newlines with no trailing
+    backslash (valid shell, e.g. a multi-line ``-d "…"`` body). Without the
+    latter the extractor would capture only the first fragment (quote left open),
+    which then fails ``shlex`` and is skipped, so the verb/options in multi-line
+    examples escape drift-checking. ``line_no`` points at the line where the
     invocation begins (1-based, within the file).
     """
+    out: list[tuple[Path, int, str]] = []
+    for fence in _FENCE_RE.finditer(text):
+        block = fence.group(1)
+        # 1-based line number in the file of the first block line.
+        block_start = text.count("\n", 0, fence.start(1)) + 1
+
+        raw_lines = block.split("\n")
+        i = 0
+        while i < len(raw_lines):
+            start_idx = i
+            # Join backslash continuations.
+            parts = [raw_lines[i]]
+            while raw_lines[i].rstrip().endswith("\\") and i + 1 < len(raw_lines):
+                parts[-1] = parts[-1].rstrip()[:-1]  # drop trailing backslash
+                i += 1
+                parts.append(raw_lines[i])
+            logical = " ".join(p.strip() for p in parts).strip()
+            # Join open-quote continuations: keep consuming raw lines (newline
+            # preserved inside the quote) until the quotes balance or the block
+            # ends. A still-unbalanced line at block end falls through and is
+            # captured anyway, so the validity test sees it and skips it.
+            while i + 1 < len(raw_lines) and _has_unbalanced_quotes(logical):
+                i += 1
+                logical = f"{logical}\n{raw_lines[i].rstrip()}"
+            i += 1
+
+            # Strip inline comments (everything after an unquoted '#').
+            logical = _strip_comment(logical)
+            if not logical:
+                continue
+            # Only validate filigree invocations.
+            if re.match(r"^filigree(\s|$)", logical):
+                out.append((path, block_start + start_idx, logical))
+    return out
+
+
+def _iter_command_lines() -> list[tuple[Path, int, str]]:
+    """Yield (file, line_no, logical_line) for each `filigree …` invocation across
+    the whole agent-facing doc surface (see ``_command_lines_in_text``)."""
     out: list[tuple[Path, int, str]] = []
     for path in DOC_FILES:
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8")
-        for fence in _FENCE_RE.finditer(text):
-            block = fence.group(1)
-            # 1-based line number in the file of the first block line.
-            block_start = text.count("\n", 0, fence.start(1)) + 1
-
-            raw_lines = block.split("\n")
-            i = 0
-            while i < len(raw_lines):
-                start_idx = i
-                # Join backslash continuations.
-                parts = [raw_lines[i]]
-                while raw_lines[i].rstrip().endswith("\\") and i + 1 < len(raw_lines):
-                    parts[-1] = parts[-1].rstrip()[:-1]  # drop trailing backslash
-                    i += 1
-                    parts.append(raw_lines[i])
-                logical = " ".join(p.strip() for p in parts).strip()
-                i += 1
-
-                # Strip inline comments (everything after an unquoted '#').
-                logical = _strip_comment(logical)
-                if not logical:
-                    continue
-                # Only validate filigree invocations.
-                if re.match(r"^filigree(\s|$)", logical):
-                    out.append((path, block_start + start_idx, logical))
+        out.extend(_command_lines_in_text(path.read_text(encoding="utf-8"), path))
     return out
 
 
@@ -137,6 +166,41 @@ def test_doc_surface_has_command_examples() -> None:
     assert len(COMMAND_LINES) >= 20, (
         f"Only found {len(COMMAND_LINES)} filigree examples across the doc surface; the extractor likely broke."
     )
+
+
+def test_multiline_quoted_command_is_assembled_not_skipped() -> None:
+    """A ``filigree`` example whose quoted argument spans newlines with NO trailing
+    backslash (valid shell — a literal newline inside ``"…"``) must be assembled
+    into one balanced logical line, so its verb/options are drift-checked rather
+    than captured as an unbalanced-quote fragment and skipped."""
+    text = '```bash\nfiligree add-comment <id> "Root cause: off-by-one.\nFixed in abc123. Tested boundaries."\n```\n'
+    lines = _command_lines_in_text(text, Path("synthetic.md"))
+    assert len(lines) == 1
+    logical = lines[0][2]
+    # Balanced now — shlex.split would raise on the old first-line-only fragment.
+    assert shlex.split(logical)[:2] == ["filigree", "add-comment"]
+
+
+def test_backslash_then_multiline_quote_is_assembled() -> None:
+    """Mixed continuation: ``\\``-continued option lines followed by a quoted
+    value that itself spans newlines (the workflow-patterns bug-report shape).
+    The whole command must assemble and parse."""
+    text = '```bash\nfiligree create "Short desc" \\\n  --type=bug \\\n  -d "Steps: ...\nExpected: ...\nActual: ..."\n```\n'
+    lines = _command_lines_in_text(text, Path("synthetic.md"))
+    assert len(lines) == 1
+    tokens = shlex.split(lines[0][2])
+    assert tokens[:2] == ["filigree", "create"]
+    assert "--type=bug" in tokens
+
+
+def test_genuinely_unbalanced_quote_still_extracts_for_skip() -> None:
+    """Safety valve preserved: an example whose quote never closes within the
+    block is still captured (so the validity test sees it and skips), not dropped."""
+    text = '```bash\nfiligree add-comment <id> "never closed\n```\n'
+    lines = _command_lines_in_text(text, Path("synthetic.md"))
+    assert len(lines) == 1
+    with pytest.raises(ValueError, match="No closing quotation"):
+        shlex.split(lines[0][2])
 
 
 @pytest.mark.parametrize(

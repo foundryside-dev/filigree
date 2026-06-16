@@ -19,7 +19,6 @@ import sqlite3
 import sys
 import time
 import weakref
-from collections import Counter
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -41,10 +40,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from filigree.core import (
     CONF_FILENAME,
-    FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
-    find_filigree_conf,
+    find_filigree_anchor,
+    resolve_store_dir,
 )
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
@@ -65,15 +64,8 @@ from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchEr
 server = Server("filigree")
 db: FiligreeDB | None = None
 _filigree_dir: Path | None = None
+_project_root: Path | None = None
 _logger: logging.Logger | None = None
-
-# Deprecation telemetry (rollout plan §5.3): count how often callers reach a
-# tool via its DEPRECATED OLD name (keyed by the inbound wire name) so we can
-# PROVE, before old names are removed in Phase 2, that consumers have migrated.
-# The count is exact: ``call_tool`` runs as an asyncio coroutine on the single
-# event-loop thread, and there is no ``await`` between the Counter read and
-# write, so each ``+= 1`` is uninterruptible — the GIL is not relied upon.
-_deprecated_tool_calls: Counter[str] = Counter()
 
 _request_db: ContextVar[FiligreeDB | None] = ContextVar("filigree_request_db", default=None)
 _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_dir", default=None)
@@ -84,9 +76,9 @@ _request_filigree_dir: ContextVar[Path | None] = ContextVar("filigree_request_di
 # structured ErrorResponse(code=SCHEMA_MISMATCH). Cleared on successful init.
 _schema_mismatch: SchemaVersionMismatchError | None = None
 
-# Set when Clarion advertises an incompatible registry API version at startup.
+# Set when Loomweave advertises an incompatible registry API version at startup.
 # Mirrors schema-mismatch degraded mode: list_tools stays available, while
-# call_tool surfaces a structured CLARION_REGISTRY_VERSION_MISMATCH envelope.
+# call_tool surfaces a structured LOOMWEAVE_REGISTRY_VERSION_MISMATCH envelope.
 _registry_startup_error: RegistryVersionMismatchError | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing
@@ -128,21 +120,24 @@ def _get_filigree_dir() -> Path | None:
     return _request_filigree_dir.get() or _filigree_dir
 
 
-def _resolve_request_filigree_dir(active_db: FiligreeDB) -> Path:
-    """Return the project metadata directory (``project_root/.filigree``)
-    for the active per-request DB, used to anchor ``_safe_path()``.
+def _get_project_root(active_db: FiligreeDB | None = None) -> Path | None:
+    if active_db is not None and active_db.project_root is not None:
+        return active_db.project_root
+    return _project_root
 
-    For v2.0 conf-built DBs the ``db`` may be relocated outside ``.filigree/``,
-    so ``db_path.parent`` is the project root, not the metadata dir; using it
-    as the anchor would let ``_safe_path()`` resolve up one level into the
-    project's parent. ``FiligreeDB.project_root`` is the source of truth — both
-    ``from_filigree_dir`` and ``from_conf`` set it. Fall back to
-    ``db_path.parent`` only for legacy direct ``FiligreeDB(...)`` constructions
-    that did not set ``project_root`` (chiefly older tests).
+
+def _resolve_request_filigree_dir(active_db: FiligreeDB) -> Path:
+    """Return the project metadata/store directory for the active per-request
+    DB, used to anchor ``_safe_path()``.
+
+    For v2.0 conf-built DBs the ``db`` may be relocated outside the store dir,
+    so ``db_path.parent`` is not necessarily the metadata dir; using it as the
+    anchor would let ``_safe_path()`` resolve into the wrong directory.
+    ``FiligreeDB.meta_dir`` is the source of truth — the anchor-aware
+    constructors (``from_anchor`` / ``from_conf`` / ``from_filigree_dir``) set it
+    to the resolved store dir (``.weft/filigree/`` or legacy ``.filigree/``).
     """
-    if active_db.project_root is not None:
-        return active_db.project_root / FILIGREE_DIR_NAME
-    return active_db.db_path.parent
+    return active_db.meta_dir
 
 
 def _refresh_summary() -> None:
@@ -207,38 +202,14 @@ def _safe_path(raw: str) -> Path:
     """
     from filigree.paths import safe_path
 
-    filigree_dir = _get_filigree_dir()
-    if filigree_dir is None:
+    # Anchor on the active DB's authoritative project_root (set by the anchor-aware
+    # constructors). Reverse-deriving it from the store dir is wrong for a
+    # multi-segment weft.toml store_dir override (I2).
+    active_db = _request_db.get() or db
+    if active_db is None or active_db.project_root is None:
         msg = "Project directory not initialized"
         raise ValueError(msg)
-    return safe_path(raw, filigree_dir.parent)
-
-
-def _record_deprecated_tool_call(wire_name: str, arguments: dict[str, Any]) -> None:
-    """Record that a caller reached a tool via its deprecated OLD name.
-
-    Best-effort: increment the per-wire-name counter and emit a structured
-    ``deprecated_tool_name`` log event (matching the ``tool_call``/``tool_error``
-    style elsewhere in this module). ``wire_name`` is guaranteed to be a key of
-    ``RENAME_MAP`` by the caller's detection guard.
-
-    Runs before the handler's try/except in ``call_tool``, so it is wrapped in a
-    blanket guard: telemetry must NEVER break a real tool call.
-    """
-    try:
-        _deprecated_tool_calls[wire_name] += 1
-        if _logger:
-            _logger.info(
-                "deprecated_tool_name",
-                extra={
-                    "tool": wire_name,
-                    "canonical": RENAME_MAP[wire_name],
-                    "actor": arguments.get("actor"),
-                },
-            )
-    except Exception:
-        # Telemetry is best-effort; never break a tool call.
-        pass
+    return safe_path(raw, active_db.project_root)
 
 
 def get_mcp_status_payload() -> dict[str, Any]:
@@ -250,6 +221,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
     """
     active_db = _request_db.get() or db
     filigree_dir = _get_filigree_dir()
+    project_root = _get_project_root(active_db)
     installed = CURRENT_SCHEMA_VERSION
 
     if _schema_mismatch is not None:
@@ -262,6 +234,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.SCHEMA_MISMATCH,
             "error": str(_schema_mismatch),
             "guidance": format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -277,7 +250,8 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": response["code"],
             "error": response["error"],
             "details": response.get("details"),
-            "guidance": "Upgrade Filigree or Clarion so their registry API versions match.",
+            "guidance": "Upgrade Filigree or Loomweave so their registry API versions match.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -292,6 +266,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.IO,
             "error": str(_db_open_error),
             "guidance": "Run `filigree doctor` for diagnosis.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -306,6 +281,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.NOT_INITIALIZED,
             "error": "Database not initialized",
             "guidance": "Run `filigree init` in the project, then restart MCP.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -322,6 +298,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.IO,
             "error": str(exc),
             "guidance": "Run `filigree doctor` for diagnosis.",
+            "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
         }
@@ -336,14 +313,26 @@ def get_mcp_status_payload() -> dict[str, Any]:
         "code": None if compatible else ErrorCode.SCHEMA_MISMATCH,
         "error": None if compatible else f"Database schema v{database_version} is newer than installed v{installed}",
         "guidance": None if compatible else format_schema_mismatch_guidance(installed, database_version),
+        "project_root": str(project_root) if project_root is not None else None,
         "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
         "runtime": _runtime_diagnostics(),
-        # Deprecation-readiness signal (plan §5.3): old-name usage counts.
-        # Surfaced only on the healthy path; degraded payloads above report
-        # *why* the connector is degraded, not migration telemetry.
-        "deprecated_tool_name_calls": {
-            "total": sum(_deprecated_tool_calls.values()),
-            "by_name": dict(_deprecated_tool_calls),
+        # ADR-012 actor-verification posture, derived from the *actual* session
+        # state so it is truthful per transport: MCP-stdio stamps the OS actor
+        # (verified), MCP-HTTP resolves a project DB with no stamp (NULL = the
+        # actor is a self-asserted claim, never silently treated as verified).
+        # Makes the unverified state programmatically discoverable on the only
+        # MCP-visible surface (tool results carry no HTTP headers) and names the
+        # deferral; authentication itself is filigree-81d3971467, not this signal.
+        "actor_verification": {
+            "verified": active_db._verified_actor is not None,
+            "verified_actor": active_db._verified_actor,
+            "deferral": "filigree-81d3971467",
+            "note": (
+                "verified_actor/verified_author are stamped only when the transport can vouch for the "
+                "caller (CLI / MCP-stdio stamp the OS identity). Over MCP-HTTP they are NULL and the "
+                "'actor' argument is an unauthenticated self-asserted claim; transport-bound identity "
+                "verification is deferred to filigree-81d3971467."
+            ),
         },
     }
 
@@ -355,6 +344,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
 from filigree.mcp_tools import (  # noqa: E402, I001  — must come after globals
     annotations as _annotations_mod,
     entities as _entities_mod,
+    federation as _federation_mod,
     files as _files_mod,
     issues as _issues_mod,
     meta as _meta_mod,
@@ -391,6 +381,7 @@ for _mod in (
     _meta_mod,
     _observations_mod,
     _entities_mod,
+    _federation_mod,
 ):
     _tools, _handlers = _mod.register()
     _record_subsystem(_tools, _mod)
@@ -846,27 +837,33 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     t0 = time.monotonic()
 
-    # Canonicalize at the very top: callers may use the namespaced wire name
-    # (served by list_tools) OR the legacy old name. Resolve the new name back
-    # to its canonical (old) identity so EVERY downstream guard, dispatch, arg
-    # check, and log line operates on one name. Critically, this keeps the three
-    # ``name != "get_mcp_status"`` degraded-mode exemptions reachable via the new
-    # ``mcp_status_get`` name. Unknown names pass through unchanged to the
-    # NOT_FOUND fast-path below.
+    # Canonicalize at the very top: the namespaced ``<entity>_<verb>`` names
+    # served by ``list_tools`` are the ONLY accepted wire surface. Resolve each
+    # inbound new name to its canonical (old) internal identity so EVERY
+    # downstream guard, dispatch, arg check, and log line operates on one name.
+    # Critically, this keeps the three ``name != "get_mcp_status"`` degraded-mode
+    # exemptions reachable via the new ``mcp_status_get`` name.
     #
-    # Deprecation telemetry (plan §5.3): capture the inbound wire name BEFORE
-    # canonicalizing, then detect the deprecated-old-name case. A caller using
-    # the NEW name (``issue_get``) resolves to a different canonical name
-    # (``get_issue``) — not deprecated. A caller using the OLD name
-    # (``get_issue``) resolves to itself AND is a key of ``RENAME_MAP`` (has a
-    # successor) — deprecated. An unknown name resolves to itself but is not in
-    # ``RENAME_MAP``, so it is not recorded (it falls through to the NOT_FOUND
-    # fast-path). Recorded here, before the degraded-mode guards, so old-name
-    # usage is counted regardless of the call's eventual outcome.
-    wire_name = name
-    name = NEW_TO_OLD.get(name, name)
-    if name == wire_name and wire_name in RENAME_MAP:
-        _record_deprecated_tool_call(wire_name, arguments)
+    # Phase 2 (ADR-016, 3.0 major boundary): the legacy flat names were REMOVED
+    # here. A caller using one now gets the standard Unknown-tool NOT_FOUND
+    # envelope, exactly as a typo would (rename-plan §6.3). The old names are
+    # still the INTERNAL canonical handler keys — re-keying ``_all_handlers`` /
+    # ``TIER_MAP`` / ``_tool_argument_names`` to the new shape would silently
+    # collapse the tier markers and read-only/destructive hints (plan §5.1.1) —
+    # so a legacy name must be rejected explicitly: a bare passthrough would let
+    # it dispatch against its still-live handler key. The no-shadow invariant
+    # (``tests/mcp/test_rename_map.py``) guarantees old ∩ new = ∅, so a new name
+    # is never a ``RENAME_MAP`` key and a legacy name is never a ``NEW_TO_OLD``
+    # key — the two branches below are unambiguous.
+    canonical = NEW_TO_OLD.get(name)
+    if canonical is not None:
+        name = canonical
+    elif name in RENAME_MAP:
+        from filigree.mcp_tools.common import _text as _common_text
+
+        return _common_text({"error": f"Unknown tool: {name}", "code": ErrorCode.NOT_FOUND})
+    # else: a genuinely unknown name — left unchanged so it reaches the existing
+    # NOT_FOUND fast-path after the degraded-mode guards (prior behavior).
 
     # Warm-but-degraded mode: if startup detected a v+1 DB, every call_tool
     # short-circuits to a structured SCHEMA_MISMATCH envelope. list_tools
@@ -944,6 +941,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     async def _run() -> list[TextContent]:
         try:
             out: list[TextContent] = await handler(arguments)
+            # ADR-012: surface a non-blocking actor mismatch in the response
+            # envelope's ``warnings`` list. Best-effort — never break a tool call.
+            try:
+                from filigree import actor_identity
+                from filigree.mcp_tools.common import _inject_warnings
+
+                run_db = _request_db.get() or db
+                if run_db is not None:
+                    mismatch = actor_identity.actor_mismatch_warning(arguments.get("actor"), run_db._verified_actor)
+                    if mismatch is not None:
+                        out = _inject_warnings(out, [dict(mismatch)])
+            except Exception:
+                # Non-blocking by design (a mismatch must never break a tool
+                # call) but never silent: a systemic break here would make
+                # every MCP actor-mismatch invisible server-wide. See
+                # filigree-61127de02c.
+                logging.getLogger(__name__).debug("actor-mismatch warning injection failed", exc_info=True)
             return out
         except Exception:
             if _logger:
@@ -1115,16 +1129,17 @@ def create_mcp_app(
 # ---------------------------------------------------------------------------
 
 
-def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
+def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_root: Path | None = None) -> None:
     """Open the project DB, falling back to warm-but-degraded mode on v+1.
 
     When ``conf_path`` is provided, opens the DB declared by ``.filigree.conf``
     via :meth:`FiligreeDB.from_conf` so v2.0 relocated layouts (e.g.
-    ``db: "track.db"``) are honoured. Otherwise opens the legacy
-    ``.filigree/filigree.db`` via :meth:`FiligreeDB.from_filigree_dir`.
-    ``filigree_dir`` always remains the metadata directory
-    (``project_root/.filigree``) and anchors logs / summary / ephemeral PID
-    regardless of where the DB itself lives.
+    ``db: ".weft/filigree/filigree.db"``) are honoured. Otherwise opens the
+    legacy ``.filigree/filigree.db`` via :meth:`FiligreeDB.from_filigree_dir`.
+    ``filigree_dir`` is the resolved machine-owned **store** directory
+    (``.weft/filigree/`` or legacy ``.filigree/``); it anchors logs / summary /
+    ephemeral PID and is threaded into ``from_conf`` as the metadata dir so
+    config / runtime resolution agrees with the DB open.
 
     On a forward schema mismatch the server stays up: ``db`` remains ``None``,
     ``_schema_mismatch`` is set, and every ``call_tool`` short-circuits to a
@@ -1138,11 +1153,27 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None) -> None:
     instead of connection drop" was one bug-class wide before this fix.
     ``_run`` consults the sentinel after calling us and exits cleanly.
     """
-    global db, _filigree_dir, _schema_mismatch, _registry_startup_error, _db_open_error
+    global db, _filigree_dir, _project_root, _schema_mismatch, _registry_startup_error, _db_open_error
 
     _filigree_dir = filigree_dir
+    _project_root = project_root
     try:
-        db = FiligreeDB.from_conf(conf_path) if conf_path is not None else FiligreeDB.from_filigree_dir(filigree_dir)
+        if conf_path is not None:
+            db = FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+        else:
+            # Confless open. The project root is NOT recoverable from the store dir
+            # alone for a multi-segment weft.toml store_dir override; prefer the
+            # explicitly threaded root and fall back to the canonical anchor walk
+            # (which reads weft.toml) rather than reverse-deriving (I2).
+            resolved_root = project_root if project_root is not None else find_filigree_anchor(filigree_dir).project_root
+            db = FiligreeDB.from_store_dir(filigree_dir, project_root=resolved_root)
+        _project_root = db.project_root
+        # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
+        # session so every runtime insert records verified_actor. Resolution
+        # never raises and never blocks; None leaves verified_actor NULL.
+        from filigree import actor_identity
+
+        db.set_verified_actor(actor_identity.resolve_os_actor())
         _schema_mismatch = None
         _registry_startup_error = None
         _db_open_error = None
@@ -1171,22 +1202,24 @@ async def _run(project_path: Path | None) -> None:
         # CLI surface (cli_common.get_db) does and stdio MCP must agree, or
         # a v2.0 conf-relocated project gets two divergent databases.
         conf_path: Path | None = (project_path / CONF_FILENAME) if (project_path / CONF_FILENAME).is_file() else None
-        filigree_dir = project_path / FILIGREE_DIR_NAME
+        project_root = project_path
+        filigree_dir = resolve_store_dir(project_path)
         if not filigree_dir.is_dir():
             print(f"Error: {filigree_dir} not found. Run 'filigree init' first.", file=sys.stderr)
             sys.exit(1)
     else:
         try:
-            conf_path = find_filigree_conf()
+            anchor = find_filigree_anchor(include_legacy_dir=False)
         except FileNotFoundError as exc:
             # ProjectNotInitialisedError carries a message that points at
             # `filigree init` and `filigree doctor`.
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        project_root = conf_path.parent
-        filigree_dir = project_root / FILIGREE_DIR_NAME
+        project_root = anchor.project_root
+        filigree_dir = anchor.store_dir
+        conf_path = anchor.conf_path
 
-    _attempt_startup(filigree_dir, conf_path=conf_path)
+    _attempt_startup(filigree_dir, conf_path=conf_path, project_root=project_root)
 
     from filigree.logging import setup_logging
 

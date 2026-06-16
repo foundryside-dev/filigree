@@ -100,7 +100,7 @@ class TestCuratedCatalogue:
         # so translate across RENAME_MAP / NEW_TO_OLD when comparing.
         from filigree.mcp_tools.rename import NEW_TO_OLD, RENAME_MAP
 
-        data = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
+        data = _parse(await call_tool("workflow_guide_get", {"pack": "core"}))
         catalog = data["tool_catalog"]
 
         # Core list matches the central mapping exactly (served names).
@@ -124,7 +124,7 @@ class TestCuratedCatalogue:
         assert set(seen) == {RENAME_MAP[t.name] for t in _all_tools}
 
     async def test_catalog_lists_known_core_tools(self, mcp_db: FiligreeDB) -> None:
-        data = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
+        data = _parse(await call_tool("workflow_guide_get", {"pack": "core"}))
         core = set(data["tool_catalog"]["core"])
         # Served (namespaced) names — old names must be absent.
         for expected in ("work_ready", "work_start", "issue_update", "issue_close", "issue_create"):

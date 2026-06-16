@@ -5,6 +5,7 @@
 import {
   deleteIssueDep,
   fetchIssueDetail,
+  fetchIssueEntityAssociations,
   fetchIssueFiles,
   fetchSearch,
   fetchTransitions,
@@ -68,17 +69,22 @@ export async function openDetail(issueId) {
   let eventsData = [];
   let commentsData = [];
   let issueFilesData = [];
+  let entityAssociationsData = [];
   let staleBanner = "";
   try {
-    const [detailData, filesData] = await Promise.all([
+    const [detailData, filesData, entityAssocData] = await Promise.all([
       fetchIssueDetail(issueId),
       fetchIssueFiles(issueId),
+      fetchIssueEntityAssociations(issueId),
     ]);
     d = detailData;
     if (!d) throw new Error("Not found");
     eventsData = d.events || [];
     commentsData = d.comments || [];
     issueFilesData = Array.isArray(filesData) ? filesData : [];
+    entityAssociationsData = Array.isArray(entityAssocData?.associations)
+      ? entityAssocData.associations
+      : [];
   } catch (err) {
     console.warn("[detail] Failed to fetch issue detail, using cached data:", err);
     // Fall back to local data if detail endpoint fails
@@ -116,7 +122,7 @@ export async function openDetail(issueId) {
         `<span class="w-2 h-2 rounded-full shrink-0" style="background:${sc}"></span>` +
         `<span class="cursor-pointer flex-1" style="color:var(--accent)" role="button" tabindex="0" aria-label="Open blocker ${escHtml(det.title.slice(0, 40))}" onclick="openDetail('${safeBid}')">${escHtml(det.title.slice(0, 40))}</span>` +
         `<span style="color:var(--text-muted)">${escHtml(det.status || "")}</span>` +
-        `<button onclick="event.stopPropagation();removeDependency('${safeIssueId}','${safeBid}')" class="text-red-400 hover:text-red-300 ml-1" title="Remove dependency">&times;</button></div>`
+        `<button onclick="event.stopPropagation();removeDependency('${safeIssueId}','${safeBid}')" class="text-red-400 hover:text-red-300 ml-1" title="Remove dependency" aria-label="Remove dependency">&times;</button></div>`
       );
     })
     .join("");
@@ -171,6 +177,43 @@ export async function openDetail(issueId) {
         assoc +
         lang +
         "</div>"
+      );
+    })
+    .join("");
+  const entityAssocCounts = entityAssociationsData.reduce(
+    (acc, assoc) => {
+      if (assoc.orphan_status === "orphaned") acc.orphaned += 1;
+      if (assoc.freshness_status === "fresh") acc.fresh += 1;
+      else if (assoc.freshness_status === "stale") acc.stale += 1;
+      else acc.unknown += 1;
+      return acc;
+    },
+    { fresh: 0, stale: 0, unknown: 0, orphaned: 0 },
+  );
+  const entityAssociationsHtml = entityAssociationsData
+    .map((assoc) => {
+      const freshness = assoc.freshness_status || "unknown";
+      const orphaned = assoc.orphan_status === "orphaned";
+      // Only badge a *known* content-axis state. This forward (issue→entity)
+      // lookup never carries Loomweave's current hash, so freshness is always
+      // "unknown" here; rendering that literal is noise, so suppress it.
+      const freshnessBadge =
+        freshness === "fresh"
+          ? '<span class="text-emerald-400">fresh</span>'
+          : freshness === "stale"
+            ? '<span class="text-amber-300">stale</span>'
+            : "";
+      const kind = assoc.entity_kind
+        ? `<span class="text-[11px]" style="color:var(--text-muted)">${escHtml(assoc.entity_kind)}</span>`
+        : "";
+      return (
+        '<div class="text-xs rounded px-2 py-1 mb-1" style="background:var(--surface-base)">' +
+        '<div class="flex items-center gap-2">' +
+        `<span class="truncate flex-1" style="color:var(--text-primary)">${escHtml(assoc.entity_id || assoc.loomweave_entity_id || "")}</span>` +
+        kind +
+        freshnessBadge +
+        (orphaned ? '<span class="text-red-300">orphaned</span>' : "") +
+        "</div></div>"
       );
     })
     .join("");
@@ -235,6 +278,14 @@ export async function openDetail(issueId) {
     (issueFilesData.length
       ? '<div class="mb-3"><div class="text-xs font-medium mb-1" style="color:var(--text-secondary)">Associated Files</div>' +
         issueFilesHtml +
+        "</div>"
+      : "") +
+    (entityAssociationsData.length
+      ? '<div class="mb-3"><div class="text-xs font-medium mb-1" style="color:var(--text-secondary)">Entity Associations</div>' +
+        `<div class="text-[11px] mb-1" style="color:var(--text-muted)">${entityAssociationsData.length} total` +
+        (entityAssocCounts.stale ? ` &middot; ${entityAssocCounts.stale} stale` : "") +
+        ` &middot; ${entityAssocCounts.orphaned} orphaned</div>` +
+        entityAssociationsHtml +
         "</div>"
       : "") +
     (commentsData.length

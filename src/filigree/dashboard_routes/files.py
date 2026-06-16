@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -16,11 +17,12 @@ if TYPE_CHECKING:
 from starlette.requests import Request
 
 from filigree.core import (
-    FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     VALID_ASSOC_TYPES,
     VALID_FINDING_STATUSES,
     VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
     FiligreeDB,
 )
 from filigree.dashboard_routes.common import (
@@ -31,6 +33,7 @@ from filigree.dashboard_routes.common import (
     _safe_int,
     _validate_actor,
 )
+from filigree.issue_payloads import issue_to_public
 from filigree.registry import (
     REGISTRY_BACKEND_FEATURES,
     RegistryBriefingBlockedError,
@@ -40,18 +43,28 @@ from filigree.registry import (
 )
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode
-from filigree.types.core import AssocType, FindingStatus, Severity
+from filigree.types.core import AssocType, FindingStatus, Severity, make_issue_id
 
 logger = logging.getLogger(__name__)
 
 _MAX_MIN_FINDINGS = 2_147_483_647
 _MAX_SCAN_FINDINGS_PER_REQUEST = 1000
+_MAX_SCANNED_PATHS_PER_REQUEST = 100_000
 _MAX_SCAN_FINDING_TEXT_LENGTH = 20_000
 _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity", "language", "suggestion", "fingerprint"})
+_SCAN_RESULTS_CHUNKING_GUIDANCE = "Split larger scan output into multiple POST /api/weft/scan-results requests."
+
+
+@dataclass(frozen=True)
+class _ScanResultsBodyError:
+    error: str
+    status_code: int = 400
+    details: dict[str, Any] | None = None
+
 
 # CONTRACT-E: the worker-thread DB paths (scan-results ingest across the three
 # router factories, and the findings/clean-stale sweep) run via
-# asyncio.to_thread so the event loop stays responsive during the Clarion HTTP
+# asyncio.to_thread so the event loop stays responsive during the Loomweave HTTP
 # wait / bulk write. They do their DB work on a PRIVATE connection obtained from
 # FiligreeDB.borrow_for_worker_thread() — NOT the shared event-loop connection.
 # That closes the cross-thread shared-connection race for good: the connection
@@ -71,9 +84,9 @@ _SCAN_FINDING_TEXT_FIELDS = frozenset({"path", "rule_id", "message", "severity",
 # ``busy_timeout`` (5 s) makes the loser wait for the brief write window rather
 # than raise SQLITE_BUSY. No application-level lock is taken, so the worker
 # paths run fully in parallel right up to that window — the bulk of each call
-# (the Clarion HTTP resolution, which happens BEFORE any write transaction
+# (the Loomweave HTTP resolution, which happens BEFORE any write transaction
 # opens) overlaps freely. The shared registry's ``httpx.Client`` is safe for
-# concurrent use, so two workers may resolve against Clarion simultaneously.
+# concurrent use, so two workers may resolve against Loomweave simultaneously.
 # The post-commit clean-stale finding→issue close cascade re-checks that the
 # finding is still ``fixed`` inside its own writer transaction before closing
 # the issue, so a concurrent re-ingest cannot leave an open finding on a newly
@@ -94,7 +107,7 @@ def _ingest_scan_results_on_private_conn(db: FiligreeDB, parsed: dict[str, Any])
 
 def _refresh_summary_for_db(db: FiligreeDB) -> None:
     """Best-effort context.md refresh after dashboard mutations."""
-    filigree_dir = db.project_root / FILIGREE_DIR_NAME if db.project_root is not None else db.db_path.parent
+    filigree_dir = db.meta_dir
     try:
         write_summary(db, filigree_dir / SUMMARY_FILENAME)
     except FileNotFoundError:
@@ -122,20 +135,25 @@ def _promote_finding_on_private_conn(
     priority: int | None,
     labels: list[str] | None,
     actor: str,
+    force: bool = False,
+    attach_entity: bool = True,
 ) -> dict[str, Any] | None:
     """Resolve ``(scan_source, fingerprint)`` → finding and promote it.
 
     Runs on a private worker-thread connection (CONTRACT-E) — the resolve and
     the promote (an issue write) share the SAME borrowed connection so it is
-    never used cross-thread. Returns ``{"issue_id", "created"}`` or ``None``
-    when no finding matches the fingerprint.
+    never used cross-thread. Returns ``{"issue_id", "created",
+    "entity_attachment", ...}`` or ``None`` when no finding matches the
+    fingerprint.
     """
     with db.borrow_for_worker_thread() as worker_db:
         finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
         if finding is None:
             return None
         try:
-            result = worker_db.promote_finding_to_issue(finding["id"], priority=priority, labels=labels, actor=actor)
+            result = worker_db.promote_finding_to_issue(
+                finding["id"], priority=priority, labels=labels, actor=actor, force=force, attach_entity=attach_entity
+            )
         except KeyError:
             # promote_finding_to_issue re-reads the finding (``get_finding``)
             # before it writes. A concurrent hard-delete in the window between
@@ -150,7 +168,56 @@ def _promote_finding_on_private_conn(
             if worker_db.find_finding_by_fingerprint(scan_source, fingerprint) is None:
                 return None
             raise
-        return {"issue_id": result["issue"].id, "created": result["created"]}
+        response: dict[str, Any] = {
+            "issue_id": result["issue"].id,
+            "created": result["created"],
+            # C-10 honesty: always say what the default entity attach did (or
+            # exactly why it did nothing) — never a silent skip.
+            "entity_attachment": result.get("entity_attachment"),
+        }
+        if result.get("association") is not None:
+            response["association"] = dict(result["association"])
+        if result.get("warnings"):
+            response["warnings"] = result["warnings"]
+        return response
+
+
+def _promote_finding_and_attach_on_private_conn(
+    db: FiligreeDB,
+    *,
+    scan_source: str,
+    fingerprint: str,
+    entity_id: str,
+    content_hash: str,
+    priority: int | None,
+    labels: list[str] | None,
+    actor: str,
+    entity_kind: str | None,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve ``(scan_source, fingerprint)`` then promote and attach an entity."""
+    with db.borrow_for_worker_thread() as worker_db:
+        finding = worker_db.find_finding_by_fingerprint(scan_source, fingerprint)
+        if finding is None:
+            return None
+        result = worker_db.promote_finding_and_attach_entity(
+            finding["id"],
+            entity_id,
+            content_hash,
+            priority=priority,
+            labels=labels,
+            actor=actor,
+            entity_kind=entity_kind,
+            force=force,
+        )
+        response: dict[str, Any] = {
+            "issue_id": result["issue"].id,
+            "created": result["created"],
+            "association": dict(result["association"]),
+        }
+        if result.get("warnings"):
+            response["warnings"] = result["warnings"]
+        return response
 
 
 def _parse_promote_priority(raw: Any) -> tuple[int | None, str | None]:
@@ -186,45 +253,88 @@ def _registry_resolution_error_response(exc: RegistryResolutionError) -> JSONRes
 # ---------------------------------------------------------------------------
 
 
-def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
+def _scan_results_limits_payload() -> dict[str, int | str]:
+    return {
+        "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
+        "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
+        "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
+        "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
+    }
+
+
+def _scan_results_body_error(error: str, *, status_code: int = 400, details: dict[str, Any] | None = None) -> _ScanResultsBodyError:
+    return _ScanResultsBodyError(error=error, status_code=status_code, details=details)
+
+
+def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | _ScanResultsBodyError:
     """Validate the scan-results request body.
 
-    Shared by the classic ``POST /api/v1/scan-results`` handler and the loom
-    ``POST /api/loom/scan-results`` handler — both generations accept the
+    Shared by the classic ``POST /api/v1/scan-results`` handler and the weft
+    ``POST /api/weft/scan-results`` handler — both generations accept the
     same request shape; only the response envelope differs (per ADR-002 §6
-    and the loom contract fixture). Returns the kwargs dict to splat into
-    ``db.process_scan_results`` on success, or an error string on validation
-    failure (caller wraps it in a 400 ``ErrorCode.VALIDATION`` response).
+    and the weft contract fixture). Returns the kwargs dict to splat into
+    ``db.process_scan_results`` on success, or a structured validation error
+    describing the failed contract.
     """
     scan_source = body.get("scan_source", "")
     if not isinstance(scan_source, str) or not scan_source:
-        return "scan_source is required and must be a string"
+        return _scan_results_body_error("scan_source is required and must be a string")
     if "findings" not in body:
-        return "findings is required (use [] for a clean scan)"
+        return _scan_results_body_error("findings is required (use [] for a clean scan)")
     findings = body["findings"]
     if not isinstance(findings, list):
-        return "findings must be a JSON array"
+        return _scan_results_body_error("findings must be a JSON array")
     if len(findings) > _MAX_SCAN_FINDINGS_PER_REQUEST:
-        return f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings"
+        return _scan_results_body_error(
+            f"findings must contain at most {_MAX_SCAN_FINDINGS_PER_REQUEST} findings",
+            status_code=413,
+            details={
+                "field": "findings",
+                "limit": _MAX_SCAN_FINDINGS_PER_REQUEST,
+                "actual": len(findings),
+                "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
+            },
+        )
     for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
-            return f"findings[{index}] must be a JSON object"
+            return _scan_results_body_error(f"findings[{index}] must be a JSON object")
         for field_name in _SCAN_FINDING_TEXT_FIELDS:
             value = finding.get(field_name)
             if isinstance(value, str) and len(value) > _MAX_SCAN_FINDING_TEXT_LENGTH:
-                return f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
+                return _scan_results_body_error(
+                    f"findings[{index}] {field_name} must be at most {_MAX_SCAN_FINDING_TEXT_LENGTH} characters"
+                )
     mark_unseen = body.get("mark_unseen", False)
     if not isinstance(mark_unseen, bool):
-        return "mark_unseen must be a boolean"
+        return _scan_results_body_error("mark_unseen must be a boolean")
     create_observations = body.get("create_observations", False)
     if not isinstance(create_observations, bool):
-        return "create_observations must be a boolean"
+        return _scan_results_body_error("create_observations must be a boolean")
     complete_scan_run = body.get("complete_scan_run", True)
     if not isinstance(complete_scan_run, bool):
-        return "complete_scan_run must be a boolean"
+        return _scan_results_body_error("complete_scan_run must be a boolean")
     scan_run_id = body.get("scan_run_id", "")
     if not isinstance(scan_run_id, str):
-        return "scan_run_id must be a string"
+        return _scan_results_body_error("scan_run_id must be a string")
+    # scanned_paths: the authoritative scanned-file set (incl. clean files with
+    # no findings) so the absent-fingerprint sweep can reconcile a file whose
+    # last finding disappeared — the close-on-fixed cascade's clean-file signal.
+    # Optional; a body without it yields [] (back-compat with classic callers).
+    scanned_paths = body.get("scanned_paths", [])
+    if not isinstance(scanned_paths, list):
+        return _scan_results_body_error("scanned_paths must be a JSON array")
+    if len(scanned_paths) > _MAX_SCANNED_PATHS_PER_REQUEST:
+        return _scan_results_body_error(f"scanned_paths must contain at most {_MAX_SCANNED_PATHS_PER_REQUEST} paths")
+    for index, scanned_path in enumerate(scanned_paths):
+        if not isinstance(scanned_path, str) or not scanned_path:
+            return _scan_results_body_error(f"scanned_paths[{index}] must be a non-empty string")
+    # fingerprint_scheme: the scanner-declared fingerprint identity scheme (e.g.
+    # wardline's 'wlfp2'). Recorded per scan_source and compared on each ingest so
+    # a silent scheme bump cannot cascade-close prior-scheme findings as fixed
+    # (Weft seam G4 / PDR-0023). Optional; absent → '' (legacy callers proceed).
+    fingerprint_scheme = body.get("fingerprint_scheme", "")
+    if not isinstance(fingerprint_scheme, str):
+        return _scan_results_body_error("fingerprint_scheme must be a string")
     return {
         "scan_source": scan_source,
         "findings": findings,
@@ -232,6 +342,8 @@ def _parse_scan_results_body(body: dict[str, Any]) -> dict[str, Any] | str:
         "mark_unseen": mark_unseen,
         "create_observations": create_observations,
         "complete_scan_run": complete_scan_run,
+        "scanned_paths": scanned_paths,
+        "fingerprint_scheme": fingerprint_scheme,
     }
 
 
@@ -307,16 +419,21 @@ def create_classic_router() -> APIRouter:
             "valid_severities": sorted(VALID_SEVERITIES),
             "valid_finding_statuses": sorted(VALID_FINDING_STATUSES),
             "valid_association_types": sorted(VALID_ASSOC_TYPES),
+            # FIL-2/X-5: the nested wardline finding-filter axes, advertised so a
+            # federation consumer can discover them without reading source.
+            "valid_finding_kinds": sorted(VALID_WARDLINE_FINDING_KINDS),
+            "valid_suppression_filters": sorted(VALID_SUPPRESSION_FILTERS),
             "valid_file_sort_fields": ["first_seen", "language", "path", "updated_at"],
             "valid_finding_sort_fields": ["severity", "updated_at"],
             "config_flags": {
                 "registry_backend": db.registry_backend,
                 "registry_backend_features": list(REGISTRY_BACKEND_FEATURES),
                 "allow_local_fallback": db.allow_local_fallback,
-                "clarion_instance_id": db.clarion_instance_id,
-                "clarion_api_version": db.clarion_api_version,
-                "clarion_instance_rotated": db.clarion_instance_rotated,
+                "loomweave_instance_id": db.loomweave_instance_id,
+                "loomweave_api_version": db.loomweave_api_version,
+                "loomweave_instance_rotated": db.loomweave_instance_rotated,
             },
+            "scan_results_limits": _scan_results_limits_payload(),
             "endpoints": [
                 {
                     "method": "POST",
@@ -326,10 +443,17 @@ def create_classic_router() -> APIRouter:
                     "request_body": {
                         "scan_source": "string (required)",
                         "findings": "array (required)",
-                        "scan_run_id": "string (optional)",
+                        "scan_run_id": (
+                            "string (optional). Send a globally unique non-empty scan_run_id when this POST should appear "
+                            "in /api/scan-runs history; empty is accepted for fire-and-forget findings and intentionally excluded."
+                        ),
                         "mark_unseen": "boolean (optional)",
                         "create_observations": "boolean (optional, default false)",
                         "complete_scan_run": "boolean (optional, default true)",
+                        "max_findings_per_request": _MAX_SCAN_FINDINGS_PER_REQUEST,
+                        "max_scanned_paths_per_request": _MAX_SCANNED_PATHS_PER_REQUEST,
+                        "max_finding_text_length": _MAX_SCAN_FINDING_TEXT_LENGTH,
+                        "chunking_guidance": _SCAN_RESULTS_CHUNKING_GUIDANCE,
                     },
                 },
                 {"method": "GET", "path": "/api/files", "description": "List tracked files", "status": "live"},
@@ -517,11 +641,11 @@ def create_classic_router() -> APIRouter:
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent
@@ -536,7 +660,14 @@ def create_classic_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
-        return JSONResponse(result)
+        # The classic envelope shape is frozen (ADR-002) and predates the
+        # PDR-0023 weft-reason carrier. ``weft_reasons`` is a weft-generation
+        # field; the G4 scheme handshake is driven by the weft route (wardline
+        # emits there), so a classic caller never declares fingerprint_scheme
+        # and this list is always empty here. Strip it to keep the classic
+        # response byte-identical to its pinned shape.
+        classic_result = {k: v for k, v in result.items() if k != "weft_reasons"}
+        return JSONResponse(classic_result)
 
     @router.get("/scan-runs")
     async def api_scan_runs(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
@@ -555,32 +686,32 @@ def create_classic_router() -> APIRouter:
     return router
 
 
-def create_loom_router() -> APIRouter:
-    """Build the loom-generation APIRouter for file tracking and scan
+def create_weft_router() -> APIRouter:
+    """Build the weft-generation APIRouter for file tracking and scan
     findings endpoints.
 
-    Phase C1 mounts ``POST /api/loom/scan-results`` per the fixture at
-    ``tests/fixtures/contracts/loom/scan-results.json``. Subsequent
-    Phase C tasks add the rest of the loom file/findings surface.
+    Phase C1 mounts ``POST /api/weft/scan-results`` per the fixture at
+    ``tests/fixtures/contracts/weft/scan-results.json``. Subsequent
+    Phase C tasks add the rest of the weft file/findings surface.
     """
     from fastapi import APIRouter, Depends
     from fastapi.responses import JSONResponse
 
     from filigree.dashboard import _get_db
-    from filigree.generations.loom.adapters import (
-        file_record_to_loom,
+    from filigree.generations.weft.adapters import (
+        file_record_to_weft,
         list_response,
-        scan_finding_to_loom,
-        scan_ingest_result_to_loom,
-        scanner_config_to_loom,
+        scan_finding_to_weft,
+        scan_ingest_result_to_weft,
+        scanner_config_to_weft,
     )
     from filigree.scanners import list_scanners
 
     router = APIRouter()
 
     @router.post("/scan-results")
-    async def api_loom_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Ingest scan results — loom envelope.
+    async def api_weft_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Ingest scan results — weft envelope.
 
         Equivalent to /api/scan-results as of 2026-04-26.
         """
@@ -588,11 +719,11 @@ def create_loom_router() -> APIRouter:
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent
@@ -607,14 +738,14 @@ def create_loom_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
-        return JSONResponse(scan_ingest_result_to_loom(result))
+        return JSONResponse(scan_ingest_result_to_weft(result))
 
     @router.get("/files")
-    async def api_loom_list_files(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List tracked files — ``ListResponse[FileRecordLoom]``.
+    async def api_weft_list_files(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """List tracked files — ``ListResponse[FileRecordWeft]``.
 
         Classic ``GET /api/files`` returns ``PaginatedResult`` with
-        ``{results, total, limit, offset, has_more}``. Loom drops
+        ``{results, total, limit, offset, has_more}``. Weft drops
         ``total``, ``limit``, ``offset`` from the envelope per the
         unified ``ListResponse`` contract — consumers paginate via
         ``next_offset``. Filter query params (``language``,
@@ -643,18 +774,26 @@ def create_loom_router() -> APIRouter:
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        items = [file_record_to_loom(r) for r in result["results"]]
+        items = [file_record_to_weft(r) for r in result["results"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
     @router.get("/findings")
-    async def api_loom_list_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Project-wide findings list — ``ListResponse[ScanFindingLoom]``.
+    async def api_weft_list_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Project-wide findings list — ``ListResponse[ScanFindingWeft]``.
 
-        Loom-only (no classic dashboard counterpart at this path).
-        Mirrors MCP ``list_findings`` filters: ``severity``, ``status``,
-        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``, plus
-        ``fingerprint`` (lets a scanner confirm a finding's issue link without
-        re-promoting). Drops MCP's ``total`` field per the unified envelope.
+        Weft-only (no classic dashboard counterpart at this path).
+        Mirrors MCP ``list_findings`` filter *keys*: ``severity``, ``status``,
+        ``scan_source``, ``scan_run_id``, ``file_id``, ``issue_id``,
+        ``rule_id``, the nested wardline axes ``kind``/``qualname``/
+        ``suppression`` (FIL-2/X-5), plus ``fingerprint`` (lets a scanner
+        confirm a finding's issue link without re-promoting). Drops MCP's
+        ``total`` field per the unified envelope.
+
+        Unlike the agent surfaces (MCP/CLI), this federation read keeps the
+        core all-inclusive ``suppression`` default (returns suppressed rows
+        unless an explicit ``suppression=`` filter is passed) — a federation
+        consumer's machine-read contract is never silently narrowed
+        (filigree-2bdb878bd2).
         """
         params = request.query_params
         pagination = _parse_pagination(params)
@@ -662,7 +801,19 @@ def create_loom_router() -> APIRouter:
             return pagination
         limit, offset = pagination
         filters: dict[str, Any] = {}
-        for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "fingerprint"):
+        for key in (
+            "severity",
+            "status",
+            "scan_source",
+            "scan_run_id",
+            "file_id",
+            "issue_id",
+            "fingerprint",
+            "rule_id",
+            "kind",
+            "qualname",
+            "suppression",
+        ):
             val = params.get(key)
             if val is not None:
                 filters[key] = val
@@ -670,11 +821,133 @@ def create_loom_router() -> APIRouter:
             result = db.list_findings_global(limit=limit, offset=offset, **filters)
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
-        items = [scan_finding_to_loom(f) for f in result["findings"]]
+        items = [scan_finding_to_weft(f) for f in result["findings"]]
         return JSONResponse(list_response(items, limit=limit, offset=offset, total=result["total"]))
 
+    @router.get("/findings/{finding_id}/dossier")
+    async def api_weft_finding_dossier(finding_id: str, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Return finding, file, linked issue, file associations, and entity bindings."""
+        try:
+            finding = db.get_finding(finding_id)
+        except KeyError:
+            return _error_response(f"Finding not found: {finding_id}", ErrorCode.NOT_FOUND, 404)
+
+        file_payload: dict[str, Any] | None = None
+        file_associations: list[dict[str, Any]] = []
+        try:
+            detail = db.get_file_detail(finding["file_id"])
+            raw_file = dict(detail["file"])
+            file_payload = {"file_id": raw_file.pop("id"), **raw_file}
+            file_associations = [dict(item) for item in detail.get("associations", [])]
+        except KeyError:
+            file_payload = None
+
+        linked_issue: dict[str, Any] | None = None
+        issue_file_associations: list[dict[str, Any]] = []
+        entity_associations: list[dict[str, Any]] = []
+        issue_id = finding.get("issue_id")
+        if issue_id:
+            try:
+                issue = db.get_issue(str(issue_id))
+                linked_issue = dict(issue_to_public(issue))
+                issue_file_associations = [dict(item) for item in db.get_issue_files(issue.id)]
+                entity_associations = [dict(row) for row in db.list_entity_associations(make_issue_id(issue.id))]
+            except KeyError:
+                linked_issue = None
+
+        return JSONResponse(
+            {
+                "finding": scan_finding_to_weft(finding),
+                "file": file_payload,
+                "linked_issue": linked_issue,
+                "file_associations": issue_file_associations or file_associations,
+                "entity_associations": entity_associations,
+            }
+        )
+
+    @router.get("/session-evidence")
+    async def api_weft_session_evidence(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """V0 session evidence bundle by actor and optional time window."""
+        params = request.query_params
+        actor = params.get("actor", "")
+        if not isinstance(actor, str) or not actor.strip():
+            return _error_response("actor query parameter is required", ErrorCode.VALIDATION, 400)
+        since = params.get("since")
+        until = params.get("until")
+        limit = _safe_int(params.get("limit", "100"), "limit", min_value=1, max_value=_MAX_PAGINATION_LIMIT)
+        if isinstance(limit, JSONResponse):
+            return limit
+
+        time_clause = ""
+        time_params: list[Any] = []
+        if since:
+            time_clause += " AND created_at >= ?"
+            time_params.append(since)
+        if until:
+            time_clause += " AND created_at <= ?"
+            time_params.append(until)
+
+        issue_rows = db.conn.execute(
+            f"""
+            SELECT DISTINCT issue_id
+            FROM events
+            WHERE actor = ?{time_clause}
+            ORDER BY issue_id ASC
+            LIMIT ?
+            """,
+            [actor, *time_params, limit],
+        ).fetchall()
+        issues = []
+        for row in issue_rows:
+            try:
+                issues.append(dict(issue_to_public(db.get_issue(row["issue_id"]))))
+            except KeyError:
+                continue
+
+        finding_rows = db.conn.execute(
+            """
+            SELECT id
+            FROM scan_findings
+            WHERE created_by = ? OR updated_by = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (actor, actor, limit),
+        ).fetchall()
+        # Route through the public ``get_finding`` accessor rather than the
+        # private ``_build_scan_finding`` row-builder. This costs one extra
+        # SELECT per finding (N+1), which is acceptable on this diagnostic
+        # session-evidence surface and keeps the route off the DB internals.
+        findings = [scan_finding_to_weft(db.get_finding(row["id"])) for row in finding_rows]
+
+        assoc_rows = db.conn.execute(
+            """
+            SELECT issue_id
+            FROM entity_associations
+            WHERE attached_by = ?
+            ORDER BY attached_at DESC
+            LIMIT ?
+            """,
+            (actor, limit),
+        ).fetchall()
+        entity_associations: list[dict[str, Any]] = []
+        for row in assoc_rows:
+            entity_associations.extend(dict(item) for item in db.list_entity_associations(row["issue_id"]))
+
+        return JSONResponse(
+            {
+                "query": {"actor": actor, "since": since, "until": until, "limit": limit},
+                "issues": issues,
+                "findings": findings,
+                "entity_associations": entity_associations,
+                "observations": [],
+                "annotations": [],
+                "commands": [],
+            }
+        )
+
     @router.post("/findings/promote")
-    async def api_loom_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_promote_finding(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Promote a finding to a tracked issue, keyed by ``(scan_source, fingerprint)``.
 
         This is the HTTP surface Wardline's ``file_finding`` posts to (A2): an
@@ -684,9 +957,20 @@ def create_loom_router() -> APIRouter:
         duplicate). Returns 404 when the fingerprint was never ingested under
         ``scan_source``. See the 2026-06-02 promote-by-fingerprint brief.
 
-        Request: ``{scan_source (req), fingerprint (req), priority?, labels?}``.
+        Request: ``{scan_source (req), fingerprint (req), priority?, labels?,
+        force?, attach_entity?}``.
         ``priority`` accepts ``"P2"``/``2``; omit to derive from severity.
-        Response: ``{"issue_id": "<id>", "created": true|false}``.
+        ``force`` (default false) overrides the suppression guard: a finding
+        wardline marked baselined/waived/judged is otherwise refused (VALIDATION
+        400) as an already-accepted defect.
+        ``attach_entity`` (default true) attaches the finding's own entity
+        identity (``metadata.loomweave.entity_id``) as an ADR-029 entity
+        association on the promoted issue when resolvable (B9,
+        weft-4a46553503); the attach is enrichment — a failure is reported
+        in-band via ``warnings``, never a promote failure.
+        Response: ``{"issue_id": "<id>", "created": true|false,
+        "entity_attachment": {...}, "association"?: {...}}`` —
+        ``entity_attachment`` always says what was attached or why not.
 
         Concurrency: promote is a WRITE (issue create + finding link), so it
         runs via ``asyncio.to_thread`` on a PRIVATE worker-thread connection
@@ -708,6 +992,12 @@ def create_loom_router() -> APIRouter:
         labels = body.get("labels")
         if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
             return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
+        attach_entity = body.get("attach_entity", True)
+        if not isinstance(attach_entity, bool):
+            return _error_response("attach_entity must be a boolean", ErrorCode.VALIDATION, 400)
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
@@ -720,6 +1010,8 @@ def create_loom_router() -> APIRouter:
                 priority=priority,
                 labels=labels,
                 actor=actor,
+                force=force,
+                attach_entity=attach_entity,
             )
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
@@ -744,8 +1036,63 @@ def create_loom_router() -> APIRouter:
         )
         return JSONResponse(result)
 
+    @router.post("/findings/promote-and-attach")
+    async def api_weft_promote_finding_and_attach(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """Promote a finding by fingerprint and attach an opaque entity binding."""
+        body = await _parse_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        scan_source = body.get("scan_source", "")
+        fingerprint = body.get("fingerprint", "")
+        entity_id = body.get("entity_id", "")
+        content_hash = body.get("content_hash", "")
+        if not isinstance(scan_source, str) or not scan_source.strip():
+            return _error_response("scan_source is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            return _error_response("fingerprint is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(entity_id, str) or not entity_id.strip():
+            return _error_response("entity_id is required and must be a string", ErrorCode.VALIDATION, 400)
+        if not isinstance(content_hash, str) or not content_hash.strip():
+            return _error_response("content_hash is required and must be a string", ErrorCode.VALIDATION, 400)
+        entity_kind = body.get("entity_kind", body.get("external_entity_kind"))
+        if entity_kind is not None and not isinstance(entity_kind, str):
+            return _error_response("entity_kind must be a string", ErrorCode.VALIDATION, 400)
+        priority, priority_err = _parse_promote_priority(body.get("priority"))
+        if priority_err is not None:
+            return _error_response(priority_err, ErrorCode.VALIDATION, 400)
+        labels = body.get("labels")
+        if labels is not None and (not isinstance(labels, list) or not all(isinstance(x, str) for x in labels)):
+            return _error_response("labels must be a list of strings", ErrorCode.VALIDATION, 400)
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            return _error_response("force must be a boolean", ErrorCode.VALIDATION, 400)
+        actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
+        if actor_err:
+            return actor_err
+        try:
+            result = await asyncio.to_thread(
+                _promote_finding_and_attach_on_private_conn,
+                db,
+                scan_source=scan_source,
+                fingerprint=fingerprint,
+                entity_id=entity_id,
+                content_hash=content_hash,
+                priority=priority,
+                labels=labels,
+                actor=actor,
+                entity_kind=entity_kind,
+                force=force,
+            )
+        except ValueError as e:
+            return _error_response(str(e), ErrorCode.VALIDATION, 400)
+        except sqlite3.Error as e:
+            return _error_response(f"database error promoting finding and attaching entity: {e}", ErrorCode.IO, 500)
+        if result is None:
+            return _error_response("no finding for fingerprint", ErrorCode.NOT_FOUND, 404)
+        return JSONResponse(result)
+
     @router.post("/findings/clean-stale")
-    async def api_loom_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+    async def api_weft_clean_stale_findings(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
         """Retention sweep — soft-archive stale ``unseen_in_latest`` findings.
 
         Federation surface over the existing core ``clean_stale_findings``
@@ -756,7 +1103,7 @@ def create_loom_router() -> APIRouter:
         auto-reopens (``fixed`` → ``open``) with its ``seen_count`` intact.
         See ADR-015 for the retention policy and the scan-run contract.
 
-        Enrich-only (loom.md sec 3-5, ADR-002 sec 7): pure local DB write,
+        Enrich-only (weft.md sec 3-5, ADR-002 sec 7): pure local DB write,
         fully functional with no federation peer present.
 
         ``scan_source`` is REQUIRED here — it is an *accident-guard*, not an
@@ -829,7 +1176,7 @@ def create_loom_router() -> APIRouter:
                 "scan_source": scan_source,
                 "older_than_days": older_than_days,
                 # Degradation signal from the best-effort finding→issue cascade.
-                # Mirrors the loom scan-results envelope, which also lifts
+                # Mirrors the weft scan-results envelope, which also lifts
                 # ``warnings`` to the top level — so a federation consumer learns
                 # a cascade close partially failed instead of it dying in logs.
                 "warnings": result["warnings"],
@@ -837,26 +1184,24 @@ def create_loom_router() -> APIRouter:
         )
 
     @router.get("/scanners")
-    async def api_loom_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """List registered scanner configs — ``ListResponse[ScannerLoom]``.
+    async def api_weft_list_scanners(db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
+        """List registered scanner configs — ``ListResponse[ScannerWeft]``.
 
-        Loom-only (no classic dashboard counterpart). Drops MCP's
+        Weft-only (no classic dashboard counterpart). Drops MCP's
         ``errors`` and ``hint`` siblings per the strict envelope —
         scanner load errors are logged at the boundary; consumers that
         need the diagnostic UI remain on the MCP surface. Resolves
-        ``scanners/`` against ``project_root / ".filigree"`` so
-        ``.filigree.conf`` projects with a relocated ``db = ...`` path
-        still find their scanner TOMLs (filigree-641037692a). Falls
-        back to ``db.db_path.parent / "scanners"`` only when
-        ``project_root`` was not set (bare ``FiligreeDB(...)``
-        construction without ``from_filigree_dir`` / ``from_conf``).
+        ``scanners/`` against ``db.meta_dir`` (the resolved store dir,
+        ``.weft/filigree/`` or legacy ``.filigree/``) so projects with a
+        relocated ``db = ...`` path still find their scanner TOMLs
+        (filigree-641037692a).
         """
-        scanners_dir = db.project_root / ".filigree" / "scanners" if db.project_root is not None else db.db_path.parent / "scanners"
+        scanners_dir = db.meta_dir / "scanners"
         load_errors: list[str] = []
         scanners = list_scanners(scanners_dir, errors=load_errors)
         if load_errors:
-            logger.warning("scanner load errors during /api/loom/scanners: %s", load_errors)
-        items = [scanner_config_to_loom(s) for s in scanners]
+            logger.warning("scanner load errors during /api/weft/scanners: %s", load_errors)
+        items = [scanner_config_to_weft(s) for s in scanners]
         return JSONResponse(list_response(items, limit=len(items), offset=0, has_more=False))
 
     return router
@@ -868,12 +1213,12 @@ def create_living_surface_router() -> APIRouter:
 
     Per ``docs/federation/contracts.md``, the living surface at
     ``/api/*`` (no generation prefix) aliases the current recommended
-    generation — as of 2026-04-26 that is loom. Living-surface aliases
+    generation — as of 2026-04-26 that is weft. Living-surface aliases
     are added per-endpoint in Phase C wherever there is no classic
     counterpart at the same path (so no ambiguity is created for
     pre-2.0 callers).
 
-    Phase C1: ``POST /api/scan-results`` aliases the loom handler.
+    Phase C1: ``POST /api/scan-results`` aliases the weft handler.
     Classic publishes ``POST /api/v1/scan-results`` (different path), so
     the alias is unambiguous.
     """
@@ -881,25 +1226,25 @@ def create_living_surface_router() -> APIRouter:
     from fastapi.responses import JSONResponse
 
     from filigree.dashboard import _get_db
-    from filigree.generations.loom.adapters import scan_ingest_result_to_loom
+    from filigree.generations.weft.adapters import scan_ingest_result_to_weft
 
     router = APIRouter()
 
     @router.post("/scan-results")
     async def api_living_scan_results(request: Request, db: FiligreeDB = Depends(_get_db)) -> JSONResponse:
-        """Ingest scan results — living surface (loom envelope).
+        """Ingest scan results — living surface (weft envelope).
 
-        Equivalent to /api/loom/scan-results as of 2026-04-26.
+        Equivalent to /api/weft/scan-results as of 2026-04-26.
         """
         body = await _parse_json_body(request)
         if isinstance(body, JSONResponse):
             return body
         parsed = _parse_scan_results_body(body)
-        if isinstance(parsed, str):
-            return _error_response(parsed, ErrorCode.VALIDATION, 400)
+        if isinstance(parsed, _ScanResultsBodyError):
+            return _error_response(parsed.error, ErrorCode.VALIDATION, parsed.status_code, parsed.details)
         # CONTRACT-E: process_scan_results does a blocking HTTP round-trip to
-        # Clarion (one per CLARION_BATCH_MAX_QUERIES-sized chunk under
-        # registry_backend='clarion'). It runs on a worker thread
+        # Loomweave (one per LOOMWEAVE_BATCH_MAX_QUERIES-sized chunk under
+        # registry_backend='loomweave'). It runs on a worker thread
         # (asyncio.to_thread) using a PRIVATE connection (see
         # _ingest_scan_results_on_private_conn) so it never shares the
         # event-loop connection cross-thread. No app-level lock: concurrent
@@ -914,6 +1259,6 @@ def create_living_surface_router() -> APIRouter:
         except ValueError as e:
             return _error_response(str(e), ErrorCode.VALIDATION, 400)
         _refresh_summary_for_db(db)
-        return JSONResponse(scan_ingest_result_to_loom(result))
+        return JSONResponse(scan_ingest_result_to_weft(result))
 
     return router

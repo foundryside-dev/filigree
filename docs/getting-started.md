@@ -23,7 +23,7 @@ uv add filigree
 ### From source
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync
 ```
@@ -38,16 +38,26 @@ filigree init
 ```
 
 ```
-Initialized filigree project with prefix 'my-project'
-Created .filigree/config.json
-Created .filigree/filigree.db
+Initialized filigree store at .weft/filigree/ in /path/to/my-project
+  Prefix: my-project
+  Mode: ethereal
+  Database: /path/to/my-project/.weft/filigree/filigree.db
+  Anchor: .weft/filigree/ (store-dir presence; confless — no .filigree.conf)
+  Scanners: /path/to/my-project/.weft/filigree/scanners/ (add .toml files to register scanners)
+
+Next: filigree install
 ```
 
-This creates a `.filigree/` directory containing:
+This creates a `.weft/filigree/` store directory containing:
 
 - `filigree.db` — SQLite database (WAL mode)
 - `config.json` — project prefix, install mode, enabled packs
 - `context.md` — auto-generated project summary
+- `scanners/` — drop `.toml` files here to register scanners
+
+`.weft/` is the canonical Weft store root since 3.0.0; `filigree` is its sole
+writer under `.weft/filigree/`. Legacy `.filigree/` stores keep working and are
+auto-migrated forward on the next `filigree init`.
 
 Issue IDs use the format `{prefix}-{10hex}` (e.g., `myproj-a3f9b2e1c0`). The prefix defaults to your directory name.
 
@@ -124,7 +134,7 @@ filigree close myproj-a3f9b2e1c0 --reason="Implemented in commit abc123"
 
 ### MCP Server
 
-The MCP server is included in the base install — no extra needed. It exposes 114 tools so agents interact with filigree without parsing CLI output. See [MCP Server Reference](mcp.md).
+The MCP server is included in the base install — no extra needed. It exposes 118 tools so agents interact with filigree without parsing CLI output. See [MCP Server Reference](mcp.md).
 
 ### Web Dashboard
 
@@ -145,7 +155,7 @@ The dashboard is included in the base install — no extra needed.
 ## What Next?
 
 - [CLI Reference](cli.md) — full command reference with parameter docs
-- [MCP Server Reference](mcp.md) — 114 tools for agent-native interaction
+- [MCP Server Reference](mcp.md) — 118 tools for agent-native interaction
 - [Workflow Templates](workflows.md) — state machines, packs, and field schemas
 - [Agent Integration](agent-integration.md) — multi-agent patterns and session resumption
 - [Architecture](architecture.md) — source layout, DB schema, design decisions

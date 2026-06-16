@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from filigree.core import (
     CONF_FILENAME,
@@ -28,11 +31,15 @@ from filigree.install_support import (
 from filigree.install_support.doctor import (
     CheckResult,
     _doctor_ethereal_checks,
+    _doctor_federation_token_checks,
     _doctor_install_method,
+    _doctor_mcp_token_result,
     _doctor_server_checks,
     _find_all_filigree_binaries,
     _is_absolute_command_path,
     _is_venv_binary,
+    _unresolved_env_refs,
+    doctor_check_id,
     run_doctor,
 )
 
@@ -339,7 +346,7 @@ class TestDoctorDatabase:
         assert schema_result.passed is False
         assert "newer" in schema_result.fix_hint.lower() or "Upgrade" in schema_result.fix_hint
 
-    def test_clarion_configured_project_warns_on_local_file_records(self, tmp_path: Path) -> None:
+    def test_loomweave_configured_project_warns_on_local_file_records(self, tmp_path: Path) -> None:
         _make_project(tmp_path)
         db_path = tmp_path / FILIGREE_DIR_NAME / DB_FILENAME
         db = FiligreeDB(db_path, prefix="tst")
@@ -355,8 +362,8 @@ class TestDoctorDatabase:
                 "project_name": "tst",
                 "prefix": "tst",
                 "db": ".filigree/filigree.db",
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "http://clarion.test"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "http://loomweave.test"},
             },
         )
 
@@ -364,9 +371,9 @@ class TestDoctorDatabase:
 
         registry_result = next(r for r in results if r.name == "File registry backend state")
         assert registry_result.passed is False
-        assert "configured for Clarion" in registry_result.message
+        assert "configured for Loomweave" in registry_result.message
         assert "1 file_records row(s)" in registry_result.message
-        assert "migrate-registry --to clarion" in registry_result.fix_hint
+        assert "migrate-registry --to loomweave" in registry_result.fix_hint
 
 
 class TestDoctorHonorsConfDbPath:
@@ -445,6 +452,48 @@ class TestDoctorHonorsConfDbPath:
 
 
 # ---------------------------------------------------------------------------
+# run_doctor — .filigree.conf anchor cutover (filigree-4bf16e64b6)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorConfAnchorCutover:
+    """The 3.0 hard cut retired ``.filigree.conf``: the anchor lives in the
+    store's config.json and nothing backfills a missing conf. Doctor must
+    treat absence as the healthy end state and a lingering conf as the
+    not-yet-migrated state that ``filigree init`` resolves.
+    """
+
+    def test_missing_conf_is_healthy(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)  # confless — the post-cutover end state
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is True
+        assert CONFIG_FILENAME in anchor_result.message
+        # No stale promise of an auto-backfill that no longer exists
+        assert "auto-written" not in anchor_result.message
+
+    def test_missing_conf_notes_retired_import(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        (tmp_path / (CONF_FILENAME + ".imported")).write_text("{}")
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is True
+        assert CONF_FILENAME + ".imported" in anchor_result.message
+
+    def test_present_conf_warns_and_points_at_init(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        write_conf(
+            tmp_path / CONF_FILENAME,
+            {"version": 1, "project_name": "tst", "prefix": "tst", "db": f"{FILIGREE_DIR_NAME}/{DB_FILENAME}"},
+        )
+        results = run_doctor(tmp_path)
+        anchor_result = next(r for r in results if r.name == ".filigree.conf anchor")
+        assert anchor_result.passed is False
+        assert "Legacy anchor" in anchor_result.message
+        assert "filigree init" in anchor_result.fix_hint
+
+
+# ---------------------------------------------------------------------------
 # run_doctor — context.md freshness check
 # ---------------------------------------------------------------------------
 
@@ -469,7 +518,6 @@ class TestDoctorContextMd:
         summary_path = tmp_path / FILIGREE_DIR_NAME / SUMMARY_FILENAME
         # Set mtime 90 minutes ago
         old_mtime = time.time() - 90 * 60
-        import os
 
         os.utime(str(summary_path), (old_mtime, old_mtime))
         results = run_doctor(tmp_path)
@@ -488,7 +536,7 @@ class TestDoctorContextMd:
         ctx_result = next(r for r in results if r.name == "context.md")
         assert ctx_result.passed is False
         assert "not a file" in ctx_result.message
-        assert "filigree doctor --fix" in ctx_result.fix_hint
+        assert "generated context" in ctx_result.fix_hint
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1067,66 @@ class TestDoctorResultStructure:
         for r in results:
             if not r.passed and r.name not in {"Git working tree", "Installation"}:
                 assert r.fix_hint.strip(), f"Failed check '{r.name}' has no fix_hint"
+
+
+class TestDoctorSharedContractChecks:
+    def test_run_doctor_emits_real_route_and_auth_checks(self, tmp_path: Path) -> None:
+        project = _make_project(tmp_path)
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+
+        assert by_id["api.availability"].name == "API routes"
+        assert by_id["scanner.results"].name == "Scan results routes"
+        assert by_id["entity_associations.routes"].name == "Entity association routes"
+        assert by_id["auth.config"].name == "Auth config"
+        assert by_id["api.availability"].passed is True
+        assert by_id["scanner.results"].passed is True
+        assert by_id["entity_associations.routes"].passed is True
+        assert by_id["auth.config"].passed is True
+
+    def test_auth_config_reports_tier2_file_token_as_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tier-2 (file) federation token with NO env var must read as auth
+        ENABLED, not 'disabled'. Since the auth flip (f7eb673) the inbound token
+        is auto-minted to <store_dir>/federation_token and auth is on-by-default;
+        an env-only check misreads that daemon as 'disabled' and sabotages the
+        lockout debugging the flip exists to support (filigree-b09a4854d7)."""
+        for var in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        from filigree.core import resolve_store_dir
+
+        project = _make_project(tmp_path)
+        store = resolve_store_dir(project)
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "federation_token").write_text("tier2-file-token-abc\n")
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+        auth = by_id["auth.config"]
+        assert auth.passed is True
+        assert "disabled" not in auth.message.lower()
+        assert "file" in auth.message.lower()
+
+    def test_auth_config_empty_env_with_file_token_reports_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty/blank env var alongside a valid tier-2 file token must still
+        report auth ENABLED — read_env_token skips the blank var and falls through
+        to tier 2, so the daemon is authed. The blank-var heads-up may remain, but
+        the check must not fail or claim 'disabled' (filigree-b09a4854d7)."""
+        for var in ("FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "   ")
+        from filigree.core import resolve_store_dir
+
+        project = _make_project(tmp_path)
+        store = resolve_store_dir(project)
+        store.mkdir(parents=True, exist_ok=True)
+        (store / "federation_token").write_text("tier2-file-token-xyz\n")
+
+        results = run_doctor(project)
+        by_id = {doctor_check_id(result): result for result in results}
+        auth = by_id["auth.config"]
+        assert auth.passed is True
+        assert "disabled" not in auth.message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1739,10 @@ class TestDoctorServerChecks:
         r = project_failures[0]
         assert "Directory gone" in r.message
         assert r.fix_hint
+        # Machine-routable repair: doctor --fix keys off the stable code and
+        # acts on the exact stored config key carried in fix_target.
+        assert r.code == "server_registry_orphan"
+        assert r.fix_target == str(missing_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1888,3 +2000,204 @@ class TestDoctorCodexMcp:
         # uv_tool_bin does not exist → warning branch skipped → passes
         assert result.passed is True
         assert "Configured in ~/.codex/config.toml" in result.message
+
+
+# ---------------------------------------------------------------------------
+# WEFT_FEDERATION_TOKEN: .mcp.json header token-reference connectivity check
+# (filigree-0e4bc3d81a)
+# ---------------------------------------------------------------------------
+
+
+class TestMcpTokenReference:
+    """The streamable-http header token must resolve, or /mcp silently 401s."""
+
+    def test_unresolved_env_refs_bare_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN}") == ["WEFT_FEDERATION_TOKEN"]
+
+    def test_unresolved_env_refs_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "secret")
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN}") == []
+
+    def test_unresolved_env_refs_literal_default_counts_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        # ${VAR:-default} expands to the literal default even when VAR is unset.
+        assert _unresolved_env_refs("Bearer ${WEFT_FEDERATION_TOKEN:-fallback}") == []
+
+    def test_token_result_unset_canonical_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WEFT_FEDERATION_TOKEN", raising=False)
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${WEFT_FEDERATION_TOKEN}"},
+        }
+        result = _doctor_mcp_token_result(entry)
+        assert result is not None
+        assert result.passed is False
+        assert result.code == "mcp_token_unresolved"
+        assert "WEFT_FEDERATION_TOKEN" in result.message
+        assert "doctor --fix" in result.fix_hint
+
+    def test_token_result_deprecated_name_hints_fix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FILIGREE_API_TOKEN", raising=False)
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${FILIGREE_API_TOKEN}"},
+        }
+        result = _doctor_mcp_token_result(entry)
+        assert result is not None
+        assert "doctor --fix" in result.fix_hint
+
+    def test_token_result_resolved_is_healthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "secret")
+        entry = {
+            "type": "streamable-http",
+            "url": "http://localhost:8749/mcp/?project=x",
+            "headers": {"Authorization": "Bearer ${WEFT_FEDERATION_TOKEN}"},
+        }
+        assert _doctor_mcp_token_result(entry) is None
+
+    def test_token_result_no_header_not_applicable(self) -> None:
+        entry = {"type": "streamable-http", "url": "http://localhost:8749/mcp"}
+        assert _doctor_mcp_token_result(entry) is None
+
+    def test_token_result_stdio_not_applicable(self) -> None:
+        entry = {"type": "stdio", "command": "/usr/bin/filigree-mcp", "args": []}
+        assert _doctor_mcp_token_result(entry) is None
+
+
+# ---------------------------------------------------------------------------
+# _doctor_federation_token_checks (weft-7a399b8124 / weft-23574069a1)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorFederationTokenChecks:
+    """Server-mode, multi-store federation-token scope checks.
+
+    Per-project scoped auth validates a scoped request against THAT project's
+    token (or an env pin), not the daemon home-store token. Doctor reports a
+    .mcp.json that still embeds a token the daemon would reject, and flags
+    token divergence across stores when no operator pin unifies them.
+    """
+
+    def _write(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n")
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for v in ("WEFT_FEDERATION_TOKEN", "FILIGREE_FEDERATION_API_TOKEN", "FILIGREE_API_TOKEN"):
+            monkeypatch.delenv(v, raising=False)
+
+    def _server_config(self, projects: dict | None = None):
+        from filigree.server import ServerConfig
+
+        return ServerConfig(port=8377, projects=projects or {})
+
+    def test_non_server_mode_returns_empty(self, tmp_path: Path) -> None:
+        assert _doctor_federation_token_checks(tmp_path, "ethereal") == []
+
+    def test_mcp_json_embedding_home_token_is_reported_and_fixable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree.cli_commands.admin import _fix_mcp_token_reference
+
+        self._clear_env(monkeypatch)
+        config_dir = tmp_path / "_srvcfg"
+        self._write(config_dir / "federation_token", "home-tok")
+        self._write(tmp_path / ".filigree" / "federation_token", "tok-proj")
+        self._write(
+            tmp_path / ".mcp.json",
+            json.dumps({"mcpServers": {"filigree": {"headers": {"Authorization": "Bearer home-tok"}}}}),
+        )
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.read_server_config", lambda: self._server_config())
+
+        results = _doctor_federation_token_checks(tmp_path, "server")
+        assert any(r.code == "federation_token_mcp_home_token" for r in results), results
+
+        # doctor --fix repoints the header to the project token; re-check clears it.
+        ok, _msg = _fix_mcp_token_reference(tmp_path)
+        assert ok
+        auth = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["filigree"]["headers"]["Authorization"]
+        assert auth == "Bearer tok-proj"
+        again = _doctor_federation_token_checks(tmp_path, "server")
+        assert not any(r.code == "federation_token_mcp_home_token" for r in again), again
+
+    def test_mcp_json_with_project_token_is_clean(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        config_dir = tmp_path / "_srvcfg"
+        self._write(config_dir / "federation_token", "home-tok")
+        self._write(tmp_path / ".filigree" / "federation_token", "tok-proj")
+        self._write(
+            tmp_path / ".mcp.json",
+            json.dumps({"mcpServers": {"filigree": {"headers": {"Authorization": "Bearer tok-proj"}}}}),
+        )
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.read_server_config", lambda: self._server_config())
+
+        results = _doctor_federation_token_checks(tmp_path, "server")
+        assert not any(r.code == "federation_token_mcp_home_token" for r in results), results
+
+    def test_divergence_reported_without_env_pin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        config_dir = tmp_path / "_srvcfg"
+        self._write(config_dir / "federation_token", "home-tok")
+        a_dir = tmp_path / "proj-a" / ".filigree"
+        b_dir = tmp_path / "proj-b" / ".filigree"
+        self._write(a_dir / "federation_token", "tok-a")
+        self._write(b_dir / "federation_token", "tok-b")
+        self._write(tmp_path / ".filigree" / "federation_token", "tok-proj")
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr(
+            "filigree.server.read_server_config",
+            lambda: self._server_config({str(a_dir): {"prefix": "a"}, str(b_dir): {"prefix": "b"}}),
+        )
+
+        results = _doctor_federation_token_checks(tmp_path, "server")
+        assert any(r.code == "federation_token_divergence" for r in results), results
+
+    def test_divergence_reported_through_run_doctor(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End-to-end: a server-mode project (config mode='server') with two
+        divergent-token stores surfaces federation_token_divergence from
+        run_doctor itself — proving the get_mode gate and the results.extend
+        wiring, not just the unit function in isolation."""
+        self._clear_env(monkeypatch)
+        filigree_dir = tmp_path / ".filigree"
+        filigree_dir.mkdir()
+        write_config(filigree_dir, {"prefix": "tst", "version": 1, "mode": "server"})
+        d = FiligreeDB(filigree_dir / DB_FILENAME, prefix="tst")
+        d.initialize()
+        d.close()
+        (filigree_dir / SUMMARY_FILENAME).write_text("# summary\n")
+
+        config_dir = tmp_path / "_srvcfg"
+        self._write(config_dir / "federation_token", "home-tok")
+        a_dir = tmp_path / "proj-a" / ".filigree"
+        b_dir = tmp_path / "proj-b" / ".filigree"
+        self._write(a_dir / "federation_token", "tok-a")
+        self._write(b_dir / "federation_token", "tok-b")
+        server_json = config_dir / "server.json"
+        server_json.write_text(json.dumps({"port": 8377, "projects": {str(a_dir): {"prefix": "a"}, str(b_dir): {"prefix": "b"}}}))
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", server_json)
+
+        results = run_doctor(tmp_path)
+        assert any(r.code == "federation_token_divergence" for r in results), [r.name for r in results]
+
+    def test_divergence_suppressed_with_env_pin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "operator-pin")
+        config_dir = tmp_path / "_srvcfg"
+        self._write(config_dir / "federation_token", "home-tok")
+        a_dir = tmp_path / "proj-a" / ".filigree"
+        b_dir = tmp_path / "proj-b" / ".filigree"
+        self._write(a_dir / "federation_token", "tok-a")
+        self._write(b_dir / "federation_token", "tok-b")
+        self._write(tmp_path / ".filigree" / "federation_token", "tok-proj")
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", config_dir)
+        monkeypatch.setattr(
+            "filigree.server.read_server_config",
+            lambda: self._server_config({str(a_dir): {"prefix": "a"}, str(b_dir): {"prefix": "b"}}),
+        )
+
+        results = _doctor_federation_token_checks(tmp_path, "server")
+        assert not any(r.code == "federation_token_divergence" for r in results), results

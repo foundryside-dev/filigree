@@ -1,6 +1,18 @@
 # Filigree Planning-Pack Deprecation Plan
 
 **Status:** Draft (2026-05-17)
+
+> **Federation status (added 2026-06-05).** This plan depends on Shuttle and on
+> the `loom://`/`shuttle://` URI scheme, both of whose federation status is now
+> tracked authoritatively at the Loom hub. Per `~/loom/uri-scheme.md`: the
+> `loom://` scheme is **formally closed** (superseded by SEI,
+> `~/loom/sei-standard.md`), and the `shuttle://` milestone-reference convenience
+> is **unresolved and low-stakes** because **Shuttle is a roadmap thought-bubble
+> with no repo** (`~/loom/doctrine.md`, `~/loom/members/shuttle.md`) — so this
+> deprecation has no concrete migration target today. The plan is retained as a
+> design record; do not execute its `shuttle://`-dependent migration until a
+> change-execution authority actually exists.
+
 **Scope:** Sequencing and migration plan for retiring filigree's `planning` pack types when Shuttle assumes ownership of planning
 **Sibling documents:**
 - `2026-05-17-shuttle-design.md` — Shuttle architecture (the new home for planning)

@@ -114,15 +114,15 @@ class TestConfIO:
         write_conf(conf, data)
         assert read_conf(conf) == data
 
-    def test_read_accepts_registry_backend_and_clarion_settings(self, tmp_path: Path) -> None:
+    def test_read_accepts_registry_backend_and_loomweave_settings(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         data = {
             "version": 1,
             "project_name": "demo",
             "prefix": "demo",
             "db": ".filigree/filigree.db",
-            "registry_backend": "clarion",
-            "clarion": {
+            "registry_backend": "loomweave",
+            "loomweave": {
                 "base_url": "http://localhost:9111",
                 "timeout_seconds": 3,
                 "allow_local_fallback": True,
@@ -154,14 +154,14 @@ class TestConfIO:
             ({"prefix": "x", "db": "filigree.db", "enabled_packs": [1, 2]}, r"enabled_packs"),
             ({"prefix": "x", "db": "filigree.db", "registry_backend": "sqlite"}, r"registry_backend"),
             ({"prefix": "x", "db": "filigree.db", "registry_backend": 1}, r"registry_backend"),
-            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion"}, r"clarion\.base_url"),
-            ({"prefix": "x", "db": "filigree.db", "registry_backend": "clarion", "clarion": {}}, r"clarion\.base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": []}, r"clarion"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": 1}}, r"base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base_url": "file:///tmp/clarion"}}, r"base_url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"base-url": "http://localhost:9111"}}, r"base-url"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
-            ({"prefix": "x", "db": "filigree.db", "clarion": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "loomweave"}, r"loomweave\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "registry_backend": "loomweave", "loomweave": {}}, r"loomweave\.base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": []}, r"loomweave"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base_url": 1}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base_url": "file:///tmp/loomweave"}}, r"base_url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"base-url": "http://localhost:9111"}}, r"base-url"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"timeout_seconds": "slow"}}, r"timeout_seconds"),
+            ({"prefix": "x", "db": "filigree.db", "loomweave": {"allow_local_fallback": "yes"}}, r"allow_local_fallback"),
         ],
         ids=[
             "db-list",
@@ -172,14 +172,14 @@ class TestConfIO:
             "packs-non-string-items",
             "registry-backend-unknown",
             "registry-backend-non-string",
-            "clarion-backend-missing-config",
-            "clarion-backend-missing-base-url",
-            "clarion-non-dict",
-            "clarion-base-url-non-string",
-            "clarion-base-url-invalid-scheme",
-            "clarion-unknown-key",
-            "clarion-timeout-non-numeric",
-            "clarion-fallback-non-bool",
+            "loomweave-backend-missing-config",
+            "loomweave-backend-missing-base-url",
+            "loomweave-non-dict",
+            "loomweave-base-url-non-string",
+            "loomweave-base-url-invalid-scheme",
+            "loomweave-unknown-key",
+            "loomweave-timeout-non-numeric",
+            "loomweave-fallback-non-bool",
         ],
     )
     def test_read_rejects_malformed_field_types(self, tmp_path: Path, payload: dict[str, object], match: str) -> None:
@@ -230,14 +230,14 @@ class TestConfIO:
                     "project_name": "demo",
                     "prefix": "demo",
                     "db": ".filigree/filigree.db",
-                    "registry_backend": "clarion",
-                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                    "registry_backend": "loomweave",
+                    "loomweave": {"base_url": base_url, "timeout_seconds": 1},
                 },
             )
 
             db = FiligreeDB.from_conf(conf)
             try:
-                assert db.registry_backend == "clarion"
+                assert db.registry_backend == "loomweave"
             finally:
                 db.close()
 
@@ -261,7 +261,7 @@ class TestFindFiligreeAnchor:
     def test_returns_conf_path_for_v2_install(self, tmp_path: Path) -> None:
         conf = tmp_path / CONF_FILENAME
         write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": ".filigree/filigree.db"})
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -269,7 +269,7 @@ class TestFindFiligreeAnchor:
         """Legacy install: project_root is identified, conf_path is None."""
         legacy_dir = tmp_path / FILIGREE_DIR_NAME
         legacy_dir.mkdir()
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path is None
 
@@ -305,7 +305,7 @@ class TestFindFiligreeAnchor:
         original_mode = tmp_path.stat().st_mode
         os.chmod(tmp_path, 0o555)  # noqa: S103 — read-only mode is the test scenario
         try:
-            project_root, conf_path = find_filigree_anchor(tmp_path)
+            project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         finally:
             os.chmod(tmp_path, original_mode)
 
@@ -323,7 +323,7 @@ class TestFindFiligreeAnchor:
         child_conf = child / CONF_FILENAME
         write_conf(child_conf, {"version": 1, "project_name": "c", "prefix": "c", "db": ".filigree/filigree.db"})
 
-        project_root, conf_path = find_filigree_anchor(child)
+        project_root, conf_path, _store = find_filigree_anchor(child)
         assert project_root == child
         assert conf_path == child_conf
 
@@ -405,7 +405,7 @@ class TestForeignDatabaseDetection:
         conf = tmp_path / CONF_FILENAME
         write_conf(conf, {"version": 1, "project_name": "p", "prefix": "p", "db": ".filigree/filigree.db"})
 
-        project_root, conf_path = find_filigree_anchor(tmp_path)
+        project_root, conf_path, _store = find_filigree_anchor(tmp_path)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -417,7 +417,7 @@ class TestForeignDatabaseDetection:
         sub = tmp_path / "src" / "deep"
         sub.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(sub)
+        project_root, conf_path, _store = find_filigree_anchor(sub)
         assert project_root == tmp_path
         assert conf_path == conf
 
@@ -430,7 +430,7 @@ class TestForeignDatabaseDetection:
         sub = tmp_path / "sub"
         sub.mkdir()
 
-        project_root, _conf_path = find_filigree_anchor(sub)
+        project_root, _conf_path, _store = find_filigree_anchor(sub)
         assert project_root == tmp_path
 
     def test_find_filigree_conf_also_enforces_boundary(self, tmp_path: Path) -> None:
@@ -504,11 +504,17 @@ class TestGitWorktreeDiscovery:
 
     @staticmethod
     def _make_worktree(main_repo: Path, worktree_root: Path, name: str) -> Path:
-        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping."""
+        """Create a linked-worktree skeleton: ``.git`` file + main-repo bookkeeping.
+
+        Mirrors git's real on-disk layout, including the bidirectional
+        ``gitdir`` back-pointer in the admin dir that names the worktree's
+        ``.git`` file — discovery verifies this round-trip before redirecting.
+        """
         wt_admin = main_repo / ".git" / "worktrees" / name
         wt_admin.mkdir(parents=True)
         worktree_root.mkdir(parents=True, exist_ok=True)
         (worktree_root / ".git").write_text(f"gitdir: {wt_admin}\n")
+        (wt_admin / "gitdir").write_text(f"{worktree_root / '.git'}\n")
         return worktree_root
 
     def test_worktree_inside_main_repo_finds_main_anchor(self, tmp_path: Path) -> None:
@@ -516,7 +522,7 @@ class TestGitWorktreeDiscovery:
         main = self._make_main_repo(tmp_path)
         wt = self._make_worktree(main, main / ".worktrees" / "feature-x", "feature-x")
 
-        project_root, conf_path = find_filigree_anchor(wt)
+        project_root, conf_path, _store = find_filigree_anchor(wt)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -525,7 +531,7 @@ class TestGitWorktreeDiscovery:
         main = self._make_main_repo(tmp_path)
         wt = self._make_worktree(main, tmp_path / "sibling-worktree", "sibling")
 
-        project_root, conf_path = find_filigree_anchor(wt)
+        project_root, conf_path, _store = find_filigree_anchor(wt)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -536,7 +542,7 @@ class TestGitWorktreeDiscovery:
         deep = wt / "src" / "pkg"
         deep.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
 
@@ -601,7 +607,7 @@ class TestGitWorktreeDiscovery:
         ordinary_dir = wt / "src" / "pkg"
         ordinary_dir.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(ordinary_dir)
+        project_root, conf_path, _store = find_filigree_anchor(ordinary_dir)
 
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
@@ -616,8 +622,9 @@ class TestGitWorktreeDiscovery:
         # Relative pointer: from wt/.git up to main/.git/worktrees/rel
         rel = os.path.relpath(wt_admin, wt)
         (wt / ".git").write_text(f"gitdir: {rel}\n")
+        (wt_admin / "gitdir").write_text(f"{wt / '.git'}\n")
 
-        project_root, _ = find_filigree_anchor(wt)
+        project_root, _, _store = find_filigree_anchor(wt)
         assert project_root == main
 
     def test_copied_worktree_root_conf_without_metadata_rolls_up_to_main(self, tmp_path: Path) -> None:
@@ -636,7 +643,7 @@ class TestGitWorktreeDiscovery:
 
         assert not (wt / FILIGREE_DIR_NAME).exists()
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
         assert find_filigree_conf(deep) == main / CONF_FILENAME
@@ -666,7 +673,7 @@ class TestGitWorktreeDiscovery:
         assert not (tracked_dir / CONFIG_FILENAME).exists()
         assert (tracked_dir / DB_FILENAME).exists()
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == main
         assert conf_path == main / CONF_FILENAME
         assert find_filigree_conf(deep) == main / CONF_FILENAME
@@ -684,7 +691,7 @@ class TestGitWorktreeDiscovery:
         deep = wt / "src" / "pkg"
         deep.mkdir(parents=True)
 
-        project_root, conf_path = find_filigree_anchor(deep)
+        project_root, conf_path, _store = find_filigree_anchor(deep)
         assert project_root == wt
         assert conf_path == wt / CONF_FILENAME
         assert find_filigree_conf(deep) == wt / CONF_FILENAME
@@ -708,7 +715,7 @@ class TestGitWorktreeDiscovery:
         )
 
         # From inside the nested sub-project: nested wins, not main.
-        project_root, conf_path = find_filigree_anchor(nested / "src")
+        project_root, conf_path, _store = find_filigree_anchor(nested / "src")
         assert project_root == nested
         assert conf_path == nested_conf
 
@@ -717,7 +724,7 @@ class TestGitWorktreeDiscovery:
 
         # And from the worktree root itself (above nested): we redirect to
         # main (no nested anchor in this direct ancestry).
-        project_root, _ = find_filigree_anchor(wt)
+        project_root, _, _store = find_filigree_anchor(wt)
         assert project_root == main
 
     def test_nested_legacy_dir_inside_worktree_wins_over_main(self, tmp_path: Path) -> None:
@@ -728,7 +735,7 @@ class TestGitWorktreeDiscovery:
         nested.mkdir()
         (nested / FILIGREE_DIR_NAME).mkdir()
 
-        project_root, conf_path = find_filigree_anchor(nested / "deep" / "code")
+        project_root, conf_path, _store = find_filigree_anchor(nested / "deep" / "code")
         assert project_root == nested
         assert conf_path is None
 
@@ -790,6 +797,51 @@ class TestGitWorktreeDiscovery:
         git_file = weird.resolve() / ".git"
         assert f"If `{git_file}` is malformed, fix or remove it before running `filigree init`." in str(excinfo.value)
 
+    def test_spoofed_worktree_pointer_is_rejected(self, tmp_path: Path) -> None:
+        """A ``.git`` file aimed at a worktree admin dir whose back-pointer
+        resolves to a *different* ``.git`` must not redirect.
+
+        Threat: an untrusted clone ships a ``.git`` file pointing at a victim
+        project's ``<main>/.git/worktrees/<name>/`` admin dir, hoping discovery
+        latches onto the victim's database. Git's bidirectional linkage defeats
+        this — the admin dir's ``gitdir`` back-pointer names the *real*
+        worktree's ``.git`` file, not the attacker's — so discovery refuses.
+        """
+        main = self._make_main_repo(tmp_path)
+        # The genuine worktree this admin dir belongs to.
+        legit_wt = tmp_path / "legit-wt"
+        legit_wt.mkdir()
+        (legit_wt / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'victim'}\n")
+        wt_admin = main / ".git" / "worktrees" / "victim"
+        wt_admin.mkdir(parents=True)
+        (wt_admin / "gitdir").write_text(f"{legit_wt / '.git'}\n")
+        # Attacker directory points its ``.git`` at the same admin dir.
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        (attacker / ".git").write_text(f"gitdir: {wt_admin}\n")
+
+        # Must NOT redirect to main's anchor; attacker has no anchor of its own.
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(attacker)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
+    def test_worktree_with_missing_back_pointer_is_not_redirected(self, tmp_path: Path) -> None:
+        """A worktree pointer whose admin dir has no ``gitdir`` back-pointer is
+        treated as stale (e.g. ``git worktree remove`` left the ``.git`` file
+        behind) and must not redirect to the main anchor.
+        """
+        main = self._make_main_repo(tmp_path)
+        wt_admin = main / ".git" / "worktrees" / "stale"
+        wt_admin.mkdir(parents=True)
+        # Deliberately no back-pointer file written.
+        wt = tmp_path / "stale-wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {wt_admin}\n")
+
+        with pytest.raises(ProjectNotInitialisedError) as excinfo:
+            find_filigree_anchor(wt)
+        assert not isinstance(excinfo.value, ForeignDatabaseError)
+
 
 # ---------------------------------------------------------------------------
 # FiligreeDB.from_project / from_conf — discovery integration
@@ -821,8 +873,14 @@ class TestFindFiligreeRoot:
         Regression: returning ``db_path.parent`` made ``mcp_server._run`` reopen
         ``storage/filigree.db`` instead of the configured ``storage/track.db``,
         and made ``install`` derive the wrong project root via ``.parent``.
+
+        Under the WEFT store consolidation ``find_filigree_root`` returns the
+        resolved store dir (presence-probe), independently of the relocated
+        ``db``. A legacy relocated-db install keeps its ``.filigree/`` metadata
+        dir, so the store dir resolves there — never to ``storage/``.
         """
         (tmp_path / "storage").mkdir()
+        (tmp_path / FILIGREE_DIR_NAME).mkdir()
         write_conf(
             tmp_path / CONF_FILENAME,
             {"version": 1, "project_name": "p", "prefix": "p", "db": "storage/track.db"},

@@ -176,10 +176,10 @@ class ScanFinding:
 
 **Step 2: Run import smoke tests**
 
-Run: `cd /home/john/filigree && uv run python -c "from filigree.models import Issue, FileRecord, ScanFinding; print('OK')"`
+Run: `cd /home/user/filigree && uv run python -c "from filigree.models import Issue, FileRecord, ScanFinding; print('OK')"`
 Expected: `OK`
 
-Run: `cd /home/john/filigree && uv run python -c "from filigree.models import ScanFinding; ScanFinding(id='x', file_id='y', severity='bad')"`
+Run: `cd /home/user/filigree && uv run python -c "from filigree.models import ScanFinding; ScanFinding(id='x', file_id='y', severity='bad')"`
 Expected: `ValueError` (confirms `get_args()` produced valid validation sets)
 
 **Step 3: Commit**
@@ -230,10 +230,10 @@ Remove the entire block from `_EMPTY_TS` definition through end of `ScanFinding.
 
 **Step 2: Run smoke test and full test suite**
 
-Run: `cd /home/john/filigree && uv run python -c "from filigree.core import Issue, FileRecord, ScanFinding, _EMPTY_TS; print('OK')"`
+Run: `cd /home/user/filigree && uv run python -c "from filigree.core import Issue, FileRecord, ScanFinding, _EMPTY_TS; print('OK')"`
 Expected: `OK`
 
-Run: `cd /home/john/filigree && uv run pytest --tb=short -q`
+Run: `cd /home/user/filigree && uv run pytest --tb=short -q`
 Expected: All tests pass (validates re-export doesn't break any existing consumers)
 
 **Step 3: Commit**
@@ -273,7 +273,7 @@ If `Any` is no longer used elsewhere in this file, remove it from the `typing` i
 
 **Step 2: Run import smoke test**
 
-Run: `cd /home/john/filigree && uv run python -c "import filigree.models; import filigree.types.core; from filigree.types.core import PromoteObservationResult; print('OK')"`
+Run: `cd /home/user/filigree && uv run python -c "import filigree.models; import filigree.types.core; from filigree.types.core import PromoteObservationResult; print('OK')"`
 Expected: `OK` (tests both import directions to confirm no cycle)
 
 **Step 3: Commit**
@@ -371,7 +371,7 @@ If TYPE_CHECKING block now only contains `MilestoneInput`/`PhaseInput` imports, 
 
 **Step 5: Run full test suite**
 
-Run: `cd /home/john/filigree && uv run pytest --tb=short -q`
+Run: `cd /home/user/filigree && uv run pytest --tb=short -q`
 Expected: All tests pass
 
 **Step 6: Commit**
@@ -453,7 +453,7 @@ from filigree.models import Issue
 
 **Step 6: Run full test suite**
 
-Run: `cd /home/john/filigree && uv run pytest --tb=short -q`
+Run: `cd /home/user/filigree && uv run pytest --tb=short -q`
 Expected: All tests pass
 
 **Step 7: Commit**
@@ -469,22 +469,22 @@ git commit -m "refactor: update non-mixin imports to use models.py directly"
 
 **Step 1: Run linters**
 
-Run: `cd /home/john/filigree && uv run ruff check src/ tests/`
+Run: `cd /home/user/filigree && uv run ruff check src/ tests/`
 Expected: No errors (or only pre-existing ones)
 
 **Step 2: Run formatter check**
 
-Run: `cd /home/john/filigree && uv run ruff format --check src/ tests/`
+Run: `cd /home/user/filigree && uv run ruff format --check src/ tests/`
 Expected: All files formatted correctly
 
 **Step 3: Run type checker**
 
-Run: `cd /home/john/filigree && uv run mypy src/filigree/`
+Run: `cd /home/user/filigree && uv run mypy src/filigree/`
 Expected: No new errors. `PromoteObservationResult.issue` should now type-check correctly.
 
 **Step 4: Run full test suite**
 
-Run: `cd /home/john/filigree && uv run pytest --tb=short`
+Run: `cd /home/user/filigree && uv run pytest --tb=short`
 Expected: All tests pass
 
 **Step 5: Fix any issues found, commit fixes**

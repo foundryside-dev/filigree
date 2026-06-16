@@ -560,9 +560,9 @@ class AnnotationsMixin(DBMixinProtocol):
         new_text = None if new_value is None else json.dumps(new_value, default=str)
         self.conn.execute(
             "INSERT INTO annotation_events "
-            "(id, annotation_id, event_type, actor, reason, old_value, new_value, target_type, target_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event_id, annotation_id, event_type, actor, reason, old_text, new_text, target_type, target_id, now),
+            "(id, annotation_id, event_type, actor, verified_actor, reason, old_value, new_value, target_type, target_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, annotation_id, event_type, actor, self._verified_actor, reason, old_text, new_text, target_type, target_id, now),
         )
         return {
             "annotation_event_id": event_id,

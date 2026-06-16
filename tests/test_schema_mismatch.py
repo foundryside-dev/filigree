@@ -162,9 +162,9 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     import json as _json
 
     for tool_name, args in (
-        ("get_issue", {"issue_id": "anything"}),
-        ("list_issues", {}),
-        ("create_issue", {"title": "x", "type": "task"}),
+        ("issue_get", {"issue_id": "anything"}),
+        ("issue_list", {}),
+        ("issue_create", {"title": "x", "type": "task"}),
     ):
         result = asyncio.run(mcp_mod.call_tool(tool_name, args))
         assert len(result) == 1, f"{tool_name}: expected single TextContent reply"
@@ -179,7 +179,7 @@ def test_mcp_server_warm_degraded_on_v_plus_one(
     payload = _json.loads(result[0].text)
     assert payload["code"] == "SCHEMA_MISMATCH"
 
-    status_result = asyncio.run(mcp_mod.call_tool("get_mcp_status", {}))
+    status_result = asyncio.run(mcp_mod.call_tool("mcp_status_get", {}))
     status_payload = _json.loads(status_result[0].text)
     assert status_payload["status"] == "schema_mismatch"
     runtime = status_payload["runtime"]
@@ -363,7 +363,7 @@ def test_init_fresh_writes_marker_no_warning(
 
     assert result.exit_code == 0, f"init failed: {result.output}\nstderr:\n{result.stderr}"
 
-    filigree_dir = tmp_path / FILIGREE_DIR_NAME
+    filigree_dir = tmp_path / ".weft" / "filigree"
     assert (filigree_dir / MARKER_NAME).exists(), "INSTALL_VERSION marker not created"
     assert (filigree_dir / MARKER_NAME).read_text() == f"{CURRENT_SCHEMA_VERSION}\n"
     assert read_install_version(filigree_dir) == CURRENT_SCHEMA_VERSION
@@ -392,7 +392,7 @@ def test_init_reinit_with_older_marker_warns_and_bumps(
     bootstrap = runner.invoke(init, [])
     assert bootstrap.exit_code == 0, f"bootstrap init failed: {bootstrap.output}"
 
-    filigree_dir = tmp_path / FILIGREE_DIR_NAME
+    filigree_dir = tmp_path / ".weft" / "filigree"
     older = CURRENT_SCHEMA_VERSION - 1
     # Forcibly age the marker to simulate a previous install at v-1.
     (filigree_dir / MARKER_NAME).write_text(f"{older}\n")

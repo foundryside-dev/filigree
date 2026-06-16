@@ -23,7 +23,14 @@ from typing import Any, cast
 import click
 
 from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
-from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES, find_filigree_anchor
+from filigree.core import (
+    VALID_ASSOC_TYPES,
+    VALID_FINDING_STATUSES,
+    VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
+    find_filigree_anchor,
+)
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.payloads import (
     file_assoc_to_mcp,
@@ -33,7 +40,7 @@ from filigree.mcp_tools.payloads import (
     timeline_entry_to_mcp,
 )
 from filigree.paths import safe_path
-from filigree.registry import clarion_file_read_url
+from filigree.registry import loomweave_file_read_url
 from filigree.types.api import BatchFailure, ErrorCode
 from filigree.types.core import AssocType, FindingStatus
 from filigree.validation import sanitize_actor
@@ -413,7 +420,7 @@ def register_file_cmd(
 
     # Validate the path before opening the DB: reject absolute paths and traversals.
     try:
-        project_root, _ = find_filigree_anchor()
+        project_root = find_filigree_anchor().project_root
     except Exception:
         # Let get_db() surface the proper error below.
         project_root = None
@@ -433,8 +440,8 @@ def register_file_cmd(
 
     with get_db() as db:
         if db.registry.is_displaced():
-            base_url = str(db.clarion_config.get("base_url", ""))
-            read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+            base_url = str(db.loomweave_config.get("base_url", ""))
+            read_url = loomweave_file_read_url(base_url, canonical_path, language=language or "")
             _logger.warning(
                 "file_registry_displaced_registration_rejected",
                 extra={
@@ -442,13 +449,13 @@ def register_file_cmd(
                     "file_path": canonical_path,
                     "language": language or "",
                     "registry_backend": db.registry_backend,
-                    "clarion_base_url": base_url,
+                    "loomweave_base_url": base_url,
                     "actor": ctx.obj["actor"],
                 },
             )
             msg = (
-                "File registration is displaced to Clarion for this project. "
-                f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+                "File registration is displaced to Loomweave for this project. "
+                f"Use Loomweave's read API instead: {read_url} (path: {canonical_path})"
             )
             if as_json:
                 click.echo(json_mod.dumps({"error": msg, "code": ErrorCode.FILE_REGISTRY_DISPLACED}))
@@ -485,7 +492,7 @@ def register_file_cmd(
 def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
     """Build the migration plan via batched resolution.
 
-    CONTRACT-1 (Clarion 1.0): rows are resolved through ``resolve_files_batch``
+    CONTRACT-1 (Loomweave 1.0): rows are resolved through ``resolve_files_batch``
     rather than one HTTP round-trip per row. Batching is owned by the
     protocol (chunks at 256 internally). Per-row blockers (rewrite blockers,
     fallback downgrade) are still computed per-row.
@@ -523,9 +530,9 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
     # Promote per-item channels into per-row error diagnostics.
     item_errors: dict[str, str] = {}
     for path in batch.get("not_found", []):
-        item_errors[path] = f"Clarion could not resolve file at {path!r}"
+        item_errors[path] = f"Loomweave could not resolve file at {path!r}"
     for path in batch.get("briefing_blocked", []):
-        item_errors[path] = f"Clarion refuses briefing-blocked file at {path!r}"
+        item_errors[path] = f"Loomweave refuses briefing-blocked file at {path!r}"
     for err in batch.get("errors", []):
         item_errors[err["requested_path"]] = f"{err['code']}: {err['message']}"
 
@@ -541,14 +548,14 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
             continue
 
         # When ``allow_local_fallback=true`` is configured and the project's
-        # ``ClarionRegistry`` is wrapped in ``_ClarionLocalFallbackRegistry``,
-        # an unreachable Clarion is silently downgraded to a local resolution
+        # ``LoomweaveRegistry`` is wrapped in ``_LoomweaveLocalFallbackRegistry``,
+        # an unreachable Loomweave is silently downgraded to a local resolution
         # at the registry boundary. The migration plan must NOT accept that
         # downgrade — recording ``new_registry_backend=target_backend`` while
         # storing a local file_id and blank content_hash would silently
         # corrupt the file_records / file_associations metadata under the
         # operator's intent to migrate. Treat the row as unresolved with a
-        # diagnostic operators can act on (lift the fallback, bring Clarion
+        # diagnostic operators can act on (lift the fallback, bring Loomweave
         # up, re-run the plan).
         if resolved["registry_backend"] != target_backend:
             unresolved.append(
@@ -559,9 +566,9 @@ def _registry_migration_plan(db: Any, *, target_backend: str) -> dict[str, Any]:
                         f"Registry resolved {row['path']!r} to "
                         f"registry_backend={resolved['registry_backend']!r} "
                         f"(file_id={resolved['file_id']!r}); migration target is "
-                        f"{target_backend!r}. This typically means Clarion is "
+                        f"{target_backend!r}. This typically means Loomweave is "
                         "unreachable and the project is running with "
-                        "allow_local_fallback=true. Bring Clarion up, disable "
+                        "allow_local_fallback=true. Bring Loomweave up, disable "
                         "fallback for the migration, and re-run the plan."
                     ),
                 }
@@ -794,7 +801,7 @@ def _apply_registry_migration(db: Any, entries: list[dict[str, Any]], *, reverse
 
 
 @click.command("migrate-registry")
-@click.option("--to", "target_backend", type=click.Choice(["clarion"]), default=None, help="Target registry backend")
+@click.option("--to", "target_backend", type=click.Choice(["loomweave"]), default=None, help="Target registry backend")
 @click.option("--dry-run", "dry_run", is_flag=True, help="Plan the migration without changing the database")
 @click.option("--execute", "execute", is_flag=True, help="Apply the migration and write a rollback manifest")
 @click.option("--rollback", "rollback_manifest", type=click.Path(path_type=Path), default=None, help="Rollback using a manifest")
@@ -948,6 +955,25 @@ def delete_file_record_cmd(ctx: click.Context, file_id: str, force: bool, as_jso
 @click.option("--scan-run-id", default=None, help="Filter by scan run ID")
 @click.option("--file-id", default=None, help="Filter by file ID")
 @click.option("--issue-id", default=None, help="Filter by linked issue ID")
+@click.option("--rule-id", default=None, help="Filter by rule/check ID (exact match)")
+@click.option(
+    "--kind",
+    default=None,
+    type=click.Choice(sorted(VALID_WARDLINE_FINDING_KINDS)),
+    help="Filter by wardline finding kind; --kind defect excludes engine telemetry",
+)
+@click.option("--qualname", default=None, help="Filter by wardline qualified name (exact match)")
+@click.option(
+    "--suppression",
+    default="active",
+    show_default=True,
+    type=click.Choice(sorted(VALID_SUPPRESSION_FILTERS)),
+    help=(
+        "Filter by suppression. Defaults to 'active' (un-suppressed/actionable) so "
+        "accepted findings are hidden from the work view; pass 'all' to include them, "
+        "or baselined/waived/judged to select a specific accepted verdict."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 def list_findings_cmd(
     limit: int,
@@ -959,6 +985,10 @@ def list_findings_cmd(
     scan_run_id: str | None,
     file_id: str | None,
     issue_id: str | None,
+    rule_id: str | None,
+    kind: str | None,
+    qualname: str | None,
+    suppression: str | None,
     as_json: bool,
 ) -> None:
     """List scan findings across all files with optional filters."""
@@ -974,6 +1004,10 @@ def list_findings_cmd(
                 scan_run_id=scan_run_id,
                 file_id=file_id,
                 issue_id=issue_id,
+                rule_id=rule_id,
+                kind=kind,
+                qualname=qualname,
+                suppression=suppression,
             )
         except ValueError as e:
             if as_json:
@@ -1113,6 +1147,17 @@ def update_finding_cmd(
 )
 @click.option("--label", "labels", multiple=True, help="Label to add to the created issue (repeatable)")
 @click.option("--actor", default=None, help="Actor identity (defaults to global --actor)")
+@click.option(
+    "--attach-entity/--no-attach-entity",
+    "attach_entity",
+    default=True,
+    show_default=True,
+    help=(
+        "Attach the finding's own entity identity (metadata.loomweave.entity_id) as an entity "
+        "association on the promoted issue when resolvable. The attach is enrichment: a failure "
+        "is reported as a warning, never a promote failure."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def promote_finding_cmd(
@@ -1121,9 +1166,15 @@ def promote_finding_cmd(
     priority: int | None,
     labels: tuple[str, ...],
     actor: str | None,
+    attach_entity: bool,
     as_json: bool,
 ) -> None:
-    """Promote a scan finding directly to a tracked issue."""
+    """Promote a scan finding directly to a tracked issue.
+
+    When the finding carries an entity identity in its own metadata, the
+    ADR-029 entity association is attached by default (B9, weft-4a46553503);
+    the output always says what was attached or why not.
+    """
     if actor is None:
         resolved_actor = ctx.obj["actor"]
     else:
@@ -1142,6 +1193,7 @@ def promote_finding_cmd(
                 priority=priority,
                 actor=resolved_actor,
                 labels=list(labels) or None,
+                attach_entity=attach_entity,
             )
         except KeyError:
             if as_json:
@@ -1162,14 +1214,25 @@ def promote_finding_cmd(
                 click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
+        attachment = promoted.get("entity_attachment")
         if as_json:
             payload: dict[str, Any] = dict(issue_to_public(promoted["issue"]))
+            # C-10 honesty: always say what the default entity attach did (or
+            # exactly why it did nothing) — never a silent skip.
+            payload["entity_attachment"] = attachment
+            if promoted.get("association") is not None:
+                payload["association"] = dict(promoted["association"])
             if promoted.get("warnings"):
                 payload["warnings"] = promoted["warnings"]
             click.echo(json_mod.dumps(payload, indent=2, default=str))
         else:
             issue = promoted["issue"]
             click.echo(f"Promoted finding {finding_id} → issue {issue.id}: {issue.title}")
+            if attachment is not None:
+                if attachment.get("attached"):
+                    click.echo(f"Attached entity {attachment['entity_id']} (content hash {attachment['content_hash']})")
+                else:
+                    click.echo(f"No entity attached: {attachment.get('reason', '')}")
         refresh_summary(db)
 
 

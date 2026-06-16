@@ -270,7 +270,7 @@ class TestFileRecordBackendInvariant:
     """FileRecord enforces the correlated (registry_backend, content_hash) invariant.
 
     ``local`` files carry the empty-hash sentinel (the local backend cannot
-    compute a drift hash); ``clarion`` files must carry a non-empty hash. The
+    compute a drift hash); ``loomweave`` files must carry a non-empty hash. The
     illegal cross combinations are rejected at construction so a corrupt row
     or a future mis-wired caller cannot hydrate an inconsistent record.
     """
@@ -280,18 +280,18 @@ class TestFileRecordBackendInvariant:
         assert record.registry_backend == "local"
         assert record.content_hash == ""
 
-    def test_clarion_with_nonempty_hash_is_valid(self) -> None:
-        record = FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="sha256:abc")
-        assert record.registry_backend == "clarion"
+    def test_loomweave_with_nonempty_hash_is_valid(self) -> None:
+        record = FileRecord(id="f1", path="src/a.py", registry_backend="loomweave", content_hash="sha256:abc")
+        assert record.registry_backend == "loomweave"
         assert record.content_hash == "sha256:abc"
 
     def test_local_with_nonempty_hash_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="content_hash"):
             FileRecord(id="f1", path="src/a.py", registry_backend="local", content_hash="sha256:abc")
 
-    def test_clarion_with_empty_hash_is_rejected(self) -> None:
+    def test_loomweave_with_empty_hash_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="content_hash"):
-            FileRecord(id="f1", path="src/a.py", registry_backend="clarion", content_hash="")
+            FileRecord(id="f1", path="src/a.py", registry_backend="loomweave", content_hash="")
 
     def test_invalid_registry_backend_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="registry_backend"):
@@ -403,6 +403,8 @@ class TestFindingsSummaryShape:
         assert isinstance(result["open_findings"], int)
         assert isinstance(result["critical"], int)
         assert isinstance(result["high"], int)
+        assert isinstance(result["suppressed"], dict)
+        assert set(result["suppressed"].keys()) == {"critical", "high", "medium", "low", "info"}
 
 
 class TestGlobalFindingsStatsShape:
@@ -427,6 +429,7 @@ class TestGlobalFindingsStatsShape:
         assert isinstance(result["open_findings"], int)
         assert isinstance(result["files_with_findings"], int)
         assert isinstance(result["critical"], int)
+        assert isinstance(result["suppressed"], dict)
 
 
 class TestFileDetailShape:
@@ -764,14 +767,12 @@ class TestStatsResultShape:
         db.create_issue("Test", type="task")
         result = db.get_stats()
         assert isinstance(result["by_status"], dict)
-        # status_name_counts / status_category_counts are DEPRECATED
+        # status_name_counts / status_category_counts were DEPRECATED
         # (filigree-17694d2db8) exact duplicates of by_status / by_category,
-        # retained as wire-compatibility aliases per ADR-009 §7. Lock the
-        # contract: still present, still identical, until the next major.
-        assert isinstance(result["status_name_counts"], dict)
-        assert result["status_name_counts"] == result["by_status"]
-        assert isinstance(result["status_category_counts"], dict)
-        assert result["status_category_counts"] == result["by_category"]
+        # REMOVED in 3.0.0 (filigree-e4181ae767). Read by_status / by_category.
+        assert "status_name_counts" not in result
+        assert "status_category_counts" not in result
+        assert isinstance(result["by_category"], dict)
         assert isinstance(result["by_type"], dict)
         assert isinstance(result["ready_count"], int)
         assert isinstance(result["blocked_count"], int)
@@ -1162,22 +1163,25 @@ class TestAddCommentResultShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        await call_tool("create_issue", {"title": "Comment target"})
-        issues = _parse(await call_tool("list_issues", {}))
+        await call_tool("issue_create", {"title": "Comment target"})
+        issues = _parse(await call_tool("issue_list", {}))
         issue_id = issues["items"][0]["issue_id"]
-        result = _parse(await call_tool("add_comment", {"issue_id": issue_id, "text": "hello"}))
+        result = _parse(await call_tool("comment_add", {"issue_id": issue_id, "text": "hello"}))
         public_issue_keys = set(get_type_hints(PublicIssue).keys())
         assert set(result.keys()) == public_issue_keys | {"comment_id", "comment"}
-        assert set(result["comment"].keys()) == {"comment_id", "author", "text", "created_at"}
+        # ADR-012 (schema v24): the MCP comment result surfaces the
+        # transport-verified identity alongside the claimed author. ``comment_to_mcp``
+        # spreads the full CommentRecord, so ``verified_author`` rides along.
+        assert set(result["comment"].keys()) == {"comment_id", "author", "verified_author", "text", "created_at"}
 
     async def test_value_types(self, mcp_db: FiligreeDB) -> None:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        await call_tool("create_issue", {"title": "Comment target"})
-        issues = _parse(await call_tool("list_issues", {}))
+        await call_tool("issue_create", {"title": "Comment target"})
+        issues = _parse(await call_tool("issue_list", {}))
         issue_id = issues["items"][0]["issue_id"]
-        result = _parse(await call_tool("add_comment", {"issue_id": issue_id, "text": "hello", "actor": "commenter"}))
+        result = _parse(await call_tool("comment_add", {"issue_id": issue_id, "text": "hello", "actor": "commenter"}))
         assert isinstance(result["issue_id"], str)
         assert isinstance(result["comment_id"], int)
         assert result["comment"]["comment_id"] == result["comment_id"]
@@ -1197,10 +1201,10 @@ class TestLabelActionResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        await call_tool("create_issue", {"title": "Label target"})
-        issues = _parse(await call_tool("list_issues", {}))
+        await call_tool("issue_create", {"title": "Label target"})
+        issues = _parse(await call_tool("issue_list", {}))
         issue_id = issues["items"][0]["issue_id"]
-        result = _parse(await call_tool("add_label", {"issue_id": issue_id, "label": "test-label"}))
+        result = _parse(await call_tool("label_add", {"issue_id": issue_id, "label": "test-label"}))
         public_issue_keys = set(get_type_hints(PublicIssue).keys())
         assert set(result.keys()) == public_issue_keys | {"label", "label_result"}
 
@@ -1208,10 +1212,10 @@ class TestLabelActionResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        await call_tool("create_issue", {"title": "Label target"})
-        issues = _parse(await call_tool("list_issues", {}))
+        await call_tool("issue_create", {"title": "Label target"})
+        issues = _parse(await call_tool("issue_list", {}))
         issue_id = issues["items"][0]["issue_id"]
-        result = _parse(await call_tool("add_label", {"issue_id": issue_id, "label": "test-label"}))
+        result = _parse(await call_tool("label_add", {"issue_id": issue_id, "label": "test-label"}))
         assert isinstance(result["issue_id"], str)
         assert isinstance(result["label"], str)
         assert isinstance(result["label_result"], str)
@@ -1224,7 +1228,7 @@ class TestJsonlTransferResponseShape:
 
         mcp_db.create_issue("Export me", type="task")
         # _safe_path requires relative paths within project root
-        result = _parse(await call_tool("export_jsonl", {"output_path": "export.jsonl"}))
+        result = _parse(await call_tool("admin_export_jsonl", {"output_path": "export.jsonl"}))
         hints = get_type_hints(JsonlTransferResponse)
         # skipped_types is NotRequired — check required keys are present
         assert set(result.keys()) <= set(hints.keys())
@@ -1235,7 +1239,7 @@ class TestJsonlTransferResponseShape:
         from tests.mcp._helpers import _parse
 
         mcp_db.create_issue("Export me", type="task")
-        result = _parse(await call_tool("export_jsonl", {"output_path": "export.jsonl"}))
+        result = _parse(await call_tool("admin_export_jsonl", {"output_path": "export.jsonl"}))
         assert isinstance(result["status"], str)
         assert isinstance(result["records"], int)
         assert isinstance(result["path"], str)
@@ -1247,7 +1251,7 @@ class TestArchiveClosedResponseShape:
         from tests.mcp._helpers import _parse
 
         # days_old<7 now requires a label filter (filigree-cb980eee0d, P3.17).
-        result = _parse(await call_tool("archive_closed", {"days_old": 0, "label": "test-scope"}))
+        result = _parse(await call_tool("admin_archive_closed", {"days_old": 0, "label": "test-scope"}))
         hints = get_type_hints(ArchiveClosedResponse)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1256,7 +1260,7 @@ class TestArchiveClosedResponseShape:
         from tests.mcp._helpers import _parse
 
         # days_old<7 now requires a label filter (filigree-cb980eee0d, P3.17).
-        result = _parse(await call_tool("archive_closed", {"days_old": 0, "label": "test-scope"}))
+        result = _parse(await call_tool("admin_archive_closed", {"days_old": 0, "label": "test-scope"}))
         assert isinstance(result["status"], str)
         assert isinstance(result["archived_count"], int)
         assert isinstance(result["archived_ids"], list)
@@ -1267,7 +1271,7 @@ class TestCompactEventsResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("compact_events", {}))
+        result = _parse(await call_tool("admin_compact_events", {}))
         hints = get_type_hints(CompactEventsResponse)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1275,7 +1279,7 @@ class TestCompactEventsResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("compact_events", {}))
+        result = _parse(await call_tool("admin_compact_events", {}))
         assert isinstance(result["status"], str)
         assert isinstance(result["events_deleted"], int)
 
@@ -1286,7 +1290,7 @@ class TestClaimNextEmptyResponseShape:
         from tests.mcp._helpers import _parse
 
         # Use type filter that matches nothing to get the empty response
-        result = _parse(await call_tool("claim_next", {"assignee": "bot", "type": "nonexistent"}))
+        result = _parse(await call_tool("work_claim_next", {"assignee": "bot", "type": "nonexistent"}))
         hints = get_type_hints(ClaimNextEmptyResponse)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1294,7 +1298,7 @@ class TestClaimNextEmptyResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("claim_next", {"assignee": "bot", "type": "nonexistent"}))
+        result = _parse(await call_tool("work_claim_next", {"assignee": "bot", "type": "nonexistent"}))
         assert isinstance(result["status"], str)
         assert isinstance(result["reason"], str)
 
@@ -1304,7 +1308,7 @@ class TestWorkflowStatusesResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("get_workflow_statuses", {}))
+        result = _parse(await call_tool("workflow_status_list", {}))
         hints = get_type_hints(WorkflowStatusesResponse)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1312,7 +1316,7 @@ class TestWorkflowStatusesResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("get_workflow_statuses", {}))
+        result = _parse(await call_tool("workflow_status_list", {}))
         assert isinstance(result["statuses"], dict)
         for category in ("open", "wip", "done"):
             assert isinstance(result["statuses"][category], list)
@@ -1323,7 +1327,7 @@ class TestPackListItemShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("list_packs", {}))
+        result = _parse(await call_tool("pack_list", {}))
         items = result["items"]
         assert isinstance(items, list)
         assert len(items) >= 1
@@ -1334,7 +1338,7 @@ class TestPackListItemShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("list_packs", {}))
+        result = _parse(await call_tool("pack_list", {}))
         pack = result["items"][0]
         assert isinstance(pack["pack"], str)
         assert isinstance(pack["version"], str)
@@ -1350,7 +1354,7 @@ class TestValidationResultShape:
         from tests.mcp._helpers import _parse
 
         issue = mcp_db.create_issue("Validate me", type="task")
-        result = _parse(await call_tool("validate_issue", {"issue_id": issue.id}))
+        result = _parse(await call_tool("issue_validate", {"issue_id": issue.id}))
         hints = get_type_hints(ValidationResult)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1359,7 +1363,7 @@ class TestValidationResultShape:
         from tests.mcp._helpers import _parse
 
         issue = mcp_db.create_issue("Validate me", type="task")
-        result = _parse(await call_tool("validate_issue", {"issue_id": issue.id}))
+        result = _parse(await call_tool("issue_validate", {"issue_id": issue.id}))
         assert isinstance(result["valid"], bool)
         assert isinstance(result["warnings"], list)
         assert isinstance(result["errors"], list)
@@ -1370,7 +1374,7 @@ class TestWorkflowGuideResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
+        result = _parse(await call_tool("workflow_guide_get", {"pack": "core"}))
         hints = get_type_hints(WorkflowGuideResponse)
         # message and note are NotRequired
         assert set(result.keys()) <= set(hints.keys())
@@ -1380,7 +1384,7 @@ class TestWorkflowGuideResponseShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("get_workflow_guide", {"pack": "core"}))
+        result = _parse(await call_tool("workflow_guide_get", {"pack": "core"}))
         assert isinstance(result["pack"], str)
         # guide is dict or null
         assert result["guide"] is None or isinstance(result["guide"], dict)
@@ -1391,7 +1395,7 @@ class TestStatusExplanationShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("explain_status", {"type": "task", "status": "open"}))
+        result = _parse(await call_tool("workflow_status_explain", {"type": "task", "status": "open"}))
         hints = get_type_hints(StatusExplanation)
         assert set(result.keys()) == set(hints.keys())
 
@@ -1399,7 +1403,7 @@ class TestStatusExplanationShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("explain_status", {"type": "task", "status": "open"}))
+        result = _parse(await call_tool("workflow_status_explain", {"type": "task", "status": "open"}))
         assert isinstance(result["status"], str)
         assert isinstance(result["category"], str)
         assert isinstance(result["type"], str)
@@ -1414,7 +1418,7 @@ class TestTransitionDetailShape:
         from tests.mcp._helpers import _parse
 
         issue = mcp_db.create_issue("Transition test", type="task")
-        result = _parse(await call_tool("get_valid_transitions", {"issue_id": issue.id}))
+        result = _parse(await call_tool("workflow_transition_list", {"issue_id": issue.id}))
         assert set(result.keys()) == {"items", "has_more"}
         assert result["has_more"] is False
         assert len(result["items"]) >= 1
@@ -1426,7 +1430,7 @@ class TestTransitionDetailShape:
         from tests.mcp._helpers import _parse
 
         issue = mcp_db.create_issue("Transition test", type="task")
-        result = _parse(await call_tool("get_valid_transitions", {"issue_id": issue.id}))
+        result = _parse(await call_tool("workflow_transition_list", {"issue_id": issue.id}))
         t = result["items"][0]
         assert isinstance(t["to"], str)
         assert isinstance(t["category"], str)
@@ -1458,7 +1462,7 @@ class TestOutboundTransitionInfoShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("explain_status", {"type": "task", "status": "open"}))
+        result = _parse(await call_tool("workflow_status_explain", {"type": "task", "status": "open"}))
         outbound = result["outbound_transitions"]
         assert isinstance(outbound, list)
         assert len(outbound) >= 1
@@ -1469,7 +1473,7 @@ class TestOutboundTransitionInfoShape:
         from filigree.mcp_server import call_tool
         from tests.mcp._helpers import _parse
 
-        result = _parse(await call_tool("explain_status", {"type": "task", "status": "open"}))
+        result = _parse(await call_tool("workflow_status_explain", {"type": "task", "status": "open"}))
         t = result["outbound_transitions"][0]
         assert isinstance(t["to"], str)
         assert isinstance(t["enforcement"], str)

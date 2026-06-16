@@ -9,7 +9,13 @@ from typing import Any
 
 from mcp.types import TextContent, Tool
 
-from filigree.core import VALID_ASSOC_TYPES, VALID_FINDING_STATUSES, VALID_SEVERITIES
+from filigree.core import (
+    VALID_ASSOC_TYPES,
+    VALID_FINDING_STATUSES,
+    VALID_SEVERITIES,
+    VALID_SUPPRESSION_FILTERS,
+    VALID_WARDLINE_FINDING_KINDS,
+)
 from filigree.issue_payloads import issue_to_public
 from filigree.mcp_tools.common import (
     _MAX_SQLITE_OFFSET,
@@ -31,7 +37,7 @@ from filigree.mcp_tools.payloads import (
     finding_to_mcp,
     timeline_entry_to_mcp,
 )
-from filigree.registry import clarion_file_read_url
+from filigree.registry import loomweave_file_read_url
 from filigree.types.api import BatchFailure, BatchResponse, ErrorCode, ErrorResponse, parse_response_detail
 from filigree.types.core import FindingStatus
 from filigree.types.inputs import (
@@ -46,6 +52,7 @@ from filigree.types.inputs import (
     ListFilesArgs,
     ListFindingsArgs,
     PromoteFindingArgs,
+    PromoteFindingAttachEntityArgs,
     RegisterFileArgs,
     UpdateFindingArgs,
 )
@@ -193,7 +200,15 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="list_findings",
-            description="List scan findings across all files with optional filters.",
+            description=(
+                "List scan findings across all files with optional filters. "
+                "Defaults to suppression='active' — accepted (baselined/waived/judged) "
+                "findings are hidden from this work view so they don't read as fresh, "
+                "open work; pass suppression='all' to include them, or a specific "
+                "verdict (baselined/waived/judged) to triage them. Filter to the real "
+                "un-suppressed defects with kind='defect' (also excludes wardline's "
+                "kind='metric' engine telemetry)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -203,6 +218,21 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "scan_run_id": {"type": "string", "description": "Filter by scan run ID"},
                     "file_id": {"type": "string", "description": "Filter by file ID"},
                     "issue_id": {"type": "string", "description": "Filter by linked issue ID"},
+                    "rule_id": {"type": "string", "description": "Filter by rule/check ID (exact match)"},
+                    "kind": {
+                        "type": "string",
+                        "enum": sorted(VALID_WARDLINE_FINDING_KINDS),
+                        "description": "Filter by wardline finding kind (metadata.wardline.kind); kind='defect' excludes engine telemetry",
+                    },
+                    "qualname": {
+                        "type": "string",
+                        "description": "Filter by wardline qualified name (metadata.wardline.qualname, exact match)",
+                    },
+                    "suppression": {
+                        "type": "string",
+                        "enum": sorted(VALID_SUPPRESSION_FILTERS),
+                        "description": "Filter by suppression state. Defaults to 'active' (un-suppressed/actionable) when omitted; pass 'all' to include suppressed rows, or 'baselined'/'waived'/'judged' to select a specific accepted verdict.",
+                    },
                     "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 10000},
                     "offset": {"type": "integer", "default": 0, "minimum": 0},
                 },
@@ -252,11 +282,27 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         ),
         Tool(
             name="promote_finding",
-            description="Promote a scan finding directly to a tracked issue and link the finding to it.",
+            description=(
+                "Promote a scan finding directly to a tracked issue and link the finding to it. "
+                "When the finding carries an entity identity in its own metadata "
+                "(metadata.loomweave.entity_id) and a content hash is available, the ADR-029 "
+                "entity association is attached by default; the response's entity_attachment "
+                "field says what was attached or why not. Pass attach_entity=false to opt out."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "finding_id": {"type": "string", "description": "Finding ID"},
+                    "attach_entity": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Attach the finding's own entity identity (metadata.loomweave.entity_id) "
+                            "as an entity association on the promoted issue when resolvable. The attach "
+                            "is enrichment: a failure is reported as a warning, never fails the promote. "
+                            "Set false to opt out."
+                        ),
+                    },
                     "priority": {
                         "type": "integer",
                         "minimum": 0,
@@ -273,8 +319,58 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                         ),
                     },
                     "actor": {"type": "string", "description": "Actor identity"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Promote even when the finding is suppressed (baselined/waived/judged). "
+                            "By default a suppressed finding is refused as an already-accepted defect, "
+                            "not active work. Set force=true to override; the override is recorded as a "
+                            "warning on the result."
+                        ),
+                    },
                 },
                 "required": ["finding_id"],
+            },
+        ),
+        Tool(
+            name="promote_finding_and_attach_entity",
+            description="Promote a scan finding to a tracked issue and attach an opaque external entity binding in one operation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "finding_id": {"type": "string", "description": "Finding ID"},
+                    "entity_id": {"type": "string", "description": "Opaque external entity ID"},
+                    "content_hash": {"type": "string", "description": "Current content hash to snapshot on the association"},
+                    "entity_kind": {
+                        "type": "string",
+                        "description": "Optional caller-supplied kind metadata; never inferred from entity_id",
+                    },
+                    "external_entity_kind": {"type": "string", "description": "Compatibility synonym for entity_kind"},
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4,
+                        "description": "Override priority (default: inferred from severity)",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional labels to attach to the promoted issue",
+                    },
+                    "actor": {"type": "string", "description": "Actor identity"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Promote even when the finding is suppressed (baselined/waived/judged). "
+                            "By default a suppressed finding is refused as an already-accepted defect, "
+                            "not active work. Set force=true to override; the override is recorded as a "
+                            "warning on the result."
+                        ),
+                    },
+                },
+                "required": ["finding_id", "entity_id", "content_hash"],
             },
         ),
         Tool(
@@ -319,6 +415,7 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
         "update_finding": _handle_update_finding,
         "batch_update_findings": _handle_batch_update_findings,
         "promote_finding": _handle_promote_finding,
+        "promote_finding_and_attach_entity": _handle_promote_finding_and_attach_entity,
         "dismiss_finding": _handle_dismiss_finding,
     }
 
@@ -549,8 +646,8 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
 
     canonical_path = str(target.relative_to(filigree_dir.resolve().parent))
     if tracker.registry.is_displaced():
-        base_url = str(tracker.clarion_config.get("base_url", ""))
-        read_url = clarion_file_read_url(base_url, canonical_path, language=language or "")
+        base_url = str(tracker.loomweave_config.get("base_url", ""))
+        read_url = loomweave_file_read_url(base_url, canonical_path, language=language or "")
         _logger.warning(
             "file_registry_displaced_registration_rejected",
             extra={
@@ -558,15 +655,15 @@ async def _handle_register_file(arguments: dict[str, Any]) -> list[TextContent]:
                 "file_path": canonical_path,
                 "language": language or "",
                 "registry_backend": tracker.registry_backend,
-                "clarion_base_url": base_url,
+                "loomweave_base_url": base_url,
                 "actor": actor,
             },
         )
         return _text(
             ErrorResponse(
                 error=(
-                    "File registration is displaced to Clarion for this project. "
-                    f"Use Clarion's read API instead: {read_url} (path: {canonical_path})"
+                    "File registration is displaced to Loomweave for this project. "
+                    f"Use Loomweave's read API instead: {read_url} (path: {canonical_path})"
                 ),
                 code=ErrorCode.FILE_REGISTRY_DISPLACED,
             )
@@ -616,16 +713,24 @@ async def _handle_list_findings(arguments: dict[str, Any]) -> list[TextContent]:
             return err
 
     filters: dict[str, Any] = {}
-    for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id"):
+    for key in ("severity", "status", "scan_source", "scan_run_id", "file_id", "issue_id", "rule_id", "kind", "qualname", "suppression"):
         val = args.get(key)
         if val is not None:
             filters[key] = val
 
-    # Validate string-type filters from MCP input
-    for key in ("scan_source", "scan_run_id", "file_id", "issue_id"):
+    # Validate string-type filters from MCP input (enum values are validated by
+    # the core query, which raises ValueError -> VALIDATION below).
+    for key in ("scan_source", "scan_run_id", "file_id", "issue_id", "rule_id", "kind", "qualname", "suppression"):
         val = filters.get(key)
         if val is not None and not isinstance(val, str):
             return _text(ErrorResponse(error=f"{key} must be a string", code=ErrorCode.VALIDATION))
+
+    # Default this agent work-view to active-only so accepted (baselined/waived/
+    # judged) findings are not surfaced as fresh, open work (filigree-2bdb878bd2).
+    # The caller opts back in with suppression='all' (no-op == everything) or a
+    # specific verdict. The core primitive keeps its all-inclusive default, so
+    # this hides rows only at the surface — not for internal callers.
+    filters.setdefault("suppression", "active")
 
     try:
         result = tracker.list_findings_global(limit=limit, offset=offset, **filters)
@@ -728,10 +833,23 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
     labels = args.get("labels")
     if labels is not None and (not isinstance(labels, list) or not all(isinstance(lbl, str) for lbl in labels)):
         return _text(ErrorResponse(error="labels must be a list of strings", code=ErrorCode.VALIDATION))
+    # Read ``force`` from the raw, untyped ``arguments`` dict rather than the
+    # cast ``args`` so the suppression-override flag plumbs through without
+    # widening the shared ``PromoteFindingArgs`` TypedDict (teammate-owned file).
+    force = arguments.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+    # Same raw-arguments idiom for the default-entity-attach opt-out (B9,
+    # weft-4a46553503).
+    attach_entity = arguments.get("attach_entity", True)
+    if not isinstance(attach_entity, bool):
+        return _text(ErrorResponse(error="attach_entity must be a boolean", code=ErrorCode.VALIDATION))
 
     tracker = get_db()
     try:
-        result = tracker.promote_finding_to_issue(finding_id, priority=priority, actor=actor, labels=labels)
+        result = tracker.promote_finding_to_issue(
+            finding_id, priority=priority, actor=actor, labels=labels, force=force, attach_entity=attach_entity
+        )
     except KeyError:
         return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
     except ValueError as exc:
@@ -742,6 +860,70 @@ async def _handle_promote_finding(arguments: dict[str, Any]) -> list[TextContent
         return _text(ErrorResponse(error=f"Database error promoting finding: {exc}", code=ErrorCode.IO))
     refresh_summary()
     response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    # C-10 honesty: always say what the default entity attach did (or exactly
+    # why it did nothing) — never a silent skip.
+    response["entity_attachment"] = result.get("entity_attachment")
+    if result.get("association") is not None:
+        response["association"] = dict(result["association"])
+    if result.get("warnings"):
+        response["warnings"] = result["warnings"]
+    return _text(response)
+
+
+async def _handle_promote_finding_and_attach_entity(arguments: dict[str, Any]) -> list[TextContent]:
+    args = _parse_args(arguments, PromoteFindingAttachEntityArgs)
+    finding_id = args.get("finding_id", "")
+    entity_id = args.get("entity_id", "")
+    content_hash = args.get("content_hash", "")
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        return _text(ErrorResponse(error="finding_id is required", code=ErrorCode.VALIDATION))
+    if not isinstance(entity_id, str) or not entity_id.strip():
+        return _text(ErrorResponse(error="entity_id is required", code=ErrorCode.VALIDATION))
+    if not isinstance(content_hash, str) or not content_hash.strip():
+        return _text(ErrorResponse(error="content_hash is required", code=ErrorCode.VALIDATION))
+    priority = args.get("priority")
+    priority_err = _validate_int_range(priority, "priority", min_val=0, max_val=4)
+    if priority_err:
+        return priority_err
+    labels = args.get("labels")
+    if labels is not None and (not isinstance(labels, list) or not all(isinstance(lbl, str) for lbl in labels)):
+        return _text(ErrorResponse(error="labels must be a list of strings", code=ErrorCode.VALIDATION))
+    entity_kind = args.get("entity_kind", args.get("external_entity_kind"))
+    if entity_kind is not None and not isinstance(entity_kind, str):
+        return _text(ErrorResponse(error="entity_kind must be a string", code=ErrorCode.VALIDATION))
+    actor, actor_err = _validate_actor(args.get("actor", "mcp"))
+    if actor_err:
+        return actor_err
+    # See ``_handle_promote_finding``: read ``force`` from the raw, untyped
+    # ``arguments`` dict so the suppression-override flag plumbs through without
+    # widening the teammate-owned ``PromoteFindingAttachEntityArgs`` TypedDict.
+    force = arguments.get("force", False)
+    if not isinstance(force, bool):
+        return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+
+    tracker = get_db()
+    try:
+        result = tracker.promote_finding_and_attach_entity(
+            finding_id,
+            entity_id,
+            content_hash,
+            priority=priority,
+            actor=actor,
+            labels=labels,
+            entity_kind=entity_kind,
+            force=force,
+        )
+    except KeyError:
+        return _text(ErrorResponse(error=f"Finding not found: {finding_id}", code=ErrorCode.NOT_FOUND))
+    except ValueError as exc:
+        _logger.warning("Failed to promote finding and attach entity %s: %s", finding_id, exc)
+        return _text(ErrorResponse(error=f"Failed to promote finding and attach entity: {exc}", code=ErrorCode.VALIDATION))
+    except sqlite3.Error as exc:
+        _logger.exception("Database error promoting finding and attaching entity %s", finding_id)
+        return _text(ErrorResponse(error=f"Database error promoting finding and attaching entity: {exc}", code=ErrorCode.IO))
+    refresh_summary()
+    response: dict[str, object] = dict(issue_to_public(result["issue"]))
+    response["association"] = dict(result["association"])
     if result.get("warnings"):
         response["warnings"] = result["warnings"]
     return _text(response)

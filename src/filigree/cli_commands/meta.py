@@ -266,7 +266,7 @@ def mcp_status(as_json: bool) -> None:
     # Lazy import: mcp_server pulls in mcp.server + starlette, which we do not
     # want to load on every CLI invocation. Mirror the MCP handler, which also
     # imports get_mcp_status_payload lazily (mcp_tools/workflow.py).
-    from filigree.core import FILIGREE_DIR_NAME, ProjectNotInitialisedError, find_filigree_anchor
+    from filigree.core import ProjectNotInitialisedError, find_filigree_anchor
     from filigree.mcp_server import _attempt_startup, get_mcp_status_payload
 
     # Resolve the project anchor exactly as the MCP server's _run() does, then
@@ -274,14 +274,14 @@ def mcp_status(as_json: bool) -> None:
     # reflects real project state (calling get_mcp_status_payload cold would
     # report "not_initialized" off the uninitialized globals).
     try:
-        project_root, conf_path = find_filigree_anchor()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         from filigree.cli_common import _emit_startup_failure
 
         _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
         sys.exit(1)
 
-    _attempt_startup(project_root / FILIGREE_DIR_NAME, conf_path=conf_path)
+    _attempt_startup(anchor.store_dir, conf_path=anchor.conf_path, project_root=anchor.project_root)
     payload = get_mcp_status_payload()
 
     if as_json:
@@ -295,7 +295,8 @@ def mcp_status(as_json: bool) -> None:
     click.echo(f"Schema compatible: {payload['schema_compatible']}")
     click.echo(f"Installed schema version: {payload['installed_schema_version']}")
     click.echo(f"Database schema version: {payload['database_schema_version']}")
-    click.echo(f"Project dir: {payload['filigree_dir']}")
+    click.echo(f"Project root: {payload.get('project_root')}")
+    click.echo(f"Store dir: {payload['filigree_dir']}")
     if payload.get("code"):
         click.echo(f"Code: {payload['code']}")
     if payload.get("error"):
@@ -855,6 +856,46 @@ def get_label_taxonomy_cmd(as_json: bool) -> None:
     _taxonomy_impl(as_json)
 
 
+@click.command("reconciliation-debt")
+@click.option("--limit", default=50, type=int, help="Max results (default 50)")
+@click.option("--offset", default=0, type=int, help="Skip first N results")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def reconciliation_debt_cmd(limit: int, offset: int, as_json: bool) -> None:
+    """List issues carrying reconciliation debt (deferred governed cascade closes).
+
+    Design A defers a governed finding→issue auto-close that Legis blocks or
+    cannot confirm, recording the deferral as reconciliation debt. This lists
+    the issues that carry it so the deferral can be actioned.
+    """
+    with get_db() as db:
+        try:
+            rows = db.list_reconciliation_debt(limit=limit + 1, offset=offset)
+        except sqlite3.Error as e:
+            if as_json:
+                click.echo(json_mod.dumps({"error": f"Database error: {e}", "code": ErrorCode.IO}))
+            else:
+                click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        next_offset = offset + len(rows) if has_more else None
+
+        if as_json:
+            payload: dict[str, Any] = {"items": rows, "has_more": has_more}
+            if has_more and next_offset is not None:
+                payload["next_offset"] = next_offset
+            click.echo(json_mod.dumps(payload, indent=2, default=str))
+            return
+
+        if not rows:
+            click.echo("No reconciliation debt.")
+            return
+        for row in rows:
+            click.echo(f"{row['issue_id']}  {row['debt_count']} debt  (latest {row['latest']})")
+        click.echo(f"\n{len(rows)} issue(s) with reconciliation debt")
+
+
 def register(cli: click.Group) -> None:
     """Register metadata commands with the CLI group."""
     cli.add_command(add_comment)
@@ -875,3 +916,4 @@ def register(cli: click.Group) -> None:
     cli.add_command(batch_add_label)
     cli.add_command(batch_remove_label)
     cli.add_command(batch_add_comment)
+    cli.add_command(reconciliation_debt_cmd)

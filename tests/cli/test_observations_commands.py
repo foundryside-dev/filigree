@@ -46,6 +46,10 @@ _OBSERVE_KEYS = frozenset(
         "actor",
         "created_at",
         "expires_at",
+        # Added v23→v24 (ADR-012): nullable transport-bound actor identity.
+        # Surfaces as None until later tasks stamp it; output shape tracks
+        # the SCHEMA_SQL column mechanically (SELECT * → dict(row)).
+        "verified_actor",
     }
 )
 
@@ -74,8 +78,8 @@ class TestObserveCommand:
     ) -> None:
         def unavailable_register_file(self: FiligreeDB, path: str, **kwargs: object) -> object:
             raise RegistryUnavailableError(
-                "Clarion registry unavailable for test",
-                url="http://clarion.test/api/v1/files?path=src%2Fobserved.py",
+                "Loomweave registry unavailable for test",
+                url="http://loomweave.test/api/v1/files?path=src%2Fobserved.py",
                 path=path,
                 cause_kind="network",
             )
@@ -89,7 +93,7 @@ class TestObserveCommand:
         assert data["details"]["cause"] == "registry_unavailable"
         assert data["details"]["cause_kind"] == "network"
         assert data["details"]["path"] == "src/observed.py"
-        assert data["details"]["url"] == "http://clarion.test/api/v1/files?path=src%2Fobserved.py"
+        assert data["details"]["url"] == "http://loomweave.test/api/v1/files?path=src%2Fobserved.py"
 
     def test_observe_happy_path_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -150,6 +154,67 @@ class TestObserveCommand:
         runner, _ = cli_in_project
         result = runner.invoke(cli, ["observe"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# TestObservationCreateAlias — `filigree observation create` is a visible alias
+# of the canonical flat `filigree observe` verb (filigree-ce3bfae865).
+# ---------------------------------------------------------------------------
+
+
+class TestObservationCreateAlias:
+    def test_create_alias_happy_path_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["observation", "create", "spotted via alias", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == _OBSERVE_KEYS, f"Shape mismatch: {set(data.keys()) ^ _OBSERVE_KEYS}"
+        assert data["summary"] == "spotted via alias"
+        assert data["priority"] == 2  # CLI default, same as observe
+
+        # The observation was really created — visible via the list verb.
+        listed = runner.invoke(cli, ["observation", "list", "--json"])
+        assert listed.exit_code == 0, listed.output
+        envelope = json.loads(listed.output)
+        assert any(item["observation_id"] == data["observation_id"] for item in envelope["items"])
+
+    def test_create_alias_with_all_options(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """The alias accepts the full observe option set (shared params, not a fork)."""
+        runner, _ = cli_in_project
+        result = runner.invoke(
+            cli,
+            [
+                "observation",
+                "create",
+                "suspicious loop",
+                "--detail",
+                "may be O(n^2)",
+                "--file-path",
+                "src/foo.py",
+                "--line",
+                "42",
+                "--source-issue-id",
+                "test-abc",
+                "--priority",
+                "1",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["summary"] == "suspicious loop"
+        assert data["detail"] == "may be O(n^2)"
+        assert data["line"] == 42
+        assert data["priority"] == 1
+        assert data["source_issue_id"] == "test-abc"
+
+    def test_observe_still_works_alongside_alias(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, _ = cli_in_project
+        result = runner.invoke(cli, ["observe", "still canonical", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data.keys()) == _OBSERVE_KEYS
+        assert data["summary"] == "still canonical"
 
 
 # ---------------------------------------------------------------------------

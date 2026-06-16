@@ -23,11 +23,11 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from filigree.types.core import (
     AssocType,
-    ClarionEntityId,
     ContentHash,
     FindingStatus,
     ISOTimestamp,
     IssueId,
+    LoomweaveEntityId,
     Severity,
     StatusCategory,
 )
@@ -50,6 +50,8 @@ class ListIssuesArgs(TypedDict):
     status_category: NotRequired[StatusCategory]
     type: NotRequired[str]
     priority: NotRequired[int]
+    priority_min: NotRequired[int]
+    priority_max: NotRequired[int]
     parent_issue_id: NotRequired[str]
     assignee: NotRequired[str]
     label: NotRequired[str | list[str]]
@@ -73,6 +75,13 @@ class CreateIssueArgs(TypedDict):
     labels: NotRequired[list[str]]
     deps: NotRequired[list[str]]
     actor: NotRequired[str]
+    # SEAM SEI-on-create (ADR-029). Bind a hand-filed ticket to the spine at
+    # creation. ``entity_id`` is the L1 direct opaque bind; ``entity_symbol`` is
+    # the L2 symbol/qualname resolved to an SEI via Loomweave before binding.
+    entity_id: NotRequired[str]
+    entity_kind: NotRequired[str]
+    content_hash: NotRequired[str]
+    entity_symbol: NotRequired[str]
 
 
 class UpdateIssueArgs(TypedDict):
@@ -121,7 +130,7 @@ class SearchIssuesArgs(TypedDict):
 
 class ClaimIssueArgs(TypedDict):
     issue_id: str
-    assignee: str
+    assignee: NotRequired[str]
     actor: NotRequired[str]
 
 
@@ -166,7 +175,7 @@ class ReclaimIssueArgs(TypedDict):
 
 
 class ClaimNextArgs(TypedDict):
-    assignee: str
+    assignee: NotRequired[str]
     type: NotRequired[str]
     priority_min: NotRequired[int]
     priority_max: NotRequired[int]
@@ -175,14 +184,14 @@ class ClaimNextArgs(TypedDict):
 
 class StartWorkArgs(TypedDict):
     issue_id: str
-    assignee: str
+    assignee: NotRequired[str]
     target_status: NotRequired[str]
     actor: NotRequired[str]
     advance: NotRequired[bool]
 
 
 class StartNextWorkArgs(TypedDict):
-    assignee: str
+    assignee: NotRequired[str]
     type: NotRequired[str]
     priority_min: NotRequired[int]
     priority_max: NotRequired[int]
@@ -462,6 +471,8 @@ class RemoveDependencyArgs(TypedDict):
 
 class GetReadyArgs(TypedDict):
     include_context: NotRequired[bool]
+    priority_min: NotRequired[int]
+    priority_max: NotRequired[int]
 
 
 class GetBlockedArgs(TypedDict):
@@ -631,20 +642,22 @@ class RegisterFileArgs(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# entity_associations.py handlers (ADR-029, Clarion B.7)
+# entity_associations.py handlers (ADR-029, Loomweave B.7)
 # ---------------------------------------------------------------------------
 
 
 class AddEntityAssociationArgs(TypedDict):
     issue_id: IssueId
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
     content_hash: ContentHash
+    entity_kind: NotRequired[str]
+    external_entity_kind: NotRequired[str]
     actor: NotRequired[str]
 
 
 class RemoveEntityAssociationArgs(TypedDict):
     issue_id: IssueId
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
     actor: NotRequired[str]
 
 
@@ -653,7 +666,16 @@ class ListEntityAssociationsArgs(TypedDict):
 
 
 class ListAssociationsByEntityArgs(TypedDict):
-    entity_id: ClarionEntityId
+    entity_id: LoomweaveEntityId
+    current_content_hash: NotRequired[ContentHash]
+
+
+class WarplineWorklistIngestArgs(TypedDict):
+    worklist: dict[str, Any]
+    apply: NotRequired[bool]
+    actor: NotRequired[str]
+    priority: NotRequired[int]
+    content_hash: NotRequired[str]
 
 
 class TriggerScanArgs(TypedDict):
@@ -685,6 +707,12 @@ class ListFindingsArgs(TypedDict):
     scan_run_id: NotRequired[str]
     file_id: NotRequired[str]
     issue_id: NotRequired[str]
+    # FIL-2/X-5: nested wardline axes + rule_id, so an agent can filter to the
+    # real un-suppressed defects server-side instead of pulling everything.
+    rule_id: NotRequired[str]
+    kind: NotRequired[str]
+    qualname: NotRequired[str]
+    suppression: NotRequired[str]
     limit: NotRequired[int]
     offset: NotRequired[int]
 
@@ -707,6 +735,20 @@ class PromoteFindingArgs(TypedDict):
     finding_id: str
     priority: NotRequired[int]
     labels: NotRequired[list[str]]
+    force: NotRequired[bool]
+    attach_entity: NotRequired[bool]
+    actor: NotRequired[str]
+
+
+class PromoteFindingAttachEntityArgs(TypedDict):
+    finding_id: str
+    entity_id: str
+    content_hash: str
+    priority: NotRequired[int]
+    labels: NotRequired[list[str]]
+    entity_kind: NotRequired[str]
+    external_entity_kind: NotRequired[str]
+    force: NotRequired[bool]
     actor: NotRequired[str]
 
 
@@ -733,6 +775,13 @@ class ReportFindingArgs(TypedDict):
     actor: NotRequired[str]
     create_observation: NotRequired[bool]
     response_detail: NotRequired[str]
+    # SEAM SEI-on-create (ADR-029). Bind an agent-reported finding to the spine
+    # at entry by stamping the SEI into ``metadata.loomweave.entity_id`` — the
+    # same key ``finding_promote`` later reads to auto-attach the entity
+    # association. ``entity_id`` is the L1 direct opaque bind; ``entity_symbol``
+    # is the L2 symbol/qualname resolved to an SEI via Loomweave before binding.
+    entity_id: NotRequired[str]
+    entity_symbol: NotRequired[str]
 
 
 class ListPromptPacksArgs(TypedDict):
@@ -771,6 +820,11 @@ class ObserveArgs(TypedDict):
     source_issue_id: NotRequired[str]
     priority: NotRequired[int]
     actor: NotRequired[str]
+
+
+class ListReconciliationDebtArgs(TypedDict):
+    limit: NotRequired[int]
+    offset: NotRequired[int]
 
 
 class ListObservationsArgs(TypedDict):
@@ -934,11 +988,13 @@ TOOL_ARGS_MAP: dict[str, type] = {
     "remove_entity_association": RemoveEntityAssociationArgs,
     "list_entity_associations": ListEntityAssociationsArgs,
     "list_associations_by_entity": ListAssociationsByEntityArgs,
+    "ingest_warpline_worklist": WarplineWorklistIngestArgs,
     "get_finding": GetFindingArgs,
     "list_findings": ListFindingsArgs,
     "update_finding": UpdateFindingArgs,
     "batch_update_findings": BatchUpdateFindingsArgs,
     "promote_finding": PromoteFindingArgs,
+    "promote_finding_and_attach_entity": PromoteFindingAttachEntityArgs,
     "dismiss_finding": DismissFindingArgs,
     # scanners.py (list_scanners has no args — excluded)
     "enable_scanner": EnableScannerArgs,
@@ -952,6 +1008,7 @@ TOOL_ARGS_MAP: dict[str, type] = {
     # observations.py
     "observe": ObserveArgs,
     "list_observations": ListObservationsArgs,
+    "list_reconciliation_debt": ListReconciliationDebtArgs,
     "dismiss_observation": DismissObservationArgs,
     "batch_dismiss_observations": BatchDismissObservationsArgs,
     "batch_promote_observations": BatchPromoteObservationsArgs,

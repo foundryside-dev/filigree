@@ -477,7 +477,7 @@ class TestReportFindingTool:
         """All optional fields are accepted and the response is the created finding."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/auth/login.py",
                     "rule_id": "sql-injection",
@@ -504,7 +504,7 @@ class TestReportFindingTool:
         """Only required fields — severity defaults to info and returns the finding."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/utils/format.py",
                     "rule_id": "unused-import",
@@ -524,7 +524,7 @@ class TestReportFindingTool:
         """An unrecognised severity value is rejected before any DB writes."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/main.py",
                     "rule_id": "some-rule",
@@ -540,7 +540,7 @@ class TestReportFindingTool:
         """Unhashable JSON values must not escape as raw TypeError."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/main.py",
                     "rule_id": "some-rule",
@@ -556,7 +556,7 @@ class TestReportFindingTool:
         """Omitting file_path triggers the required-fields validation error."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "",
                     "rule_id": "some-rule",
@@ -571,7 +571,7 @@ class TestReportFindingTool:
         """Omitting rule_id triggers the required-fields validation error."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/main.py",
                     "rule_id": "",
@@ -586,7 +586,7 @@ class TestReportFindingTool:
         """Omitting message triggers the required-fields validation error."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/main.py",
                     "rule_id": "some-rule",
@@ -602,7 +602,7 @@ class TestReportFindingTool:
         """Every member of VALID_SEVERITIES creates a finding without error."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": f"src/file_{severity}.py",
                     "rule_id": "test-rule",
@@ -624,10 +624,10 @@ class TestReportFindingTool:
             "message": "First report",
             "response_detail": "full",
         }
-        first = _parse(await call_tool("report_finding", args))
+        first = _parse(await call_tool("finding_report", args))
         assert first["finding_result"] == "created"
 
-        second = _parse(await call_tool("report_finding", {**args, "message": "Second report"}))
+        second = _parse(await call_tool("finding_report", {**args, "message": "Second report"}))
         assert second["finding_result"] == "updated"
         assert second["status"] == "open"
         assert second["finding_id"] == first["finding_id"]
@@ -645,7 +645,7 @@ class TestReportFindingTool:
         ):
             data = _parse(
                 await call_tool(
-                    "report_finding",
+                    "finding_report",
                     {
                         "file_path": "src/main.py",
                         "rule_id": "test-rule",
@@ -661,7 +661,7 @@ class TestReportFindingTool:
         mcp_db_for_report_finding.register_file("src/existing.py")
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/existing.py",
                     "rule_id": "existing-rule",
@@ -680,7 +680,7 @@ class TestReportFindingTool:
         """
         slim = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/slim.py",
                     "rule_id": "slim-rule",
@@ -705,7 +705,7 @@ class TestReportFindingTool:
         """By default, report_finding creates only the finding (ADR-007)."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/no-obs.py",
                     "rule_id": "no-obs-rule",
@@ -728,7 +728,7 @@ class TestReportFindingTool:
         """
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/actor.py",
                     "rule_id": "actor-rule",
@@ -751,7 +751,7 @@ class TestReportFindingTool:
         with patch("filigree.mcp_tools.scanners.refresh_summary") as refresh_summary:
             data = _parse(
                 await call_tool(
-                    "report_finding",
+                    "finding_report",
                     {
                         "file_path": "src/summary.py",
                         "rule_id": "needs-refresh",
@@ -768,7 +768,7 @@ class TestReportFindingTool:
     async def test_invalid_actor_on_observation_returns_validation_error(self, mcp_db_for_report_finding: FiligreeDB) -> None:
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/bad-actor.py",
                     "rule_id": "bad-actor-rule",
@@ -793,7 +793,7 @@ class TestReportFindingTool:
         """
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/cascade-link.py",
                     "rule_id": "review-d-link",
@@ -835,7 +835,7 @@ class TestReportFindingTool:
         (mcp_root / "src/foo.py").write_text("x = 1\n", encoding="utf-8")
         mcp_data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     **payload,
                     "actor": "scanner-agent",
@@ -889,7 +889,7 @@ class TestReportFindingTool:
         """dismiss_finding auto-dismisses the linked observation (P1.2)."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/cascade-dismiss.py",
                     "rule_id": "review-d-dismiss",
@@ -907,7 +907,7 @@ class TestReportFindingTool:
         ).fetchone()
         assert live["c"] == 1
         # Dismiss the finding.
-        await call_tool("dismiss_finding", {"finding_id": finding_id, "reason": "duplicate"})
+        await call_tool("finding_dismiss", {"finding_id": finding_id, "reason": "duplicate"})
         # Observation gone, dismissal recorded.
         live = mcp_db_for_report_finding.conn.execute(
             "SELECT COUNT(*) AS c FROM observations WHERE id = ?", (observation_ids[0],)
@@ -922,7 +922,7 @@ class TestReportFindingTool:
         """promote_finding auto-dismisses the linked observation (P1.2)."""
         data = _parse(
             await call_tool(
-                "report_finding",
+                "finding_report",
                 {
                     "file_path": "src/cascade-promote.py",
                     "rule_id": "review-d-promote",
@@ -935,7 +935,7 @@ class TestReportFindingTool:
         finding_id = data["finding_id"]
         observation_ids = data["observation_ids"]
         # Promote the finding.
-        await call_tool("promote_finding", {"finding_id": finding_id})
+        await call_tool("finding_promote", {"finding_id": finding_id})
         # Linked observation is gone.
         live = mcp_db_for_report_finding.conn.execute(
             "SELECT COUNT(*) AS c FROM observations WHERE id = ?", (observation_ids[0],)

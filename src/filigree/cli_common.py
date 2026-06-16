@@ -16,8 +16,8 @@ import warnings
 
 import click
 
+from filigree import actor_identity
 from filigree.core import (
-    FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     FiligreeDB,
     ProjectNotInitialisedError,
@@ -80,7 +80,28 @@ class ActorCommand(click.Command):
                 raise click.BadParameter(err, param_hint="'--actor'")
             ctx.ensure_object(dict)
             ctx.obj["actor"] = cleaned
+            # FIL-3 (filigree-3028a8d0f8): a post-verb --actor is explicit by
+            # definition; record it so explicit_actor() can default an omitted
+            # --assignee from it on claim-shaped verbs.
+            ctx.obj["actor_explicit"] = True
         return super().invoke(ctx)
+
+
+def explicit_actor(ctx: click.Context) -> str | None:
+    """Return the resolved actor only when it was *explicitly* provided.
+
+    Explicit means the group-level ``filigree --actor X`` (detected via
+    ``ctx.get_parameter_source`` in the group callback) or a post-verb
+    ``--actor X`` on an :class:`ActorCommand`. The implicit ``"cli"`` default
+    returns None so claim-shaped verbs never silently claim as "cli".
+    Reads defensively: commands invoked without the group callback (direct
+    ``runner.invoke(<command>)``) have no ``actor_explicit`` key.
+    """
+    obj = ctx.obj if isinstance(ctx.obj, dict) else {}
+    if not obj.get("actor_explicit"):
+        return None
+    actor = obj.get("actor")
+    return actor if isinstance(actor, str) and actor else None
 
 
 def _wants_json() -> bool:
@@ -198,14 +219,17 @@ def get_db() -> FiligreeDB:
     its own ``SCHEMA_MISMATCH`` code.
     """
     try:
-        project_root, conf_path = find_filigree_anchor()
+        anchor = find_filigree_anchor()
     except ProjectNotInitialisedError as exc:
         _emit_startup_failure(exc, ErrorCode.NOT_INITIALIZED)
         sys.exit(1)
     try:
-        if conf_path is not None:
-            return FiligreeDB.from_conf(conf_path)
-        return FiligreeDB.from_filigree_dir(project_root / FILIGREE_DIR_NAME)
+        db = FiligreeDB.from_anchor(anchor)
+        # ADR-012 (schema v24): stamp the transport-verified OS identity onto the
+        # session so every runtime insert records verified_actor. Resolution
+        # never raises and never blocks; None leaves verified_actor NULL.
+        db.set_verified_actor(actor_identity.resolve_os_actor())
+        return db
     except SchemaVersionMismatchError as exc:
         _emit_startup_failure(exc, ErrorCode.SCHEMA_MISMATCH, human_prefix="Error opening project database: ")
         sys.exit(1)

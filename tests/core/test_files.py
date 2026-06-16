@@ -48,7 +48,7 @@ class _CasefoldingRegistry:
                 "content_hash": f"hash:{canonical_path}",
                 "canonical_path": canonical_path,
                 "language": language,
-                "registry_backend": "clarion",
+                "registry_backend": "loomweave",
             },
         )
 
@@ -91,7 +91,7 @@ class TestRegisterFile:
             registry=FixedRegistry(
                 file_id="core:file:def456@src/direct.py",
                 content_hash="hash-direct",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -103,7 +103,7 @@ class TestRegisterFile:
             assert file_record.path == "src/direct.py"
             assert file_record.language == "python"
             assert file_record.content_hash == "hash-direct"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
         finally:
             db.close()
 
@@ -129,7 +129,7 @@ class TestRegisterFile:
             registry=FixedRegistry(
                 file_id="core:file:escape",
                 canonical_path="../outside.py",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -359,7 +359,7 @@ class TestRegisterFile:
                         "content_hash": f"sha256:refresh-{self.calls}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -367,7 +367,7 @@ class TestRegisterFile:
                 return True
 
         registry = RefreshingRegistry()
-        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="clarion")
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="loomweave")
         try:
             db.initialize()
 
@@ -381,7 +381,7 @@ class TestRegisterFile:
 
             assert created.id == updated.id
             assert updated.content_hash == "sha256:refresh-2"
-            assert updated.registry_backend == "clarion"
+            assert updated.registry_backend == "loomweave"
             assert registry.calls == 2
             events = db.get_file_timeline(updated.id, event_type="file_metadata_update")
             assert {event["data"]["field"] for event in events["results"]} >= {"content_hash", "registry_backend"}
@@ -679,7 +679,7 @@ class TestProcessScanResults:
             registry=FixedRegistry(
                 file_id="core:file:abc123@src/main.py",
                 content_hash="hash-ingest",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -702,7 +702,7 @@ class TestProcessScanResults:
             assert file_record is not None
             assert file_record.id == "core:file:abc123@src/main.py"
             assert file_record.content_hash == "hash-ingest"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
             finding = db.get_finding(result["new_finding_ids"][0])
             assert finding["file_id"] == "core:file:abc123@src/main.py"
         finally:
@@ -721,7 +721,7 @@ class TestProcessScanResults:
                         "content_hash": f"sha256:scan-{self.calls}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -732,7 +732,7 @@ class TestProcessScanResults:
                 return True
 
         registry = RefreshingRegistry()
-        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="clarion")
+        db = FiligreeDB(tmp_path / "filigree.db", prefix="test", registry=registry, registry_backend="loomweave")
         try:
             db.initialize()
             first = db.process_scan_results(
@@ -767,7 +767,7 @@ class TestProcessScanResults:
             assert second["files_updated"] == 1
             assert registry.calls == 2
             assert file_record.content_hash == "sha256:scan-2"
-            assert file_record.registry_backend == "clarion"
+            assert file_record.registry_backend == "loomweave"
         finally:
             db.close()
 
@@ -787,7 +787,7 @@ class TestProcessScanResults:
                         "content_hash": f"hash:{path}",
                         "canonical_path": path,
                         "language": language,
-                        "registry_backend": "clarion",
+                        "registry_backend": "loomweave",
                     },
                 )
 
@@ -799,8 +799,8 @@ class TestProcessScanResults:
             tmp_path / "filigree.db",
             prefix="test",
             registry=registry,
-            registry_backend="clarion",
-            clarion_config={"base_url": "http://clarion.test"},
+            registry_backend="loomweave",
+            loomweave_config={"base_url": "http://loomweave.test"},
         )
         registry.db = db
         try:
@@ -1000,7 +1000,7 @@ class TestProcessScanResults:
             registry=FixedRegistry(
                 file_id="core:file:escape",
                 canonical_path="/etc/passwd",
-                registry_backend="clarion",
+                registry_backend="loomweave",
             ),
         )
         try:
@@ -1675,7 +1675,7 @@ class TestScanRunId:
         skips the completion attempt silently — no "status not updated" warning
         (there is nothing to complete). Findings still ingest."""
         result = db.process_scan_results(
-            scan_source="clarion",
+            scan_source="loomweave",
             scan_run_id="never-created-run",
             findings=[{"path": "a.py", "rule_id": "C1", "severity": "high", "message": "m"}],
         )
@@ -2473,6 +2473,52 @@ class TestFileDetailCore:
         assert summary["total_findings"] == 2  # total includes all
         assert summary["open_findings"] == 1  # open excludes fixed
 
+    def test_summary_splits_suppressed_buckets(self, db: FiligreeDB) -> None:
+        # G4: a baselined HIGH keeps its non-terminal status, so it stays in the
+        # census `high` bucket — but the parallel `suppressed` breakdown must
+        # report it so a consumer can derive actionable = high - suppressed.high.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "high", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "high", "message": "baselined"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        findings = db.get_findings(f.id)
+        baselined = next(x for x in findings if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), baselined.id),
+        )
+        db.conn.commit()
+        summary = db.get_file_findings_summary(f.id)
+        assert summary["high"] == 2  # census unchanged — both open HIGH findings
+        assert summary["suppressed"]["high"] == 1  # one of them is accepted
+        # actionable = census - suppressed
+        assert summary["high"] - summary["suppressed"]["high"] == 1
+
+    def test_summary_suppressed_excludes_terminal(self, db: FiligreeDB) -> None:
+        # A finding that is BOTH fixed (terminal) AND baselined must not appear
+        # in either the open census or the suppressed breakdown — the open_filter
+        # gates the suppressed columns too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[{"path": "a.py", "rule_id": "W1", "severity": "high", "message": "m"}],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        findings = db.get_findings(f.id)
+        db.conn.execute(
+            "UPDATE scan_findings SET status = 'fixed', metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), findings[0].id),
+        )
+        db.conn.commit()
+        summary = db.get_file_findings_summary(f.id)
+        assert summary["high"] == 0
+        assert summary["suppressed"]["high"] == 0
+
     def test_get_file_detail_structure(self, db: FiligreeDB) -> None:
         f = db.register_file("src/main.py", language="python")
         detail = db.get_file_detail(f.id)
@@ -3122,6 +3168,27 @@ class TestListFilesEnrichment:
         assert s["critical"] == 0
         assert result["results"][0]["associations_count"] == 0
 
+    def test_list_summary_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the federation file-list (4th FindingsSummary producer) carries the split.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "high", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "high", "message": "baselined"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        baselined = next(x for x in db.get_findings(f.id) if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "baselined"}}), baselined.id),
+        )
+        db.conn.commit()
+        s = db.list_files_paginated()["results"][0]["summary"]
+        assert s["high"] == 2
+        assert s["suppressed"]["high"] == 1
+
 
 class TestFileTimeline:
     """Tests for get_file_timeline() in core."""
@@ -3404,6 +3471,51 @@ class TestGlobalFindingsStats:
         assert stats["open_findings"] == 1
         assert stats["critical"] == 0
         assert stats["low"] == 1
+
+    def test_global_stats_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the global rollup must carry the suppressed split too.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "critical", "message": "active"},
+                {"path": "b.py", "rule_id": "W2", "severity": "critical", "message": "waived"},
+            ],
+        )
+        fb = db.get_file_by_path("b.py")
+        assert fb is not None
+        waived = db.get_findings(fb.id)[0]
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "waived"}}), waived.id),
+        )
+        db.conn.commit()
+        stats = db.get_global_findings_stats()
+        assert stats["critical"] == 2
+        assert stats["suppressed"]["critical"] == 1
+
+    def test_files_summary_splits_suppressed(self, db: FiligreeDB) -> None:
+        # G4: the multi-file aggregate (scan-run posture echo) carries the split.
+        db.process_scan_results(
+            scan_source="wardline",
+            findings=[
+                {"path": "a.py", "rule_id": "W1", "severity": "medium", "message": "active"},
+                {"path": "a.py", "rule_id": "W2", "severity": "medium", "message": "judged"},
+            ],
+        )
+        f = db.get_file_by_path("a.py")
+        assert f is not None
+        judged = next(x for x in db.get_findings(f.id) if x.rule_id == "W2")
+        db.conn.execute(
+            "UPDATE scan_findings SET metadata = ? WHERE id = ?",
+            (json.dumps({"wardline": {"suppression_state": "judged"}}), judged.id),
+        )
+        db.conn.commit()
+        summary = db.get_files_findings_summary([f.id])
+        assert summary["medium"] == 2
+        assert summary["suppressed"]["medium"] == 1
+        # the empty-list early-return still carries the suppressed key (zero-filled)
+        empty = db.get_files_findings_summary([])
+        assert empty["suppressed"] == {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
 
 class TestPaginationMetadata:

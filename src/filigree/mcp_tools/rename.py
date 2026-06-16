@@ -8,15 +8,20 @@ identity is the client wrapper's job; the entity token (``finding_`` / ``file_``
 / ``issue_``) does the intra-server disambiguation this rename exists for.
 
 This module is **data + a derived inverse only**, and it **is** consumed by
-``mcp_server`` (Phase-1 aliasing — see
-``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5):
+``mcp_server`` (the namespaced wire surface — see
+``docs/plans/2026-06-02-mcp-tool-namespacing-rename-plan.md`` §5-6):
 
 * the canonicalize-at-top resolve step in ``call_tool`` maps an inbound new
-  name to its canonical (old) name via ``NEW_TO_OLD``, keeping every downstream
-  guard/dispatch valid;
-* ``list_tools`` renames the served ``Tool.name`` via ``RENAME_MAP``;
-* a deprecation-telemetry counter records inbound calls that arrive under an
-  old name so the cutover can be tracked.
+  name to its canonical (old) internal name via ``NEW_TO_OLD``, keeping every
+  downstream guard/dispatch valid;
+* ``list_tools`` renames the served ``Tool.name`` via ``RENAME_MAP``.
+
+Phase 2 (ADR-016, the 3.0 major boundary) removed the legacy flat names from the
+wire: ``call_tool`` rejects any name that is a ``RENAME_MAP`` *key* (an old
+name) with the standard Unknown-tool NOT_FOUND envelope. The old names survive
+only as the *internal* canonical handler keys — never as an accepted wire name —
+so ``NEW_TO_OLD`` is the live new→canonical dispatch table, not a transition
+shim.
 
 It remains the frozen, CI-validated source of truth so the agreed names cannot
 drift. ``RENAME_MAP`` is exposed as a read-only ``MappingProxyType`` so the
@@ -86,6 +91,8 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "add_comment": "comment_add",
     "get_comments": "comment_list",
     "batch_add_comment": "comment_batch_add",
+    # reconciliation debt — deferred governed cascade closes (1)
+    "list_reconciliation_debt": "reconciliation_debt_list",
     # file (7)
     "list_files": "file_list",
     "get_file": "file_get",
@@ -94,11 +101,12 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "delete_file_record": "file_delete",
     "get_file_timeline": "file_timeline_get",
     "get_file_annotations": "file_annotation_list",
-    # finding (7)
+    # finding (8)
     "list_findings": "finding_list",
     "get_finding": "finding_get",
     "dismiss_finding": "finding_dismiss",
     "promote_finding": "finding_promote",
+    "promote_finding_and_attach_entity": "finding_promote_and_attach_entity",
     "update_finding": "finding_update",
     "batch_update_findings": "finding_batch_update",
     "report_finding": "finding_report",
@@ -129,6 +137,8 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "remove_entity_association": "entity_association_remove",
     "list_entity_associations": "entity_association_list",
     "list_associations_by_entity": "entity_association_list_by_entity",
+    # federation consumer bindings (1)
+    "ingest_warpline_worklist": "warpline_worklist_ingest",
     # scanner (4) + scan (4)
     "list_scanners": "scanner_list",
     "list_available_scanners": "scanner_available_list",
@@ -157,9 +167,10 @@ _RENAME_MAP_DATA: dict[str, str] = {
     "get_metrics": "metrics_get",
     "get_mcp_status": "mcp_status_get",
     "session_context": "session_context_get",
-    # admin — mutating maintenance (7)
+    # admin / db — mutating maintenance (8)
     "archive_closed": "admin_archive_closed",
     "compact_events": "admin_compact_events",
+    "checkpoint_db": "db_checkpoint",
     "export_jsonl": "admin_export_jsonl",
     "import_jsonl": "admin_import_jsonl",
     "undo_last": "admin_undo_last",

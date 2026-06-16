@@ -50,10 +50,22 @@ class SeverityBreakdown(TypedDict):
 
 
 class FindingsSummary(SeverityBreakdown):
-    """Shape returned by ``get_file_findings_summary()``."""
+    """Shape returned by ``get_file_findings_summary()``.
+
+    The top-level severity buckets (inherited from :class:`SeverityBreakdown`)
+    count every *open* (non-terminal-status) finding, suppression-agnostic —
+    their meaning is unchanged. ``suppressed`` is an additive parallel breakdown
+    of how many of those same open findings carry a wardline suppression verdict
+    (``baselined`` / ``waived`` / ``judged``), so a federation consumer can
+    derive actionable work as ``bucket - suppressed[bucket]`` without the rollup
+    silently counting already-accepted findings as actionable. This mirrors the
+    row-level orthogonality (status vs ``metadata.wardline.suppression_state``)
+    that ``finding_list`` already exposes.
+    """
 
     total_findings: int
     open_findings: int
+    suppressed: SeverityBreakdown
 
 
 class GlobalFindingsStats(FindingsSummary):
@@ -176,6 +188,26 @@ class ScanRunStatusDict(ScanRunDict):
 
     process_alive: bool
     log_tail: list[str]
+    #: Severity-bucketed posture of the run's target file(s) at read time, so a
+    #: status poll echoes the findings posture instead of a vacuous run-state-only
+    #: green. Aggregated across ``file_ids``; reflects post-ingest state once the
+    #: scan's results have been POSTed back.
+    file_summary: FindingsSummary
+
+
+class WeftReason(TypedDict):
+    """A weft-reason carrier (PDR-0023, the honesty invariant).
+
+    A non-clean ingest outcome is reported as a structured carrier rather than
+    a silent count or a bare warning string, so a caller can switch on
+    ``reason_class`` and act on ``fix`` (the recruiting action) instead of
+    grepping prose. ``reason_class`` is drawn from the closed PDR-0023 set;
+    ``cause`` and ``fix`` are MANDATORY on every (non-clean) carrier.
+    """
+
+    reason_class: str
+    cause: str
+    fix: str
 
 
 class ScanIngestResult(TypedDict):
@@ -189,6 +221,12 @@ class ScanIngestResult(TypedDict):
     observations_created: int
     observations_failed: int
     warnings: list[str]
+    #: Structured weft-reason carriers for non-clean ingest outcomes (PDR-0023).
+    #: Empty on the clean path. A ``scheme_mismatch`` carrier here means the
+    #: declared ``fingerprint_scheme`` differed from the stored one for this
+    #: scan_source, so the ``mark_unseen`` sweep was REFUSED to avoid silently
+    #: cascade-closing prior-scheme findings as fixed (Weft seam G4).
+    weft_reasons: list[WeftReason]
 
 
 class EnrichedFileItem(FileRecordDict):
@@ -219,6 +257,6 @@ class CleanStaleResult(TypedDict):
     closed_issue_ids: list[str]
     #: Operator-facing advisories from the best-effort finding→issue cascade —
     #: e.g. a linked issue whose close could not be completed. Empty on the
-    #: happy path. Surfaced so a caller (CLI ``--json``, the loom HTTP envelope)
+    #: happy path. Surfaced so a caller (CLI ``--json``, the weft HTTP envelope)
     #: learns a cascade close partially failed instead of it dying in the logs.
     warnings: list[str]

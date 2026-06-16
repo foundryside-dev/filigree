@@ -36,7 +36,7 @@ class TestReadConfig:
 
         assert config["registry_backend"] == "local"
 
-    def test_read_config_preserves_clarion_registry_settings(self, tmp_path: Path) -> None:
+    def test_read_config_preserves_loomweave_registry_settings(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -44,8 +44,8 @@ class TestReadConfig:
             {
                 "prefix": "proj",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {
+                "registry_backend": "loomweave",
+                "loomweave": {
                     "base_url": "http://localhost:9111",
                     "timeout_seconds": 3,
                     "allow_local_fallback": True,
@@ -55,12 +55,43 @@ class TestReadConfig:
 
         config = read_config(filigree_dir)
 
-        assert config["registry_backend"] == "clarion"
-        assert config["clarion"]["base_url"] == "http://localhost:9111"
-        assert config["clarion"]["timeout_seconds"] == 3
-        assert config["clarion"]["allow_local_fallback"] is True
+        assert config["registry_backend"] == "loomweave"
+        assert config["loomweave"]["base_url"] == "http://localhost:9111"
+        assert config["loomweave"]["timeout_seconds"] == 3
+        assert config["loomweave"]["allow_local_fallback"] is True
 
-    def test_read_config_rejects_invalid_clarion_base_url(self, tmp_path: Path) -> None:
+    def test_registry_backend_accepts_loomweave_literal(self) -> None:
+        from filigree.core import VALID_REGISTRY_BACKENDS
+
+        assert "loomweave" in VALID_REGISTRY_BACKENDS
+        assert "clarion" not in VALID_REGISTRY_BACKENDS
+
+    def test_existing_clarion_config_migrates_on_load(self, tmp_path: Path) -> None:
+        """A deployed .filigree.conf still on the pre-3.0 clarion names loads as
+        loomweave via the one-shot rename-on-load shim (no manual edit needed)."""
+        from filigree.core import read_conf
+
+        conf = tmp_path / ".filigree.conf"
+        conf.write_text(
+            json.dumps(
+                {
+                    "prefix": "f",
+                    "db": "f.db",
+                    "version": 1,
+                    "registry_backend": "clarion",
+                    "clarion": {"base_url": "http://x"},
+                }
+            )
+        )
+
+        cfg = read_conf(conf)
+
+        assert cfg["registry_backend"] == "loomweave"
+        assert "loomweave" in cfg
+        assert "clarion" not in cfg
+        assert cfg["loomweave"]["base_url"] == "http://x"
+
+    def test_read_config_rejects_invalid_loomweave_base_url(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -68,15 +99,15 @@ class TestReadConfig:
             {
                 "prefix": "proj",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base_url": "file:///tmp/clarion"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": "file:///tmp/loomweave"},
             },
         )
 
         with pytest.raises(ValueError, match=r"base_url"):
             read_config(filigree_dir)
 
-    def test_read_config_rejects_unknown_clarion_keys(self, tmp_path: Path) -> None:
+    def test_read_config_rejects_unknown_loomweave_keys(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
         write_config(
@@ -84,20 +115,20 @@ class TestReadConfig:
             {
                 "prefix": "proj",
                 "version": 1,
-                "registry_backend": "clarion",
-                "clarion": {"base-url": "http://localhost:9111"},
+                "registry_backend": "loomweave",
+                "loomweave": {"base-url": "http://localhost:9111"},
             },
         )
 
         with pytest.raises(ValueError, match=r"base-url"):
             read_config(filigree_dir)
 
-    def test_read_config_requires_clarion_base_url_when_backend_is_clarion(self, tmp_path: Path) -> None:
+    def test_read_config_requires_loomweave_base_url_when_backend_is_loomweave(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
-        write_config(filigree_dir, {"prefix": "proj", "version": 1, "registry_backend": "clarion"})
+        write_config(filigree_dir, {"prefix": "proj", "version": 1, "registry_backend": "loomweave"})
 
-        with pytest.raises(ValueError, match=r"clarion\.base_url"):
+        with pytest.raises(ValueError, match=r"loomweave\.base_url"):
             read_config(filigree_dir)
 
     def test_non_dict_json_returns_defaults(self, tmp_path: Path) -> None:
@@ -168,14 +199,14 @@ class TestFromFiligreeDir:
                 {
                     "prefix": "proj",
                     "version": 1,
-                    "registry_backend": "clarion",
-                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                    "registry_backend": "loomweave",
+                    "loomweave": {"base_url": base_url, "timeout_seconds": 1},
                 },
             )
 
             db = FiligreeDB.from_filigree_dir(filigree_dir)
             try:
-                assert db.registry_backend == "clarion"
+                assert db.registry_backend == "loomweave"
             finally:
                 db.close()
 
@@ -206,19 +237,26 @@ class TestFromFiligreeDir:
         assert db._check_same_thread is False
         db.close()
 
-    def test_invalid_utf8_config_uses_project_prefix_fallback(self, tmp_path: Path) -> None:
-        """from_filigree_dir treats undecodable config.json like a corrupt partial config."""
+    def test_undecodable_config_refuses_open(self, tmp_path: Path) -> None:
+        """An undecodable config.json is refused at open, NOT silently defaulted to
+        the project-dir prefix.
+
+        Post-cutover (filigree-4bf16e64b6) config.json is the sole identity
+        authority for a confless store — there is no conf backstop — so a corrupt
+        one must not let the project open under the wrong namespace (which would
+        fragment issue IDs between the real prefix and the dir name). This is
+        symmetric with from_conf's read_conf, which already raises on a corrupt
+        conf. (Was: ``test_invalid_utf8_config_uses_project_prefix_fallback``, which
+        asserted the pre-cutover lenient fallback.)
+        """
         project_root = tmp_path / "broken-config"
         project_root.mkdir()
         filigree_dir = project_root / ".filigree"
         filigree_dir.mkdir()
         (filigree_dir / "config.json").write_bytes(b"\xff\xfe")
 
-        db = FiligreeDB.from_filigree_dir(filigree_dir)
-        try:
-            assert db.prefix == "broken-config"
-        finally:
-            db.close()
+        with pytest.raises(ValueError, match=r"config\.json"):
+            FiligreeDB.from_filigree_dir(filigree_dir)
 
 
 class TestConfigEnabledPacks:

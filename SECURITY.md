@@ -11,7 +11,7 @@ Only the latest release receives security fixes.
 
 ## Reporting a Vulnerability
 
-To report a security vulnerability, use [GitHub's private vulnerability reporting](https://github.com/tachyon-beep/filigree/security/advisories/new).
+To report a security vulnerability, use [GitHub's private vulnerability reporting](https://github.com/foundryside-dev/filigree/security/advisories/new).
 
 We aim to acknowledge reports within 7 days and provide a fix or mitigation plan within 30 days.
 

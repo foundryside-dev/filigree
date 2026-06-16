@@ -2,26 +2,28 @@
 
 Local-first issue tracker designed for AI coding agents — SQLite, MCP tools, no cloud, no accounts.
 
-[![CI](https://github.com/tachyon-beep/filigree/actions/workflows/ci.yml/badge.svg)](https://github.com/tachyon-beep/filigree/actions/workflows/ci.yml)
+[![CI](https://github.com/foundryside-dev/filigree/actions/workflows/ci.yml/badge.svg)](https://github.com/foundryside-dev/filigree/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/filigree)](https://pypi.org/project/filigree/)
 [![Python 3.11+](https://img.shields.io/pypi/pyversions/filigree)](https://pypi.org/project/filigree/)
-[![License: MIT](https://img.shields.io/pypi/l/filigree)](https://github.com/tachyon-beep/filigree/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/pypi/l/filigree)](https://github.com/foundryside-dev/filigree/blob/main/LICENSE)
 
 ## What Is Filigree?
 
-Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 114 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
+Filigree is a lightweight, SQLite-backed issue tracker designed for AI coding agents (Claude Code, Codex, etc.) to use as first-class citizens. It exposes 118 MCP tools so agents interact natively, plus a full CLI for humans and background subagents.
 
 Traditional issue trackers are human-first — agents scrape CLI output or parse API responses. Filigree flips this: agents get a pre-computed `context.md` at session start, claim work with optimistic locking, and resume sessions via event streams without re-reading history. For Claude Code, `filigree install` wires up session hooks and a workflow skill pack so agents get project context automatically.
 
-Filigree is local-first. No cloud, no accounts. Each project gets a `.filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). Filigree 2.0 also adds a named Loom HTTP generation at `/api/loom/*` for federation-aware integrations while keeping the classic HTTP surface supported for existing callers.
+Filigree is local-first. No cloud, no accounts. Each project gets a `.weft/filigree/` directory (like `.git/`) containing a SQLite database, configuration, and auto-generated context summary; legacy `.filigree/` stores keep working and migrate on the next `filigree init`. Installations support two modes: `ethereal` (default, per-project) and `server` (persistent multi-project daemon). A named Weft HTTP generation at `/api/weft/*` serves federation-aware integrations while the classic HTTP surface stays supported for existing callers.
+
+Filigree is the work-state member of the **Weft federation** — a family of independently-useful code-governance tools woven together by narrow, additive contracts. Filigree runs fully standalone; the Weft surface is optional enrichment. The authoritative federation roster, axiom, and composition doctrine live at the Weft hub (`~/weft`, see `~/weft/doctrine.md`); Filigree owns its own HTTP/MCP/CLI surface and contracts (see [docs/federation/contracts.md](docs/federation/contracts.md)).
 
 **Security boundary:** Filigree does not encrypt, sandbox, harden, or secure stored project data beyond ordinary filesystem permissions and standard HTTPS transport if you put it behind HTTPS yourself. Do not use Filigree for secure, regulated, confidential, or business-sensitive data.
 
 ### Key Features
 
-- **MCP server** with 114 tools — agents interact natively without parsing text
+- **MCP server** with 118 tools — agents interact natively without parsing text
 - **Full CLI** with `--json` output for background subagents and `--actor` for audit trails
-- **Loom HTTP generation** — stable `/api/loom/*` contracts with classic compatibility for existing integrations
+- **Weft HTTP generation** — stable `/api/weft/*` contracts with classic compatibility for existing integrations
 - **Claude Code integration** — session hooks inject project snapshots at startup; bundled skill pack teaches agents workflow patterns
 - **Workflow templates** — 24 issue types across 9 packs with enforced state machines
 - **Dependency graph** — blockers, ready-queue, critical path analysis
@@ -47,13 +49,13 @@ flowchart TD
     Human["You + scripts"]
     Browser["Browser"]
 
-    MCP["MCP server<br/>(114 namespaced tools, stdio)"]
+    MCP["MCP server<br/>(118 namespaced tools, stdio)"]
     CLI["filigree CLI<br/>(--json, --actor)"]
     Dash["Web dashboard<br/>(localhost:8377)"]
 
-    DB[("SQLite database<br/>.filigree/filigree.db")]
+    DB[("SQLite database<br/>.weft/filigree/filigree.db")]
     Ctx["context.md<br/>(pre-computed orientation)"]
-    Loom["Loom HTTP /api/loom/*<br/>(optional federation)"]
+    Weft["Weft HTTP /api/weft/*<br/>(optional federation)"]
 
     Agent -->|"calls tools over stdio"| MCP
     Human -->|"runs commands"| CLI
@@ -66,7 +68,7 @@ flowchart TD
     DB -->|"regenerates on every mutation"| Ctx
     Ctx -->|"injected at session start"| Agent
 
-    DB -.->|"serves federation peers"| Loom
+    DB -.->|"serves federation peers"| Weft
 ```
 
 **The work loop** is the same whether you drive it from the CLI or an agent
@@ -77,7 +79,7 @@ do the work, close it — and the next orientation is already regenerated.
 sequenceDiagram
     participant Dev as You / AI agent
     participant Fg as Filigree
-    participant DB as .filigree/ (SQLite)
+    participant DB as .weft/filigree/ (SQLite)
 
     Note over Dev,Fg: Session start
     Dev->>Fg: filigree session-context
@@ -124,13 +126,44 @@ stateDiagram-v2
 ```bash
 pip install filigree        # or: uv add filigree
 cd my-project
-filigree init               # Create .filigree/ directory
+filigree init               # Create the .weft/filigree/ store
 filigree install             # Set up MCP, hooks, skills, CLAUDE.md, .gitignore
 filigree create "Set up CI pipeline" --type=task --priority=1
-filigree ready               # See what's ready to work on
-filigree update <id> --status=in_progress
+filigree ready               # See ready work, including startability hints
+filigree start-next-work --assignee "$USER" --advance
+# ...do the work and commit...
 filigree close <id>
 ```
+
+Use `start-next-work` or `start-work` to claim and transition work in one
+atomic step. The older pattern of claiming and then manually updating status can
+race another agent. Pass `--advance` when you want Filigree to walk safe
+pre-workflow transitions first, such as moving a bug from `triage` through
+`confirmed` into its working state.
+
+## 3.0 Migration Snapshot
+
+Filigree 3.0 is a hard-break release for existing federation consumers and older
+local stores. New projects start directly in the current layout. Existing
+projects should follow this operator checklist before resuming agent work:
+
+1. Stop all writers for the project: dashboard daemons, stdio MCP sessions, and
+   any scripts holding the legacy database open.
+2. Run `filigree init` from the project root. It migrates `.filigree/` into
+   `.weft/filigree/`, imports `.filigree.conf` into
+   `.weft/filigree/config.json`, and leaves an imported-conf breadcrumb.
+3. Update MCP consumers to namespaced tool names such as `issue_get`,
+   `finding_list`, and `work_start`. CLI verbs such as `start-next-work` and
+   `close` are unchanged.
+4. Repoint federation HTTP clients from `/api/loom/*` to `/api/weft/*`. Use
+   `WEFT_TOKEN` for the outbound registry token and `WEFT_FEDERATION_TOKEN` for
+   Filigree's inbound `/api/weft/*` and `/mcp` bearer token.
+5. Expect finding work views to default to active findings only. Pass
+   `--suppression all` on the CLI or `suppression="all"` through MCP when you
+   need baselined, waived, or judged findings too.
+
+Full migration details live in [UPGRADING.md](docs/UPGRADING.md) and
+[MIGRATION-3.0.md](docs/MIGRATION-3.0.md).
 
 ## Installation
 
@@ -141,7 +174,7 @@ pip install filigree                     # CLI + MCP server + Web dashboard
 Or from source:
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree && uv sync
 ```
 
@@ -169,14 +202,14 @@ The session hook runs `filigree session-context` at startup, giving the agent a 
 
 ### Dashboard Authentication Scope
 
-The dashboard is local-first and assumes loopback/local filesystem trust by default. Setting `FILIGREE_FEDERATION_API_TOKEN` enables bearer-token authentication only for federation and agent-ingest surfaces; the older `FILIGREE_API_TOKEN` is still accepted as a backward-compatible fallback. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled.
+The dashboard is local-first and assumes loopback/local filesystem trust by default. The federation and MCP-over-HTTP surfaces are bearer-token gated **by default**: the daemon auto-mints a per-machine token at `<store_dir>/federation_token` (mode 0600, gitignored) on first serve, and `filigree install` / `doctor --fix` pre-seed it. The token resolves in three tiers — the `WEFT_FEDERATION_TOKEN` environment variable (operator override, the only tier that works across hosts), then the store-dir token file, then absent (auth off). The older `FILIGREE_FEDERATION_API_TOKEN` and `FILIGREE_API_TOKEN` names are still accepted as deprecated fallbacks and log a migration warning. This token is federation/deconfliction plumbing, not a security secret. The token value is never reported by `/api/health`, but the health payload does report which auth scope is enabled. Rotate with `filigree rotate-federation-token` (effective at the next daemon restart).
 
 | Route class | Authentication |
 |-------------|----------------|
 | Dashboard UI (`/`) | Open under the local loopback trust boundary |
 | Classic dashboard API (`/api/issues`, `/api/issue/{id}`, `/api/health`) | Open under the local loopback trust boundary |
-| Federation and scanner ingest (`/api/loom/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
-| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when `FILIGREE_FEDERATION_API_TOKEN` or fallback `FILIGREE_API_TOKEN` is set |
+| Federation and scanner ingest (`/api/weft/*`, `/api/scan-results`, `/api/observations`, `/api/v1/scan-results`, `/api/v1/observations`) | Bearer token when one resolves (auto-minted by default; `WEFT_FEDERATION_TOKEN` overrides) |
+| MCP HTTP endpoint (`/mcp`, `/mcp/*`) | Bearer token when one resolves (auto-minted by default; `WEFT_FEDERATION_TOKEN` overrides) |
 
 ## Why Filigree?
 
@@ -206,7 +239,7 @@ Filigree has no cloud sync, no accounts, and no network-accessible API beyond lo
 Filigree does not connect to CI pipelines, Slack, PagerDuty, or third-party services. If your workflow requires automated ticket creation from alerts or Slack-based triage, Filigree will not fit without custom scripting.
 
 **A persistent project record outlasting the repository.**
-Your `.filigree/` directory lives with your project. If you need an audit trail that survives repository deletion or is accessible after the project ends, use a hosted service.
+Your `.weft/filigree/` directory lives with your project. If you need an audit trail that survives repository deletion or is accessible after the project ends, use a hosted service.
 
 **Multi-project portfolio management.**
 The web dashboard supports switching between local projects, but Filigree has no cross-project reporting, resource allocation, or roadmap views. It tracks tasks, not portfolios.
@@ -225,8 +258,8 @@ Nothing in Filigree is encrypted or secured beyond ordinary local filesystem pro
 |----------|-------------|
 | [Getting Started](docs/getting-started.md) | 5-minute tutorial: install, init, first issue |
 | [CLI Reference](docs/cli.md) | All CLI commands with full parameter docs |
-| [MCP Server Reference](docs/mcp.md) | 114 MCP tools for agent-native interaction |
-| [Federation Contracts](docs/federation/contracts.md) | Classic and Loom HTTP generation contracts |
+| [MCP Server Reference](docs/mcp.md) | 118 MCP tools for agent-native interaction |
+| [Federation Contracts](docs/federation/contracts.md) | Classic and Weft HTTP generation contracts |
 | [Workflow Templates](docs/workflows.md) | State machines, packs, field schemas, enforcement |
 | [Agent Integration](docs/agent-integration.md) | Multi-agent patterns, claiming, session resumption |
 | [Python API Reference](docs/api-reference.md) | FiligreeDB, Issue, TemplateRegistry for programmatic use |
@@ -252,7 +285,7 @@ Node-backed static dashboard pytest tests and dashboard JavaScript quality
 gates.
 
 ```bash
-git clone https://github.com/tachyon-beep/filigree.git
+git clone https://github.com/foundryside-dev/filigree.git
 cd filigree
 uv sync --group dev
 

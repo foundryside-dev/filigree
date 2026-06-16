@@ -34,7 +34,7 @@ from filigree.core import (
 )
 from filigree.dashboard import create_app
 from filigree.mcp_tools.issues import _handle_get_issue, _handle_update_issue
-from filigree.registry import EXPECTED_CLARION_API_VERSION
+from filigree.registry import EXPECTED_LOOMWEAVE_API_VERSION
 from filigree.types.api import ErrorCode
 from tests._fakes.clarion_http import clarion_stub
 
@@ -70,10 +70,11 @@ def _assert_flat_envelope(payload: dict, *, surface: str) -> None:
     # violation.
     allowed_top_level = {"error", "code", "details"}
     extra = set(payload.keys()) - allowed_top_level
-    # Allow transition-error hints (valid_transitions, hint) for now since
-    # TransitionError carries them as top-level optional fields. Anything
-    # else is a violation.
-    extra -= {"valid_transitions", "hint"}
+    # Allow transition-error hints (valid_transitions, hint) and the
+    # source-state recovery fields (current_status, type_name, to_state)
+    # since TransitionError carries them as top-level optional fields
+    # (filigree-d25e75cebf). Anything else is a violation.
+    extra -= {"valid_transitions", "hint", "current_status", "type_name", "to_state"}
     assert not extra, f"[{surface}] unexpected top-level keys {extra!r} — extras should be in 'details': {payload!r}"
 
 
@@ -318,18 +319,18 @@ class TestCLIStartupEnvelope:
         _assert_flat_envelope(payload, surface="cli")
         assert payload["code"] == ErrorCode.SCHEMA_MISMATCH
 
-    def test_clarion_api_version_mismatch_emits_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`stats --json` maps Clarion API mismatch to the public registry code."""
+    def test_loomweave_api_version_mismatch_emits_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`stats --json` maps Loomweave API mismatch to the public registry code."""
         filigree_dir = tmp_path / FILIGREE_DIR_NAME
         filigree_dir.mkdir()
-        with clarion_stub(api_version=EXPECTED_CLARION_API_VERSION + 1) as (base_url, _state):
+        with clarion_stub(api_version=EXPECTED_LOOMWEAVE_API_VERSION + 1) as (base_url, _state):
             write_config(
                 filigree_dir,
                 {
                     "prefix": "proj",
                     "version": 1,
-                    "registry_backend": "clarion",
-                    "clarion": {"base_url": base_url, "timeout_seconds": 1},
+                    "registry_backend": "loomweave",
+                    "loomweave": {"base_url": base_url, "timeout_seconds": 1},
                 },
             )
 
@@ -340,12 +341,12 @@ class TestCLIStartupEnvelope:
         assert result.exit_code == 1, result.output
         payload = json.loads(result.output)
         _assert_flat_envelope(payload, surface="cli")
-        assert payload["code"] == ErrorCode.CLARION_REGISTRY_VERSION_MISMATCH
+        assert payload["code"] == ErrorCode.LOOMWEAVE_REGISTRY_VERSION_MISMATCH
         assert payload["details"] == {
-            "cause": "clarion_registry_version_mismatch",
+            "cause": "loomweave_registry_version_mismatch",
             "url": f"{base_url}/api/v1/_capabilities",
-            "expected": EXPECTED_CLARION_API_VERSION,
-            "advertised": EXPECTED_CLARION_API_VERSION + 1,
+            "expected": EXPECTED_LOOMWEAVE_API_VERSION,
+            "advertised": EXPECTED_LOOMWEAVE_API_VERSION + 1,
         }
 
     def test_corrupt_conf_emits_envelope(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

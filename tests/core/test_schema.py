@@ -181,7 +181,7 @@ class TestClaimLeaseSchema:
 
 
 class TestEntityAssociationsSchema:
-    """Verify the v15 entity_associations table per ADR-029 (Clarion B.7)."""
+    """Verify the v15 entity_associations table per ADR-029 (Loomweave B.7)."""
 
     def test_fresh_schema_contains_entity_associations_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)
@@ -193,23 +193,27 @@ class TestEntityAssociationsSchema:
         columns = _get_table_columns(conn, "entity_associations")
         assert set(columns) == {
             "issue_id",
-            "clarion_entity_id",
+            "loomweave_entity_id",
             "content_hash_at_attach",
             "attached_at",
             "attached_by",
             "migration_orphaned_at",
+            "entity_kind",
+            "signature",
+            "signoff_seq",
+            "signed_content_hash",
         }
         # Composite PK — no surrogate association_id.
         pk_rows = conn.execute("PRAGMA table_info(entity_associations)").fetchall()
         pk_columns = {row[1] for row in pk_rows if row[5]}
-        assert pk_columns == {"issue_id", "clarion_entity_id"}
+        assert pk_columns == {"issue_id", "loomweave_entity_id"}
 
         # Reverse-lookup index per ADR-029 §"Decision 1".
         assert "ix_entity_assoc_entity" in _get_index_names(conn)
         conn.close()
 
     def test_fresh_schema_no_entity_id_check_constraint(self, tmp_path: Path) -> None:
-        """Federation §5 — clarion_entity_id must be opaque (no grammar parsing).
+        """Federation §5 — loomweave_entity_id must be opaque (no grammar parsing).
 
         Pin the absence of any CHECK constraint on the entity_id column.
         Adding one would couple Filigree to ADR-003's grammar and break
@@ -218,7 +222,7 @@ class TestEntityAssociationsSchema:
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Any string must insert successfully — including obviously-malformed
-        # Clarion-shaped IDs. Use raw SQL to bypass any future application-
+        # Loomweave-shaped IDs. Use raw SQL to bypass any future application-
         # layer validation.
         conn.execute(
             "INSERT INTO issues (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -226,9 +230,9 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("filigree-test", "not-a-clarion-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
+            ("filigree-test", "not-a-loomweave-grammar-id", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
         conn.commit()
         conn.close()
@@ -244,7 +248,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES (?, ?, ?, ?, ?)",
             ("filigree-test", "py:func:foo", "abc", "2026-05-17T00:00:00+00:00", "tester"),
         )
@@ -273,14 +277,14 @@ class TestEntityAssociationsSchema:
         assert "entity_associations" in _get_table_names(conn)
         assert "ix_entity_assoc_entity" in _get_index_names(conn)
         columns = _get_table_columns(conn, "entity_associations")
-        assert "clarion_entity_id" in columns
+        assert "loomweave_entity_id" in columns
         assert "content_hash_at_attach" in columns
         conn.close()
 
     def test_migration_v21_to_v22_adds_migration_orphaned_at_column(self, tmp_path: Path) -> None:
         """Pin the v21->v22 migration in isolation: ALTER adds the nullable
         ``entity_associations.migration_orphaned_at`` ORPHAN marker (ADR-038 §7).
-        Existing rows read NULL; the opaque ``clarion_entity_id`` is untouched."""
+        Existing rows read NULL; the opaque ``loomweave_entity_id`` is untouched."""
         conn = _make_db(tmp_path)
         conn.executescript(SCHEMA_SQL)
         # Simulate a true v21 DB: drop the marker column and stamp the prior version.
@@ -292,7 +296,7 @@ class TestEntityAssociationsSchema:
         )
         conn.execute(
             "INSERT INTO entity_associations "
-            "(issue_id, clarion_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
             "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
             ("2026-05-01T00:00:00+00:00",),
         )
@@ -317,6 +321,280 @@ class TestEntityAssociationsSchema:
         # Column already present (fresh schema) — re-running add_column is a no-op.
         migrate_v21_to_v22(conn)
         assert "migration_orphaned_at" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v22_to_v23_adds_entity_kind_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN entity_kind")
+        conn.execute("PRAGMA user_version = 22")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'not-a-loomweave-id', 'h', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+
+        applied = apply_pending_migrations(conn, 23)
+
+        assert applied == 1
+        assert _get_schema_version(conn) == 23
+        assert "entity_kind" in _get_table_columns(conn, "entity_associations")
+        row = conn.execute("SELECT entity_kind FROM entity_associations WHERE issue_id = 'iss-1'").fetchone()
+        assert row["entity_kind"] == ""
+        conn.close()
+
+    def test_migration_v23_to_v24_adds_verified_actor_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v23 DB: drop the new columns and stamp the prior version.
+        conn.execute("ALTER TABLE events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE file_events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE annotation_events DROP COLUMN verified_actor")
+        conn.execute("ALTER TABLE comments DROP COLUMN verified_author")
+        conn.execute("ALTER TABLE observations DROP COLUMN verified_actor")
+        conn.execute("PRAGMA user_version = 23")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO events (issue_id, event_type, actor, created_at) VALUES ('iss-1', 'created', 'x', ?)",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "verified_actor" not in _get_table_columns(conn, "events")
+
+        applied = apply_pending_migrations(conn, 24)
+
+        assert applied == 1
+        assert _get_schema_version(conn) == 24
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_actor" in _get_table_columns(conn, "file_events")
+        assert "verified_actor" in _get_table_columns(conn, "annotation_events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        assert "verified_actor" in _get_table_columns(conn, "observations")
+        # Pre-existing row reads NULL (no backfill).
+        row = conn.execute("SELECT verified_actor FROM events WHERE issue_id = 'iss-1'").fetchone()
+        assert row["verified_actor"] is None
+        conn.close()
+
+    def test_migration_v23_to_v24_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v23_to_v24
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Columns already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v23_to_v24(conn)
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        conn.close()
+
+    def test_fresh_schema_has_v24_verified_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "verified_actor" in _get_table_columns(conn, "events")
+        assert "verified_actor" in _get_table_columns(conn, "file_events")
+        assert "verified_actor" in _get_table_columns(conn, "annotation_events")
+        assert "verified_author" in _get_table_columns(conn, "comments")
+        assert "verified_actor" in _get_table_columns(conn, "observations")
+        conn.close()
+
+    def test_migration_v24_to_v25_adds_signature_and_signoff_seq_columns(self, tmp_path: Path) -> None:
+        """Pin the v24->v25 migration: ALTER adds the nullable
+        ``entity_associations.signature`` (TEXT) and ``signoff_seq`` (INTEGER)
+        Legis governed-signoff binding fields (B1). Existing rows read NULL;
+        the opaque ``loomweave_entity_id`` is untouched."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v24 DB: drop the new columns and stamp the prior version.
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signature")
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signoff_seq")
+        conn.execute("PRAGMA user_version = 24")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'py:func:foo', 'h', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "signature" not in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" not in _get_table_columns(conn, "entity_associations")
+
+        # Target v25 explicitly to isolate the v24->v25 migration.
+        applied = apply_pending_migrations(conn, 25)
+        assert applied == 1
+        assert _get_schema_version(conn) == 25
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        row = conn.execute("SELECT signature, signoff_seq FROM entity_associations WHERE issue_id = 'iss-1'").fetchone()
+        assert row["signature"] is None
+        assert row["signoff_seq"] is None
+        conn.close()
+
+    def test_migration_v24_to_v25_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v24_to_v25
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Columns already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v24_to_v25(conn)
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_v25_signature_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "signature" in _get_table_columns(conn, "entity_associations")
+        assert "signoff_seq" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v26_to_v27_adds_signed_content_hash_and_backfills(self, tmp_path: Path) -> None:
+        """Pin the v26->v27 migration (signature-bypass fix): ALTER adds the
+        nullable ``entity_associations.signed_content_hash`` (TEXT), backfilled
+        from ``content_hash_at_attach`` only where ``signature IS NOT NULL`` so
+        existing governed rows start out fresh; ungoverned rows read NULL."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v26 DB: drop the new column and stamp the prior version.
+        conn.execute("ALTER TABLE entity_associations DROP COLUMN signed_content_hash")
+        conn.execute("PRAGMA user_version = 26")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-05-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        )
+        # One governed row (has a signature) and one ungoverned row (no signature).
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by, signature, signoff_seq) "
+            "VALUES ('iss-1', 'sei:governed', 'gov-hash', ?, 'legis', 'sigX', 3)",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.execute(
+            "INSERT INTO entity_associations "
+            "(issue_id, loomweave_entity_id, content_hash_at_attach, attached_at, attached_by) "
+            "VALUES ('iss-1', 'sei:plain', 'plain-hash', ?, 'x')",
+            ("2026-05-01T00:00:00+00:00",),
+        )
+        conn.commit()
+        assert "signed_content_hash" not in _get_table_columns(conn, "entity_associations")
+
+        applied = apply_pending_migrations(conn, 27)
+        assert applied == 1
+        assert _get_schema_version(conn) == 27
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
+        governed = conn.execute("SELECT signed_content_hash FROM entity_associations WHERE loomweave_entity_id = 'sei:governed'").fetchone()
+        assert governed["signed_content_hash"] == "gov-hash"  # backfilled from content_hash_at_attach
+        plain = conn.execute("SELECT signed_content_hash FROM entity_associations WHERE loomweave_entity_id = 'sei:plain'").fetchone()
+        assert plain["signed_content_hash"] is None  # ungoverned -> not backfilled
+        conn.close()
+
+    def test_migration_v26_to_v27_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v26_to_v27
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Column already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v26_to_v27(conn)
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_v27_signed_content_hash_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_migration_v25_to_v26_renames_column_and_rewrites_prefixes(self, tmp_path: Path) -> None:
+        """v25→v26 (Loomweave/Weft rebrand data pass): rename the
+        entity-association column ``loomweave_entity_id`` -> ``loomweave_entity_id``
+        (PK rewritten by SQLite RENAME COLUMN), rewrite stored SEI prefixes
+        ``loomweave:eid:`` -> ``loomweave:eid:`` and finding rule-id prefixes
+        ``CLA-`` -> ``LMWV-`` in place, suffixes preserved."""
+        from filigree.migrations import migrate_v25_to_v26
+
+        conn = _make_db(tmp_path)
+        # minimal v25 shape for the two affected tables (old clarion_entity_id column)
+        conn.execute(
+            "CREATE TABLE entity_associations ("
+            "issue_id TEXT NOT NULL, clarion_entity_id TEXT NOT NULL, "
+            "content_hash_at_attach TEXT NOT NULL, attached_at TEXT NOT NULL, attached_by TEXT NOT NULL, "
+            "PRIMARY KEY (issue_id, clarion_entity_id))"
+        )
+        conn.execute("CREATE INDEX ix_entity_assoc_entity ON entity_associations(clarion_entity_id)")
+        conn.execute("CREATE TABLE scan_findings (id TEXT PRIMARY KEY, rule_id TEXT DEFAULT '')")
+        # F5 tombstone array + audit events carry the same SEI value (all must be rewritten).
+        conn.execute("CREATE TABLE deleted_issues (issue_id TEXT, entity_ids TEXT NOT NULL DEFAULT '[]')")
+        conn.execute(
+            "CREATE TABLE events (issue_id TEXT, event_type TEXT, actor TEXT, old_value TEXT, new_value TEXT, comment TEXT DEFAULT '')"
+        )
+        conn.execute("INSERT INTO entity_associations VALUES ('filigree-a', 'clarion:eid:deadbeef', 'h', 't', 'me')")
+        conn.execute("INSERT INTO scan_findings (id, rule_id) VALUES ('f1', 'CLA-PY-UNSAFE-EVAL')")
+        conn.execute("INSERT INTO scan_findings (id, rule_id) VALUES ('f2', '')")
+        conn.execute("""INSERT INTO deleted_issues VALUES ('filigree-z', '["clarion:eid:abc", "clarion:eid:def"]')""")
+        conn.execute("INSERT INTO events VALUES ('filigree-a', 'entity_association_added', 'me', NULL, 'clarion:eid:deadbeef', 'h')")
+        conn.execute("INSERT INTO events VALUES ('filigree-a', 'entity_association_removed', 'me', 'clarion:eid:gone', NULL, '')")
+        conn.commit()
+
+        migrate_v25_to_v26(conn)
+
+        cols = _get_table_columns(conn, "entity_associations")
+        assert "loomweave_entity_id" in cols
+        assert "clarion_entity_id" not in cols
+        eid = conn.execute("SELECT loomweave_entity_id FROM entity_associations").fetchone()[0]
+        assert eid == "loomweave:eid:deadbeef"  # prefix rewritten, suffix preserved
+        rid = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f1'").fetchone()[0]
+        assert rid == "LMWV-PY-UNSAFE-EVAL"  # CLA- -> LMWV-, suffix preserved
+        empty = conn.execute("SELECT rule_id FROM scan_findings WHERE id = 'f2'").fetchone()[0]
+        assert empty == ""  # untouched
+        # F5 tombstone array rewritten (both elements), no clarion:eid: survives.
+        ids = conn.execute("SELECT entity_ids FROM deleted_issues").fetchone()[0]
+        assert ids == '["loomweave:eid:abc", "loomweave:eid:def"]'
+        # audit events rewritten in new_value (added) and old_value (removed)
+        added = conn.execute("SELECT new_value FROM events WHERE event_type = 'entity_association_added'").fetchone()[0]
+        assert added == "loomweave:eid:deadbeef"
+        removed = conn.execute("SELECT old_value FROM events WHERE event_type = 'entity_association_removed'").fetchone()[0]
+        assert removed == "loomweave:eid:gone"
+        # PK rewritten to the new column name
+        pk = [r[1] for r in conn.execute("PRAGMA table_info(entity_associations)") if r[5]]
+        assert pk == ["issue_id", "loomweave_entity_id"]
+        conn.close()
+
+    def test_migration_v25_to_v26_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v25_to_v26
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Fresh schema already has loomweave_entity_id; re-running must be a no-op.
+        migrate_v25_to_v26(conn)
+        assert "loomweave_entity_id" in _get_table_columns(conn, "entity_associations")
+        assert "clarion_entity_id" not in _get_table_columns(conn, "entity_associations")
+        conn.close()
+
+    def test_fresh_schema_has_loomweave_entity_id_column(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        cols = _get_table_columns(conn, "entity_associations")
+        assert "loomweave_entity_id" in cols
+        assert "clarion_entity_id" not in cols
         conn.close()
 
     def test_migration_v15_to_v16_adds_event_seq_and_rebuilds_index(self, tmp_path: Path) -> None:
@@ -1904,8 +2182,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_22(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 22
+    def test_current_schema_version_is_28(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 28
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

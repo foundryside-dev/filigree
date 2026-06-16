@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, get_args
@@ -38,8 +39,15 @@ from filigree.registry import (
     RegistryResolutionError,
     resolve_files_batch_via_loop,
 )
-from filigree.types.core import AssocType, FindingStatus, Severity
-from filigree.types.files import ScanIngestResult
+from filigree.types.core import (
+    AssocType,
+    FindingStatus,
+    Severity,
+    make_content_hash,
+    make_issue_id,
+    make_loomweave_entity_id,
+)
+from filigree.types.files import ScanIngestResult, WeftReason
 
 if TYPE_CHECKING:
     from filigree.registry import ResolvedFile
@@ -74,6 +82,77 @@ TERMINAL_FINDING_STATUSES: frozenset[str] = frozenset({"fixed", "false_positive"
 if not all(s.isalpha() or s.replace("_", "").isalpha() for s in TERMINAL_FINDING_STATUSES):
     raise ValueError(f"TERMINAL_FINDING_STATUSES values must be simple identifiers, got: {TERMINAL_FINDING_STATUSES}")
 VALID_ASSOC_TYPES: frozenset[str] = frozenset(get_args(AssocType))
+# FIL-2/X-5: the nested wardline axes ``finding_list`` can filter on. Mirror
+# wardline's own ``scan where:{kind, suppression}`` enums so the consumer's
+# grammar matches the producer's. ``kind``/``suppression_state`` live under
+# ``metadata.wardline.*`` (lifted onto the read surface in ``_build_scan_finding``).
+VALID_WARDLINE_FINDING_KINDS: frozenset[str] = frozenset({"defect", "fact", "classification", "metric", "suggestion"})
+# ``active`` is the unsuppressed population (no wardline suppression verdict);
+# ``baselined``/``waived``/``judged`` are wardline's repo-controlled suppression
+# annotations; ``all`` is the explicit no-filter sentinel (identical to omitting
+# the filter — returns every row). The agent-facing surfaces (MCP/CLI) default
+# to ``active`` and pass ``all`` to opt back in to suppressed rows
+# (filigree-2bdb878bd2); the core query keeps its all-inclusive default so
+# internal callers are unaffected.
+WARDLINE_SUPPRESSION_STATES: frozenset[str] = frozenset({"active", "baselined", "waived", "judged"})
+VALID_SUPPRESSION_FILTERS: frozenset[str] = WARDLINE_SUPPRESSION_STATES | {"all"}
+# FIL-1: the wardline kinds that are NOT defect-signal — engine telemetry and
+# informational output. Derived from VALID_WARDLINE_FINDING_KINDS (never a
+# parallel literal) so a kind added to the enum is defect-side by default
+# until explicitly classified here. Used by ``unbridged_finding_stats`` to
+# split the actionable bucket; a finding with a missing, corrupt, or unknown
+# kind must NEVER be hidden as telemetry.
+NON_DEFECT_WARDLINE_FINDING_KINDS: frozenset[str] = VALID_WARDLINE_FINDING_KINDS - {"defect"}
+# Safety: these values are interpolated into SQL string literals
+# (see ``_wardline_non_defect_kind_sql``).
+if not all(s.isalpha() for s in NON_DEFECT_WARDLINE_FINDING_KINDS):
+    raise ValueError(f"NON_DEFECT_WARDLINE_FINDING_KINDS values must be simple identifiers, got: {NON_DEFECT_WARDLINE_FINDING_KINDS}")
+
+
+def _wardline_suppressed_sql(alias: str = "") -> str:
+    """SQL predicate that is true when a finding carries a wardline suppression
+    verdict (``metadata.wardline.suppression_state`` is present).
+
+    Shared verbatim by ``unbridged_finding_stats`` (its ``suppressed`` count)
+    and the ``finding_list`` ``suppression`` filter so the active/suppressed
+    *classification* is computed identically on both surfaces and cannot drift.
+    (This shares the predicate, not the base population: ``unbridged_finding_stats``
+    additionally restricts to open + un-bridged findings, so its ``actionable``
+    count is a subset of ``finding_list(suppression="active")`` — the latter
+    applies no open/unbridged filter of its own.) ``json_valid`` guards a single
+    corrupt-metadata row from raising ``OperationalError``; an absent/corrupt
+    verdict reads as un-suppressed (matches the promote-guard's "absent =>
+    active" contract). ``alias`` is an optional table qualifier (e.g. ``"sf"``)
+    for joined queries.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.suppression_state') IS NOT NULL)"
+
+
+def _wardline_non_defect_kind_sql(alias: str = "") -> str:
+    """SQL predicate that is true when ``metadata.wardline.kind`` is a KNOWN
+    non-defect kind (``NON_DEFECT_WARDLINE_FINDING_KINDS``).
+
+    Same ``json_valid``-guarded ``$.wardline.kind`` extraction path as the
+    ``finding_list`` ``kind`` filter (``_wardline_field_eq_sql("kind")``), so
+    the two surfaces classify identically. Classifying by membership in the
+    known non-defect set — not ``kind != 'defect'`` — is what makes a missing
+    kind (``json_extract`` → NULL), corrupt metadata (``json_valid`` → false),
+    and unknown kind values all fall to the defect side automatically: a
+    third-party finding without a kind is never hidden as telemetry.
+    ``alias`` is an optional table qualifier (e.g. ``"sf"``) for joined queries.
+    """
+    col = f"{alias}.metadata" if alias else "metadata"
+    kinds = ", ".join(f"'{k}'" for k in sorted(NON_DEFECT_WARDLINE_FINDING_KINDS))
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.kind') IN ({kinds}))"
+
+
+def _wardline_field_eq_sql(field: str, alias: str = "") -> str:
+    """SQL predicate matching a nested ``metadata.wardline.<field>`` against a
+    bound ``?`` parameter, guarded by ``json_valid``. ``field`` is always a
+    fixed literal from this module's call sites (never user input)."""
+    col = f"{alias}.metadata" if alias else "metadata"
+    return f"(json_valid({col}) AND json_extract({col}, '$.wardline.{field}') = ?)"
 
 
 def _validate_string(value: object, field_name: str) -> str:
@@ -213,6 +292,14 @@ class FilesMixin(DBMixinProtocol):
     _VALID_FILE_SORTS = frozenset({"updated_at", "first_seen", "path", "language"})
     _VALID_FINDING_SORTS = frozenset({"updated_at", "severity"})
 
+    # N6 (weft-c815d5e77d): finding read paths LEFT JOIN the linked issue so the
+    # finding carries the issue's status + ``close_reason`` resolution. The
+    # ``scan_findings`` table is aliased ``sf`` and ``issues`` ``i``; any WHERE /
+    # ORDER BY column that exists on BOTH tables (``status``, ``updated_at``,
+    # ``id``) MUST be qualified with ``sf.`` to stay unambiguous after the join.
+    _FINDING_ISSUE_JOIN = "FROM scan_findings sf LEFT JOIN issues i ON sf.issue_id = i.id"
+    _FINDING_SELECT_COLS = "sf.*, i.status AS issue_status, json_extract(i.fields, '$.close_reason') AS issue_resolution"
+
     # -- Build helpers -------------------------------------------------------
 
     @staticmethod
@@ -243,7 +330,22 @@ class FilesMixin(DBMixinProtocol):
         )
 
     def _build_scan_finding(self, row: sqlite3.Row) -> ScanFinding:
-        """Build a ScanFinding from a database row."""
+        """Build a ScanFinding from a database row.
+
+        The optional ``issue_status`` / ``issue_resolution`` columns are present
+        only when the caller's query LEFT JOINs ``issues`` (N6). Bare
+        ``SELECT * FROM scan_findings`` callers omit them, so read them
+        defensively and default to ``None`` (an unjoined read carries no linked
+        issue status).
+        """
+        row_keys = row.keys()
+        metadata = self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}")
+        # Lift wardline's suppression verdict out of the metadata blob onto the
+        # read surface (mirrors the N6 issue_status lift). Guard every level: the
+        # wardline namespace and its suppression_state are both optional, and a
+        # corrupt metadata parse yields a non-dict sentinel.
+        wardline_meta = metadata.get("wardline") if isinstance(metadata, dict) else None
+        suppression_state = wardline_meta.get("suppression_state") if isinstance(wardline_meta, dict) else None
         return ScanFinding(
             id=row["id"],
             file_id=row["file_id"],
@@ -264,21 +366,24 @@ class FilesMixin(DBMixinProtocol):
             first_seen=row["first_seen"],
             updated_at=row["updated_at"],
             last_seen_at=row["last_seen_at"],
-            metadata=self._parse_metadata(row["metadata"], f"scan_finding:{row['file_id']}"),
+            issue_status=row["issue_status"] if "issue_status" in row_keys else None,
+            issue_resolution=row["issue_resolution"] if "issue_resolution" in row_keys else None,
+            suppression_state=suppression_state,
+            metadata=metadata,
         )
 
     def _is_local_registry_fallback_row(self, registry_backend: str) -> bool:
         # ``registry_backend`` and ``allow_local_fallback`` are always set on
         # ``FiligreeDB.__init__`` before any DB call reaches a mixin method;
         # attribute access is safe without a default.
-        return self.registry_backend == "clarion" and bool(self.allow_local_fallback) and registry_backend == "local"
+        return self.registry_backend == "loomweave" and bool(self.allow_local_fallback) and registry_backend == "local"
 
     def _record_registry_fallback_event(self, file_id: str, *, actor: str, now: str) -> None:
         self.conn.execute(
             "INSERT INTO file_events "
-            "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'clarion', 'local', ?, ?)",
-            (file_id, actor, now),
+            "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+            "VALUES (?, 'registry_local_fallback', 'registry_backend', 'loomweave', 'local', ?, ?, ?)",
+            (file_id, actor, self._verified_actor, now),
         )
 
     # -- File registration ---------------------------------------------------
@@ -557,9 +662,9 @@ class FilesMixin(DBMixinProtocol):
             for field, old_val, new_val in changes:
                 self.conn.execute(
                     "INSERT INTO file_events "
-                    "(file_id, event_type, field, old_value, new_value, actor, created_at) "
-                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?)",
-                    (existing["id"], field, old_val, new_val, actor, now),
+                    "(file_id, event_type, field, old_value, new_value, actor, verified_actor, created_at) "
+                    "VALUES (?, 'file_metadata_update', ?, ?, ?, ?, ?, ?)",
+                    (existing["id"], field, old_val, new_val, actor, self._verified_actor, now),
                 )
             if _commit:
                 self.conn.commit()
@@ -768,8 +873,13 @@ class FilesMixin(DBMixinProtocol):
                 raise ValueError(f'Invalid direction "{direction}". Must be "asc" or "desc".')
 
         _open = self._OPEN_FINDINGS_FILTER_SF
+        _supp = _wardline_suppressed_sql("sf")
         _sev_cols = " ".join(
             f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {_open} AND sf.severity='{s}') AS cnt_{s},"
+            for s in ("critical", "high", "medium", "low", "info")
+        )
+        _supp_cols = " ".join(
+            f"(SELECT COUNT(*) FROM scan_findings sf WHERE sf.file_id = fr.id AND {_open} AND sf.severity='{s}' AND {_supp}) AS supp_{s},"
             for s in ("critical", "high", "medium", "low", "info")
         )
         enriched_sql = (
@@ -780,7 +890,7 @@ class FilesMixin(DBMixinProtocol):
             f"(SELECT COUNT(*) FROM scan_findings sf"
             f" WHERE sf.file_id = fr.id"
             f") AS total_findings, "
-            f"{_sev_cols} "
+            f"{_sev_cols} {_supp_cols} "
             f"(SELECT COUNT(*) FROM file_associations fa"
             f" WHERE fa.file_id = fr.id"
             f") AS associations_count, "
@@ -805,6 +915,13 @@ class FilesMixin(DBMixinProtocol):
                 "medium": r["cnt_medium"],
                 "low": r["cnt_low"],
                 "info": r["cnt_info"],
+                "suppressed": {
+                    "critical": r["supp_critical"],
+                    "high": r["supp_high"],
+                    "medium": r["supp_medium"],
+                    "low": r["supp_low"],
+                    "info": r["supp_info"],
+                },
             }
             d["associations_count"] = r["associations_count"]
             d["observation_count"] = r["observation_count"]
@@ -984,9 +1101,9 @@ class FilesMixin(DBMixinProtocol):
                     # id between our pre-resolve and this write. A local-backend
                     # resolution mints a fresh, arbitrary id per resolve
                     # (LocalRegistry.resolve_file) — covering both pure-local and
-                    # Clarion-fallback rows — so the already-committed row is
+                    # Loomweave-fallback rows — so the already-committed row is
                     # authoritative and we adopt its id rather than raising. Only
-                    # a stable-id (Clarion) mismatch is genuine registry drift,
+                    # a stable-id (Loomweave) mismatch is genuine registry drift,
                     # for which migrate-registry is the right remedy.
                     if resolved["registry_backend"] != "local":
                         msg = (
@@ -1064,7 +1181,7 @@ class FilesMixin(DBMixinProtocol):
     def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
         """Resolve new scan file identities before the write transaction opens.
 
-        CONTRACT-1 (Clarion 1.0): unfamiliar paths are batched into a single
+        CONTRACT-1 (Loomweave 1.0): unfamiliar paths are batched into a single
         ``resolve_files_batch`` call (chunked at 256 by the protocol). One HTTP
         round-trip per chunk replaces the prior N-round-trip per-finding loop.
         Briefing-blocked / not_found / structured-error per-item failures are
@@ -1108,15 +1225,15 @@ class FilesMixin(DBMixinProtocol):
         messages = batch.get("messages", {})
         if batch["briefing_blocked"]:
             first = batch["briefing_blocked"][0]
-            msg = messages.get(first) or f"Clarion registry refuses briefing-blocked file at {first!r} (batch resolve)"
+            msg = messages.get(first) or f"Loomweave registry refuses briefing-blocked file at {first!r} (batch resolve)"
             raise RegistryBriefingBlockedError(msg, status_code=403, url="")
         if batch["not_found"]:
             first = batch["not_found"][0]
-            msg = messages.get(first) or f"Clarion registry could not resolve file at {first!r} (batch resolve)"
+            msg = messages.get(first) or f"Loomweave registry could not resolve file at {first!r} (batch resolve)"
             raise RegistryFileNotFoundError(msg, status_code=404, url="")
         if batch["errors"]:
             err = batch["errors"][0]
-            msg = f"Clarion registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
+            msg = f"Loomweave registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
             raise RegistryResolutionError(msg, status_code=400, url="")
         return batch["resolved"]
 
@@ -1160,7 +1277,7 @@ class FilesMixin(DBMixinProtocol):
             suggestion = suggestion[:10_000] + "\n[truncated]"
 
         if fingerprint:
-            # Scanner-supplied fingerprint is the cross-run identity (Loom §3.B):
+            # Scanner-supplied fingerprint is the cross-run identity (Weft §3.B):
             # it follows the finding across line moves, so identity is keyed on
             # (scan_source, fingerprint) alone, not file/rule/line.
             existing_finding = self.conn.execute(
@@ -1328,19 +1445,84 @@ class FilesMixin(DBMixinProtocol):
         seen_finding_ids: dict[str, list[str]],
         now: str,
         actor: str,
+        resolved: set[tuple[str, str]],
     ) -> None:
-        """Mark findings not in current batch as unseen_in_latest."""
+        """Mark findings not in current batch as unseen_in_latest.
+
+        Captures into *resolved* the ``(finding_id, issue_id)`` pairs whose
+        status genuinely transitions open/new → ``unseen_in_latest``
+        (issue-linked only), so the caller runs the close-on-fixed cascade
+        post-commit. A file with an empty seen-set — a clean file folded in via
+        ``scanned_paths`` — sweeps ALL its non-terminal findings; the
+        ``id NOT IN`` clause is dropped in that case to avoid the
+        ``id NOT IN ()`` SQLite syntax error.
+        """
         terminal = tuple(TERMINAL_FINDING_STATUSES)
         terminal_ph = ",".join("?" * len(terminal))
         for fid, fids in seen_finding_ids.items():
-            placeholders = ",".join("?" * len(fids))
+            not_in_clause = ""
+            extra_params: list[Any] = []
+            if fids:
+                placeholders = ",".join("?" * len(fids))
+                not_in_clause = f" AND id NOT IN ({placeholders})"
+                extra_params = list(fids)
+            # Capture genuine open/new → unseen transitions on issue-linked
+            # findings BEFORE the UPDATE rewrites their status. The
+            # ``status != 'unseen_in_latest'`` guard keeps an already-unseen
+            # finding from re-firing the close cascade every batch (idempotency).
+            for row in conn.execute(
+                f"SELECT id, issue_id FROM scan_findings "
+                f"WHERE file_id = ? AND scan_source = ? AND issue_id IS NOT NULL "
+                f"AND status NOT IN ({terminal_ph}) "
+                f"AND status != 'unseen_in_latest'"
+                f"{not_in_clause}",
+                [fid, scan_source, *terminal, *extra_params],
+            ).fetchall():
+                resolved.add((row["id"], str(row["issue_id"])))
             conn.execute(
                 f"UPDATE scan_findings SET status = 'unseen_in_latest', updated_at = ?, updated_by = ? "
                 f"WHERE file_id = ? AND scan_source = ? "
-                f"AND status NOT IN ({terminal_ph}) "
-                f"AND id NOT IN ({placeholders})",
-                [now, actor, fid, scan_source, *terminal, *fids],
+                f"AND status NOT IN ({terminal_ph})"
+                f"{not_in_clause}",
+                [now, actor, fid, scan_source, *terminal, *extra_params],
             )
+
+    def _get_scan_source_scheme(self, scan_source: str) -> str:
+        """The fingerprint_scheme recorded for *scan_source*, or '' if none.
+
+        Weft seam G4. A '' result means either no scheme has ever been declared
+        for this scan_source (legacy/blank callers) or the registry row is
+        absent — both read as "no baseline yet", so the caller proceeds normally.
+        Defensive against a pre-v28 DB that somehow skipped the migration: a
+        missing table reads as no-baseline rather than raising.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT fingerprint_scheme FROM scan_source_schemes WHERE scan_source = ?",
+                (scan_source,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return ""
+        return str(row["fingerprint_scheme"]) if row is not None and row["fingerprint_scheme"] else ""
+
+    def _record_scan_source_scheme(self, scan_source: str, fingerprint_scheme: str, *, now: str) -> None:
+        """Record (or refresh) the declared fingerprint_scheme for *scan_source*.
+
+        Weft seam G4. Upsert keyed on scan_source: the first declaration
+        establishes the baseline a later bump is measured against. This is only
+        reached on the MATCH / no-baseline-yet path (the mismatch path never
+        records, so a bump cannot silently overwrite the baseline it just
+        tripped). Runs on the shared connection in the caller's context, before
+        the ingest write window's BEGIN IMMEDIATE.
+        """
+        self.conn.execute(
+            "INSERT INTO scan_source_schemes (scan_source, fingerprint_scheme, first_seen, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(scan_source) DO UPDATE SET "
+            "fingerprint_scheme = excluded.fingerprint_scheme, updated_at = excluded.updated_at",
+            (scan_source, fingerprint_scheme, now, now),
+        )
+        self.conn.commit()
 
     def process_scan_results(
         self,
@@ -1352,6 +1534,8 @@ class FilesMixin(DBMixinProtocol):
         create_observations: bool = False,
         complete_scan_run: bool = True,
         observation_actor: str = "",
+        scanned_paths: Sequence[str] = (),
+        fingerprint_scheme: str = "",
     ) -> ScanIngestResult:
         """Ingest scan results: create/update file records and findings.
 
@@ -1367,12 +1551,35 @@ class FilesMixin(DBMixinProtocol):
         Only findings with a non-terminal status are affected (``fixed`` and
         ``false_positive`` are left alone).
 
+        *scanned_paths* is the authoritative set of files the scanner visited
+        this run, including clean files with zero findings. The sweep above only
+        visits files present in *findings*; *scanned_paths* widens it so a file
+        whose last/only finding was fixed (and is therefore absent from this
+        batch) is still swept — its prior findings flip to ``unseen_in_latest``,
+        which the close-on-fixed cascade then resolves. Unknown clean paths (no
+        prior file record) are skipped, not created. Only consulted when
+        *mark_unseen* is ``True``.
+
         When *create_observations* is ``True``, each new finding is promoted to
         an observation for triage tracking. Pass *observation_actor* to set the
         observation's ``actor`` field — required for ``report_finding`` callers
         that want to attribute the finding to a specific agent rather than the
         default ``scanner:{scan_source}`` (F3 — review-h). Empty string falls
         back to the default.
+
+        *fingerprint_scheme* is the scanner-declared identity scheme for the
+        fingerprints in this batch (e.g. wardline's ``wlfp2``). It is recorded
+        per *scan_source* on first sight and compared on every subsequent
+        ingest. The dedup join is keyed on the raw fingerprint VALUE, so a
+        silent scheme bump (``wlfp2`` -> ``wlfp3``) re-mints every fingerprint:
+        the new-scheme batch would miss the join and — under *mark_unseen* — the
+        sweep would CASCADE-CLOSE every prior-scheme finding as ``fixed`` with
+        zero error. On a MISMATCH this method REFUSES the sweep (forces
+        ``mark_unseen=False``), ingests the new-scheme findings WITHOUT touching
+        the old set, and appends a ``scheme_mismatch`` weft-reason carrier to the
+        result's ``weft_reasons`` (PDR-0023). A blank declared scheme (legacy
+        caller) or a not-yet-recorded scan_source proceeds normally. INVARIANT: a
+        scheme bump MUST NEVER silently cascade-close existing findings as fixed.
 
         When *complete_scan_run* is ``False`` and a *scan_run_id* is provided,
         the scan run status is NOT transitioned to ``completed``.  Use this for
@@ -1386,9 +1593,10 @@ class FilesMixin(DBMixinProtocol):
             raise ValueError("scan_source must be a non-empty string")
         if not isinstance(scan_run_id, str):
             raise ValueError(f"scan_run_id must be a string, got {type(scan_run_id).__name__}")
-        if mark_unseen and not findings:
+        if mark_unseen and not findings and not scanned_paths:
             raise ValueError(
-                "mark_unseen=True requires at least one finding; an empty batch cannot identify which (file, scan_source) pairs to sweep"
+                "mark_unseen=True requires at least one finding or scanned path; "
+                "without either, an empty batch cannot identify which (file, scan_source) pairs to sweep"
             )
         if scan_run_id:
             scan_run = self.conn.execute("SELECT scan_source FROM scan_runs WHERE id = ?", (scan_run_id,)).fetchone()
@@ -1413,10 +1621,53 @@ class FilesMixin(DBMixinProtocol):
             observations_created=0,
             observations_failed=0,
             warnings=warnings,
+            weft_reasons=[],
         )
         regressed_issue_ids: set[str] = set()
+        # (finding_id, issue_id) pairs whose finding genuinely transitioned to
+        # ``unseen_in_latest`` in the sweep below — the close-on-fixed cascade
+        # resolves these post-commit, symmetric to regressed_issue_ids/reopen.
+        resolved: set[tuple[str, str]] = set()
 
-        # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Clarion HTTP round
+        # Weft seam G4 — fingerprint-scheme echo handshake (PDR-0023). Compare the
+        # declared scheme against the one recorded for this scan_source. On a
+        # MISMATCH the raw-fingerprint dedup join is invalidated (every incoming
+        # fingerprint is re-minted under the new scheme), so a mark_unseen sweep
+        # would flip every prior-scheme finding to ``unseen_in_latest`` and the
+        # close-on-fixed cascade would silently close them as fixed. REFUSE the
+        # sweep and surface a structured scheme_mismatch carrier instead; ingest
+        # the new-scheme findings without touching the old set. A blank declared
+        # scheme (legacy caller) or a not-yet-recorded scan_source proceeds
+        # normally and records the scheme. Done BEFORE the ingest write window so
+        # the (possibly forced-off) mark_unseen is what the sweep sees.
+        stored_scheme = self._get_scan_source_scheme(scan_source)
+        declared_scheme = fingerprint_scheme or ""
+        if declared_scheme and stored_scheme and declared_scheme != stored_scheme:
+            if mark_unseen:
+                logger.warning(
+                    "fingerprint scheme mismatch for scan_source=%r: declared %r != stored %r; "
+                    "REFUSING mark_unseen sweep to avoid cascade-closing prior-scheme findings",
+                    scan_source,
+                    declared_scheme,
+                    stored_scheme,
+                )
+            mark_unseen = False
+            stats["weft_reasons"].append(
+                WeftReason(
+                    reason_class="scheme_mismatch",
+                    cause=f"declared {declared_scheme} != stored {stored_scheme} for scan_source {scan_source}",
+                    fix="re-baseline under the new scheme / migrate fingerprints / confirm the bump was intentional",
+                )
+            )
+        else:
+            # MATCH, blank declared (legacy), or no stored scheme yet: record the
+            # declared scheme so the FIRST ingest for a scan_source establishes
+            # the baseline a later bump is measured against. A blank declared
+            # scheme never overwrites a recorded one (it carries no claim).
+            if declared_scheme:
+                self._record_scan_source_scheme(scan_source, declared_scheme, now=now)
+
+        # CONTRACT-E / c9196e5: resolve unfamiliar paths (the Loomweave HTTP round
         # trip) BEFORE the writer lock so concurrent ingests overlap. The write
         # window below then runs under its own BEGIN IMMEDIATE + busy-retry, the
         # same transaction discipline every other write surface uses; scan-run
@@ -1435,6 +1686,8 @@ class FilesMixin(DBMixinProtocol):
             actor=actor,
             stats=stats,
             regressed_issue_ids=regressed_issue_ids,
+            resolved=resolved,
+            scanned_paths=scanned_paths,
         )
 
         # Post-commit finding→issue cascade: reopen issues whose linked finding
@@ -1442,7 +1695,7 @@ class FilesMixin(DBMixinProtocol):
         # reopen owns its own BEGIN IMMEDIATE) and is best-effort — a transition
         # that the issue's workflow forbids must not fail the whole scan ingest.
         # A failure appends to ``stats["warnings"]``, which IS surfaced on the
-        # wire (the classic envelope is a passthrough of this dict and the loom
+        # wire (the classic envelope is a passthrough of this dict and the weft
         # adapter lifts ``warnings`` to the top level), and is now also logged
         # per-failure below so a systemic "every cascade is failing" is visible
         # in operator logs. The ``logger.info`` further down fires only for
@@ -1463,9 +1716,35 @@ class FilesMixin(DBMixinProtocol):
                 ", ".join(reopened_issue_ids),
             )
 
+        # Post-commit close cascade, symmetric to the reopen above: close issues
+        # whose linked finding just resolved (flipped to ``unseen_in_latest`` in
+        # the sweep). Same best-effort discipline — each close owns its own
+        # BEGIN IMMEDIATE, the ``== "done"`` guard preserves terminal human
+        # decisions, and a forbidden transition rides out in ``warnings`` (the
+        # wire) plus a per-failure log line rather than failing the ingest.
+        #
+        # Skip any issue that ALSO had a finding regress in this same batch: a
+        # regress means an active defect, so reopen wins over close. The
+        # sibling-open guard in ``_close_issue_for_fixed_finding_tx`` is the
+        # authoritative backstop (it re-reads sibling state under the writer
+        # lock); this exclusion just avoids a doomed close attempt and the
+        # reconciliation-debt churn it would log.
+        warnings_before_close = len(stats["warnings"])
+        close_candidates = [(finding_id, issue_id) for finding_id, issue_id in sorted(resolved) if issue_id not in regressed_issue_ids]
+        closed_issue_ids = self._finding_issue_cascade_service().close_resolved_findings(close_candidates, warnings=stats["warnings"])
+        for warning in stats["warnings"][warnings_before_close:]:
+            logger.warning("finding→issue close cascade: %s", warning)
+        if closed_issue_ids:
+            logger.info(
+                "finding→issue cascade: closed %d issue(s) on fix (scan_source=%r): %s",
+                len(closed_issue_ids),
+                scan_source,
+                ", ".join(closed_issue_ids),
+            )
+
         if scan_run_id and complete_scan_run:
-            # §F6 tolerate-unknown: an enrich-only producer (e.g. Clarion
-            # `clarion analyze`) POSTs findings under a scan_run_id Filigree
+            # §F6 tolerate-unknown: an enrich-only producer (e.g. Loomweave
+            # `loomweave analyze`) POSTs findings under a scan_run_id Filigree
             # never created, so there is no scan_runs row to mark completed.
             # That is the normal path, not an error — skip the completion
             # attempt silently rather than emit a benign "status not updated"
@@ -1505,6 +1784,8 @@ class FilesMixin(DBMixinProtocol):
         actor: str,
         stats: ScanIngestResult,
         regressed_issue_ids: set[str],
+        resolved: set[tuple[str, str]],
+        scanned_paths: Sequence[str] = (),
     ) -> None:
         """Write window for :meth:`process_scan_results`.
 
@@ -1524,8 +1805,9 @@ class FilesMixin(DBMixinProtocol):
         stats["observations_failed"] = 0
         stats["new_finding_ids"] = []
         # Reset on every entry so a @_retry_busy re-run after a rolled-back
-        # transient SQLITE_BUSY does not double-accumulate regressed issues.
+        # transient SQLITE_BUSY does not double-accumulate regressed/resolved issues.
         regressed_issue_ids.clear()
+        resolved.clear()
 
         seen_finding_ids: dict[str, list[str]] = {}
         counted_file_ids: set[str] = set()
@@ -1557,12 +1839,24 @@ class FilesMixin(DBMixinProtocol):
             )
 
         if mark_unseen:
+            # Widen the sweep to the union of files-with-findings and scanned_paths.
+            # A clean file (scanned, zero findings this batch) gets an empty
+            # seen-set so all its prior non-terminal findings flip to unseen —
+            # this is how close-on-fixed fires when the last/only finding in a
+            # file is fixed. Resolve clean paths by lookup, not upsert: a path
+            # with no prior file record can hold no findings, so skip it.
+            for path in scanned_paths:
+                record = self.get_file_by_path(path)
+                if record is None:
+                    continue
+                seen_finding_ids.setdefault(record.id, [])
             self._mark_unseen_findings(
                 self.conn,
                 scan_source=scan_source,
                 seen_finding_ids=seen_finding_ids,
                 now=now,
                 actor=actor,
+                resolved=resolved,
             )
 
         # Accumulate findings_count on the scan_run row per batch.
@@ -1832,19 +2126,38 @@ class FilesMixin(DBMixinProtocol):
     @_retry_busy()
     @_in_immediate_tx("close_issue_for_fixed_finding")
     def _close_issue_for_fixed_finding_tx(self, finding_id: str, issue_id: str) -> bool:
-        """Atomically verify the finding is still fixed before closing its issue.
+        """Atomically verify the finding is still resolved before closing its issue.
 
-        The stale sweep and scan ingest intentionally commit before their
-        best-effort issue cascades. This transaction closes the post-commit
-        race: if ingest reopened the same finding after the sweep, the status
-        check observes ``open`` under the writer lock and skips the stale close.
+        Resolved means ``fixed`` (the age-gated clean-stale sweep) or
+        ``unseen_in_latest`` (the eager scan-ingest sweep). Both callers commit
+        before their best-effort issue cascades; this transaction closes the
+        post-commit race: if a later ingest reopened the same finding to
+        ``open`` after the sweep, the status check observes ``open`` under the
+        writer lock and skips the close.
         """
         finding = self.conn.execute(
             "SELECT status FROM scan_findings WHERE id = ? AND issue_id = ?",
             (finding_id, issue_id),
         ).fetchone()
-        if finding is None or finding["status"] != "fixed":
+        if finding is None or finding["status"] not in ("fixed", "unseen_in_latest"):
             return False
+
+        # Sibling-open guard: an issue may link more than one finding (a second
+        # finding can be attached via ``update_finding(..., issue_id=...)``; see
+        # ``get_issue_findings``). Resolving ONE of them does not mean the issue
+        # is fixed — if any other linked finding is still an active defect
+        # (non-terminal and not itself resolved-as-unseen), leave the issue open.
+        # This also closes the same-batch reopen-then-close race: a sibling that
+        # regressed to ``open`` in this ingest now blocks the close under the
+        # writer lock.
+        resolved_statuses = (*TERMINAL_FINDING_STATUSES, "unseen_in_latest")
+        resolved_ph = ",".join("?" * len(resolved_statuses))
+        sibling_open = self.conn.execute(
+            f"SELECT 1 FROM scan_findings WHERE issue_id = ? AND id != ? AND status NOT IN ({resolved_ph}) LIMIT 1",
+            (issue_id, finding_id, *resolved_statuses),
+        ).fetchone()
+        if sibling_open is not None:
+            return False  # another linked finding is still an active defect
 
         issue = self.get_issue(issue_id)
         if self._resolve_status_category(issue.type, issue.status) == "done":
@@ -1953,10 +2266,8 @@ class FilesMixin(DBMixinProtocol):
         fixed = self._sweep_stale_findings_to_fixed(days=days, scan_source=scan_source, actor=actor)
 
         warnings: list[str] = []
-        closed_issue_ids: list[str] = []
-        for finding_id, issue_id in fixed:
-            if issue_id and self._close_issue_for_fixed_finding(finding_id, str(issue_id), warnings=warnings):
-                closed_issue_ids.append(str(issue_id))
+        valid = [(finding_id, str(issue_id)) for finding_id, issue_id in fixed if issue_id]
+        closed_issue_ids = self._finding_issue_cascade_service().close_resolved_findings(valid, warnings=warnings)
         for warning in warnings:
             logger.warning("clean_stale_findings cascade: %s", warning)
 
@@ -1969,6 +2280,27 @@ class FilesMixin(DBMixinProtocol):
             f"SUM(CASE WHEN severity='{s}' AND {open_filter} THEN 1 ELSE 0 END) AS {s}," for s in ("critical", "high", "medium", "low")
         )
         return f"{parts} SUM(CASE WHEN severity='info' AND {open_filter} THEN 1 ELSE 0 END) AS info"
+
+    @staticmethod
+    def _suppressed_severity_bucket_sql(open_filter: str) -> str:
+        """Build ``SUM(...) AS supp_<severity>`` columns counting the wardline-suppressed
+        subset of each open severity bucket.
+
+        Parallel to :meth:`_severity_bucket_sql` but gated additionally on
+        :func:`_wardline_suppressed_sql`, so the rollup reports how many of the
+        open findings in each severity bucket are baselined/waived/judged
+        (accepted) rather than actionable. The shared classifier keeps this
+        identical to the row-level ``finding_list`` suppression filter — they
+        cannot drift. Columns are aliased ``supp_<severity>``; the ``FROM
+        scan_findings`` callers have no table alias, so ``severity`` and
+        ``metadata`` are referenced bare.
+        """
+        supp = _wardline_suppressed_sql()
+        parts = " ".join(
+            f"SUM(CASE WHEN severity='{s}' AND {open_filter} AND {supp} THEN 1 ELSE 0 END) AS supp_{s},"
+            for s in ("critical", "high", "medium", "low")
+        )
+        return f"{parts} SUM(CASE WHEN severity='info' AND {open_filter} AND {supp} THEN 1 ELSE 0 END) AS supp_info"
 
     def _findings_where(
         self,
@@ -1987,18 +2319,21 @@ class FilesMixin(DBMixinProtocol):
             valid = ", ".join(sorted(self._VALID_FINDING_SORTS))
             raise ValueError(f'Invalid sort field "{sort}". Must be one of: {valid}')
 
-        clauses = ["file_id = ?"]
+        # ``sf.`` qualifiers: the shared WHERE/ORDER feed queries that LEFT JOIN
+        # ``issues`` (N6), where ``status``/``updated_at`` are ambiguous. The
+        # count path aliases ``scan_findings sf`` too (no join) so these resolve.
+        clauses = ["sf.file_id = ?"]
         params: list[Any] = [file_id]
 
         if severity is not None:
-            clauses.append("severity = ?")
+            clauses.append("sf.severity = ?")
             params.append(severity)
         if status is not None:
-            clauses.append("status = ?")
+            clauses.append("sf.status = ?")
             params.append(status)
 
         where = " AND ".join(clauses)
-        order_clause = f"{self._SEVERITY_ORDER_SQL} ASC, updated_at DESC" if sort == "severity" else "updated_at DESC"
+        order_clause = f"{self._SEVERITY_ORDER_SQL} ASC, sf.updated_at DESC" if sort == "severity" else "sf.updated_at DESC"
         return where, params, order_clause
 
     def get_findings(
@@ -2014,7 +2349,7 @@ class FilesMixin(DBMixinProtocol):
         """Get scan findings for a file with optional filters."""
         where, params, order_clause = self._findings_where(file_id, severity=severity, status=status, sort=sort)
         rows = self.conn.execute(
-            f"SELECT * FROM scan_findings WHERE {where} ORDER BY {order_clause} LIMIT ? OFFSET ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE {where} ORDER BY {order_clause} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
         return [self._build_scan_finding(r) for r in rows]
@@ -2035,8 +2370,10 @@ class FilesMixin(DBMixinProtocol):
         """
         where, params, _order = self._findings_where(file_id, severity=severity, status=status, sort=sort)
 
+        # ``where`` carries ``sf.`` qualifiers (N6), so alias the table here too.
+        # The COUNT needs no join — the filters are all finding-level.
         total: int = self.conn.execute(
-            f"SELECT COUNT(*) FROM scan_findings WHERE {where}",
+            f"SELECT COUNT(*) FROM scan_findings sf WHERE {where}",
             params,
         ).fetchone()[0]
 
@@ -2061,11 +2398,18 @@ class FilesMixin(DBMixinProtocol):
         "low": 3,
         "info": 3,
     }
+    _FINDING_SEVERITY_TO_BUG_SEVERITY: ClassVar[dict[str, str]] = {
+        "critical": "critical",
+        "high": "major",
+        "medium": "major",
+        "low": "minor",
+        "info": "cosmetic",
+    }
 
     def get_finding(self, finding_id: str) -> ScanFindingDict:
         """Get a single finding by ID.  Raises *KeyError* if not found."""
         row = self.conn.execute(
-            "SELECT * FROM scan_findings WHERE id = ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE sf.id = ?",
             (finding_id,),
         ).fetchone()
         if row is None:
@@ -2103,10 +2447,32 @@ class FilesMixin(DBMixinProtocol):
         file_id: str | None = None,
         issue_id: str | None = None,
         fingerprint: str | None = None,
+        rule_id: str | None = None,
+        kind: str | None = None,
+        qualname: str | None = None,
+        suppression: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Project-wide finding query with optional filters.
+
+        Beyond the flat column filters, ``kind``/``qualname``/``suppression``
+        reach into the nested ``metadata.wardline.*`` axes (FIL-2/X-5) so an
+        agent can answer "show me the real un-suppressed defects"
+        (``kind="defect", suppression="active"``) server-side rather than
+        pulling every finding and filtering nested metadata client-side.
+        ``suppression="active"`` selects the un-suppressed population, classified
+        by the same shared predicate ``unbridged_finding_stats`` uses to split
+        ``actionable`` vs ``suppressed`` (so the classification cannot drift).
+        Note this query applies no open/unbridged base filter, so its total is a
+        *superset* of that ``actionable`` count unless the caller also passes
+        ``status``/``issue_id``; ``baselined`` / ``waived`` / ``judged`` select
+        that specific wardline verdict. ``suppression="all"`` (and the default
+        ``None``) apply no suppression clause at all — every row is returned.
+        The agent-facing surfaces (MCP ``finding_list`` / CLI ``list-findings``)
+        default to ``active`` and pass ``all`` to opt back in (filigree-2bdb878bd2);
+        this primitive keeps its all-inclusive default so internal callers (e.g.
+        ``scanner_reporting`` re-finding a just-ingested row) never silently lose rows.
 
         Returns ``{"findings": [...], "total": N, "limit": ..., "offset": ...}``.
         """
@@ -2116,7 +2482,13 @@ class FilesMixin(DBMixinProtocol):
         if status is not None and status not in VALID_FINDING_STATUSES:
             valid = ", ".join(sorted(VALID_FINDING_STATUSES))
             raise ValueError(f'Invalid status filter "{status}". Must be one of: {valid}')
-        # All filters are simple equality on identically-named columns.
+        if kind is not None and kind not in VALID_WARDLINE_FINDING_KINDS:
+            valid = ", ".join(sorted(VALID_WARDLINE_FINDING_KINDS))
+            raise ValueError(f'Invalid kind filter "{kind}". Must be one of: {valid}')
+        if suppression is not None and suppression not in VALID_SUPPRESSION_FILTERS:
+            valid = ", ".join(sorted(VALID_SUPPRESSION_FILTERS))
+            raise ValueError(f'Invalid suppression filter "{suppression}". Must be one of: {valid}')
+        # Flat filters are simple equality on identically-named columns.
         filters = {
             "severity": severity,
             "status": status,
@@ -2125,23 +2497,45 @@ class FilesMixin(DBMixinProtocol):
             "file_id": file_id,
             "issue_id": issue_id,
             "fingerprint": fingerprint,
+            "rule_id": rule_id,
         }
+        # ``sf.`` qualifiers: the rows query LEFT JOINs ``issues`` (N6), where the
+        # ``status`` filter would otherwise be ambiguous (both tables have it).
+        # The COUNT aliases ``scan_findings sf`` for the same qualified WHERE.
         clauses: list[str] = []
         params: list[Any] = []
         for col, val in filters.items():
             if val is not None:
-                clauses.append(f"{col} = ?")
+                clauses.append(f"sf.{col} = ?")
                 params.append(val)
+
+        # Nested wardline metadata axes (FIL-2/X-5). These clauses and their
+        # params join the SAME ``clauses``/``params`` lists the COUNT and the
+        # rows query share, so the two cannot count different populations.
+        if kind is not None:
+            clauses.append(_wardline_field_eq_sql("kind", "sf"))
+            params.append(kind)
+        if qualname is not None:
+            clauses.append(_wardline_field_eq_sql("qualname", "sf"))
+            params.append(qualname)
+        if suppression == "active":
+            clauses.append(f"NOT {_wardline_suppressed_sql('sf')}")
+        elif suppression not in (None, "all"):
+            # ``all`` is the explicit no-filter sentinel — like ``None`` it adds
+            # no clause, so it must not fall through to an equality on
+            # ``suppression_state = 'all'`` (which would match nothing).
+            clauses.append(_wardline_field_eq_sql("suppression_state", "sf"))
+            params.append(suppression)
 
         where = " AND ".join(clauses) if clauses else "1=1"
 
         total: int = self.conn.execute(
-            f"SELECT COUNT(*) FROM scan_findings WHERE {where}",
+            f"SELECT COUNT(*) FROM scan_findings sf WHERE {where}",
             params,
         ).fetchone()[0]
 
         rows = self.conn.execute(
-            f"SELECT * FROM scan_findings WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            f"SELECT {self._FINDING_SELECT_COLS} {self._FINDING_ISSUE_JOIN} WHERE {where} ORDER BY sf.updated_at DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
 
@@ -2192,8 +2586,174 @@ class FilesMixin(DBMixinProtocol):
         priority: int | None = None,
         actor: str = "",
         labels: list[str] | None = None,
+        force: bool = False,
+        attach_entity: bool = True,
     ) -> dict[str, Any]:
-        """Promote a finding directly to a tracked issue.
+        """Promote a finding to a tracked issue, attaching its entity binding by default.
+
+        Default entity attach (dogfood-4 B9, weft-4a46553503): when the finding
+        itself carries an entity identity (``metadata.loomweave.entity_id``) and
+        its file record carries a content hash to snapshot as the drift
+        baseline, the promote also creates the ADR-029 entity association — so
+        a promoted federation finding is visible from Loomweave's entity
+        surfaces without a second opt-in call. The attach is *enrichment, never
+        load-bearing*: any attach failure is reported in-band (a ``warnings``
+        entry plus ``entity_attachment.reason``) and the promote still
+        succeeds. Pass ``attach_entity=False`` to opt out.
+
+        The result always carries an ``entity_attachment`` dict saying what was
+        attached (``attached=True`` with ``entity_id``/``content_hash``/
+        ``source``, plus a top-level ``association`` row) or exactly why not
+        (``attached=False`` with ``reason``) — never a silent skip (C-10).
+        Re-promoting an already-promoted finding re-runs the attach, which
+        upserts on ``(issue_id, entity_id)`` and refreshes the stored hash, so
+        a promote that failed mid-attach converges on retry.
+        """
+        result = self._promote_finding_to_issue_unattached(finding_id, priority=priority, actor=actor, labels=labels, force=force)
+        if not attach_entity:
+            result["entity_attachment"] = {"attached": False, "reason": "entity attach disabled by caller (attach_entity=false)"}
+            return result
+
+        # Dismissed-issue guard (weft, N6 continuation): when the idempotency
+        # path returned an existing issue (``created=False``) that is now
+        # done-category — e.g. a human dismissal as ``not_a_bug`` — the prior
+        # triage stands and the work is meant to be left untouched. Running the
+        # default entity attach here would re-write that dismissed issue's
+        # ADR-029 drift baseline (``content_hash_at_attach``), silently mutating
+        # governance state on work nobody asked to reopen. So we skip the
+        # default attach for a done-category early-return, naming exactly why
+        # (C-10, never a silent skip). Convergence-on-open is preserved: a
+        # ``created=False`` early-return whose issue is still open/wip DOES
+        # re-attach, so a promote that failed mid-attach still converges on
+        # retry while the issue remains live.
+        existing_issue = result.get("issue")
+        if (
+            not result.get("created", False)
+            and existing_issue is not None
+            and self._resolve_status_category(existing_issue.type, existing_issue.status) == "done"
+        ):
+            result["entity_attachment"] = {
+                "attached": False,
+                "reason": (
+                    f"default entity attach skipped: finding already linked to issue {existing_issue.id}, "
+                    f"which is done-category ('{existing_issue.status}'); its ADR-029 drift baseline is "
+                    "left untouched so the prior triage stands. Re-attach explicitly via "
+                    "finding_promote_and_attach_entity if intentional."
+                ),
+            }
+            return result
+
+        finding = self.get_finding(finding_id)
+        entity_id, source, no_identity_reason = self._entity_identity_from_finding(finding)
+        if entity_id is None:
+            result["entity_attachment"] = {"attached": False, "reason": no_identity_reason}
+            return result
+
+        content_hash = self._file_content_hash_for_finding(finding["file_id"])
+        if not content_hash:
+            result["entity_attachment"] = {
+                "attached": False,
+                "entity_id": entity_id,
+                "reason": (
+                    f"resolution failed: file record for file_id={finding['file_id']} carries no "
+                    "content hash to snapshot as the drift baseline (local-registry file); pass "
+                    "an explicit content_hash via finding_promote_and_attach_entity"
+                ),
+            }
+            return result
+
+        issue_id = result["issue"].id
+        try:
+            association = self.add_entity_association(
+                make_issue_id(issue_id),
+                make_loomweave_entity_id(entity_id),
+                make_content_hash(content_hash),
+                actor=actor,
+            )
+        except Exception as exc:  # enrichment must never sink the promote
+            logger.warning("Default entity attach failed for finding %s (entity %r): %s", finding_id, entity_id, exc)
+            result["entity_attachment"] = {
+                "attached": False,
+                "entity_id": entity_id,
+                "reason": f"attach failed: {exc}",
+            }
+            result.setdefault("warnings", []).append(
+                f"Issue {issue_id} promoted, but the default entity attach of {entity_id!r} failed: {exc}"
+            )
+            return result
+
+        result["association"] = association
+        result["entity_attachment"] = {
+            "attached": True,
+            "entity_id": entity_id,
+            "content_hash": content_hash,
+            "source": source,
+        }
+        return result
+
+    @staticmethod
+    def _entity_identity_from_finding(finding: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+        """Extract the entity identity a finding carries in its own metadata.
+
+        Returns ``(entity_id, source, reason_when_absent)``. The only identity
+        filigree can use without a network resolve is
+        ``metadata.loomweave.entity_id`` — an opaque Loomweave-owned id (SEI or
+        legacy locator). A wardline finding carries only
+        ``metadata.wardline.qualname``, which filigree deliberately does not
+        resolve locally (resolution is Loomweave's authority); the returned
+        reason names the qualname and points at the explicit attach form.
+        Metadata is external scanner payload stored verbatim, so every level is
+        type-guarded.
+        """
+        raw_metadata = finding.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        loomweave_meta = metadata.get("loomweave")
+        if isinstance(loomweave_meta, dict):
+            entity_id = loomweave_meta.get("entity_id")
+            if isinstance(entity_id, str) and entity_id.strip():
+                return entity_id, "metadata.loomweave.entity_id", None
+        wardline_meta = metadata.get("wardline")
+        if isinstance(wardline_meta, dict):
+            qualname = wardline_meta.get("qualname")
+            if isinstance(qualname, str) and qualname.strip():
+                return (
+                    None,
+                    None,
+                    (
+                        f"resolution failed: finding carries qualname {qualname!r} "
+                        "(metadata.wardline.qualname) but no entity id; filigree does not resolve "
+                        "qualnames locally — resolve it via Loomweave and call "
+                        "finding_promote_and_attach_entity"
+                    ),
+                )
+        return None, None, "no entity identity on finding (no metadata.loomweave.entity_id or metadata.wardline.qualname)"
+
+    def _file_content_hash_for_finding(self, file_id: str) -> str:
+        """The finding's file-record content hash, or empty string when absent.
+
+        Populated by the Loomweave registry resolve in ``loomweave`` registry
+        mode; the empty sentinel in local mode (where no drift baseline exists).
+        """
+        row = self.conn.execute("SELECT content_hash FROM file_records WHERE id = ?", (file_id,)).fetchone()
+        if row is None:
+            return ""
+        return str(row["content_hash"] or "")
+
+    def _promote_finding_to_issue_unattached(
+        self,
+        finding_id: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+        labels: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Promote a finding directly to a tracked issue (no entity attach).
+
+        The promote core. Public surfaces go through
+        :meth:`promote_finding_to_issue`, which layers the default entity
+        attach on top; :meth:`promote_finding_and_attach_entity` calls this
+        directly so the caller-supplied binding stays the only one created.
 
         The older ``promote_finding_to_observation`` helper remains available
         for explicit scratchpad triage. This method backs public
@@ -2202,6 +2762,20 @@ class FilesMixin(DBMixinProtocol):
         ``labels`` lets the caller carry session-cluster context onto the
         promoted issue. The ``from-finding`` label is always added in
         addition. Senior-user MCP review run e P2.12.
+
+        Suppression guard (weft-171fc22a50): wardline stamps suppression
+        provenance onto a finding's metadata as
+        ``metadata.wardline.suppression_state`` (``"baselined"`` |
+        ``"waived"`` | ``"judged"``); the key is *absent* for an active
+        finding. A suppressed finding is an already-accepted/suppressed defect,
+        not active work — creating a *new* issue from it would manufacture false
+        work. So we refuse by default (``ValueError`` → a clean VALIDATION coded
+        error at the MCP/HTTP surfaces) and require an explicit ``force=True``
+        override, which is recorded as a warning on the result. The guard runs
+        *after* the idempotency early-returns, so re-promoting a finding that is
+        already linked to an issue still returns that issue (``created=False``)
+        even if it later acquired a ``suppression_state`` — that path
+        manufactures no new work and so is never blocked.
         """
         actor = _validate_string(actor, "actor")
         labels = _validate_optional_string_list(labels, "labels")
@@ -2210,6 +2784,14 @@ class FilesMixin(DBMixinProtocol):
             priority = self._SEVERITY_TO_PRIORITY.get(finding["severity"], 3)
 
         warnings: list[str] = []
+
+        # Idempotency first: re-promoting a finding that already links an issue
+        # returns that existing issue (created=False) and manufactures no new
+        # work, so it must NOT be blocked by the suppression guard below — the
+        # promote-by-fingerprint surfaces are designed to be called repeatedly,
+        # and a finding can acquire a suppression_state on a later rescan after
+        # it was already promoted while active. The guard only protects against
+        # creating a *new* issue from an accepted/suppressed defect.
         linked_issue_id = finding.get("issue_id")
         if linked_issue_id:
             try:
@@ -2217,7 +2799,18 @@ class FilesMixin(DBMixinProtocol):
             except KeyError:
                 warnings.append(f"Finding {finding_id} referenced missing issue {linked_issue_id}; creating a new issue")
             else:
-                warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
+                # N6 (b): a finding linked to an already-closed issue (e.g. a
+                # human dismissal as ``not_a_bug``) returns that issue rather than
+                # minting new work — the prior triage stands. Name the done state
+                # so the caller does not read the result as fresh, open work.
+                if self._resolve_status_category(issue.type, issue.status) == "done":
+                    warnings.append(
+                        f"Finding {finding_id} already linked to issue {issue.id}, which is closed as "
+                        f"'{issue.status}'; returning the existing (dismissed) issue rather than minting "
+                        "new work — its prior triage stands."
+                    )
+                else:
+                    warnings.append(f"Finding {finding_id} already linked to issue {issue.id} (returning existing)")
                 return {"issue": issue, "created": False, "warnings": warnings}
 
         existing_issue_row = self.conn.execute(
@@ -2232,6 +2825,26 @@ class FilesMixin(DBMixinProtocol):
                 warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id}, but relinking failed")
             warnings.append(f"Finding {finding_id} was already promoted to issue {issue.id} (returning existing)")
             return {"issue": issue, "created": False, "warnings": warnings}
+
+        # Suppression guard (weft-171fc22a50): only reached when we are about to
+        # create a NEW issue. A suppressed finding (baselined/waived/judged) is
+        # an already-accepted defect, not active work — refuse by default and
+        # require an explicit force override (recorded as a warning).
+        # ``metadata.wardline`` is external scanner payload that filigree stores
+        # verbatim without shape-validating nested values, so it may be a
+        # non-dict (off-contract) value. Guard its type: a non-dict/absent
+        # ``wardline`` node falls through to ``None`` (treat-as-active), matching
+        # the "absent => active" contract.
+        wardline_meta = (finding.get("metadata") or {}).get("wardline")
+        suppression_state = wardline_meta.get("suppression_state") if isinstance(wardline_meta, dict) else None
+        if suppression_state:
+            if not force:
+                msg = (
+                    f"Finding {finding_id} is {suppression_state} — an accepted/suppressed defect, "
+                    "not active work; promoting it generates false work. Pass force=true to promote anyway."
+                )
+                raise ValueError(msg)
+            warnings.append(f"Promoted {suppression_state} finding {finding_id} via force override.")
 
         file_path = self._file_path_for_finding(finding["file_id"])
         if not file_path:
@@ -2268,6 +2881,7 @@ class FilesMixin(DBMixinProtocol):
             priority=priority,
             description="\n\n".join(description_parts),
             fields={
+                "severity": self._FINDING_SEVERITY_TO_BUG_SEVERITY.get(finding["severity"], "minor"),
                 "source_finding_id": finding_id,
                 "scan_source": finding["scan_source"],
                 "rule_id": finding["rule_id"],
@@ -2285,6 +2899,59 @@ class FilesMixin(DBMixinProtocol):
             result["warnings"] = warnings
         return result
 
+    def promote_finding_and_attach_entity(
+        self,
+        finding_id: str,
+        entity_id: str,
+        content_hash: str,
+        *,
+        priority: int | None = None,
+        actor: str = "",
+        labels: list[str] | None = None,
+        entity_kind: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Promote a finding to an issue and attach an opaque entity binding.
+
+        This composes the existing idempotent primitives so retrying the same
+        request returns the existing issue and refreshes the association hash.
+        Public HTTP routes run this on a private worker-thread connection.
+
+        **Partial-state contract.** This is deliberately *not* a single
+        transaction — ``promote_finding_to_issue`` commits the issue before
+        ``add_entity_association`` runs. If the attach step raises, the issue
+        is already promoted and committed, with no association attached. This
+        is safe because both primitives are idempotent and converge on retry:
+        ``promote_finding_to_issue`` reuses the existing issue via the
+        finding's ``source_finding_id`` lookup, and ``add_entity_association``
+        upserts on ``(issue_id, entity_id)`` and refreshes the stored content
+        hash. Re-issuing the same request after a mid-operation failure
+        therefore returns the existing issue with the association now present
+        (see ``test_promote_and_attach_retry_converges_after_attach_failure``).
+
+        This explicit form remains caller-driven: it promotes via the
+        unattached core, so the default metadata-derived attach (see
+        :meth:`promote_finding_to_issue`) never fires alongside the
+        caller-supplied binding.
+        """
+        result = self._promote_finding_to_issue_unattached(finding_id, priority=priority, actor=actor, labels=labels, force=force)
+        issue = result["issue"]
+        association = self.add_entity_association(
+            make_issue_id(issue.id),
+            make_loomweave_entity_id(entity_id),
+            make_content_hash(content_hash),
+            actor=actor,
+            entity_kind=entity_kind,
+        )
+        payload: dict[str, Any] = {
+            "issue": self.get_issue(issue.id),
+            "created": result["created"],
+            "association": association,
+        }
+        if result.get("warnings"):
+            payload["warnings"] = result["warnings"]
+        return payload
+
     def _file_path_for_finding(self, file_id: str) -> str:
         """Look up the file path for a file_id, returning empty string if not found."""
         row = self.conn.execute("SELECT path FROM file_records WHERE id = ?", (file_id,)).fetchone()
@@ -2297,10 +2964,11 @@ class FilesMixin(DBMixinProtocol):
         """Get a severity-bucketed summary of findings for a file."""
         _open = self._OPEN_FINDINGS_FILTER
         _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
         row = self.conn.execute(
             f"SELECT COUNT(*) AS total_findings, "
             f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
-            f"{_sev} "
+            f"{_sev}, {_supp} "
             f"FROM scan_findings WHERE file_id = ?",
             (file_id,),
         ).fetchone()
@@ -2312,17 +2980,71 @@ class FilesMixin(DBMixinProtocol):
             "medium": row["medium"] or 0,
             "low": row["low"] or 0,
             "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
+        }
+
+    def get_files_findings_summary(self, file_ids: list[str]) -> FindingsSummary:
+        """Severity-bucketed summary aggregated across *file_ids* in one query.
+
+        The multi-file analogue of :meth:`get_file_findings_summary`; a single
+        ``IN (...)`` aggregate so a scan-run posture echo over N files stays one
+        round-trip. An empty list returns the all-zero summary (no ``IN ()``).
+        """
+        if not file_ids:
+            return {
+                "total_findings": 0,
+                "open_findings": 0,
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+                "info": 0,
+                "suppressed": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            }
+        _open = self._OPEN_FINDINGS_FILTER
+        _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
+        placeholders = ", ".join("?" for _ in file_ids)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) AS total_findings, "
+            f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
+            f"{_sev}, {_supp} "
+            f"FROM scan_findings WHERE file_id IN ({placeholders})",
+            list(file_ids),
+        ).fetchone()
+        return {
+            "total_findings": row["total_findings"],
+            "open_findings": row["open_findings"] or 0,
+            "critical": row["critical"] or 0,
+            "high": row["high"] or 0,
+            "medium": row["medium"] or 0,
+            "low": row["low"] or 0,
+            "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
         }
 
     def get_global_findings_stats(self) -> GlobalFindingsStats:
         """Get project-wide severity-bucketed findings stats."""
         _open = self._OPEN_FINDINGS_FILTER
         _sev = self._severity_bucket_sql(_open)
+        _supp = self._suppressed_severity_bucket_sql(_open)
         row = self.conn.execute(
             f"SELECT COUNT(*) AS total_findings, "
             f"SUM(CASE WHEN {_open} THEN 1 ELSE 0 END) AS open_findings, "
             f"COUNT(DISTINCT CASE WHEN {_open} THEN file_id END) AS files_with_findings, "
-            f"{_sev} "
+            f"{_sev}, {_supp} "
             f"FROM scan_findings",
         ).fetchone()
         return {
@@ -2334,6 +3056,63 @@ class FilesMixin(DBMixinProtocol):
             "medium": row["medium"] or 0,
             "low": row["low"] or 0,
             "info": row["info"] or 0,
+            "suppressed": {
+                "critical": row["supp_critical"] or 0,
+                "high": row["supp_high"] or 0,
+                "medium": row["supp_medium"] or 0,
+                "low": row["supp_low"] or 0,
+                "info": row["supp_info"] or 0,
+            },
+        }
+
+    def unbridged_finding_stats(self) -> dict[str, int]:
+        """Count OPEN analyzer findings not yet bridged to an issue (F2).
+
+        "Un-bridged" = a non-terminal (``_OPEN_FINDINGS_FILTER``) scan finding
+        with ``issue_id IS NULL`` — i.e. a live defect that has not been promoted
+        to a tracked issue. Returns ``{"total", "actionable", "suppressed",
+        "actionable_defect", "actionable_other"}``, splitting the un-bridged set
+        by the wardline ``suppression_state`` that survives the emit: a
+        baselined/waived/judged finding is an already-accepted defect, *not*
+        actionable work, so it must not read as a unit of work in session
+        orientation. Off-contract / absent metadata counts as actionable
+        (matches the promote-guard's "absent => active" contract). Terminal
+        findings (fixed/false_positive) and already-bridged ones are excluded —
+        only hidden work is counted.
+
+        FIL-1: the actionable bucket is additionally split by wardline kind so
+        engine telemetry does not read as defect-signal:
+        ``actionable_defect`` counts ``kind == "defect"`` plus every finding
+        whose kind is missing, corrupt, or unknown (a third-party finding
+        without a kind is never hidden as telemetry); ``actionable_other``
+        counts the known non-defect kinds (``NON_DEFECT_WARDLINE_FINDING_KINDS``).
+        Invariant: ``actionable == actionable_defect + actionable_other``.
+        """
+        # Guard json_extract with json_valid: a single corrupt metadata row would
+        # otherwise raise OperationalError and break session context entirely.
+        # Shared verbatim with the ``finding_list`` ``suppression`` filter so the
+        # active/suppressed classification is computed identically on both
+        # surfaces (this restricts to open + un-bridged below, so ``actionable``
+        # is a subset of an unfiltered ``finding_list(suppression="active")``).
+        suppressed = _wardline_suppressed_sql()
+        non_defect = _wardline_non_defect_kind_sql()
+        row = self.conn.execute(
+            f"SELECT "
+            f"SUM(CASE WHEN {suppressed} THEN 1 ELSE 0 END) AS suppressed, "
+            f"SUM(CASE WHEN NOT {suppressed} THEN 1 ELSE 0 END) AS actionable, "
+            f"SUM(CASE WHEN NOT {suppressed} AND {non_defect} THEN 1 ELSE 0 END) AS actionable_other "
+            f"FROM scan_findings "
+            f"WHERE issue_id IS NULL AND {self._OPEN_FINDINGS_FILTER}"
+        ).fetchone()
+        actionable = row["actionable"] or 0
+        suppressed_count = row["suppressed"] or 0
+        actionable_other = row["actionable_other"] or 0
+        return {
+            "total": actionable + suppressed_count,
+            "actionable": actionable,
+            "suppressed": suppressed_count,
+            "actionable_defect": actionable - actionable_other,
+            "actionable_other": actionable_other,
         }
 
     def get_file_detail(self, file_id: str) -> FileDetail:

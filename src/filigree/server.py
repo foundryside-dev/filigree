@@ -14,13 +14,24 @@ import signal
 import sqlite3
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
 import portalocker
 
-from filigree.core import CONF_FILENAME, DB_FILENAME, read_conf, read_config, write_atomic
+from filigree.core import (
+    CONF_FILENAME,
+    DB_FILENAME,
+    WEFT_DIR_NAME,
+    WEFT_MEMBER_SUBDIR,
+    ProjectNotInitialisedError,
+    find_filigree_anchor,
+    read_conf,
+    read_config,
+    write_atomic,
+)
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.ephemeral import is_pid_alive, read_pid_file, verify_pid_ownership, write_pid_file
 
@@ -54,8 +65,27 @@ class ServerConfig:
             raise ValueError(f"port must be between 1 and 65535, got {self.port}")
 
 
+def _project_root_from_store_dir(store_dir: Path) -> Path:
+    """Return the project root for a registered store dir via the canonical anchor.
+
+    The project root is NOT recoverable from the store dir alone for an
+    arbitrary-depth weft.toml ``store_dir`` override; stripping a fixed number of
+    segments (the old ``.weft/filigree`` 2-seg / legacy 1-seg special-case) gives
+    the wrong root. Resolve through :func:`find_filigree_anchor`, which reads
+    weft.toml (I2). Fall back to the segment heuristic only when no anchor can be
+    discovered (e.g. a registered dir whose anchor was removed) so a schema-version
+    probe stays best-effort rather than raising during registration/listing.
+    """
+    try:
+        return find_filigree_anchor(store_dir).project_root
+    except ProjectNotInitialisedError:
+        if store_dir.name == WEFT_MEMBER_SUBDIR and store_dir.parent.name == WEFT_DIR_NAME:
+            return store_dir.parent.parent
+        return store_dir.parent
+
+
 def _project_db_path(filigree_dir: Path) -> Path:
-    conf_path = filigree_dir.parent / CONF_FILENAME
+    conf_path = _project_root_from_store_dir(filigree_dir) / CONF_FILENAME
     if conf_path.is_file():
         conf = read_conf(conf_path)
         db_name: str = conf["db"]
@@ -195,16 +225,32 @@ def register_project(filigree_dir: Path) -> None:
         config = read_server_config()
         project_key = str(filigree_dir)
         prefix = str(project_config.get("prefix", "filigree"))
+        new_root = _project_root_from_store_dir(filigree_dir).resolve()
 
+        # Entries are keyed by store-dir string, but a project's IDENTITY is its
+        # root. A store relocation (.filigree -> .weft/filigree) re-registers
+        # under a new store dir while the old key lingers with the same prefix —
+        # which the collision check below would otherwise read as a conflict and
+        # refuse the move (filigree-a4925b59bb). Dedup by root: any existing entry
+        # resolving to the same project root is the same project's stale key, so
+        # drop it instead of colliding. (A running daemon's in-memory
+        # project_store is not reconciled here — server.json is the durable record
+        # this fixes; the daemon picks the change up on its next reload.)
+        stale_keys: list[str] = []
         for existing_path, meta in config.projects.items():
             if existing_path == project_key:
-                continue  # idempotent re-register
+                continue  # idempotent re-register (exact same store dir)
+            if _project_root_from_store_dir(Path(existing_path)).resolve() == new_root:
+                stale_keys.append(existing_path)  # same project, relocated store
+                continue
             existing_prefix = str(meta.get("prefix", "filigree")) if isinstance(meta, dict) else "filigree"
             if existing_prefix == prefix:
                 raise ValueError(
                     f"Prefix collision: {prefix!r} already registered by {existing_path}. Choose a unique prefix in .filigree/config.json."
                 )
 
+        for stale_key in stale_keys:
+            del config.projects[stale_key]
         config.projects[project_key] = {"prefix": prefix}
         write_server_config(config)
 
@@ -223,6 +269,40 @@ def unregister_project(filigree_dir: Path) -> None:
         config = read_server_config()
         config.projects.pop(str(filigree_dir), None)
         write_server_config(config)
+
+
+def unregister_projects(project_keys: Iterable[str]) -> set[str]:
+    """Remove several projects from server.json in a single locked pass.
+
+    Unlike :func:`unregister_project`, the keys are matched *exactly* against
+    the stored ``projects`` map — they are deliberately **not** re-``resolve()``d.
+    Callers (notably ``doctor --fix`` cleaning up vanished-directory entries)
+    already hold the exact config keys, and re-resolving a now-missing path can
+    diverge from the string that was recorded at registration time, leaving the
+    stale entry stranded.
+
+    Returns the set of keys that were actually present and removed (so callers
+    can report precisely what changed and tell a real removal from a no-op).
+    """
+    wanted = set(project_keys)
+    if not wanted:
+        return set()
+    SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = SERVER_CONFIG_DIR / "server.lock"
+    try:
+        lock_fd = open(lock_path, "w")  # noqa: SIM115
+    except OSError as e:
+        raise RuntimeError(f"Cannot create lock file at {lock_path}: {e}. Check permissions on {SERVER_CONFIG_DIR}.") from e
+    removed: set[str] = set()
+    with lock_fd:
+        portalocker.lock(lock_fd, portalocker.LOCK_EX)
+        config = read_server_config()
+        for key in wanted:
+            if config.projects.pop(key, None) is not None:
+                removed.add(key)
+        if removed:
+            write_server_config(config)
+    return removed
 
 
 # ---------------------------------------------------------------------------

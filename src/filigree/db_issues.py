@@ -35,11 +35,29 @@ from filigree.types.api import (
     InvalidTransitionError,
     IssueDeletionRefusedError,
     TransitionHint,
+    TransitionMode,
+    allowed_transitions_clause,
     classify_value_error,
 )
-from filigree.types.core import StatusCategory
+from filigree.types.core import (
+    StatusCategory,
+    make_content_hash,
+    make_issue_id,
+    make_loomweave_entity_id,
+)
 from filigree.types.files import DeleteIssueResult
 from filigree.validation import sanitize_actor
+
+#: Stamped as ``content_hash_at_attach`` when ``create_issue`` is given an
+#: ``entity_id`` to bind at creation but no ``content_hash``. A hand-filed
+#: ticket binds to a code identity (the SEI/locator is the moat) before the
+#: caller necessarily knows the producer's current content hash; the
+#: association needs a non-blank hash (``make_content_hash`` rejects blank), so
+#: we stamp this sentinel. Filigree never interprets ``content_hash_at_attach``
+#: itself (drift is the consumer's read-path concern), so a sentinel here is a
+#: deferred-freshness marker, not a forged hash. Mirrors warpline_consumer's
+#: ``UNVERIFIED_CONTENT_HASH`` convention without coupling to that module.
+UNVERIFIED_CONTENT_HASH = "filigree:content-unverified"
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -507,6 +525,9 @@ class IssuesMixin(DBMixinProtocol):
         labels: list[str] | None = None,
         deps: list[str] | None = None,
         actor: str = "",
+        entity_id: str | None = None,
+        entity_kind: str | None = None,
+        content_hash: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         if not isinstance(title, str):
@@ -531,6 +552,21 @@ class IssuesMixin(DBMixinProtocol):
         assignee = _normalize_assignee(assignee)
         if labels:
             labels = [self._validate_label_name(label) for label in labels]
+        # Validate the optional inline entity binding BEFORE any writes so a
+        # bad entity_id/content_hash fails the whole create atomically rather
+        # than leaving a bound-less issue behind (the bind itself runs after the
+        # issue row exists, since add_entity_association needs the issue FK).
+        bind_entity = entity_id is not None and str(entity_id).strip() != ""
+        if bind_entity and entity_id is not None:
+            bound_entity_id = make_loomweave_entity_id(entity_id)
+            raw_hash = content_hash if (content_hash and content_hash.strip()) else UNVERIFIED_CONTENT_HASH
+            bind_content_hash = make_content_hash(raw_hash)
+        elif content_hash is not None and content_hash.strip():
+            msg = "content_hash was supplied without entity_id; nothing to bind it to"
+            raise ValueError(msg)
+        elif entity_kind is not None and str(entity_kind).strip():
+            msg = "entity_kind was supplied without entity_id; nothing to bind it to"
+            raise ValueError(msg)
         # Reject unknown types — don't silently fall back
         if self.templates.get_type(type) is None:
             valid_types = [t.type for t in self.templates.list_types()]
@@ -605,6 +641,22 @@ class IssuesMixin(DBMixinProtocol):
                     "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at) VALUES (?, ?, 'blocks', ?)",
                     (issue_id, dep_id, now),
                 )
+
+        # Inline ADR-029 entity binding (SEAM SEI-on-create, L1). The opaque
+        # entity_id is bound at the moment information enters, so a hand-filed
+        # ticket lands ON the spine in one call rather than off it. Runs inside
+        # the same create transaction (add_entity_association composes via
+        # _skip_begin because we are already in the create's immediate tx), so
+        # the issue and its binding commit together. Re-validated above.
+        if bind_entity:
+            self.add_entity_association(
+                make_issue_id(issue_id),
+                bound_entity_id,
+                bind_content_hash,
+                actor=actor,
+                entity_kind=entity_kind,
+                _skip_begin=True,
+            )
 
         return self.get_issue(issue_id)
 
@@ -686,19 +738,6 @@ class IssuesMixin(DBMixinProtocol):
             for r in self.conn.execute(f"SELECT id, parent_id FROM issues WHERE parent_id IN ({placeholders})", chunk).fetchall():
                 children_by_id[r["parent_id"]].append(r["id"])
 
-        # 6. Batch compute open blocker counts — same blocker semantics as step 4.
-        open_blockers_by_id: dict[str, int] = dict.fromkeys(issue_ids, 0)
-        for chunk in self._chunk_issue_ids_for_sqlite(issue_ids, extra_params=len(blocker_done_params)):
-            placeholders = ",".join("?" * len(chunk))
-            for r in self.conn.execute(
-                f"SELECT d.issue_id, COUNT(*) as cnt FROM dependencies d "
-                f"JOIN issues blocker ON d.depends_on_id = blocker.id "
-                f"WHERE d.issue_id IN ({placeholders}) AND NOT ({blocker_done_sql}) "
-                f"GROUP BY d.issue_id",
-                [*chunk, *blocker_done_params],
-            ).fetchall():
-                open_blockers_by_id[r["issue_id"]] = r["cnt"]
-
         # Build Issue objects preserving input order
         result: list[Issue] = []
         for iid in issue_ids:
@@ -732,7 +771,7 @@ class IssuesMixin(DBMixinProtocol):
                         # state name shared across types in different categories
                         # is classified correctly.
                         self._resolve_status_category(row["type"], row["status"]) == "open"
-                        and open_blockers_by_id.get(iid, 0) == 0
+                        and len(blocked_by_id.get(iid, [])) == 0
                         and not (row["assignee"] or "")
                     ),
                     children=children_by_id.get(iid, []),
@@ -758,7 +797,7 @@ class IssuesMixin(DBMixinProtocol):
         actor: str = "",
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
-        backward: bool = False,
+        mode: TransitionMode = TransitionMode.FORWARD,
         _skip_begin: bool = False,
     ) -> Issue:
         """Update issue fields, workflow status, assignment, and parent links.
@@ -766,8 +805,9 @@ class IssuesMixin(DBMixinProtocol):
         The write runs in an IMMEDIATE transaction and applies a compare-and-swap
         guard when the issue is already assigned, so a concurrent reassignment
         cannot be silently overwritten. Status changes are validated against the
-        issue type's workflow template; pass ``backward=True`` only for declared
-        reverse/escape transitions such as force-close, reopen, or release.
+        issue type's workflow template; pass ``mode=TransitionMode.BACKWARD``
+        only for declared reverse/escape transitions such as force-close,
+        reopen, or release.
 
         Args:
             issue_id: Issue identifier to mutate. The id prefix must belong to
@@ -791,8 +831,10 @@ class IssuesMixin(DBMixinProtocol):
             force_overwrite_corrupt: When the stored ``fields`` JSON is corrupt,
                 refuse merges by default. Set this to replace the corrupt value
                 entirely and record a ``corrupt_fields_overwritten`` event.
-            backward: Validate a status change against declared reverse/escape
-                transitions and audit the shortcut with ``transition_forced``.
+            mode: ``TransitionMode.BACKWARD`` validates a status change against
+                declared reverse/escape transitions and audits the shortcut with
+                ``transition_forced``. ``TransitionMode.FORWARD`` (default) uses
+                the normal workflow lane.
 
         Returns:
             The freshly loaded issue. Soft transition data warnings are also
@@ -862,8 +904,9 @@ class IssuesMixin(DBMixinProtocol):
             self._validate_status(status, current.type)
 
             # Atomic transition-with-fields: validate merged fields against target state.
-            # ``backward=True`` routes through the declared reverse/escape edge
-            # table, preserving auditability without the old skip-check bypass.
+            # ``mode=TransitionMode.BACKWARD`` routes through the declared
+            # reverse/escape edge table, preserving auditability without the old
+            # skip-check bypass.
             merged_fields = {**current.fields}
             if fields is not None:
                 merged_fields.update(fields)
@@ -875,7 +918,7 @@ class IssuesMixin(DBMixinProtocol):
                     current.status,
                     status,
                     merged_fields,
-                    backward=backward,
+                    mode=mode,
                 )
                 if not _transition_result.allowed:
                     valid_transitions = _transition_hints(self.templates.get_valid_transitions(current.type, current.status, merged_fields))
@@ -888,13 +931,14 @@ class IssuesMixin(DBMixinProtocol):
                     else:
                         msg = (
                             f"Transition '{current.status}' -> '{status}' is not allowed for type "
-                            f"'{current.type}'. Use get_valid_transitions() to see allowed transitions."
+                            f"'{current.type}'. {allowed_transitions_clause(current.status, [h['to'] for h in valid_transitions])}"
                         )
                     raise InvalidTransitionError(
                         current.type,
                         current.status,
                         to_state=status,
                         valid_transitions=valid_transitions,
+                        missing_fields=list(_transition_result.missing_fields) or None,
                         message=msg,
                     )
 
@@ -953,7 +997,7 @@ class IssuesMixin(DBMixinProtocol):
             # alongside the ``status_changed`` so reviewers can find every
             # workflow shortcut. Sequenced before the status_changed event so
             # the chain is causally ordered when read top-to-bottom.
-            if backward:
+            if mode is TransitionMode.BACKWARD:
                 self._record_event(
                     issue_id,
                     "transition_forced",
@@ -1184,14 +1228,14 @@ class IssuesMixin(DBMixinProtocol):
         if reason:
             update_fields["close_reason"] = reason
 
-        use_reverse_transition = force
+        mode = TransitionMode.BACKWARD if force else TransitionMode.FORWARD
         return self.update_issue(
             issue_id,
             status=done_status,
             fields=update_fields or None,
             actor=actor,
             expected_assignee=expected_assignee,
-            backward=use_reverse_transition,
+            mode=mode,
             _skip_begin=_skip_begin,
         )
 
@@ -1203,8 +1247,8 @@ class IssuesMixin(DBMixinProtocol):
         The target comes from the most recent ``status_changed`` event whose
         old status is non-done and whose new status is done. If no such event is
         available, the issue type's initial state is used. Reopen routes through
-        ``update_issue(backward=True)`` so the reverse/escape transition must be
-        declared and any invalid transition carries normal ``valid_transitions``
+        ``update_issue(mode=TransitionMode.BACKWARD)`` so the reverse/escape
+        transition must be declared and any invalid transition carries normal ``valid_transitions``
         context. After the transition it clears ``closed_at`` and stale
         close-only fields such as ``close_reason``.
 
@@ -1233,7 +1277,7 @@ class IssuesMixin(DBMixinProtocol):
             status=reopen_status,
             actor=actor,
             expected_assignee=current.assignee,
-            backward=True,
+            mode=TransitionMode.BACKWARD,
             _skip_begin=True,
         )
         reopen_fields = _fields_for_reopen(current.fields)
@@ -1286,7 +1330,7 @@ class IssuesMixin(DBMixinProtocol):
         path. The events row is destroyed along with the issue, so ``undo_last``
         cannot reverse it. A row is written to ``deleted_issues`` in the same
         transaction so federation consumers reconciling off ``GET
-        /api/loom/changes`` learn of the deletion (they would otherwise keep a
+        /api/weft/changes`` learn of the deletion (they would otherwise keep a
         stale reference forever — the changes feed INNER JOINs ``issues``).
 
         Guards (each refuses with a ``ValueError`` unless ``force=True``):
@@ -1359,7 +1403,7 @@ class IssuesMixin(DBMixinProtocol):
 
         now = _now_iso()
         # The final DELETE cascades this issue's entity_associations rows away
-        # (ON DELETE CASCADE). Capture the bound clarion_entity_ids BEFORE the
+        # (ON DELETE CASCADE). Capture the bound loomweave_entity_ids BEFORE the
         # cascade — sorted for a deterministic signal — so the tombstone (and the
         # synthetic issue_deleted change record built from it) can name them as
         # ``affected_entities``. Without this, a consumer mirroring the reverse
@@ -1368,7 +1412,7 @@ class IssuesMixin(DBMixinProtocol):
         affected_entity_ids = [
             row[0]
             for row in self.conn.execute(
-                "SELECT clarion_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY clarion_entity_id",
+                "SELECT loomweave_entity_id FROM entity_associations WHERE issue_id = ? ORDER BY loomweave_entity_id",
                 (issue_id,),
             ).fetchall()
         ]
@@ -1624,7 +1668,7 @@ class IssuesMixin(DBMixinProtocol):
                         row["status"],
                         target,
                         fields,
-                        backward=True,
+                        mode=TransitionMode.BACKWARD,
                     )
                 except InvalidTransitionError as exc:
                     if exc.valid_transitions is None:
@@ -1640,14 +1684,15 @@ class IssuesMixin(DBMixinProtocol):
                     else:
                         msg = (
                             f"Transition '{row['status']}' -> '{target}' is not allowed for type "
-                            f"'{row['type']}'. Use get_valid_transitions() to see allowed transitions."
+                            f"'{row['type']}'. {allowed_transitions_clause(row['status'], [h['to'] for h in valid_transitions])}"
                         )
                     raise InvalidTransitionError(
                         row["type"],
                         row["status"],
                         to_state=target,
-                        backward=True,
+                        mode=TransitionMode.BACKWARD,
                         valid_transitions=valid_transitions,
+                        missing_fields=list(result.missing_fields) or None,
                         message=msg,
                     )
 
@@ -2199,20 +2244,26 @@ class IssuesMixin(DBMixinProtocol):
             if priority_max is not None and issue.priority > priority_max:
                 continue
 
+            tpl = self.templates.get_type(issue.type)
+            if tpl is None:
+                skipped += 1
+                logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
+                continue
+            # F3: the auto-picker never claims an aggregate/container type (release,
+            # epic, milestone, phase) — you complete its children, not the
+            # container. Declarative (the type-schema `container` flag), the SAME
+            # predicate behind work_ready's startable=False, so the two cannot
+            # diverge. Manual start_work / update --status on a container is
+            # unaffected — only this auto-picker skips them.
+            if tpl.container:
+                skipped += 1
+                logger.debug("start_next_work: skipping container %s (type %r)", issue.id, issue.type)
+                continue
+
             # Resolve target_status per-candidate, lock-free. When no explicit
             # target was given, a candidate that has no single-hop wip target
-            # (e.g. a ``triage`` bug — ready but not startable,
-            # filigree-406e6b7ee0) or an ambiguous one is *skipped*, not fatal:
-            # "ready" no longer implies "startable", so start_next_work walks
-            # past it to the next candidate instead of throwing on the queue.
-            # An explicit ``target_status`` keeps its original error contract
-            # (handled below via ``first_explicit_transition_error``).
+            # (e.g. a ``triage`` bug) or an ambiguous one is *skipped*, not fatal.
             if target_status is None:
-                tpl = self.templates.get_type(issue.type)
-                if tpl is None:
-                    skipped += 1
-                    logger.debug("start_next_work: skipping %s: no template for type %r", issue.id, issue.type)
-                    continue
                 try:
                     this_path = tpl.soft_path_to_working_status(issue.status) if advance else [tpl.reachable_working_status(issue.status)]
                 except (InvalidTransitionError, AmbiguousTransitionError) as exc:
@@ -2276,6 +2327,7 @@ class IssuesMixin(DBMixinProtocol):
             raise InvalidTransitionError(
                 row["type"],
                 row["status"],
+                next_action=next_action,
                 message=(
                     f"{row['type']!r} in {row['status']!r} is not directly startable: no single-hop "
                     f"transition to a working state. Move it to {next_action!r} first (or pass advance=True), "
@@ -2597,6 +2649,8 @@ class IssuesMixin(DBMixinProtocol):
         status: str | None = None,
         type: str | None = None,
         priority: int | None = None,
+        priority_min: int | None = None,
+        priority_max: int | None = None,
         parent_id: str | None = None,
         assignee: str | None = None,
         label: str | list[str] | None = None,
@@ -2662,6 +2716,14 @@ class IssuesMixin(DBMixinProtocol):
         if priority is not None:
             conditions.append("i.priority = ?")
             params.append(priority)
+        # Range bounds mirror the claim-verb semantics (N-6): each bound is
+        # independent, and min > max simply matches nothing — no error.
+        if priority_min is not None:
+            conditions.append("i.priority >= ?")
+            params.append(priority_min)
+        if priority_max is not None:
+            conditions.append("i.priority <= ?")
+            params.append(priority_max)
         if parent_id is not None:
             conditions.append("i.parent_id = ?")
             params.append(parent_id)
@@ -2723,14 +2785,23 @@ class IssuesMixin(DBMixinProtocol):
         if not fts_query:
             pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
-                (pattern, pattern),
+                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                "OR id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\')",
+                (pattern, pattern, pattern),
             ).fetchone()
             return int(row["cnt"]) if row else 0
         try:
+            # Lockstep with search_issues' FTS arm: count FTS title/description
+            # hits UNION label-LIKE hits so a bareword label-only query is
+            # counted, not silently zero. DISTINCT id dedupes rows matching both.
+            label_pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid WHERE issues_fts MATCH ?",
-                (fts_query,),
+                "SELECT COUNT(*) AS cnt FROM ("
+                "  SELECT i.id FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid WHERE issues_fts MATCH ? "
+                "  UNION "
+                "  SELECT issue_id AS id FROM labels WHERE label LIKE ? ESCAPE '\\'"
+                ")",
+                (fts_query, label_pattern),
             ).fetchone()
         except sqlite3.OperationalError as exc:
             if not _is_fts_unavailable_error(exc):
@@ -2741,8 +2812,9 @@ class IssuesMixin(DBMixinProtocol):
             )
             pattern = _escape_like(query)
             row = self.conn.execute(
-                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'",
-                (pattern, pattern),
+                "SELECT COUNT(*) AS cnt FROM issues WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+                "OR id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\')",
+                (pattern, pattern, pattern),
             ).fetchone()
         return int(row["cnt"]) if row else 0
 
@@ -2786,8 +2858,16 @@ class IssuesMixin(DBMixinProtocol):
         rows: list[Any]
         if not fts_query:
             pattern = _escape_like(query)
-            where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
-            params: list[Any] = [pattern, pattern]
+            # The substring arm also searches LABELS: label vocabulary is
+            # kebab-case, so a label query always lands here — and a 0-result
+            # search that silently never looked at labels is a miss an agent
+            # cannot recover from (dogfood-4 B5: two issues carried the exact
+            # label searched for).
+            where = (
+                "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' "
+                "OR i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\'))"
+            )
+            params: list[Any] = [pattern, pattern, pattern]
             if category_sql:
                 where = f"{where} AND ({category_sql})"
                 params.extend(category_params)
@@ -2798,18 +2878,38 @@ class IssuesMixin(DBMixinProtocol):
             ).fetchall()
         else:
             try:
-                where = "issues_fts MATCH ?"
-                params = [fts_query]
-                if category_sql:
-                    where = f"{where} AND ({category_sql})"
-                    params.extend(category_params)
-                params.extend([limit, offset])
+                # The FTS index covers only title/description (db_schema.py),
+                # never labels — so a bareword query that exactly names a label
+                # (``backend``, ``urgent``) would route here and silently miss
+                # label-only matches, while kebab-case labels (which carry a
+                # hyphen) land in the LIKE arm and DO match. Closing that
+                # asymmetry (no-dead-by-design): UNION the FTS hits with rows
+                # whose labels LIKE the raw query. FTS hits keep their relevance
+                # ordering (match_rank=0, ordered by issues_fts.rank); label-only
+                # hits (no FTS row) come after (match_rank=1), ordered by
+                # priority. Rows that are BOTH appear once via the FTS branch.
+                label_pattern = _escape_like(query)
+                cat_clause = f" AND ({category_sql})" if category_sql else ""
+                fts_params: list[Any] = [fts_query, *category_params]
+                label_params: list[Any] = [label_pattern, fts_query, *category_params]
+                where_params: list[Any] = [*fts_params, *label_params, limit, offset]
                 rows = self.conn.execute(
-                    "SELECT i.id, i.type, i.status FROM issues i "
-                    "JOIN issues_fts ON issues_fts.rowid = i.rowid "
-                    f"WHERE {where} "
-                    "ORDER BY issues_fts.rank LIMIT ? OFFSET ?",
-                    params,
+                    "SELECT id, type, status FROM ("
+                    "  SELECT i.id AS id, i.type AS type, i.status AS status, "
+                    "         0 AS match_rank, issues_fts.rank AS fts_rank, i.priority AS priority, i.created_at AS created_at "
+                    "  FROM issues i JOIN issues_fts ON issues_fts.rowid = i.rowid "
+                    f"  WHERE issues_fts MATCH ?{cat_clause} "
+                    "  UNION ALL "
+                    "  SELECT i.id AS id, i.type AS type, i.status AS status, "
+                    "         1 AS match_rank, 0 AS fts_rank, i.priority AS priority, i.created_at AS created_at "
+                    "  FROM issues i "
+                    "  WHERE i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\') "
+                    "    AND i.id NOT IN ("
+                    "      SELECT i2.id FROM issues i2 JOIN issues_fts ON issues_fts.rowid = i2.rowid WHERE issues_fts MATCH ?"
+                    "    )"
+                    f"{cat_clause} "
+                    ") ORDER BY match_rank, fts_rank, priority, created_at LIMIT ? OFFSET ?",
+                    where_params,
                 ).fetchall()
             except sqlite3.OperationalError as exc:
                 if not _is_fts_unavailable_error(exc):
@@ -2819,8 +2919,11 @@ class IssuesMixin(DBMixinProtocol):
                     exc,
                 )
                 pattern = _escape_like(query)
-                where = "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\')"
-                params = [pattern, pattern]
+                where = (
+                    "(i.title LIKE ? ESCAPE '\\' OR i.description LIKE ? ESCAPE '\\' "
+                    "OR i.id IN (SELECT issue_id FROM labels WHERE label LIKE ? ESCAPE '\\'))"
+                )
+                params = [pattern, pattern, pattern]
                 if category_sql:
                     where = f"{where} AND ({category_sql})"
                     params.extend(category_params)
