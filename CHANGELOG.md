@@ -4233,6 +4233,7 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
+[3.0.1]: https://github.com/foundryside-dev/filigree/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/foundryside-dev/filigree/compare/v2.3.0...v3.0.0
 [2.3.0]: https://github.com/foundryside-dev/filigree/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/foundryside-dev/filigree/compare/v2.1.1...v2.2.0
