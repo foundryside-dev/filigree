@@ -51,6 +51,14 @@ def _restore_mcp_globals() -> Generator[None, None, None]:
     try:
         yield
     finally:
+        # The command opens a DB onto ``mcp_server.db`` (process-lifetime in
+        # production; closed when the CLI process exits). Under in-process
+        # CliRunner the handle would be dropped unclosed when we restore the
+        # globals below, leaking the connection — finalized mid-session it trips
+        # the suite's ``error::ResourceWarning`` filter. Close it first.
+        opened = getattr(mcp_server, "db", None)
+        if opened is not None and opened is not saved["db"]:
+            opened.close()
         for name, value in saved.items():
             setattr(mcp_server, name, value)
 

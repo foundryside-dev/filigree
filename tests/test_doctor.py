@@ -38,6 +38,7 @@ from filigree.install_support.doctor import (
     _find_all_filigree_binaries,
     _is_absolute_command_path,
     _is_venv_binary,
+    _route_supports,
     _unresolved_env_refs,
     doctor_check_id,
     run_doctor,
@@ -1067,6 +1068,45 @@ class TestDoctorResultStructure:
         for r in results:
             if not r.passed and r.name not in {"Git working tree", "Installation"}:
                 assert r.fix_hint.strip(), f"Failed check '{r.name}' has no fix_hint"
+
+
+class TestRouteSupports:
+    """Route detection must see ``include_router``-mounted routes regardless of
+    FastAPI version. FastAPI >=0.137 wraps included routers in a lazy
+    ``_IncludedRouter`` whose child paths are stored unprefixed and composed
+    into the full ``/api/...`` path only at match time, so a flat ``app.routes``
+    path scan reports every included route as missing — a false-positive doctor
+    failure on field installs that resolve the newer FastAPI. ``_route_supports``
+    must match through that wrapper and enforce the HTTP method."""
+
+    def test_detects_included_router_routes_across_fastapi_versions(self) -> None:
+        from filigree.dashboard import create_app
+
+        app = create_app(server_mode=False)
+
+        # ``include_router``-mounted routes — present at runtime on every
+        # install, but invisible to a flat path scan under FastAPI >=0.137.
+        assert _route_supports(app, "/api/entity-associations", "GET") is True
+        assert _route_supports(app, "/api/scan-results", "POST") is True
+        assert _route_supports(app, "/api/weft/scan-results", "POST") is True
+        assert _route_supports(app, "/api/files/_schema", "GET") is True
+        assert _route_supports(app, "/api/issue/{issue_id}/entity-associations", "DELETE") is True
+        # Directly-registered route (not via include_router) still works.
+        assert _route_supports(app, "/api/health", "GET") is True
+
+    def test_enforces_http_method(self) -> None:
+        from filigree.dashboard import create_app
+
+        app = create_app(server_mode=False)
+        # ``/api/entity-associations`` is GET-only; a different verb on the same
+        # path must not register as supported.
+        assert _route_supports(app, "/api/entity-associations", "POST") is False
+
+    def test_absent_route_stays_absent(self) -> None:
+        from filigree.dashboard import create_app
+
+        app = create_app(server_mode=False)
+        assert _route_supports(app, "/api/this-route-does-not-exist", "GET") is False
 
 
 class TestDoctorSharedContractChecks:

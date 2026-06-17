@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-06-18
+
+### Fixed
+
+- **`filigree doctor` false-positive on FastAPI ≥ 0.137** — the dashboard
+  route-registration checks ("Scan results routes", "Entity association routes")
+  reported registered routes as *missing* on any install that resolved
+  FastAPI 0.137 or newer, failing `doctor` (exit 1) even though the routes are
+  served correctly at runtime. FastAPI 0.137 made `include_router` lazy: child
+  routes are mounted behind a `_IncludedRouter` wrapper and only compose their
+  `/api` (and `/weft`) prefix at match time, so the doctor's flat `app.routes`
+  path scan could no longer see them. The check now resolves routes by Starlette
+  *matching* instead of path-string scanning, which is correct across FastAPI
+  versions. The dependency lock now resolves FastAPI 0.137.1 so CI exercises the
+  version field installs actually receive.
+
 ## [3.0.0] - 2026-06-17
 
 3.0.0 is a **major release** — the SemVer-major boundary that lands the
@@ -4217,6 +4233,7 @@ identified through systematic static analysis and verified against HEAD.
 - Issue validation against workflow templates (`validate`)
 - PEP 561 `py.typed` marker for downstream type checking
 
+[3.0.1]: https://github.com/foundryside-dev/filigree/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/foundryside-dev/filigree/compare/v2.3.0...v3.0.0
 [2.3.0]: https://github.com/foundryside-dev/filigree/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/foundryside-dev/filigree/compare/v2.1.1...v2.2.0
