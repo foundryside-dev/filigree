@@ -123,7 +123,7 @@ const DETAIL = {
   {/* ---------------------------------------------------------------- */}
   <section class="hero">
     <div class="wrap">
-      <p class="eyebrow">Filigree · work state / issue lifecycle · Python</p>
+      <p class="weft-eyebrow">Filigree · work state / issue lifecycle · Python</p>
       <h1 class="hero__title">Turns a swarm of stateless agents into a coordinated workforce.</h1>
       <p class="hero__sub">
         Filigree owns issues, dependencies, and workflow state machines — giving an
@@ -164,7 +164,7 @@ const DETAIL = {
   {/* ---------------------------------------------------------------- */}
   <section class="band">
     <div class="wrap">
-      <p class="eyebrow">What it is</p>
+      <p class="weft-eyebrow">What it is</p>
       <h2 class="h2">The federation's work-state surface.</h2>
       <p class="lede">
         Traditional issue trackers are human-first; agents scrape CLI output or parse
@@ -234,7 +234,7 @@ const DETAIL = {
   {/* ---------------------------------------------------------------- */}
   <section class="section">
     <div class="wrap">
-      <p class="eyebrow">Key capabilities · the five things it gives you</p>
+      <p class="weft-eyebrow">Key capabilities · the five things it gives you</p>
       <h2 class="h2">Built so a swarm of agents does not collide.</h2>
       <div class="grid grid--3">
         <article class="card cap">
@@ -293,7 +293,7 @@ const DETAIL = {
   {/* ---------------------------------------------------------------- */}
   <section id="dashboard" class="band band--feature">
     <div class="wrap">
-      <p class="eyebrow">The dashboard · unique to Filigree</p>
+      <p class="weft-eyebrow">The dashboard · unique to Filigree</p>
       <h2 class="h2">The only Weft member with a web UI.</h2>
       <p class="lede">
         A local-first board on <code>localhost:8377</code> — Kanban lanes with
@@ -394,7 +394,7 @@ const DETAIL = {
   {/* ---------------------------------------------------------------- */}
   <section id="usage" class="section">
     <div class="wrap">
-      <p class="eyebrow">Usage snapshot · curated, not the full reference</p>
+      <p class="weft-eyebrow">Usage snapshot · curated, not the full reference</p>
       <h2 class="h2">The atomic loop.</h2>
       <div class="usage">
         <div class="well">
@@ -426,7 +426,7 @@ filigree dashboard --port=8377</code></pre>
   {/* ---------------------------------------------------------------- */}
   <section class="band">
     <div class="wrap">
-      <p class="eyebrow">How it composes · value is the weave</p>
+      <p class="weft-eyebrow">How it composes · value is the weave</p>
       <h2 class="h2">Each pairing lights up a capability Filigree does not have alone.</h2>
       <p class="lede">
         Filigree's slice of the combination matrix. Every status is honest on its face:
@@ -462,7 +462,7 @@ filigree dashboard --port=8377</code></pre>
   {/* ---------------------------------------------------------------- */}
   <section class="section">
     <div class="wrap">
-      <p class="eyebrow">Status & honest limits</p>
+      <p class="weft-eyebrow">Status & honest limits</p>
       <h2 class="h2">What it is not.</h2>
       <div class="limits">
         <Banner client:visible tone="warn" title="A-1 asterisk: the Wardline → Filigree pairing is live, but watched.">
@@ -496,7 +496,7 @@ filigree dashboard --port=8377</code></pre>
   {/* ---------------------------------------------------------------- */}
   <section class="band">
     <div class="wrap">
-      <p class="eyebrow">Links · pointers to the authorities</p>
+      <p class="weft-eyebrow">Links · pointers to the authorities</p>
       <h2 class="h2">Where the moving facts actually live.</h2>
       <div class="links">
         <a class="link" href={REPO} rel="noopener"><span class="link__t">Repository</span><span class="link__d">github.com/foundryside-dev/filigree</span></a>
@@ -535,18 +535,14 @@ filigree dashboard --port=8377</code></pre>
   /* Page-local layout only. Brand atoms (colors, type, motifs) come ONLY from the
      site-kit token layer — no new colors, no dark mode (light theme only). */
   .wrap { max-width: var(--width-content); margin: 0 auto; padding: 0 36px; }
-  .eyebrow {
-    font: var(--type-mono-sm); text-transform: uppercase;
-    letter-spacing: var(--tracking-caps); color: var(--text-muted);
-    font-size: var(--text-xs); margin: 0 0 14px;
-  }
+  .weft-eyebrow { margin: 0 0 14px; }
   .h2 { font: var(--type-h1); color: var(--text-strong); margin: 0 0 16px; max-width: 26ch; }
   .lede { font: var(--type-body); color: var(--text-body); max-width: 66ch; margin: 0 0 26px; }
   .lede code, .pair__cap code, .cap__p code, .machines__note code { font-family: var(--font-mono); font-size: 0.92em; color: var(--text-strong); }
 
-  .section { padding: 64px 0; }
+  .section { padding: var(--space-10) 0; }
   .band {
-    padding: 64px 0; background: var(--bg-sunken);
+    padding: var(--space-10) 0; background: var(--bg-sunken);
     border-top: 1px solid var(--border-hairline);
     border-bottom: 1px solid var(--border-hairline);
   }
@@ -696,7 +692,7 @@ filigree dashboard --port=8377</code></pre>
   /* CTA */
   .cta { padding: 44px 0; background: var(--bg-sunken); border-top: 1px solid var(--border-hairline); }
   .cta__inner { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-  .cta__dot { width: 12px; height: 12px; border-radius: 3px; flex: none; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+  .cta__dot { width: 12px; height: 12px; border-radius: var(--radius-sm); flex: none; box-shadow: inset 0 0 0 1px var(--border-hairline); }
   .cta__copy { flex: 1 1 360px; }
   .cta__lead { font: var(--type-body); font-weight: var(--fw-semibold); color: var(--text-strong); margin: 0 0 2px; }
   .cta__sub { font: var(--type-body-sm); color: var(--text-muted); margin: 0; max-width: 60ch; }
