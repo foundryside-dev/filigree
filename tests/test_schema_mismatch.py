@@ -258,13 +258,23 @@ def test_mcp_server_log_startup_status_silent_on_clean_open(
     monkeypatch.setattr(mcp_mod, "_schema_mismatch", None)
 
     mcp_mod._attempt_startup(filigree_dir)
-    assert mcp_mod._schema_mismatch is None
+    try:
+        assert mcp_mod._schema_mismatch is None
 
-    logger = _logging.getLogger("filigree.mcp_server.test_clean")
-    with caplog.at_level(_logging.WARNING, logger=logger.name):
-        mcp_mod._log_startup_status(logger)
+        logger = _logging.getLogger("filigree.mcp_server.test_clean")
+        with caplog.at_level(_logging.WARNING, logger=logger.name):
+            mcp_mod._log_startup_status(logger)
 
-    assert not [r for r in caplog.records if r.message == "mcp_server_degraded"]
+        assert not [r for r in caplog.records if r.message == "mcp_server_degraded"]
+    finally:
+        # Clean open: _attempt_startup stores the opened DB on the module-level
+        # ``mcp_server.db`` (process-lifetime in production, closed at _run
+        # shutdown). A direct caller must close it — otherwise the connection is
+        # finalized mid-session during a later test's GC and trips the suite's
+        # ``error::ResourceWarning`` filter. monkeypatch only rebinds the global,
+        # dropping the handle without closing it.
+        if mcp_mod.db is not None:
+            mcp_mod.db.close()
 
 
 def test_dashboard_server_mode_returns_409_for_v_plus_one_project(

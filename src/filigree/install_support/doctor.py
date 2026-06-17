@@ -396,8 +396,41 @@ def _doctor_bundled_scanner_checks(filigree_dir: Path) -> list[CheckResult]:
     ]
 
 
-def _route_supports(route_table: dict[str, set[str]], path: str, method: str) -> bool:
-    return method.upper() in route_table.get(path, set())
+def _route_supports(app: Any, path: str, method: str) -> bool:
+    """Return ``True`` iff *app* fully serves ``(path, method)``.
+
+    Uses Starlette route *matching* rather than a flat ``app.routes`` path scan.
+    FastAPI >=0.137 mounts ``include_router`` results behind a lazy
+    ``fastapi.routing._IncludedRouter`` whose child routes keep their unprefixed
+    paths and only compose the ``/api`` (and ``/weft``) prefix at match time. A
+    flat scan of ``app.routes`` therefore sees the wrapper's empty path and
+    reports every included route as missing — a false-positive that fails
+    ``filigree doctor`` on any install resolving the newer FastAPI, even though
+    the routes are served correctly at runtime. Matching composes the prefixes
+    and enforces the HTTP method natively, so it is correct across FastAPI
+    versions without inspecting version-specific internals.
+    """
+    from starlette.routing import Match
+
+    # Substitute path-template params ({issue_id}) with a concrete segment so
+    # the matcher resolves an actual scope.
+    concrete_path = re.sub(r"\{[^/}]+\}", "_", path)
+    scope = {
+        "type": "http",
+        "method": method.upper(),
+        "path": concrete_path,
+        "headers": [],
+        "query_string": b"",
+    }
+    for route in getattr(app, "routes", []):
+        try:
+            match, _ = route.matches(scope)
+        except Exception:
+            logger.debug("route.matches failed for %r", getattr(route, "path", route), exc_info=True)
+            continue
+        if match == Match.FULL:
+            return True
+    return False
 
 
 def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[CheckResult]:
@@ -412,15 +445,6 @@ def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[
         from filigree.dashboard import FEDERATION_TOKEN_ENV_VARS, create_app
 
         app = create_app(server_mode=False)
-        route_table: dict[str, set[str]] = {}
-        for route in getattr(app, "routes", []):
-            path = getattr(route, "path", "")
-            if not isinstance(path, str) or not path:
-                continue
-            methods = getattr(route, "methods", None)
-            if methods is None:
-                continue
-            route_table.setdefault(path, set()).update(str(method).upper() for method in methods)
     except Exception as exc:
         message = f"Could not inspect dashboard route table: {exc}"
         return [
@@ -432,7 +456,7 @@ def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[
 
     results: list[CheckResult] = []
 
-    if _route_supports(route_table, "/api/health", "GET"):
+    if _route_supports(app, "/api/health", "GET"):
         results.append(CheckResult("API routes", True, "GET /api/health registered"))
     else:
         results.append(
@@ -449,7 +473,7 @@ def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[
         ("/api/scan-results", "POST"),
         ("/api/files/_schema", "GET"),
     )
-    missing_scanner = [f"{method} {path}" for path, method in scanner_routes if not _route_supports(route_table, path, method)]
+    missing_scanner = [f"{method} {path}" for path, method in scanner_routes if not _route_supports(app, path, method)]
     if missing_scanner:
         results.append(
             CheckResult(
@@ -468,7 +492,7 @@ def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[
         ("/api/issue/{issue_id}/entity-associations", "DELETE"),
         ("/api/entity-associations", "GET"),
     )
-    missing_entity = [f"{method} {path}" for path, method in entity_routes if not _route_supports(route_table, path, method)]
+    missing_entity = [f"{method} {path}" for path, method in entity_routes if not _route_supports(app, path, method)]
     if missing_entity:
         results.append(
             CheckResult(
