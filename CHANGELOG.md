@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Warpline seam — issue lifecycle facts on the entity-association
+  reverse-lookup.** `GET /api/entity-associations?entity_id=<sei>` (and the MCP
+  and data-layer reverse lookups) now enriches each binding row with the bound
+  issue's `claimed_at`, `closed_at`, `status`, and `status_category`, so warpline
+  can correlate "changed since the issue was claimed/closed" against its own
+  changed-set in a single round trip. `closed_at` is the proven-good signal
+  ("issue closed at commit X"); Filigree exposes the resolution timestamp and
+  stores no commit SHA (warpline maps timestamp→commit on its side). Implemented
+  as a separate enriched projection over a `LEFT JOIN` to `issues` — the shared
+  mapper, the forward per-issue list, the add-response, and the governance
+  closure gate are untouched and byte-identical; an orphaned binding still
+  returns (null facts). Additive and Loomweave-safe (the consumer ignores
+  unknown fields); the entity-associations contract fixture is bumped to v2.
+
+### Fixed
+
+- **Warpline reverify ingest filed an issue and bound its SEI
+  non-atomically.** `warpline_worklist_ingest` created the issue and attached
+  its SEI association in two separate transactions, so a non-retryable storage
+  error on the bind left the issue FILED-but-UNBOUND — and the next ingest then
+  re-filed a duplicate because the loop-closure contract keys on the SEI
+  binding. File + bind now commit together in one transaction via
+  `create_issue`'s inline ADR-029 bind path.
+
 ## [3.0.1] - 2026-06-18
 
 ### Fixed
