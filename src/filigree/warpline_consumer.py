@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from filigree.types.core import make_content_hash, make_issue_id, make_loomweave_entity_id
+from filigree.types.core import make_loomweave_entity_id
 
 if TYPE_CHECKING:
     from filigree.core import FiligreeDB
@@ -203,6 +203,15 @@ def ingest_reverify_worklist(
             result["prior_closed_issue_ids"] = closed_issue_ids
 
         if apply:
+            # File the issue and bind its SEI in a SINGLE transaction via
+            # create_issue's inline ADR-029 bind (SEAM SEI-on-create). A separate
+            # add_entity_association call would commit the issue first, so a
+            # storage failure on the bind would leave the issue FILED-but-UNBOUND
+            # — and the next ingest would re-file a duplicate, because the
+            # loop-closure contract keys on the SEI binding. The inline path makes
+            # file+bind atomic, and (re)applies the same UNVERIFIED sentinel for a
+            # blank hash. content_hash here is already resolved (a real hash or the
+            # warpline sentinel), so it is preserved verbatim.
             issue = db.create_issue(
                 f"Reverify: {locator if locator else sei}",
                 type="task",
@@ -210,12 +219,8 @@ def ingest_reverify_worklist(
                 description=_build_description(raw, sei, locator),
                 labels=list(PRODUCER_LABELS),
                 actor=actor,
-            )
-            db.add_entity_association(
-                make_issue_id(issue.id),
-                entity_id,
-                make_content_hash(content_hash),
-                actor=actor,
+                entity_id=str(entity_id),
+                content_hash=content_hash,
                 entity_kind=ENTITY_KIND,
             )
             result["issue_id"] = issue.id

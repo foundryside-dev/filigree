@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from filigree.core import FiligreeDB
 from filigree.warpline_consumer import (
     ENTITY_KIND,
@@ -158,3 +160,27 @@ class TestSkipAndShapes:
             apply=True,
         )
         assert report["summary"] == {"filed": 1, "linked": 1, "skipped": 1, "total": 3}
+
+
+class TestFileAndBindAtomicity:
+    """A filed item must create the issue and bind its SEI in a SINGLE
+    transaction. If the bind fails, the whole item rolls back — no issue may be
+    left FILED-but-UNBOUND, otherwise the next ingest sees the SEI as untracked
+    and re-files a duplicate, breaking the loop-closure contract.
+    """
+
+    def test_bind_failure_rolls_back_the_filed_issue(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        before = len(db.list_issues())
+
+        def boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("simulated non-retryable storage failure on bind")
+
+        monkeypatch.setattr(db, "add_entity_association", boom)
+
+        with pytest.raises(RuntimeError, match="storage failure on bind"):
+            ingest_reverify_worklist(db, _worklist(_item("loomweave:eid:ATOMIC")), apply=True)
+
+        # Atomic: the issue insert rolled back together with the failed bind —
+        # no orphaned FILED-but-UNBOUND task, and nothing bound to the SEI.
+        assert len(db.list_issues()) == before
+        assert db.list_associations_by_entity("loomweave:eid:ATOMIC") == []
