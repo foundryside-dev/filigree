@@ -521,6 +521,56 @@ class TestEntityAssociationsSchema:
         assert "signed_content_hash" in _get_table_columns(conn, "entity_associations")
         conn.close()
 
+    def test_migration_v28_to_v29_adds_commit_anchor_columns(self, tmp_path: Path) -> None:
+        """v28->v29 (warpline commit-anchor seam, contract B): ALTER adds the
+        two nullable per-issue commit-anchor columns ``issues.claim_commit`` and
+        ``issues.close_commit`` (TEXT). Existing rows read NULL — warpline falls
+        back to the timestamp when no anchor is present."""
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        # Simulate a true v28 DB: drop the new columns and stamp the prior version.
+        conn.execute("ALTER TABLE issues DROP COLUMN claim_commit")
+        conn.execute("ALTER TABLE issues DROP COLUMN close_commit")
+        conn.execute("PRAGMA user_version = 28")
+        conn.execute(
+            "INSERT INTO issues (id, title, created_at, updated_at) VALUES ('iss-1', 't', ?, ?)",
+            ("2026-06-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"),
+        )
+        conn.commit()
+        assert "claim_commit" not in _get_table_columns(conn, "issues")
+        assert "close_commit" not in _get_table_columns(conn, "issues")
+
+        applied = apply_pending_migrations(conn, 29)
+        assert applied == 1
+        assert _get_schema_version(conn) == 29
+        assert "claim_commit" in _get_table_columns(conn, "issues")
+        assert "close_commit" in _get_table_columns(conn, "issues")
+        row = conn.execute("SELECT claim_commit, close_commit FROM issues WHERE id = 'iss-1'").fetchone()
+        assert row["claim_commit"] is None
+        assert row["close_commit"] is None
+        conn.close()
+
+    def test_migration_v28_to_v29_idempotent(self, tmp_path: Path) -> None:
+        from filigree.migrations import migrate_v28_to_v29
+
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        # Columns already present (fresh schema) — re-running add_column is a no-op.
+        migrate_v28_to_v29(conn)
+        assert "claim_commit" in _get_table_columns(conn, "issues")
+        assert "close_commit" in _get_table_columns(conn, "issues")
+        conn.close()
+
+    def test_fresh_schema_has_v29_commit_anchor_columns(self, tmp_path: Path) -> None:
+        conn = _make_db(tmp_path)
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        cols = _get_table_columns(conn, "issues")
+        assert "claim_commit" in cols
+        assert "close_commit" in cols
+        conn.close()
+
     def test_migration_v25_to_v26_renames_column_and_rewrites_prefixes(self, tmp_path: Path) -> None:
         """v25→v26 (Loomweave/Weft rebrand data pass): rename the
         entity-association column ``loomweave_entity_id`` -> ``loomweave_entity_id``
@@ -2182,8 +2232,8 @@ class TestDeletedIssuesTombstoneSchema:
     """v19 -> v20: the ``deleted_issues`` tombstone (F5); v20 -> v21 adds the
     ``entity_ids`` column (F5 entity-association amplifier, filigree-f3bf56554c)."""
 
-    def test_current_schema_version_is_28(self) -> None:
-        assert CURRENT_SCHEMA_VERSION == 28
+    def test_current_schema_version_is_29(self) -> None:
+        assert CURRENT_SCHEMA_VERSION == 29
 
     def test_fresh_schema_contains_deleted_issues_table(self, tmp_path: Path) -> None:
         conn = _make_db(tmp_path)

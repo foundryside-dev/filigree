@@ -80,18 +80,26 @@ class EntityAssociationByEntityRow(EntityAssociationRow):
     to learn which issues are bound to a code entity, then correlates "changed
     since the issue was claimed/closed" against its own changed-set. Carrying the
     lifecycle anchors here lets it do that in one round trip. ``closed_at`` is the
-    proven-good signal ("issue closed at commit X"); Filigree exposes the
-    resolution timestamp verbatim and stores no commit SHA — warpline maps the
+    proven-good signal ("issue closed at commit X"); ``close_commit`` /
+    ``claim_commit`` carry the caller-supplied ``branch@sha`` anchor when present
+    so warpline can correlate on the COMMIT directly, and otherwise it maps the
     timestamp to a commit on its own side.
 
-    All four fields are ``None`` for an *orphaned* binding (the issue row is
-    absent — a LEFT JOIN, not INNER, so the binding is still returned rather than
-    dropped). These keys appear ONLY on the reverse projection; the forward
+    All fields are ``None`` for an *orphaned* binding (the issue row is absent — a
+    LEFT JOIN, not INNER, so the binding is still returned rather than dropped),
+    and the commit anchors are also ``None`` when no commit was supplied at
+    claim / close. These keys appear ONLY on the reverse projection; the forward
     per-issue list (``list_entity_associations``) stays a pure binding row.
     """
 
     claimed_at: ISOTimestamp | None
     closed_at: ISOTimestamp | None
+    # Opaque ``branch@sha`` commit anchors (warpline seam, contract B): the
+    # caller-supplied commit the issue was claimed / closed at, stored verbatim.
+    # ``None`` for an orphaned binding (issue row absent) or when no commit was
+    # supplied — warpline then falls back to the timestamp.
+    claim_commit: str | None
+    close_commit: str | None
     status: str | None
     status_category: StatusCategory | None
 
@@ -423,9 +431,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         The base binding projection is byte-identical to the forward list (the
         shared :func:`_row_to_entity_association` is untouched); only the reverse
         surface carries the LEFT-JOINed ``issues`` columns. ``status`` /
-        ``closed_at`` / ``claimed_at`` are ``None`` for an orphaned binding (issue
-        row absent), and ``status_category`` is then ``None`` too, so the row is
-        still returned rather than dropped.
+        ``closed_at`` / ``claimed_at`` / ``close_commit`` / ``claim_commit`` are
+        ``None`` for an orphaned binding (issue row absent), and
+        ``status_category`` is then ``None`` too, so the row is still returned
+        rather than dropped.
         """
         base = _row_to_entity_association(r, current_content_hash=current_content_hash)
         status = r["issue_status"]
@@ -435,6 +444,10 @@ class EntityAssociationsMixin(DBMixinProtocol):
         enriched = cast("EntityAssociationByEntityRow", dict(base))
         enriched["claimed_at"] = ISOTimestamp(claimed_at) if claimed_at else None
         enriched["closed_at"] = ISOTimestamp(closed_at) if closed_at else None
+        # Opaque commit anchors, stored verbatim (None for an orphaned binding or
+        # when no commit was supplied). Echoed exactly like the timestamps.
+        enriched["claim_commit"] = r["issue_claim_commit"]
+        enriched["close_commit"] = r["issue_close_commit"]
         enriched["status"] = status
         enriched["status_category"] = (
             self._resolve_status_category(issue_type, status) if status is not None and issue_type is not None else None
@@ -476,6 +489,7 @@ class EntityAssociationsMixin(DBMixinProtocol):
                    ea.attached_at, ea.attached_by, ea.migration_orphaned_at, ea.signature,
                    ea.signoff_seq, ea.signed_content_hash,
                    i.claimed_at AS issue_claimed_at, i.closed_at AS issue_closed_at,
+                   i.claim_commit AS issue_claim_commit, i.close_commit AS issue_close_commit,
                    i.status AS issue_status, i.type AS issue_type
             FROM entity_associations ea
             LEFT JOIN issues i ON i.id = ea.issue_id

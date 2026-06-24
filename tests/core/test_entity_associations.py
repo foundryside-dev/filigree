@@ -425,6 +425,43 @@ class TestReverseLookupLifecycleFacts:
         assert "claimed_at" not in fwd
         assert "status" not in fwd
         assert "status_category" not in fwd
+        # The commit anchors are reverse-only too (forward list stays a pure binding row).
+        assert "claim_commit" not in fwd
+        assert "close_commit" not in fwd
+
+    def test_closed_with_commit_row_exposes_close_commit(self, db: FiligreeDB) -> None:
+        """The reverse row carries the close commit anchor (warpline correlates
+        'changed since closed' on the COMMIT, not the clock)."""
+        issue = db.create_issue("close w/ commit", priority=2)
+        db.add_entity_association(issue.id, "py:func:cc-target", content_hash="h1", actor="alice")
+        db.close_issue(issue.id, reason="done", commit="main@deadbeef")
+        (row,) = db.list_associations_by_entity("py:func:cc-target")
+        assert row["close_commit"] == "main@deadbeef"
+        assert row["claim_commit"] is None
+
+    def test_claimed_with_commit_row_exposes_claim_commit(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("claim w/ commit", priority=2)
+        db.add_entity_association(issue.id, "py:func:claimcc-target", content_hash="h1", actor="alice")
+        db.claim_issue(issue.id, assignee="alice", commit="main@c0ffee")
+        (row,) = db.list_associations_by_entity("py:func:claimcc-target")
+        assert row["claim_commit"] == "main@c0ffee"
+
+    def test_open_row_exposes_null_commit_anchors(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("open no commit", priority=2)
+        db.add_entity_association(issue.id, "py:func:openocc-target", content_hash="h1", actor="alice")
+        (row,) = db.list_associations_by_entity("py:func:openocc-target")
+        assert row["claim_commit"] is None
+        assert row["close_commit"] is None
+
+    def test_orphaned_binding_has_null_commit_anchors(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("orphan cc", priority=2)
+        db.add_entity_association(issue.id, "py:func:orphancc-target", content_hash="h1", actor="alice")
+        db.conn.execute("PRAGMA foreign_keys = OFF")
+        db.conn.execute("DELETE FROM issues WHERE id = ?", (issue.id,))
+        db.conn.execute("PRAGMA foreign_keys = ON")
+        (row,) = db.list_associations_by_entity("py:func:orphancc-target")
+        assert row["claim_commit"] is None
+        assert row["close_commit"] is None
 
     def test_attach_without_signature_stores_null(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Ungoverned work", priority=2)

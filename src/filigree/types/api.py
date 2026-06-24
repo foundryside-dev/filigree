@@ -120,6 +120,10 @@ class PublicIssue(TypedDict):
     created_at: ISOTimestamp
     updated_at: ISOTimestamp
     closed_at: ISOTimestamp | None
+    # Opaque branch@sha commit anchors (warpline seam, contract B): the
+    # caller-supplied commit the issue was claimed / closed at, stored verbatim.
+    claim_commit: str | None
+    close_commit: str | None
     description: str
     notes: str
     fields: dict[str, Any]

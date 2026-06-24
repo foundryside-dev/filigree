@@ -88,6 +88,8 @@ def issue_to_weft(issue: Issue) -> IssueWeft:
         created_at=classic["created_at"],
         updated_at=classic["updated_at"],
         closed_at=classic["closed_at"],
+        claim_commit=classic["claim_commit"],
+        close_commit=classic["close_commit"],
         description=classic["description"],
         notes=classic["notes"],
         fields=classic["fields"],

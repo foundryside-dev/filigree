@@ -45,6 +45,8 @@
           "created_at": "2026-04-26T00:00:00+00:00",
           "updated_at": "2026-04-26T00:00:00+00:00",
           "closed_at": null,
+          "claim_commit": null,
+          "close_commit": null,
           "description": "",
           "notes": "",
           "fields": {},

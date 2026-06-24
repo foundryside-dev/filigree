@@ -355,9 +355,11 @@ class EventsMixin(DBMixinProtocol):
                     # Maintain closed_at consistency with the restored status
                     old_cat = self._resolve_status_category(current.type, old_status)
                     if old_cat == "done":
-                        # Restoring to a done state — set closed_at
+                        # Restoring to a done state — set closed_at. The undo path
+                        # has no commit to restore, so clear close_commit to NULL
+                        # (warpline falls back to the restored timestamp).
                         self.conn.execute(
-                            "UPDATE issues SET closed_at = ? WHERE id = ?",
+                            "UPDATE issues SET closed_at = ?, close_commit = NULL WHERE id = ?",
                             (now, issue_id),
                         )
                     else:
@@ -369,7 +371,7 @@ class EventsMixin(DBMixinProtocol):
                         from filigree.db_issues import _REOPEN_CLEAR_FIELDS
 
                         self.conn.execute(
-                            "UPDATE issues SET closed_at = NULL WHERE id = ?",
+                            "UPDATE issues SET closed_at = NULL, close_commit = NULL WHERE id = ?",
                             (issue_id,),
                         )
                         existing_fields = current.fields or {}
@@ -402,32 +404,37 @@ class EventsMixin(DBMixinProtocol):
 
                 case "assignee_changed":
                     old_assignee = row["old_value"] or ""
+                    # The undo path has no commit to restore, so claim_commit is
+                    # cleared to NULL on both branches (warpline falls back to the
+                    # restored claimed_at timestamp); mirrors claimed_at exactly.
                     if old_assignee:
                         self.conn.execute(
-                            "UPDATE issues SET assignee = ?, claimed_at = ?, last_heartbeat_at = ?, "
+                            "UPDATE issues SET assignee = ?, claimed_at = ?, claim_commit = NULL, last_heartbeat_at = ?, "
                             "claim_expires_at = ?, updated_at = ? WHERE id = ?",
                             (old_assignee, now, now, _undo_claim_expiry(now), now, issue_id),
                         )
                     else:
                         self.conn.execute(
-                            "UPDATE issues SET assignee = '', claimed_at = NULL, last_heartbeat_at = NULL, "
+                            "UPDATE issues SET assignee = '', claimed_at = NULL, claim_commit = NULL, last_heartbeat_at = NULL, "
                             "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
                             (now, issue_id),
                         )
 
                 case "claimed":
                     # Restore: revert to the assignee before the claim (usually '' but
-                    # preserves prior assignee if the claim re-assigned from another agent)
+                    # preserves prior assignee if the claim re-assigned from another agent).
+                    # The undo path has no commit to restore, so claim_commit is cleared
+                    # to NULL on both branches; mirrors claimed_at exactly.
                     old_assignee = row["old_value"] if row["old_value"] is not None else ""
                     if old_assignee:
                         self.conn.execute(
-                            "UPDATE issues SET assignee = ?, claimed_at = ?, last_heartbeat_at = ?, "
+                            "UPDATE issues SET assignee = ?, claimed_at = ?, claim_commit = NULL, last_heartbeat_at = ?, "
                             "claim_expires_at = ?, updated_at = ? WHERE id = ?",
                             (old_assignee, now, now, _undo_claim_expiry(now), now, issue_id),
                         )
                     else:
                         self.conn.execute(
-                            "UPDATE issues SET assignee = '', claimed_at = NULL, last_heartbeat_at = NULL, "
+                            "UPDATE issues SET assignee = '', claimed_at = NULL, claim_commit = NULL, last_heartbeat_at = NULL, "
                             "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
                             (now, issue_id),
                         )

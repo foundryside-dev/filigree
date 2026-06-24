@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closure gate are untouched and byte-identical; an orphaned binding still
   returns (null facts). Additive and Loomweave-safe (the consumer ignores
   unknown fields); the entity-associations contract fixture is bumped to v2.
+- **Warpline seam — per-issue commit anchor at claim/close (schema v29).** New
+  nullable `issues.claim_commit` / `issues.close_commit` columns hold an opaque,
+  caller-supplied `branch@sha` the issue was claimed/closed at, so warpline can
+  correlate on commits rather than wall-clock timestamps. Filigree stores the
+  anchor verbatim and never parses it (git/CI is Legis's domain) — the
+  `commit` argument is optional on `close`, `claim`, and `start-work` (CLI, MCP,
+  and HTTP), and on the underlying `update_issue`/`reclaim` paths. The anchor is
+  mirrored at every `claimed_at`/`closed_at` set **and** clear site (so a stale
+  anchor never survives a release, reopen, unassign, reclaim, or undo), exposed
+  on the issue read (classic + weft) and the entity-association reverse-lookup,
+  and `NULL` when no commit is supplied — in which case warpline falls back to
+  the timestamp. Additive and Loomweave-safe; the entity-associations contract
+  fixture is bumped to v3. With no `commit` supplied, every existing flow is
+  byte-identical.
 
 ### Fixed
 

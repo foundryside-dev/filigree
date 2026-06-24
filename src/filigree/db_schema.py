@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS issues (
     description TEXT DEFAULT '',
     notes       TEXT DEFAULT '',
     fields      TEXT DEFAULT '{}',
+    claim_commit TEXT,
+    close_commit TEXT,
 
     CHECK (priority BETWEEN 0 AND 4)
 );
@@ -607,4 +609,4 @@ CREATE TRIGGER IF NOT EXISTS issues_fts_delete AFTER DELETE ON issues BEGIN
 END;
 """
 
-CURRENT_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29

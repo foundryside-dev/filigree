@@ -107,6 +107,8 @@ class CloseIssueArgs(TypedDict):
     fields: NotRequired[dict[str, Any]]
     expected_assignee: NotRequired[str]
     force: NotRequired[bool]
+    # Opaque branch@sha commit anchor (warpline seam, contract B) -> close_commit.
+    commit: NotRequired[str]
 
 
 class DeleteIssueArgs(TypedDict):
@@ -132,6 +134,8 @@ class ClaimIssueArgs(TypedDict):
     issue_id: str
     assignee: NotRequired[str]
     actor: NotRequired[str]
+    # Opaque branch@sha commit anchor (warpline seam, contract B) -> claim_commit.
+    commit: NotRequired[str]
 
 
 class ReleaseClaimArgs(TypedDict):
@@ -188,6 +192,8 @@ class StartWorkArgs(TypedDict):
     target_status: NotRequired[str]
     actor: NotRequired[str]
     advance: NotRequired[bool]
+    # Opaque branch@sha commit anchor (warpline seam, contract B) -> claim_commit.
+    commit: NotRequired[str]
 
 
 class StartNextWorkArgs(TypedDict):

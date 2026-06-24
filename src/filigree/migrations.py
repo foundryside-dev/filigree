@@ -947,6 +947,23 @@ def migrate_v27_to_v28(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_v28_to_v29(conn: sqlite3.Connection) -> None:
+    """v28 -> v29: Add the per-issue commit-anchor columns (warpline seam, contract B).
+
+    Warpline correlates "changed since the issue was claimed/closed" against
+    COMMITS, not clocks. ``issues.claim_commit`` and ``issues.close_commit``
+    hold an opaque ``branch@sha`` string the CALLER supplies at claim / close;
+    Filigree stores it verbatim and never parses it (git/CI is Legis's domain).
+
+    Both columns are nullable: an absent ``commit`` param leaves the column NULL
+    and warpline falls back to the existing ``claimed_at`` / ``closed_at``
+    timestamp. Additive + idempotent (``add_column`` no-ops if present); existing
+    rows read NULL, so every WARPLINE-ABSENT flow is byte-identical to today.
+    """
+    add_column(conn, "issues", "claim_commit", "TEXT", default=None)
+    add_column(conn, "issues", "close_commit", "TEXT", default=None)
+
+
 MIGRATIONS: dict[int, MigrationFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
@@ -975,6 +992,7 @@ MIGRATIONS: dict[int, MigrationFn] = {
     25: migrate_v25_to_v26,
     26: migrate_v26_to_v27,
     27: migrate_v27_to_v28,
+    28: migrate_v28_to_v29,
 }
 
 

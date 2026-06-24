@@ -615,6 +615,9 @@ def create_classic_router() -> APIRouter:
         status_field = body.get("status")
         if status_field is not None and not isinstance(status_field, str):
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
+        commit = body.get("commit")
+        if commit is not None and not isinstance(commit, str):
+            return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         try:
             gate = governance.evaluate_closure_gate(db, issue_id)
@@ -628,6 +631,7 @@ def create_classic_router() -> APIRouter:
                 actor=actor,
                 fields=fields,
                 expected_assignee=expected_assignee,
+                commit=commit,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -893,8 +897,11 @@ def create_classic_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        commit = body.get("commit")
+        if commit is not None and not isinstance(commit, str):
+            return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         try:
-            issue = db.claim_issue(issue_id, assignee=assignee, actor=actor)
+            issue = db.claim_issue(issue_id, assignee=assignee, actor=actor, commit=commit)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
@@ -1460,6 +1467,9 @@ def create_weft_router() -> APIRouter:
         status_field = body.get("status")
         if status_field is not None and not isinstance(status_field, str):
             return _error_response("status must be a string", ErrorCode.VALIDATION, 400)
+        commit = body.get("commit")
+        if commit is not None and not isinstance(commit, str):
+            return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         fields = body.get("fields")
         ready_before = {i.id for i in db.get_ready()}
         try:
@@ -1474,6 +1484,7 @@ def create_weft_router() -> APIRouter:
                 actor=actor,
                 fields=fields,
                 expected_assignee=expected_assignee,
+                commit=commit,
             )
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
@@ -1527,8 +1538,11 @@ def create_weft_router() -> APIRouter:
         actor, actor_err = _validate_actor(body.get("actor", "dashboard"))
         if actor_err:
             return actor_err
+        commit = body.get("commit")
+        if commit is not None and not isinstance(commit, str):
+            return _error_response("commit must be a string", ErrorCode.VALIDATION, 400)
         try:
-            issue = db.claim_issue(issue_id, assignee=assignee, actor=actor)
+            issue = db.claim_issue(issue_id, assignee=assignee, actor=actor, commit=commit)
         except KeyError:
             return _error_response(f"Issue not found: {issue_id}", ErrorCode.NOT_FOUND, 404)
         except WrongProjectError as e:
