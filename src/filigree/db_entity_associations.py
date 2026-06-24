@@ -23,7 +23,7 @@ Four operations form the surface:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from filigree.db_base import DBMixinProtocol, _in_immediate_tx, _now_iso, _retry_busy
 from filigree.types.core import (
@@ -31,6 +31,7 @@ from filigree.types.core import (
     ISOTimestamp,
     IssueId,
     LoomweaveEntityId,
+    StatusCategory,
     make_content_hash,
     make_issue_id,
     make_loomweave_entity_id,
@@ -69,6 +70,30 @@ class EntityAssociationRow(TypedDict):
     # across a signatureless re-attach. ``signed_content_hash != content_hash_at_attach``
     # means the sign-off has drifted — the gate fails closed (GateOutcome.STALE).
     signed_content_hash: ContentHash | None
+
+
+class EntityAssociationByEntityRow(EntityAssociationRow):
+    """A reverse-lookup row (``list_associations_by_entity``) enriched with the
+    bound issue's lifecycle facts.
+
+    The warpline<->filigree seam (B contract): warpline reads the reverse lookup
+    to learn which issues are bound to a code entity, then correlates "changed
+    since the issue was claimed/closed" against its own changed-set. Carrying the
+    lifecycle anchors here lets it do that in one round trip. ``closed_at`` is the
+    proven-good signal ("issue closed at commit X"); Filigree exposes the
+    resolution timestamp verbatim and stores no commit SHA — warpline maps the
+    timestamp to a commit on its own side.
+
+    All four fields are ``None`` for an *orphaned* binding (the issue row is
+    absent — a LEFT JOIN, not INNER, so the binding is still returned rather than
+    dropped). These keys appear ONLY on the reverse projection; the forward
+    per-issue list (``list_entity_associations``) stays a pure binding row.
+    """
+
+    claimed_at: ISOTimestamp | None
+    closed_at: ISOTimestamp | None
+    status: str | None
+    status_category: StatusCategory | None
 
 
 class GovernedAssociationRemovalError(ValueError):
@@ -390,12 +415,38 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ).fetchall()
         return [_row_to_entity_association(r) for r in rows]
 
+    def _row_to_by_entity_association(
+        self, r: Mapping[str, Any], *, current_content_hash: str | None = None
+    ) -> EntityAssociationByEntityRow:
+        """Enrich a reverse-lookup row with the bound issue's lifecycle facts.
+
+        The base binding projection is byte-identical to the forward list (the
+        shared :func:`_row_to_entity_association` is untouched); only the reverse
+        surface carries the LEFT-JOINed ``issues`` columns. ``status`` /
+        ``closed_at`` / ``claimed_at`` are ``None`` for an orphaned binding (issue
+        row absent), and ``status_category`` is then ``None`` too, so the row is
+        still returned rather than dropped.
+        """
+        base = _row_to_entity_association(r, current_content_hash=current_content_hash)
+        status = r["issue_status"]
+        issue_type = r["issue_type"]
+        claimed_at = r["issue_claimed_at"]
+        closed_at = r["issue_closed_at"]
+        enriched = cast("EntityAssociationByEntityRow", dict(base))
+        enriched["claimed_at"] = ISOTimestamp(claimed_at) if claimed_at else None
+        enriched["closed_at"] = ISOTimestamp(closed_at) if closed_at else None
+        enriched["status"] = status
+        enriched["status_category"] = (
+            self._resolve_status_category(issue_type, status) if status is not None and issue_type is not None else None
+        )
+        return enriched
+
     def list_associations_by_entity(
         self,
         entity_id: LoomweaveEntityId,
         *,
         current_content_hash: ContentHash | str | None = None,
-    ) -> list[EntityAssociationRow]:
+    ) -> list[EntityAssociationByEntityRow]:
         """Return all issue bindings for a given Loomweave entity.
 
         The reverse of :meth:`list_entity_associations`: given an
@@ -414,16 +465,24 @@ class EntityAssociationsMixin(DBMixinProtocol):
         entity_id = make_loomweave_entity_id(entity_id)
         if current_content_hash is not None:
             current_content_hash = make_content_hash(current_content_hash)
+        # LEFT JOIN (not INNER) so an orphaned binding — issue row gone, a state
+        # warpline_consumer explicitly contemplates ("binding outlived its
+        # issue") — is still returned with null lifecycle facts rather than
+        # silently dropped. The issue columns are aliased to avoid any collision
+        # and to read explicitly in the enrichment mapper.
         rows = self.conn.execute(
             """
-            SELECT issue_id, loomweave_entity_id, entity_kind, content_hash_at_attach,
-                   attached_at, attached_by, migration_orphaned_at, signature, signoff_seq,
-                   signed_content_hash
-            FROM entity_associations
-            WHERE loomweave_entity_id = ?
-            ORDER BY attached_at ASC, issue_id ASC
+            SELECT ea.issue_id, ea.loomweave_entity_id, ea.entity_kind, ea.content_hash_at_attach,
+                   ea.attached_at, ea.attached_by, ea.migration_orphaned_at, ea.signature,
+                   ea.signoff_seq, ea.signed_content_hash,
+                   i.claimed_at AS issue_claimed_at, i.closed_at AS issue_closed_at,
+                   i.status AS issue_status, i.type AS issue_type
+            FROM entity_associations ea
+            LEFT JOIN issues i ON i.id = ea.issue_id
+            WHERE ea.loomweave_entity_id = ?
+            ORDER BY ea.attached_at ASC, ea.issue_id ASC
             """,
             (entity_id,),
         ).fetchall()
         current_hash = str(current_content_hash) if current_content_hash is not None else None
-        return [_row_to_entity_association(r, current_content_hash=current_hash) for r in rows]
+        return [self._row_to_by_entity_association(r, current_content_hash=current_hash) for r in rows]

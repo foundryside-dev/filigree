@@ -363,6 +363,69 @@ class TestSignatureAndSignoffSeq:
         assert by_entity[0]["signature"] == "deadbeef"
         assert by_entity[0]["signoff_seq"] == 7
 
+
+class TestReverseLookupLifecycleFacts:
+    """b-ii (warpline seam): the reverse lookup enriches each binding with the
+    bound issue's lifecycle facts — ``claimed_at``, ``closed_at``, ``status``,
+    and ``status_category`` — so warpline can correlate "changed since
+    claimed/closed" against its own changed-set in one round trip. closed_at is
+    the proven-good signal (issue closed at commit X); warpline maps the
+    timestamp to a commit on its side.
+
+    The forward per-issue list (``list_entity_associations``) stays a pure
+    binding projection and must NOT grow these keys — the shared mapper is
+    untouched; only the reverse query joins ``issues``.
+    """
+
+    def test_open_issue_row_exposes_null_close_and_open_category(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("open work", priority=2)
+        db.add_entity_association(issue.id, "py:func:open-target", content_hash="h1", actor="alice")
+        (row,) = db.list_associations_by_entity("py:func:open-target")
+        assert row["closed_at"] is None
+        assert row["claimed_at"] is None
+        assert row["status"] == issue.status
+        assert row["status_category"] == "open"
+
+    def test_closed_issue_row_exposes_closed_at_and_done_category(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("to close", priority=2)
+        db.add_entity_association(issue.id, "py:func:closed-target", content_hash="h1", actor="alice")
+        db.close_issue(issue.id, reason="done")
+        (row,) = db.list_associations_by_entity("py:func:closed-target")
+        assert row["closed_at"] is not None
+        assert row["status_category"] == "done"
+
+    def test_claimed_issue_row_exposes_claimed_at(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("to claim", priority=2)
+        db.add_entity_association(issue.id, "py:func:claimed-target", content_hash="h1", actor="alice")
+        db.claim_issue(issue.id, assignee="alice")
+        (row,) = db.list_associations_by_entity("py:func:claimed-target")
+        assert row["claimed_at"] is not None
+
+    def test_orphaned_binding_still_returns_with_null_facts(self, db: FiligreeDB) -> None:
+        """LEFT JOIN, not INNER: a binding whose issue row is absent must still
+        appear (warpline_consumer contemplates 'binding outlived its issue'),
+        with null lifecycle facts rather than being dropped."""
+        issue = db.create_issue("soon orphaned", priority=2)
+        db.add_entity_association(issue.id, "py:func:orphan-target", content_hash="h1", actor="alice")
+        # Delete the issue row directly, leaving the binding (bypassing cascade).
+        db.conn.execute("PRAGMA foreign_keys = OFF")
+        db.conn.execute("DELETE FROM issues WHERE id = ?", (issue.id,))
+        db.conn.execute("PRAGMA foreign_keys = ON")
+        (row,) = db.list_associations_by_entity("py:func:orphan-target")
+        assert row["issue_id"] == issue.id
+        assert row["closed_at"] is None
+        assert row["status"] is None
+        assert row["status_category"] is None
+
+    def test_forward_list_omits_lifecycle_facts(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("forward", priority=2)
+        db.add_entity_association(issue.id, "py:func:fwd-target", content_hash="h1", actor="alice")
+        (fwd,) = db.list_entity_associations(issue.id)
+        assert "closed_at" not in fwd
+        assert "claimed_at" not in fwd
+        assert "status" not in fwd
+        assert "status_category" not in fwd
+
     def test_attach_without_signature_stores_null(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Ungoverned work", priority=2)
         row = db.add_entity_association(issue.id, "sei:plain", content_hash="h1", actor="x")
