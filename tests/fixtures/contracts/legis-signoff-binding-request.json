@@ -1,0 +1,26 @@
+{
+  "contract": "legis.signoff_binding.v1",
+  "description": "legis->filigree governed sign-off binding POST request body. legis is the producer (HttpFiligreeClient.attach -> POST /api/issue/{issue_id}/entity-associations); filigree is the consumer (dashboard_routes/entities.py, v25/B1) which parses and persists signature + signoff_seq. The signature is sign({issue_id, entity_id, content_hash, signoff_seq}, key) (legis.enforcement.signing, deterministic HMAC-SHA256 over canonical_json). issue_id rides the URL path, not the body.",
+  "endpoint": {
+    "method": "POST",
+    "path": "/api/issue/LEGIS-SIGNOFF-1/entity-associations"
+  },
+  "request_body": {
+    "actor": "legis",
+    "content_hash": "blake3:fixedcontenthashfixedcontenthashfixedcontenthashfixedcontent",
+    "entity_id": "loomweave:eid:0123456789abcdef0123456789abcdef",
+    "signature": "hmac-sha256:v2:2d43280fad6b80fc879d4569e2a8b3c86f94c2538616d578a8d0fc479e5d0962",
+    "signoff_seq": 7
+  },
+  "signing_inputs": {
+    "issue_id": "LEGIS-SIGNOFF-1",
+    "key_hex": "6c656769732d7369676e6f66662d776972652d76310000000000000000000000",
+    "signature": "hmac-sha256:v2:2d43280fad6b80fc879d4569e2a8b3c86f94c2538616d578a8d0fc479e5d0962",
+    "signed_fields": {
+      "content_hash": "blake3:fixedcontenthashfixedcontenthashfixedcontenthashfixedcontent",
+      "entity_id": "loomweave:eid:0123456789abcdef0123456789abcdef",
+      "issue_id": "LEGIS-SIGNOFF-1",
+      "signoff_seq": 7
+    }
+  }
+}
