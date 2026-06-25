@@ -51,6 +51,10 @@ class Issue:
     created_at: ISOTimestamp = _EMPTY_TS
     updated_at: ISOTimestamp = _EMPTY_TS
     closed_at: ISOTimestamp | None = None
+    # Opaque ``branch@sha`` commit anchors (warpline seam, contract B). Set at
+    # claim / close from a caller-supplied value, stored verbatim, never parsed.
+    claim_commit: str | None = None
+    close_commit: str | None = None
     description: str = ""
     notes: str = ""
     fields: dict[str, Any] = field(default_factory=dict)
@@ -97,6 +101,8 @@ class Issue:
             created_at=self.created_at,
             updated_at=self.updated_at,
             closed_at=self.closed_at,
+            claim_commit=self.claim_commit,
+            close_commit=self.close_commit,
             description=self.description,
             notes=self.notes,
             fields=fields,

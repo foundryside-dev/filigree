@@ -714,6 +714,11 @@ def update_issue_cmd(
     ),
 )
 @click.option("--expected-assignee", default=None, help="Expected current holder for coordinator writes")
+@click.option(
+    "--commit",
+    default=None,
+    help="Opaque branch@sha commit anchor (warpline seam); stored verbatim as close_commit.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def close(
@@ -723,6 +728,7 @@ def close(
     status: str | None,
     force: bool,
     expected_assignee: str | None,
+    commit: str | None,
     as_json: bool,
 ) -> None:
     """Close one or more issues."""
@@ -749,6 +755,7 @@ def close(
                     actor=ctx.obj["actor"],
                     expected_assignee=expected_assignee,
                     force=force,
+                    commit=commit,
                 )
                 if as_json:
                     item: dict[str, Any] = {
@@ -871,9 +878,14 @@ def reopen(ctx: click.Context, issue_ids: tuple[str, ...], as_json: bool) -> Non
 @click.command(cls=ActorCommand)
 @click.argument("issue_id")
 @click.option("--assignee", default=None, help="Who is claiming (agent name); defaults to an explicitly provided --actor")
+@click.option(
+    "--commit",
+    default=None,
+    help="Opaque branch@sha commit anchor (warpline seam); stored verbatim as claim_commit.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def claim(ctx: click.Context, issue_id: str, assignee: str | None, as_json: bool) -> None:
+def claim(ctx: click.Context, issue_id: str, assignee: str | None, commit: str | None, as_json: bool) -> None:
     """Atomically claim an open issue or released in-progress handoff."""
     # FIL-3: --assignee defaults from an explicit --actor (group-level or
     # post-verb); with neither, fail naming both options.
@@ -888,7 +900,7 @@ def claim(ctx: click.Context, issue_id: str, assignee: str | None, as_json: bool
         sys.exit(1)
     with get_db() as db:
         try:
-            issue = db.claim_issue(issue_id, assignee=assignee, actor=ctx.obj["actor"])
+            issue = db.claim_issue(issue_id, assignee=assignee, actor=ctx.obj["actor"], commit=commit)
         except KeyError:
             if as_json:
                 click.echo(json_mod.dumps({"error": f"Not found: {issue_id}", "code": ErrorCode.NOT_FOUND}))
@@ -1442,6 +1454,11 @@ def delete_issue_cmd(ctx: click.Context, issue_id: str, force: bool, as_json: bo
 @click.option("--target-status", default=None, help="Override wip status (defaults to reachable wip target)")
 @click.option("--actor", default=None, help="Actor for audit trail (defaults to --assignee; also fills an omitted --assignee)")
 @click.option("--advance", is_flag=True, help="Walk soft transitions to the nearest wip state (e.g. triage->confirmed->fixing)")
+@click.option(
+    "--commit",
+    default=None,
+    help="Opaque branch@sha commit anchor (warpline seam); stored verbatim as claim_commit.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def start_work(
@@ -1451,6 +1468,7 @@ def start_work(
     target_status: str | None,
     actor: str | None,
     advance: bool,
+    commit: str | None,
     as_json: bool,
 ) -> None:
     """Atomically claim an issue and transition it to its wip status."""
@@ -1475,6 +1493,7 @@ def start_work(
                 target_status=target_status,
                 actor=resolved_actor,
                 advance=advance,
+                commit=commit,
             )
         except KeyError:
             if as_json:

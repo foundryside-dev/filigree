@@ -150,6 +150,8 @@ _PUBLIC_ISSUE_KEYS = frozenset(
         "created_at",
         "updated_at",
         "closed_at",
+        "claim_commit",
+        "close_commit",
         "description",
         "notes",
         "fields",

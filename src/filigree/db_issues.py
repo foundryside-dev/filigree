@@ -759,6 +759,8 @@ class IssuesMixin(DBMixinProtocol):
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                     closed_at=row["closed_at"],
+                    claim_commit=row["claim_commit"],
+                    close_commit=row["close_commit"],
                     description=row["description"],
                     notes=row["notes"],
                     fields=_safe_fields_json(row["fields"], iid),
@@ -798,6 +800,8 @@ class IssuesMixin(DBMixinProtocol):
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
         mode: TransitionMode = TransitionMode.FORWARD,
+        claim_commit: str | None = None,
+        close_commit: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Update issue fields, workflow status, assignment, and parent links.
@@ -835,6 +839,11 @@ class IssuesMixin(DBMixinProtocol):
                 declared reverse/escape transitions and audits the shortcut with
                 ``transition_forced``. ``TransitionMode.FORWARD`` (default) uses
                 the normal workflow lane.
+            claim_commit: Opaque ``branch@sha`` commit anchor (warpline seam,
+                contract B), stored verbatim wherever ``claimed_at`` is set; NULL
+                otherwise. Filigree never parses it.
+            close_commit: Opaque ``branch@sha`` commit anchor stored verbatim
+                wherever ``closed_at`` is set (done-entry); NULL otherwise.
 
         Returns:
             The freshly loaded issue. Soft transition data warnings are also
@@ -1024,11 +1033,18 @@ class IssuesMixin(DBMixinProtocol):
             if is_done:
                 updates.append("closed_at = ?")
                 params.append(now)
+                # Mirror closed_at: capture the caller-supplied commit anchor
+                # (NULL when none supplied -> warpline falls back to the timestamp).
+                updates.append("close_commit = ?")
+                params.append(close_commit)
             else:
                 # Clear closed_at when leaving a done-category state
                 old_cat = self.templates.get_category(current.type, current.status)
                 if (old_cat or self._infer_status_category(current.type, current.status)) == "done":
                     updates.append("closed_at = NULL")
+                    # Mirror closed_at clear: a stale close anchor must not
+                    # survive leaving a done state (reopen/release).
+                    updates.append("close_commit = NULL")
 
         if priority is not None and priority != current.priority:
             self._record_event(
@@ -1048,8 +1064,15 @@ class IssuesMixin(DBMixinProtocol):
             if assignee:
                 updates.extend(["claimed_at = ?", "last_heartbeat_at = ?", "claim_expires_at = ?"])
                 params.extend([now, now, _claim_expiry(now)])
+                # Mirror claimed_at: capture the caller-supplied claim anchor
+                # (NULL when none supplied -> warpline falls back to the timestamp).
+                updates.append("claim_commit = ?")
+                params.append(claim_commit)
             else:
                 updates.extend(["claimed_at = NULL", "last_heartbeat_at = NULL", "claim_expires_at = NULL"])
+                # Mirror claimed_at clear: a stale claim anchor must not survive
+                # an unassign.
+                updates.append("claim_commit = NULL")
 
         if description is not None and description != current.description:
             self._record_event(
@@ -1168,6 +1191,7 @@ class IssuesMixin(DBMixinProtocol):
         fields: dict[str, Any] | None = None,
         expected_assignee: str | None = None,
         force: bool = False,
+        commit: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue:
         """Close an issue.
@@ -1188,6 +1212,11 @@ class IssuesMixin(DBMixinProtocol):
         state on the caller's behalf — that hid intent (a feature in
         ``building`` that's actually shipped should not become ``deferred``
         just because that's the only reachable done-state).
+
+        ``commit`` is an opaque ``branch@sha`` commit anchor (warpline seam,
+        contract B) persisted as ``close_commit`` when the issue enters the
+        done-category state; NULL when omitted. Filigree stores it verbatim and
+        never parses it.
         """
         if fields is not None and not isinstance(fields, dict):
             msg = "fields must be a dict"
@@ -1236,6 +1265,7 @@ class IssuesMixin(DBMixinProtocol):
             actor=actor,
             expected_assignee=expected_assignee,
             mode=mode,
+            close_commit=commit,
             _skip_begin=_skip_begin,
         )
 
@@ -1488,7 +1518,7 @@ class IssuesMixin(DBMixinProtocol):
 
     @_retry_busy()
     @_in_immediate_tx("claim_issue")
-    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", _skip_begin: bool = False) -> Issue:
+    def claim_issue(self, issue_id: str, *, assignee: str, actor: str = "", commit: str | None = None, _skip_begin: bool = False) -> Issue:
         """Atomically claim an open/wip-category issue with optimistic locking.
 
         Sets assignee only — does NOT change status. Agent uses update_issue
@@ -1502,6 +1532,12 @@ class IssuesMixin(DBMixinProtocol):
         Composed callers (``start_work``, ``_claim_next_with_prior``) pass the
         decorator's ``_skip_begin=True`` so this method runs inside the outer
         IMMEDIATE transaction.
+
+        ``commit`` is an opaque ``branch@sha`` commit anchor (warpline seam,
+        contract B) stored as ``claim_commit`` alongside ``claimed_at`` on a
+        fresh claim; like ``claimed_at`` it is set via COALESCE so a same-agent
+        re-claim preserves the original anchor. NULL when omitted. Stored
+        verbatim, never parsed.
         """
         # filigree-694f7e9bf8: enforce the same trimmed-identity invariant as
         # create_issue/update_issue. Without normalization, claiming with
@@ -1537,10 +1573,11 @@ class IssuesMixin(DBMixinProtocol):
         claim_expires_at = _claim_expiry(now)
         cursor = self.conn.execute(
             f"UPDATE issues SET assignee = ?, claimed_at = COALESCE(claimed_at, ?), "
+            f"claim_commit = COALESCE(claim_commit, ?), "
             f"last_heartbeat_at = ?, claim_expires_at = ?, updated_at = ? "
             f"WHERE id = ? AND status IN ({status_ph}) "
             f"AND (assignee = '' OR assignee IS NULL OR assignee = ?)",
-            [assignee, now, now, claim_expires_at, now, issue_id, *claimable_states, assignee],
+            [assignee, now, commit, now, claim_expires_at, now, issue_id, *claimable_states, assignee],
         )
 
         if cursor.rowcount == 0:
@@ -1700,12 +1737,16 @@ class IssuesMixin(DBMixinProtocol):
         updates = [
             "assignee = ''",
             "claimed_at = NULL",
+            # Mirror claimed_at clear: a stale claim anchor must not survive a release.
+            "claim_commit = NULL",
             "last_heartbeat_at = NULL",
             "claim_expires_at = NULL",
         ]
         params: list[Any] = []
         if target is not None:
-            updates.extend(["status = ?", "closed_at = NULL"])
+            # Mirror closed_at clear: a wip-revert that clears closed_at clears
+            # the close anchor too (a released issue is no longer closed).
+            updates.extend(["status = ?", "closed_at = NULL", "close_commit = NULL"])
             params.append(target)
         updates.append("updated_at = ?")
         params.append(now)
@@ -1981,6 +2022,7 @@ class IssuesMixin(DBMixinProtocol):
         reason: str,
         actor: str = "",
         lease_hours: int = DEFAULT_CLAIM_LEASE_HOURS,
+        commit: str | None = None,
     ) -> Issue:
         """Atomically transfer a stale claim to a new assignee.
 
@@ -1988,6 +2030,11 @@ class IssuesMixin(DBMixinProtocol):
         observed holder at write time. On success it sets ``assignee``,
         ``claimed_at``, ``last_heartbeat_at``, ``claim_expires_at``, and
         ``updated_at`` together and records a ``reclaimed`` event.
+
+        ``commit`` is the new holder's opaque ``branch@sha`` claim anchor
+        (warpline seam, contract B). Unlike ``claim_issue``'s COALESCE, reclaim
+        OVERWRITES ``claim_commit`` (and NULLs it when omitted): the claim is now
+        a different holder's, so the prior holder's anchor must not survive.
 
         Args:
             issue_id: Claimed issue to reclaim. The id prefix must belong to
@@ -2036,9 +2083,9 @@ class IssuesMixin(DBMixinProtocol):
         now = _now_iso()
         claim_expires_at = _claim_expiry(now, lease_hours)
         cursor = self.conn.execute(
-            "UPDATE issues SET assignee = ?, claimed_at = ?, last_heartbeat_at = ?, "
+            "UPDATE issues SET assignee = ?, claimed_at = ?, claim_commit = ?, last_heartbeat_at = ?, "
             "claim_expires_at = ?, updated_at = ? WHERE id = ? AND assignee = ?",
-            (assignee, now, now, claim_expires_at, now, issue_id, expected_assignee),
+            (assignee, now, commit, now, claim_expires_at, now, issue_id, expected_assignee),
         )
         if cursor.rowcount == 0:
             current = self.conn.execute("SELECT assignee FROM issues WHERE id = ?", (issue_id,)).fetchone()
@@ -2152,6 +2199,7 @@ class IssuesMixin(DBMixinProtocol):
         target_status: str | None = None,
         actor: str = "",
         advance: bool = False,
+        commit: str | None = None,
     ) -> Issue:
         """Atomically claim an issue and transition it to a working status.
 
@@ -2180,6 +2228,10 @@ class IssuesMixin(DBMixinProtocol):
         identity — if the issue was already owned by ``assignee`` before the
         call, a transition failure must leave the claim in place rather than
         wiping out an unrelated, pre-existing claim.
+
+        ``commit`` is an opaque ``branch@sha`` claim anchor (warpline seam,
+        contract B) forwarded to the inner ``claim_issue`` and stored as
+        ``claim_commit``; NULL when omitted. Stored verbatim, never parsed.
         """
         actor = actor or assignee
         self._check_id_prefix(issue_id)
@@ -2190,6 +2242,7 @@ class IssuesMixin(DBMixinProtocol):
                 assignee=assignee,
                 target_path=target_path,
                 actor=actor,
+                commit=commit,
             )
         except _StartCandidateUnclaimableError as exc:
             # Public API contract: surface the underlying claim error.
@@ -2347,6 +2400,7 @@ class IssuesMixin(DBMixinProtocol):
         assignee: str,
         target_path: list[str],
         actor: str,
+        commit: str | None = None,
     ) -> Issue:
         """Private critical section for ``start_work`` / ``start_next_work``.
 
@@ -2376,7 +2430,7 @@ class IssuesMixin(DBMixinProtocol):
         ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
         """
         try:
-            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, _skip_begin=True)
+            result = self.claim_issue(issue_id, assignee=assignee, actor=actor, commit=commit, _skip_begin=True)
         except (ClaimConflictError, KeyError) as exc:
             raise _StartCandidateUnclaimableError(issue_id) from exc
         except ValueError as exc:

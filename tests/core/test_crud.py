@@ -778,6 +778,8 @@ class TestIssueToDictRoundTrip:
             "created_at",
             "updated_at",
             "closed_at",
+            "claim_commit",
+            "close_commit",
             "description",
             "notes",
             "fields",

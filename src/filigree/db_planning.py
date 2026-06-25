@@ -195,6 +195,8 @@ def _truncated_issue_sentinel(issue_id: str) -> IssueDict:
         created_at=_EMPTY_TS,
         updated_at=_EMPTY_TS,
         closed_at=None,
+        claim_commit=None,
+        close_commit=None,
         description="",
         notes="",
         fields={},

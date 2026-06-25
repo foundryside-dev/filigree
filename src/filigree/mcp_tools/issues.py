@@ -448,6 +448,14 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "transition_forced is recorded before status_changed."
                         ),
                     },
+                    "commit": {
+                        "type": "string",
+                        "description": (
+                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as "
+                            "close_commit so warpline can correlate 'changed since closed' on the "
+                            "commit, not the clock. Omit to leave it null."
+                        ),
+                    },
                 },
                 "required": ["issue_id"],
             },
@@ -563,6 +571,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                     "actor": {
                         "type": "string",
                         "description": "Agent/user identity for audit trail (defaults to assignee)",
+                    },
+                    "commit": {
+                        "type": "string",
+                        "description": (
+                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
+                        ),
                     },
                 },
                 "required": ["issue_id"],
@@ -803,6 +817,12 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                             "Walk soft transitions to the nearest wip state when no single-hop wip target exists "
                             "(e.g. triage->confirmed->fixing). Missing required fields surface as warnings, not blocks; "
                             "hard edges are never auto-walked. Default false."
+                        ),
+                    },
+                    "commit": {
+                        "type": "string",
+                        "description": (
+                            "Opaque branch@sha commit anchor (warpline seam). Stored verbatim as claim_commit. Omit to leave it null."
                         ),
                     },
                 },
@@ -1225,6 +1245,9 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
     force = args.get("force", False)
     if not isinstance(force, bool):
         return _text(ErrorResponse(error="force must be a boolean", code=ErrorCode.VALIDATION))
+    commit = args.get("commit")
+    if commit is not None and not isinstance(commit, str):
+        return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
         gate = governance.evaluate_closure_gate(tracker, args["issue_id"])
@@ -1240,6 +1263,7 @@ async def _handle_close_issue(arguments: dict[str, Any]) -> list[TextContent]:
             fields=args.get("fields"),
             expected_assignee=expected_assignee,
             force=force,
+            commit=commit,
         )
         refresh_summary()
         ready_after = tracker.get_ready()
@@ -1369,12 +1393,16 @@ async def _handle_claim_issue(arguments: dict[str, Any]) -> list[TextContent]:
     actor, actor_err = _validate_actor(args.get("actor", assignee))
     if actor_err:
         return actor_err
+    commit = args.get("commit")
+    if commit is not None and not isinstance(commit, str):
+        return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
         issue = tracker.claim_issue(
             args["issue_id"],
             assignee=assignee,
             actor=actor,
+            commit=commit,
         )
         refresh_summary()
         return _text(issue_to_public(issue))
@@ -1764,6 +1792,9 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
     advance = args.get("advance", False)
     if not isinstance(advance, bool):
         return _text(ErrorResponse(error="advance must be a boolean", code=ErrorCode.VALIDATION))
+    commit = args.get("commit")
+    if commit is not None and not isinstance(commit, str):
+        return _text(ErrorResponse(error="commit must be a string", code=ErrorCode.VALIDATION))
     tracker = get_db()
     try:
         issue = tracker.start_work(
@@ -1772,6 +1803,7 @@ async def _handle_start_work(arguments: dict[str, Any]) -> list[TextContent]:
             target_status=args.get("target_status"),
             actor=actor,
             advance=advance,
+            commit=commit,
         )
     except KeyError:
         return _text(ErrorResponse(error=f"Issue not found: {args['issue_id']}", code=ErrorCode.NOT_FOUND))

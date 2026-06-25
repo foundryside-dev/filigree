@@ -395,6 +395,8 @@ class DBMixinProtocol(Protocol):
         expected_assignee: str | None = None,
         force_overwrite_corrupt: bool = False,
         mode: TransitionMode = TransitionMode.FORWARD,
+        claim_commit: str | None = None,
+        close_commit: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 
@@ -408,6 +410,7 @@ class DBMixinProtocol(Protocol):
         fields: dict[str, Any] | None = None,
         expected_assignee: str | None = None,
         force: bool = False,
+        commit: str | None = None,
         _skip_begin: bool = False,
     ) -> Issue: ...
 

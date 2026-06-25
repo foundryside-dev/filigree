@@ -164,6 +164,8 @@ class IssueDict(TypedDict):
     created_at: ISOTimestamp
     updated_at: ISOTimestamp
     closed_at: ISOTimestamp | None
+    claim_commit: str | None
+    close_commit: str | None
     description: str
     notes: str
     fields: dict[str, Any]
