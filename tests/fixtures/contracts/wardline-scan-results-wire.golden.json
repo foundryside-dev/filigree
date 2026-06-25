@@ -1,0 +1,136 @@
+{
+  "findings": [
+    {
+      "fingerprint": "wlfp2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "language": "python",
+      "line_end": 14,
+      "line_start": 12,
+      "message": "untrusted value reaches trusted sink",
+      "metadata": {
+        "wardline": {
+          "confidence": 0.9,
+          "fingerprint": "wlfp2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "internal_severity": "ERROR",
+          "kind": "defect",
+          "properties": {
+            "sink": "os.system",
+            "tier": "untrusted"
+          },
+          "qualname": "app.handler.handle",
+          "related_entities": [
+            "python:function:app.handler.read_raw"
+          ]
+        }
+      },
+      "path": "src/app/handler.py",
+      "rule_id": "PY-WL-101",
+      "severity": "high",
+      "suggestion": "validate at the boundary before the sink"
+    },
+    {
+      "fingerprint": "wlfp2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "language": "rust",
+      "line_end": 42,
+      "line_start": 42,
+      "message": "tainted data flows to command execution",
+      "metadata": {
+        "wardline": {
+          "fingerprint": "wlfp2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "internal_severity": "CRITICAL",
+          "kind": "defect",
+          "qualname": "main::run"
+        }
+      },
+      "path": "src/main.rs",
+      "rule_id": "RS-WL-108",
+      "severity": "critical"
+    },
+    {
+      "fingerprint": "wlfp2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "language": "python",
+      "line_end": 3,
+      "line_start": 3,
+      "message": "external boundary detected",
+      "metadata": {
+        "wardline": {
+          "fingerprint": "wlfp2:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "internal_severity": "NONE",
+          "kind": "fact",
+          "qualname": "app.io.fetch"
+        }
+      },
+      "path": "src/app/io.py",
+      "rule_id": "WLN-BOUNDARY-FACT",
+      "severity": "info"
+    },
+    {
+      "fingerprint": "wlfp2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "language": "python",
+      "line_end": 7,
+      "line_start": 7,
+      "message": "boundary classification",
+      "metadata": {
+        "wardline": {
+          "fingerprint": "wlfp2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "internal_severity": "INFO",
+          "kind": "classification",
+          "qualname": "app.io.fetch",
+          "suppression_reason": "reviewed false positive",
+          "suppression_state": "waived"
+        }
+      },
+      "path": "src/app/io.py",
+      "rule_id": "PY-WL-120",
+      "severity": "low"
+    },
+    {
+      "fingerprint": "wlfp2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "language": "python",
+      "line_end": null,
+      "line_start": 1,
+      "message": "decorator coverage 80%",
+      "metadata": {
+        "wardline": {
+          "fingerprint": "wlfp2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "internal_severity": "NONE",
+          "kind": "metric",
+          "properties": {
+            "coverage": 0.8
+          }
+        }
+      },
+      "path": "src/app/io.py",
+      "rule_id": "WLN-METRIC-COVERAGE",
+      "severity": "info"
+    },
+    {
+      "fingerprint": "wlfp2:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "language": "python",
+      "line_end": 33,
+      "line_start": 30,
+      "message": "consider narrowing the boundary",
+      "metadata": {
+        "wardline": {
+          "fingerprint": "wlfp2:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "internal_severity": "WARN",
+          "kind": "suggestion",
+          "qualname": "app.util.helper",
+          "suppression_state": "baselined"
+        }
+      },
+      "path": "src/app/util.py",
+      "rule_id": "PY-WL-126",
+      "severity": "medium",
+      "suggestion": "annotate @external_boundary"
+    }
+  ],
+  "fingerprint_scheme": "wlfp2",
+  "mark_unseen": true,
+  "scan_source": "wardline",
+  "scanned_paths": [
+    "src/app/handler.py",
+    "src/main.rs",
+    "src/app/io.py",
+    "src/app/util.py"
+  ]
+}
