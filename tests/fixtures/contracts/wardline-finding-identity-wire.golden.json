@@ -1,0 +1,141 @@
+{
+  "contract": "weft/wardline-finding-identity-wire",
+  "fingerprint_scheme": "wlfp2",
+  "vectors": {
+    "collision_pair_a": {
+      "bare_fingerprint": "0216b7ecd449bd36bdeaeb677d879edcecfed1377917329c794c391b057ab16c",
+      "inputs": {
+        "location": {
+          "col_end": 20,
+          "col_start": 8,
+          "line_end": 8,
+          "line_start": 8,
+          "path": "src/app/db.py"
+        },
+        "path": "src/app/db.py",
+        "qualname": "app.db.run",
+        "rule_id": "PY-WL-118",
+        "taint_path": "execute@8:20"
+      },
+      "spans": {
+        "col_end": 20,
+        "col_start": 8,
+        "line_end": 8,
+        "line_start": 8,
+        "path": "src/app/db.py"
+      },
+      "stamped_fingerprint": "wlfp2:0216b7ecd449bd36bdeaeb677d879edcecfed1377917329c794c391b057ab16c",
+      "wire_fingerprint": "0216b7ecd449bd36bdeaeb677d879edcecfed1377917329c794c391b057ab16c",
+      "wire_jsonl_qualname": "app.db.run",
+      "wire_qualname": "app.db.run"
+    },
+    "collision_pair_b": {
+      "bare_fingerprint": "769311da39324ea164f0159f684724318cb3dc45450b53c13c122ade4ba98d73",
+      "inputs": {
+        "location": {
+          "col_end": 42,
+          "col_start": 30,
+          "line_end": 8,
+          "line_start": 8,
+          "path": "src/app/db.py"
+        },
+        "path": "src/app/db.py",
+        "qualname": "app.db.run",
+        "rule_id": "PY-WL-118",
+        "taint_path": "execute@30:42"
+      },
+      "spans": {
+        "col_end": 42,
+        "col_start": 30,
+        "line_end": 8,
+        "line_start": 8,
+        "path": "src/app/db.py"
+      },
+      "stamped_fingerprint": "wlfp2:769311da39324ea164f0159f684724318cb3dc45450b53c13c122ade4ba98d73",
+      "wire_fingerprint": "769311da39324ea164f0159f684724318cb3dc45450b53c13c122ade4ba98d73",
+      "wire_jsonl_qualname": "app.db.run",
+      "wire_qualname": "app.db.run"
+    },
+    "property_setter_qualname": {
+      "bare_fingerprint": "65f22bbcb2e90af0597f5384024d8cde9d78a9ad58a436fdf9f9da1898d8d188",
+      "inputs": {
+        "location": {
+          "col_end": 18,
+          "col_start": 4,
+          "line_end": 23,
+          "line_start": 21,
+          "path": "src/app/model.py"
+        },
+        "path": "src/app/model.py",
+        "qualname": "app.model.Config.value:setter",
+        "rule_id": "PY-WL-105",
+        "taint_path": null
+      },
+      "spans": {
+        "col_end": 18,
+        "col_start": 4,
+        "line_end": 23,
+        "line_start": 21,
+        "path": "src/app/model.py"
+      },
+      "stamped_fingerprint": "wlfp2:65f22bbcb2e90af0597f5384024d8cde9d78a9ad58a436fdf9f9da1898d8d188",
+      "wire_fingerprint": "65f22bbcb2e90af0597f5384024d8cde9d78a9ad58a436fdf9f9da1898d8d188",
+      "wire_jsonl_qualname": "app.model.Config.value:setter",
+      "wire_qualname": "app.model.Config.value"
+    },
+    "rust_qualname_span": {
+      "bare_fingerprint": "23cb46bd9151fd832a715c53e7cd643a7e6dbc062b3c904288b816ac6c530f35",
+      "inputs": {
+        "location": {
+          "col_end": null,
+          "col_start": null,
+          "line_end": 42,
+          "line_start": 42,
+          "path": "src/main.rs"
+        },
+        "path": "src/main.rs",
+        "qualname": "main::run",
+        "rule_id": "PY-WL-101",
+        "taint_path": null
+      },
+      "spans": {
+        "col_end": null,
+        "col_start": null,
+        "line_end": 42,
+        "line_start": 42,
+        "path": "src/main.rs"
+      },
+      "stamped_fingerprint": "wlfp2:23cb46bd9151fd832a715c53e7cd643a7e6dbc062b3c904288b816ac6c530f35",
+      "wire_fingerprint": "23cb46bd9151fd832a715c53e7cd643a7e6dbc062b3c904288b816ac6c530f35",
+      "wire_jsonl_qualname": "main::run",
+      "wire_qualname": "main::run"
+    },
+    "singleton_no_taint_path": {
+      "bare_fingerprint": "a2cde44a864042c85eb0993d0ef38d5bd8812da892aed2e4688dd8566693d142",
+      "inputs": {
+        "location": {
+          "col_end": 20,
+          "col_start": 4,
+          "line_end": 14,
+          "line_start": 12,
+          "path": "src/app/handler.py"
+        },
+        "path": "src/app/handler.py",
+        "qualname": "app.handler.handle",
+        "rule_id": "PY-WL-101",
+        "taint_path": null
+      },
+      "spans": {
+        "col_end": 20,
+        "col_start": 4,
+        "line_end": 14,
+        "line_start": 12,
+        "path": "src/app/handler.py"
+      },
+      "stamped_fingerprint": "wlfp2:a2cde44a864042c85eb0993d0ef38d5bd8812da892aed2e4688dd8566693d142",
+      "wire_fingerprint": "a2cde44a864042c85eb0993d0ef38d5bd8812da892aed2e4688dd8566693d142",
+      "wire_jsonl_qualname": "app.handler.handle",
+      "wire_qualname": "app.handler.handle"
+    }
+  }
+}

@@ -99,6 +99,7 @@ jobs:
           tests/federation/test_sei_conformance_oracle.py
           tests/federation/test_suppression_filter_conformance_oracle.py
           tests/federation/test_scan_results_wire_conformance_oracle.py
+          tests/federation/test_finding_identity_wire_conformance_oracle.py
 
   live-loomweave:
     name: Live Loomweave Integration
