@@ -19,6 +19,49 @@
   },
   "examples": [
     {
+      "name": "live_v_issue_detail_200",
+      "note": "Open, un-claimed task issue → 200 with the full 25-field IssueWeft projection. The entity's own primary key is named issue_id (the id→issue_id weft rename); reference fields keep their names. status_category derives from status; is_ready is computed from blockers; the four lifecycle/commit anchors are null for an open, un-claimed, un-closed issue.",
+      "request": {
+        "method": "GET",
+        "path": "/api/weft/issues/genp-0123456789",
+        "headers": {},
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "issue_id": "genp-0123456789",
+          "title": "golden issue detail",
+          "status": "open",
+          "status_category": "open",
+          "priority": 2,
+          "type": "task",
+          "parent_id": null,
+          "assignee": "",
+          "claimed_at": null,
+          "last_heartbeat_at": null,
+          "claim_expires_at": null,
+          "created_at": "2026-01-02T03:04:05+00:00",
+          "updated_at": "2026-01-02T03:04:05+00:00",
+          "closed_at": null,
+          "claim_commit": null,
+          "close_commit": null,
+          "description": "",
+          "notes": "",
+          "fields": {},
+          "labels": [],
+          "blocks": [],
+          "blocked_by": [],
+          "is_ready": true,
+          "children": [],
+          "data_warnings": []
+        }
+      }
+    },
+    {
       "name": "error_not_found",
       "note": "Missing issue id \u2192 404 NOT_FOUND with the standard ErrorResponse envelope.",
       "request": {
