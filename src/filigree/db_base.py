@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
@@ -510,7 +510,12 @@ class DBMixinProtocol(Protocol):
         _skip_begin: bool = False,
     ) -> EntityAssociationRow: ...
 
-    def list_entity_associations(self, issue_id: IssueId) -> list[EntityAssociationRow]: ...
+    def list_entity_associations(
+        self,
+        issue_id: IssueId,
+        *,
+        current_content_hashes: Mapping[str, str] | None = None,
+    ) -> list[EntityAssociationRow]: ...
 
     # -- ObservationsMixin ---------------------------------------------------
 
