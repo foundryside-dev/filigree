@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
 from typing import Any, Literal, Protocol, TypeAlias, TypedDict
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -59,6 +59,13 @@ DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "loomwea
 REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "loomweave")
 LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS = 3
 LOOMWEAVE_RESOLVE_FILE_RETRY_BACKOFF_SECONDS = 0.05
+
+# The one sanctioned peek at Loomweave's otherwise-opaque entity-id grammar: the
+# frozen Stable Entity Identity prefix (ADR-038). An id carrying it is an SEI and
+# resolves through the by-SEI endpoint; anything else is a locator and resolves
+# through the locator batch. Mirrors ``sei_backfill.SEI_PREFIX`` (kept here too so
+# the registry layer does not import the operator-command module).
+LOOMWEAVE_SEI_PREFIX = "loomweave:eid:"
 
 # Loomweave's `_capabilities` response declares an `api_version: u8`. Filigree
 # rejects startup under `loomweave` mode if Loomweave advertises a version this
@@ -186,6 +193,27 @@ class SeiResolution(TypedDict):
 # sending so it never trips the cap; the constant is exposed so callers
 # can size their inputs deliberately.
 LOOMWEAVE_BATCH_MAX_QUERIES = 256
+
+
+class EntityHashResolution(TypedDict):
+    """Outcome of resolving opaque entity ids to their CURRENT content_hash.
+
+    The drift-comparison input for the closure gate (ADR-029 Decision 3: drift
+    detection is the consumer's job; Filigree owns the current-code-vs-attach
+    comparison per the 2026-06-29 hub ruling).
+
+    - ``resolved`` — keyed by the *submitted* entity id, value is the entity's
+      current Loomweave ``content_hash`` (only ALIVE entities appear here).
+    - ``unresolved`` — entity ids Loomweave could not vouch for *while reachable*:
+      orphaned (``alive:false``), not_found, or rejected as invalid. The caller
+      treats these as freshness UNKNOWN — never silently fresh, never a hard
+      block (the enrich-only invariant). A whole-backend availability failure is
+      NOT reported here; it raises :class:`RegistryUnavailableError` so the
+      caller can degrade with a distinct, discriminated reason.
+    """
+
+    resolved: dict[str, str]
+    unresolved: list[str]
 
 
 def resolve_files_batch_via_loop(
@@ -342,6 +370,16 @@ def loomweave_capabilities_url(base_url: str) -> str:
 def loomweave_identity_resolve_batch_url(base_url: str) -> str:
     """Build the Loomweave batched locator→SEI resolve URL (ADR-038, REQ-F-02)."""
     return f"{base_url.rstrip('/')}/api/v1/identity/resolve:batch"
+
+
+def loomweave_identity_sei_url(base_url: str, sei: str) -> str:
+    """Build the Loomweave by-SEI resolve URL (``GET /api/v1/identity/sei/{sei}``).
+
+    The SEI carries reserved ``:`` separators, so the segment is percent-encoded
+    (Loomweave's axum router decodes it back). The endpoint returns the entity's
+    current ``content_hash`` for an alive SEI — the by-SEI counterpart to the
+    locator-keyed ``resolve:batch`` surface (ADR-038)."""
+    return f"{base_url.rstrip('/')}/api/v1/identity/sei/{quote(sei, safe='')}"
 
 
 def _is_loopback_origin(url: str) -> bool:
@@ -1051,6 +1089,161 @@ class LoomweaveRegistry:
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
         return SeiResolution(resolved=resolved, orphaned=orphaned, already_migrated=already_migrated)
+
+    def resolve_entity_content_hashes(self, entity_ids: list[str]) -> EntityHashResolution:
+        """Resolve opaque entity ids to their CURRENT Loomweave ``content_hash``.
+
+        The closure gate's drift-comparison input. Filigree treats the entity id
+        as opaque except for the one sanctioned peek — the frozen SEI prefix —
+        which selects the resolution endpoint (mirrors ``sei_backfill``):
+
+        - ``loomweave:eid:`` SEIs → ``GET /api/v1/identity/sei/{sei}``
+          (``resolve_sei``), which returns ``content_hash`` for an alive SEI.
+        - everything else (locators) → ``POST /api/v1/identity/resolve:batch``,
+          which returns ``content_hash`` per alive locator and routes SEI-shaped
+          / malformed inputs to its own ``invalid`` channel.
+
+        Both endpoints carry ``content_hash`` only for an ALIVE entity; an
+        orphaned / not_found / invalid id is omitted from ``resolved`` and listed
+        in ``unresolved`` (UNKNOWN to the caller, never silently fresh).
+        Whole-backend availability failures (network / timeout / 5xx / auth /
+        malformed body) raise :class:`RegistryUnavailableError`; the caller
+        degrades to UNKNOWN without hard-blocking (enrich-only).
+        """
+        resolved: dict[str, str] = {}
+        unresolved: list[str] = []
+        # Preserve first-seen order, drop duplicates, partition by id scheme.
+        seen: set[str] = set()
+        locators: list[str] = []
+        seis: list[str] = []
+        for eid in entity_ids:
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            (seis if eid.startswith(LOOMWEAVE_SEI_PREFIX) else locators).append(eid)
+
+        if locators:
+            locator_hashes = self._resolve_locator_content_hashes(locators)
+            for loc in locators:
+                current = locator_hashes.get(loc)
+                if current is not None:
+                    resolved[loc] = current
+                else:
+                    unresolved.append(loc)
+        for sei in seis:
+            current = self._resolve_sei_content_hash(sei)
+            if current is not None:
+                resolved[sei] = current
+            else:
+                unresolved.append(sei)
+        return EntityHashResolution(resolved=resolved, unresolved=unresolved)
+
+    def _resolve_locator_content_hashes(self, locators: list[str]) -> dict[str, str]:
+        """Resolve locators → current ``content_hash`` via ``resolve:batch``.
+
+        Returns a map of submitted locator → current content_hash for ALIVE
+        locators only; a locator Loomweave reports in ``not_found`` / ``invalid``
+        (or as a non-alive resolved record) is simply absent from the map. Chunks
+        at the 256 per-batch cap like the sibling resolve paths.
+        """
+        out: dict[str, str] = {}
+        url = loomweave_identity_resolve_batch_url(self.base_url)
+        for start in range(0, len(locators), LOOMWEAVE_BATCH_MAX_QUERIES):
+            chunk = locators[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
+            payload = self._request_identity_json("POST", url, body={"locators": chunk})
+            resolved = payload.get("resolved")
+            if not isinstance(resolved, dict):
+                msg = f"Loomweave identity resolve at {url}: 'resolved' must be an object"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+            for locator, record in resolved.items():
+                if not isinstance(record, dict) or record.get("alive") is not True:
+                    continue
+                content_hash = record.get("content_hash")
+                if isinstance(content_hash, str) and content_hash:
+                    out[locator] = content_hash
+        return out
+
+    def _resolve_sei_content_hash(self, sei: str) -> str | None:
+        """Resolve a single SEI → current ``content_hash`` via ``GET .../sei/{sei}``.
+
+        Returns the content_hash for an alive SEI, or ``None`` when Loomweave
+        reports it ``alive:false`` (orphaned) — there is no batch by-SEI surface,
+        so this is a per-SEI read (governed bindings per issue are few).
+
+        FEDERATION-CONTRACT GAP (flag for the hub): Loomweave's *implementation*
+        (``http_read/identity.rs::get_identity_sei``) returns ``content_hash`` on
+        the by-SEI response today, but the blessed ``weft-sei-conformance-oracle``
+        only documents it on the by-*locator* shape (``resolve_locator``), NOT on
+        ``resolve_sei``. So the locator path rests on a blessed field while the
+        SEI path rests on an un-blessed implementation detail. A future
+        "conform Loomweave to the oracle" pass could legitimately trim
+        content_hash from this response, at which point SEI-form drift detection
+        degrades to UNKNOWN (enrich-only — fails safe, never silently fresh). The
+        durable fix is to bless content_hash on ``resolve_sei`` in the oracle;
+        until then this dependency is intentional and self-degrading."""
+        url = loomweave_identity_sei_url(self.base_url, sei)
+        payload = self._request_identity_json("GET", url)
+        if payload.get("alive") is True:
+            content_hash = payload.get("content_hash")
+            if isinstance(content_hash, str) and content_hash:
+                return content_hash
+        return None
+
+    def _request_identity_json(self, method: str, url: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Issue an identity-resolve request and return its parsed JSON object.
+
+        Shares the deadline / retry / backoff budget of the other read paths
+        (transient 5xx and network failures retry; auth and other non-2xx are
+        deterministic and raise immediately). Every failure mode — connectivity,
+        non-2xx, malformed body — raises :class:`RegistryUnavailableError` so the
+        single drift-resolution consumer has one exception to degrade on.
+        """
+        has_body = body is not None
+        deadline = time.monotonic() + self.timeout_seconds
+        attempt = 1
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Loomweave identity request unreachable at {url}: retry budget exhausted"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="timeout")
+            try:
+                response = self._http_client.request(
+                    method,
+                    url,
+                    json=body if has_body else None,
+                    headers=self._headers_for_request(url, has_body=has_body),
+                    timeout=remaining,
+                )
+                raw = response.text
+                if response.status_code >= 400:
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                        self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
+                        self._sleep_before_retry(deadline)
+                        attempt += 1
+                        continue
+                    reason = response.reason_phrase
+                    cause_kind = "auth" if response.status_code == 401 else "http_error"
+                    msg = f"Loomweave identity request rejected at {url}: HTTP {response.status_code} {reason}"
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind=cause_kind)
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if self._should_retry_read(attempt, deadline):
+                    self._log_retry(url=url, attempt=attempt, cause_kind="network")
+                    self._sleep_before_retry(deadline)
+                    attempt += 1
+                    continue
+                msg = f"Loomweave identity request unreachable at {url}: {exc}"
+                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="network") from exc
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            msg = f"Loomweave identity request returned invalid JSON from {url}: {exc}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response") from exc
+        if not isinstance(payload, dict):
+            msg = f"Loomweave identity request returned non-object response from {url}: {type(payload).__name__}"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        return payload
 
     def is_displaced(self) -> bool:
         return True
