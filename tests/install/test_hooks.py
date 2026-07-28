@@ -26,6 +26,7 @@ from filigree.hooks import (
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS,
+    FILIGREE_INSTRUCTIONS_MARKER,
     FILIGREE_WRITER_MARKER,
     _instructions_hash,
     inject_instructions,
@@ -1290,3 +1291,74 @@ class TestSanitizeContextTitle:
         result = _sanitize_context_title(title)
         assert len(result) == CONTEXT_TITLE_MAX_LEN
         assert result == "C" * (CONTEXT_TITLE_MAX_LEN - 3) + "..."
+
+
+class TestFreshnessRedirectAware:
+    """SessionStart honours the CLAUDE.md -> AGENTS.md redirect (C-20 /
+    weft-6a1fdb0192). The freshness path routes through the same injector, so
+    a pointer-only CLAUDE.md must never end up carrying a block."""
+
+    REDIRECT = "# PROJECT\n\nContext lives in AGENTS.md.\n\n@AGENTS.md\n"
+
+    def test_migrates_legacy_block_even_when_its_hash_is_current(self, tmp_path: Path) -> None:
+        """The staleness short-circuit must not skip the migration.
+
+        A *current* block in CLAUDE.md is the case a hash check would wave
+        through forever — so it is exactly the case that must migrate.
+        """
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(self.REDIRECT)
+        inject_instructions(claude_md)  # redirect-aware: writes AGENTS.md
+        # Re-plant a legacy CLAUDE.md block carrying the CURRENT hash.
+        claude_md.write_text(f"{self.REDIRECT}\n{FILIGREE_INSTRUCTIONS}\n")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert any("Migrated" in m for m in messages), messages
+        assert FILIGREE_INSTRUCTIONS_MARKER not in claude_md.read_text()
+        assert "@AGENTS.md" in claude_md.read_text()
+        assert FILIGREE_INSTRUCTIONS in (tmp_path / "AGENTS.md").read_text()
+
+    def test_migrates_stale_legacy_block(self, tmp_path: Path) -> None:
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            f"{self.REDIRECT}\n<!-- filigree:instructions:v0.0.0:00000000 -->\nold instructions\n<!-- /filigree:instructions -->\n"
+        )
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert any("Migrated" in m for m in messages), messages
+        assert FILIGREE_INSTRUCTIONS_MARKER not in claude_md.read_text()
+        assert _instructions_hash() in (tmp_path / "AGENTS.md").read_text()
+
+    def test_pointer_only_claude_md_is_left_alone(self, tmp_path: Path) -> None:
+        """No block to migrate, nothing to say — and no block gets created."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(self.REDIRECT)
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert messages == []
+        assert claude_md.read_text() == self.REDIRECT
+        assert not (tmp_path / "AGENTS.md").exists()
+
+    def test_agents_md_still_refreshes_under_a_redirect(self, tmp_path: Path) -> None:
+        (tmp_path / "CLAUDE.md").write_text(self.REDIRECT)
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("<!-- filigree:instructions:v0.0.0:00000000 -->\nold\n<!-- /filigree:instructions -->\n")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert any("AGENTS.md" in m for m in messages)
+        assert _instructions_hash() in agents_md.read_text()
+
+    def test_non_redirect_project_keeps_dual_write(self, tmp_path: Path) -> None:
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(
+            "# P\n\nreal content\n\n<!-- filigree:instructions:v0.0.0:00000000 -->\nold\n<!-- /filigree:instructions -->\n"
+        )
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert any(m == "Updated filigree instructions in CLAUDE.md" for m in messages), messages
+        assert _instructions_hash() in claude_md.read_text()

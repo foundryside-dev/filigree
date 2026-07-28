@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from filigree.cli import cli
+from filigree.install import FILIGREE_INSTRUCTIONS_MARKER
 from tests.cli.conftest import _extract_id
 
 
@@ -442,6 +443,47 @@ class TestInstallCli:
         result = runner.invoke(cli, ["install", "--claude-md"])
         assert result.exit_code == 0
         assert "CLAUDE.md" in result.output
+
+    def test_install_all_writes_one_block_in_a_redirect_project(
+        self, cli_in_project: tuple[CliRunner, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C-20 (weft-6a1fdb0192): CLAUDE.md redirects -> AGENTS.md gets the
+        block, CLAUDE.md keeps none, and the two install steps do not both
+        claim to have written the same file."""
+        runner, project = cli_in_project
+        codex_home = project / ".test-home"
+        codex_home.mkdir()
+        monkeypatch.setattr("filigree.install_support.integrations.Path.home", lambda: codex_home)
+        (project / "CLAUDE.md").write_text("# P\n\nContext lives in AGENTS.md.\n\n@AGENTS.md\n")
+
+        result = runner.invoke(cli, ["install"])
+
+        assert result.exit_code == 0, result.output
+        assert FILIGREE_INSTRUCTIONS_MARKER not in (project / "CLAUDE.md").read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER in (project / "AGENTS.md").read_text()
+        # One reported action, not two lines claiming the same write.
+        reporting_lines = [line for line in result.output.splitlines() if "AGENTS.md" in line]
+        assert len(reporting_lines) == 1, result.output
+        assert "redirects" in reporting_lines[0]
+
+    def test_install_agents_md_only_still_works_under_redirect(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project = cli_in_project
+        (project / "CLAUDE.md").write_text("# P\n\n@AGENTS.md\n")
+
+        result = runner.invoke(cli, ["install", "--agents-md"])
+
+        assert result.exit_code == 0, result.output
+        assert FILIGREE_INSTRUCTIONS_MARKER in (project / "AGENTS.md").read_text()
+
+    def test_install_claude_md_only_redirects_under_redirect(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        runner, project = cli_in_project
+        (project / "CLAUDE.md").write_text("# P\n\n@AGENTS.md\n")
+
+        result = runner.invoke(cli, ["install", "--claude-md"])
+
+        assert result.exit_code == 0, result.output
+        assert FILIGREE_INSTRUCTIONS_MARKER not in (project / "CLAUDE.md").read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER in (project / "AGENTS.md").read_text()
 
     def test_install_codex_skills_flag(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, project = cli_in_project

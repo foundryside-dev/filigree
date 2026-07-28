@@ -314,6 +314,7 @@ def install(
         install_codex_mcp,
         install_codex_skills,
         install_skills,
+        is_agents_md_redirect,
     )
 
     try:
@@ -364,6 +365,13 @@ def install(
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server config port; defaulting to 8377", exc_info=True)
 
+    # C-20 (weft-6a1fdb0192): in a project whose CLAUDE.md just redirects to
+    # AGENTS.md, the CLAUDE.md step already maintains the AGENTS.md block (and
+    # migrates any legacy CLAUDE.md block off), so running both steps would
+    # write one file twice and print two lines for one action. `--agents-md`
+    # on its own still runs — it is correct standalone.
+    _agents_md_covered_by_claude_md_step = (install_all or claude_md) and is_agents_md_redirect(project_root / "CLAUDE.md")
+
     install_steps: list[tuple[bool, str, Callable[[], tuple[bool, str]]]] = [
         (
             install_all or claude_code,
@@ -381,7 +389,7 @@ def install(
             lambda: inject_instructions(project_root / "CLAUDE.md"),
         ),
         (
-            install_all or agents_md,
+            (install_all or agents_md) and not _agents_md_covered_by_claude_md_step,
             "AGENTS.md",
             lambda: inject_instructions(project_root / "AGENTS.md"),
         ),

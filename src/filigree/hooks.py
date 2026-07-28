@@ -35,6 +35,7 @@ from filigree.install import (
     inject_instructions,
     install_codex_skills,
     install_skills,
+    is_agents_md_redirect,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,12 @@ def _check_instructions_freshness(project_root: Path) -> list[str]:
     messages: list[str] = []
     current_hash = _instructions_hash()
 
+    # C-20 (weft-6a1fdb0192): when CLAUDE.md is a pointer at AGENTS.md, the
+    # block belongs in AGENTS.md alone. The freshness path must honour that
+    # too, or a legacy CLAUDE.md block whose hash happens to be current would
+    # never migrate — the staleness short-circuit below would skip it forever.
+    redirects_to_agents = is_agents_md_redirect(project_root / "CLAUDE.md")
+
     # Check CLAUDE.md and AGENTS.md
     for filename in ("CLAUDE.md", "AGENTS.md"):
         md_path = project_root / filename
@@ -233,6 +240,13 @@ def _check_instructions_freshness(project_root: Path) -> list[str]:
         if not content.strip():
             inject_instructions(md_path)
             messages.append(f"Restored filigree instructions in empty {filename}")
+            continue
+        if filename == "CLAUDE.md" and redirects_to_agents:
+            if FILIGREE_INSTRUCTIONS_MARKER in content:
+                # inject_instructions is redirect-aware: it refreshes the
+                # AGENTS.md block and strips this legacy one.
+                inject_instructions(md_path)
+                messages.append("Migrated filigree instructions from CLAUDE.md to AGENTS.md (CLAUDE.md redirects there)")
             continue
         if FILIGREE_INSTRUCTIONS_MARKER not in content:
             continue

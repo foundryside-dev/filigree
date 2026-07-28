@@ -45,6 +45,7 @@ from filigree.install import (
     install_codex_mcp,
     install_codex_skills,
     install_skills,
+    is_agents_md_redirect,
     run_doctor,
 )
 
@@ -3167,3 +3168,221 @@ class TestMalformedMcpJson:
         assert ok
         data = json.loads(mcp_json.read_text())
         assert "filigree" in data["mcpServers"]
+
+
+# ===========================================================================
+# CLAUDE.md -> AGENTS.md redirect awareness (C-20 / weft-6a1fdb0192)
+# ===========================================================================
+
+_REDIRECT_CLAUDE_MD = (
+    "# PROJECT\n\nAll shared agent context lives in AGENTS.md — the single\nsource of truth for every agent.\n\n@AGENTS.md\n"
+)
+
+
+class TestAgentsMdRedirectDetection:
+    """`is_agents_md_redirect` — what counts as a pointer file."""
+
+    def test_bare_import_line_is_a_redirect(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(_REDIRECT_CLAUDE_MD)
+        assert is_agents_md_redirect(claude)
+
+    @pytest.mark.parametrize("line", ["@AGENTS.md", "@./AGENTS.md", "@agents.md", "@./Agents.MD", "  @AGENTS.md  "])
+    def test_accepted_spellings(self, tmp_path: Path, line: str) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"# P\n\n{line}\n")
+        assert is_agents_md_redirect(claude)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "see @AGENTS.md for details",  # prose about the file, not a redirect
+            "@AGENTS.md.bak",
+            "@/AGENTS.md",  # absolute path, not the project-relative import
+            "@OTHER.md",
+            "AGENTS.md",  # no @ — just a filename mention
+        ],
+    )
+    def test_rejected_spellings(self, tmp_path: Path, line: str) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"# P\n\n{line}\n")
+        assert not is_agents_md_redirect(claude)
+
+    def test_import_inside_a_foreign_block_does_not_trigger(self, tmp_path: Path) -> None:
+        """A sibling tool's payload is not this project's redirect declaration."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "# P\n\n"
+            "<!-- wardline:instructions:v1:abcd1234 -->\n"
+            "Wardline says: put `@AGENTS.md` at the top of CLAUDE.md.\n"
+            "@AGENTS.md\n"
+            "<!-- /wardline:instructions -->\n"
+        )
+        assert not is_agents_md_redirect(claude)
+
+    def test_import_inside_our_own_block_does_not_trigger(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"# P\n\n{FILIGREE_INSTRUCTIONS_MARKER}:v1:abcd1234 -->\n@AGENTS.md\n<!-- /filigree:instructions -->\n")
+        assert not is_agents_md_redirect(claude)
+
+    def test_import_outside_a_foreign_block_still_triggers(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"# P\n\n@AGENTS.md\n\n{_WARDLINE_BLOCK}\n")
+        assert is_agents_md_redirect(claude)
+
+    def test_unclosed_block_is_conservative(self, tmp_path: Path) -> None:
+        """A malformed file must not be enough to migrate a block."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# P\n\n<!-- wardline:instructions:v1:abcd1234 -->\nbody, never closed\n\n@AGENTS.md\n")
+        assert not is_agents_md_redirect(claude)
+
+    def test_missing_file_is_not_a_redirect(self, tmp_path: Path) -> None:
+        assert not is_agents_md_redirect(tmp_path / "CLAUDE.md")
+
+
+class TestInjectInstructionsRedirect:
+    """The installer writes one block per project, in the right file."""
+
+    def test_block_lands_only_in_agents_md(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(_REDIRECT_CLAUDE_MD)
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# Agent guide\n\nproject prose\n")
+
+        ok, msg = inject_instructions(claude)
+
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER not in claude.read_text()
+        assert FILIGREE_INSTRUCTIONS in agents.read_text()
+        assert "AGENTS.md" in msg
+        # The redirect declaration itself must survive untouched.
+        assert "@AGENTS.md" in claude.read_text()
+        assert "project prose" in agents.read_text()
+
+    def test_missing_agents_md_is_created(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(_REDIRECT_CLAUDE_MD)
+
+        ok, _msg = inject_instructions(claude)
+
+        assert ok
+        agents = tmp_path / "AGENTS.md"
+        assert agents.exists()
+        assert FILIGREE_INSTRUCTIONS in agents.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in claude.read_text()
+
+    def test_legacy_claude_md_block_migrates_off(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# Agent guide\n")
+
+        ok, msg = inject_instructions(claude)
+
+        assert ok
+        remaining = claude.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in remaining
+        assert "@AGENTS.md" in remaining
+        assert "# PROJECT" in remaining
+        assert FILIGREE_INSTRUCTIONS in agents.read_text()
+        assert "migrated" in msg.lower()
+
+    def test_migration_preserves_a_foreign_block(self, tmp_path: Path) -> None:
+        """C-4 holds on both files: we only ever excise our own block."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n\n{_WARDLINE_BLOCK}\n")
+
+        ok, _msg = inject_instructions(claude)
+
+        assert ok
+        remaining = claude.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in remaining
+        assert "wardline body line" in remaining
+        assert "<!-- wardline:instructions:v1:abcd1234 -->" in remaining
+        assert "<!-- /wardline:instructions -->" in remaining
+
+    def test_redirect_injection_is_idempotent(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n")
+
+        inject_instructions(claude)
+        first_claude, first_agents = claude.read_text(), (tmp_path / "AGENTS.md").read_text()
+        inject_instructions(claude)
+
+        assert claude.read_text() == first_claude
+        assert (tmp_path / "AGENTS.md").read_text() == first_agents
+        assert first_agents.count(FILIGREE_INSTRUCTIONS_MARKER) == 1
+
+    def test_injecting_agents_md_directly_still_works_under_redirect(self, tmp_path: Path) -> None:
+        """`filigree install --agents-md` is correct standalone."""
+        (tmp_path / "CLAUDE.md").write_text(_REDIRECT_CLAUDE_MD)
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# Agent guide\n")
+
+        ok, _msg = inject_instructions(agents)
+
+        assert ok
+        assert FILIGREE_INSTRUCTIONS in agents.read_text()
+
+    def test_no_redirect_project_is_unchanged(self, tmp_path: Path) -> None:
+        """Dual-write behaviour is untouched when CLAUDE.md is real content."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# P\n\nreal project instructions, no import line\n")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# Agent guide\n")
+
+        inject_instructions(claude)
+        inject_instructions(agents)
+
+        assert FILIGREE_INSTRUCTIONS in claude.read_text()
+        assert FILIGREE_INSTRUCTIONS in agents.read_text()
+
+    def test_agents_md_symlink_is_refused_without_touching_claude_md(self, tmp_path: Path) -> None:
+        """Destination is validated BEFORE the source is mutated: never zero copies."""
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n")
+        outside = tmp_path / "elsewhere.md"
+        outside.write_text("# elsewhere\n")
+        (tmp_path / "AGENTS.md").symlink_to(outside)
+
+        ok, msg = inject_instructions(claude)
+
+        assert not ok
+        assert "symlink" in msg.lower()
+        # The legacy block is still there — the instructions did not vanish.
+        assert FILIGREE_INSTRUCTIONS_MARKER in claude.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in outside.read_text()
+
+
+class TestDoctorRedirect:
+    def test_redirect_claude_md_passes_without_a_block(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text(_REDIRECT_CLAUDE_MD)
+        inject_instructions(tmp_path / "CLAUDE.md")
+
+        results = {r.name: r for r in run_doctor(project_root=tmp_path)}
+
+        assert results["CLAUDE.md"].passed
+        assert "AGENTS.md" in results["CLAUDE.md"].message
+        assert results["AGENTS.md"].passed
+
+    def test_redirect_with_legacy_block_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n")
+
+        results = {r.name: r for r in run_doctor(project_root=tmp_path)}
+
+        assert not results["CLAUDE.md"].passed
+        assert "legacy" in results["CLAUDE.md"].message.lower()
+
+    def test_redirect_without_agents_md_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text(_REDIRECT_CLAUDE_MD)
+
+        results = {r.name: r for r in run_doctor(project_root=tmp_path)}
+
+        assert not results["AGENTS.md"].passed
+        assert "redirects" in results["AGENTS.md"].message.lower()
