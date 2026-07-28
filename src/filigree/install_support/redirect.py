@@ -75,10 +75,19 @@ def is_agents_md_redirect(claude_md: Path) -> bool:
     @-import of AGENTS.md (``@AGENTS.md`` or ``@./AGENTS.md``,
     case-insensitive).
 
-    Known limitation: an ``@AGENTS.md`` line quoted inside a fenced code block
-    (rather than inside a managed block) still reads as a redirect. Managed
-    blocks are the case that occurs in practice — every weft tool writes one.
+    Known limitation, stated rather than silently accepted: an ``@AGENTS.md``
+    line quoted inside a ``` fenced markdown block (rather than inside a
+    *managed* block) still reads as a redirect. C-20 specifies managed-block
+    exclusion only, and the sibling members implement the same boundary —
+    uniform beats locally-clever.
+
+    Every doubtful input reads as NO redirect, keeping dual-write: absent,
+    unreadable, non-UTF-8 or symlinked CLAUDE.md all return False. A redundant
+    block is recoverable; silently abandoning the block a project actually
+    reads is not.
     """
+    if claude_md.is_symlink():
+        return False
     try:
         content = claude_md.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

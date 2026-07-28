@@ -276,7 +276,11 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
 @click.command()
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
-@click.option("--claude-md", is_flag=True, help="Inject instructions into CLAUDE.md only")
+@click.option(
+    "--claude-md",
+    is_flag=True,
+    help="Inject instructions into CLAUDE.md only (into AGENTS.md when CLAUDE.md only redirects there)",
+)
 @click.option("--agents-md", is_flag=True, help="Inject instructions into AGENTS.md only")
 @click.option("--gitignore", is_flag=True, help="Add .filigree/ to .gitignore only")
 @click.option("--hooks", "hooks_only", is_flag=True, help="Install Claude Code hooks only")

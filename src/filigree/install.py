@@ -340,10 +340,12 @@ def _inject_via_redirect_locked(claude_md: Path) -> tuple[bool, str]:
     if not ok:
         return ok, msg
 
-    migrated = _strip_own_block_locked(claude_md)
+    migration = _strip_own_block_locked(claude_md)
     detail = f"{CLAUDE_MD_FILENAME} redirects to {AGENTS_MD_FILENAME}: {msg[0].lower()}{msg[1:]}"
-    if migrated:
+    if migration == "removed":
         detail += f" (migrated legacy block out of {claude_md})"
+    elif migration == "refused":
+        detail += f" (legacy block left in {claude_md}: ownership boundary not provable — resolve by hand)"
     return True, detail
 
 
@@ -396,21 +398,86 @@ def _own_block_bounds(content: str, file_path: Path) -> tuple[int, int, str]:
     return start, bound, sep
 
 
-def _strip_own_block_locked(file_path: Path) -> bool:
-    """Remove filigree's managed block from *file_path*; True when one was removed.
+def _provable_own_block_span(content: str) -> tuple[int, int] | None:
+    """Span of filigree's managed block when ownership is PROVABLE, else ``None``.
 
-    Same foreign-safe bounding as the replace path: only our own block is ever
-    excised. Refuses to leave the file blank — a file that is nothing but our
-    block is left alone rather than emptied (``_atomic_write_text`` would
-    refuse the write anyway).
+    Removal is deliberately more conservative than its inject twin. Injection
+    can always fall back to an append — which deletes nothing — so it may bound
+    a malformed block at a foreign fence and recover. A mis-bounded *delete*
+    eats a sibling tool's block and has no safe fallback. So every case where
+    ownership is not provable is a no-op:
+
+      - no top-level filigree open fence (including one shielded by an unclosed
+        sibling block) — nothing to remove;
+      - our close marker missing, or sitting beyond a foreign fence — refuse;
+      - split brain (more than one top-level own block) — refuse, matching
+        doctor's "resolve it by hand" posture rather than guessing which copy
+        to drop.
+
+    This mirrors the normative legis implementation of C-20 so the members
+    behave identically on the same file.
+    """
+    spans: list[tuple[int, int]] = []
+    open_ns: str | None = None
+    open_at = 0
+    unresolved = False
+    for m in _INSTR_FENCE_RE.finditer(content):
+        is_close = "/" in m.group(0)
+        ns = m.group(1).lower()
+        if open_ns is None:
+            if not is_close:
+                open_ns, open_at = ns, m.start()
+        elif is_close and ns == open_ns:
+            if open_ns == "filigree":
+                close_end = content.find("-->", m.start())
+                if close_end == -1:
+                    unresolved = True
+                else:
+                    spans.append((open_at, close_end + len("-->")))
+            open_ns = None
+        elif not is_close:
+            # An open fence inside an unclosed block: the file's block
+            # structure is malformed, so no span in it is provable — including
+            # an own marker merely *shielded* by an unclosed sibling block.
+            unresolved = True
+            open_ns, open_at = ns, m.start()
+    # An unclosed foreign block trailing a cleanly-closed own block is fine;
+    # an unclosed own block is not.
+    unresolved = unresolved or open_ns == "filigree"
+
+    if unresolved or len(spans) != 1:
+        return None
+    return spans[0]
+
+
+def _strip_own_block_locked(file_path: Path) -> str:
+    """Remove filigree's managed block from *file_path*.
+
+    Returns ``"removed"``, ``"absent"`` (no block to remove) or ``"refused"``
+    (a block is present but ownership is not provable — see
+    :func:`_provable_own_block_span`; it is left in place and reported).
+
+    Refuses to leave the file blank — a file that is nothing but our block is
+    left alone rather than emptied (``_atomic_write_text`` would refuse the
+    write anyway).
     """
     if not file_path.exists():
-        return False
+        return "absent"
     content = file_path.read_text()
     if FILIGREE_INSTRUCTIONS_MARKER not in content:
-        return False
+        return "absent"
 
-    start, bound, _sep = _own_block_bounds(content, file_path)
+    span = _provable_own_block_span(content)
+    if span is None:
+        logger.warning(
+            "left the filigree instruction block in %s in place: its ownership "
+            "boundary is not provable (unclosed block, missing close marker, or "
+            "more than one copy). Removing it could delete another tool's block. "
+            "Resolve it by hand.",
+            file_path,
+        )
+        return "refused"
+    start, bound = span
     head, tail = content[:start], content[bound:]
     if head.strip() and tail.strip():
         remainder = head.rstrip("\n") + "\n\n" + tail.lstrip("\n")
@@ -418,9 +485,9 @@ def _strip_own_block_locked(file_path: Path) -> bool:
         remainder = (head.rstrip("\n") + "\n") if head.strip() else tail.lstrip("\n")
     if not remainder.strip():
         logger.debug("not stripping the filigree block from %s: nothing else in the file", file_path)
-        return False
+        return "refused"
     _atomic_write_text(file_path, remainder)
-    return True
+    return "removed"
 
 
 def _inject_instructions_locked(file_path: Path) -> tuple[bool, str]:

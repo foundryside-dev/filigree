@@ -1324,12 +1324,41 @@ class TestFreshnessRedirectAware:
         claude_md.write_text(
             f"{self.REDIRECT}\n<!-- filigree:instructions:v0.0.0:00000000 -->\nold instructions\n<!-- /filigree:instructions -->\n"
         )
+        (tmp_path / "AGENTS.md").write_text(f"# Agent guide\n\n{FILIGREE_INSTRUCTIONS}\n")
 
         messages = _check_instructions_freshness(tmp_path)
 
         assert any("Migrated" in m for m in messages), messages
         assert FILIGREE_INSTRUCTIONS_MARKER not in claude_md.read_text()
         assert _instructions_hash() in (tmp_path / "AGENTS.md").read_text()
+
+    def test_does_not_migrate_when_agents_md_has_no_block(self, tmp_path: Path) -> None:
+        """This hook refreshes what is installed; it never installs.
+
+        Migrating while AGENTS.md carries nothing would leave the session with
+        NO filigree guidance. A duplicate block is the cheaper failure —
+        `filigree install` does the real migration. (Normative legis rule.)
+        """
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(f"{self.REDIRECT}\n{FILIGREE_INSTRUCTIONS}\n")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert messages == []
+        assert FILIGREE_INSTRUCTIONS_MARKER in claude_md.read_text()
+        assert not (tmp_path / "AGENTS.md").exists()
+
+    def test_does_not_migrate_when_agents_md_exists_without_a_block(self, tmp_path: Path) -> None:
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(f"{self.REDIRECT}\n{FILIGREE_INSTRUCTIONS}\n")
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("# Agent guide\n\nno filigree block here\n")
+
+        messages = _check_instructions_freshness(tmp_path)
+
+        assert messages == []
+        assert FILIGREE_INSTRUCTIONS_MARKER in claude_md.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in agents_md.read_text()
 
     def test_pointer_only_claude_md_is_left_alone(self, tmp_path: Path) -> None:
         """No block to migrate, nothing to say — and no block gets created."""

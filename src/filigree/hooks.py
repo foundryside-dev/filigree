@@ -215,6 +215,14 @@ def _extract_marker_hash(content: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _has_instruction_block(md_path: Path) -> bool:
+    """True when *md_path* exists and already carries filigree's managed block."""
+    try:
+        return FILIGREE_INSTRUCTIONS_MARKER in md_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _check_instructions_freshness(project_root: Path) -> list[str]:
     """Check whether CLAUDE.md/AGENTS.md instructions and skills are current.
 
@@ -242,7 +250,13 @@ def _check_instructions_freshness(project_root: Path) -> list[str]:
             messages.append(f"Restored filigree instructions in empty {filename}")
             continue
         if filename == "CLAUDE.md" and redirects_to_agents:
-            if FILIGREE_INSTRUCTIONS_MARKER in content:
+            # Migrate ONLY once AGENTS.md already carries a block. This hook
+            # refreshes what is installed and never installs, so migrating
+            # while AGENTS.md is empty would leave the session with NO filigree
+            # guidance at all. A duplicate block is the far cheaper failure;
+            # `filigree install` does the real migration. (Matches the
+            # normative legis implementation of C-20.)
+            if FILIGREE_INSTRUCTIONS_MARKER in content and _has_instruction_block(project_root / "AGENTS.md"):
                 # inject_instructions is redirect-aware: it refreshes the
                 # AGENTS.md block and strips this legacy one.
                 inject_instructions(md_path)

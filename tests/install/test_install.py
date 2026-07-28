@@ -37,6 +37,7 @@ from filigree.install import (
     _has_hook_command,
     _instructions_hash,
     _instructions_version,
+    _strip_own_block_locked,
     ensure_filigree_dir_gitignore,
     ensure_gitignore,
     inject_instructions,
@@ -3354,6 +3355,73 @@ class TestInjectInstructionsRedirect:
         assert FILIGREE_INSTRUCTIONS_MARKER not in outside.read_text()
 
 
+class TestRedirectMigrationIsConservative:
+    """Removal has no safe fallback, so it refuses whenever ownership is not
+    provable (C-20, mirroring the normative legis implementation). A
+    mis-bounded delete would eat a sibling tool's block."""
+
+    def test_refuses_when_our_close_marker_is_missing(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS_MARKER}:v1:abcd1234 -->\nunclosed body\n")
+
+        ok, msg = inject_instructions(claude)
+
+        assert ok  # AGENTS.md still gets the block
+        assert FILIGREE_INSTRUCTIONS in (tmp_path / "AGENTS.md").read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER in claude.read_text()  # left in place
+        assert "not provable" in msg
+
+    def test_refuses_on_split_brain(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n\n{_WARDLINE_BLOCK}\n\n{FILIGREE_INSTRUCTIONS}\n")
+
+        ok, msg = inject_instructions(claude)
+
+        assert ok
+        assert claude.read_text().count(FILIGREE_INSTRUCTIONS_MARKER) == 2  # nothing deleted
+        assert "wardline body line" in claude.read_text()
+        assert "not provable" in msg
+
+    def test_refuses_when_our_marker_is_shielded_by_an_unclosed_sibling(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n<!-- wardline:instructions:v1:abcd1234 -->\nnever closed\n\n{FILIGREE_INSTRUCTIONS}\n")
+
+        ok, _msg = inject_instructions(claude)
+
+        assert ok
+        assert FILIGREE_INSTRUCTIONS_MARKER in claude.read_text()
+        assert "never closed" in claude.read_text()
+
+    def test_file_that_is_nothing_but_our_block_is_left_alone(self, tmp_path: Path) -> None:
+        """A redirect can't happen here, so drive the stripper directly."""
+        target = tmp_path / "CLAUDE.md"
+        target.write_text(f"{FILIGREE_INSTRUCTIONS}\n")
+
+        assert _strip_own_block_locked(target) == "refused"
+        assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
+
+    def test_crlf_file_migrates_and_normalises_like_inject(self, tmp_path: Path) -> None:
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_bytes(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n".replace("\n", "\r\n").encode())
+
+        ok, _msg = inject_instructions(claude)
+
+        assert ok
+        remaining = claude.read_text()
+        assert FILIGREE_INSTRUCTIONS_MARKER not in remaining
+        assert "@AGENTS.md" in remaining
+        assert FILIGREE_INSTRUCTIONS in (tmp_path / "AGENTS.md").read_text()
+
+    def test_symlinked_claude_md_is_not_a_redirect(self, tmp_path: Path) -> None:
+        """Doubtful input keeps dual-write rather than migrating."""
+        real = tmp_path / "elsewhere.md"
+        real.write_text(_REDIRECT_CLAUDE_MD)
+        claude = tmp_path / "CLAUDE.md"
+        claude.symlink_to(real)
+
+        assert not is_agents_md_redirect(claude)
+
+
 class TestDoctorRedirect:
     def test_redirect_claude_md_passes_without_a_block(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _setup_project(tmp_path)
@@ -3376,6 +3444,23 @@ class TestDoctorRedirect:
 
         assert not results["CLAUDE.md"].passed
         assert "legacy" in results["CLAUDE.md"].message.lower()
+
+    def test_fix_converges_on_a_legacy_block(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The reported failure must actually clear: fix once, then pass."""
+        _setup_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"{_REDIRECT_CLAUDE_MD}\n{FILIGREE_INSTRUCTIONS}\n")
+
+        before = {r.name: r for r in run_doctor(project_root=tmp_path)}
+        assert not before["CLAUDE.md"].passed
+
+        # What `doctor --fix` runs for the claude_md check.
+        inject_instructions(claude)
+
+        after = {r.name: r for r in run_doctor(project_root=tmp_path)}
+        assert after["CLAUDE.md"].passed, after["CLAUDE.md"].message
+        assert after["AGENTS.md"].passed, after["AGENTS.md"].message
 
     def test_redirect_without_agents_md_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _setup_project(tmp_path)
