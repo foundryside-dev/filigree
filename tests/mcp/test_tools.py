@@ -2842,7 +2842,7 @@ def _skill_text(rel: str) -> str:
 class TestInstructionsUpdate:
     """The injected block is intentionally lean — command catalogues are
     discoverable via `--help` and MCP tool schemas, and the depth lives in the
-    on-demand skill pack. C-18 (weft-6a1fdb0192) budgets the block to 800
+    on-demand skill pack. C-20 (weft-6a1fdb0192) budgets the block to 800
     characters: what it must still pre-load is the entry point and the two
     rules an agent cannot discover from `--help`. Everything else was
     *relocated*, not dropped — the tests below pin each piece at its new home
@@ -2870,7 +2870,7 @@ class TestInstructionsUpdate:
         assert "--help" in FILIGREE_INSTRUCTIONS
 
     def test_instructions_stay_within_c18_budget(self) -> None:
-        """C-18 budget: <= 800 chars for the injected template (weft-6a1fdb0192).
+        """C-20 budget: <= 800 chars for the injected template (weft-6a1fdb0192).
 
         Measured on the template, not the assembled block: the block embeds
         ``_instructions_version()``, which differs between a source checkout
@@ -2879,21 +2879,21 @@ class TestInstructionsUpdate:
         from filigree.install import _instructions_text
 
         text = _instructions_text()
-        assert len(text) <= 800, f"instructions.md is {len(text)} chars (C-18 budget: 800)"
+        assert len(text) <= 800, f"instructions.md is {len(text)} chars (C-20 budget: 800)"
         assert len(text.encode("utf-8")) <= 800
 
     def test_skill_stays_within_c18_budget(self) -> None:
-        """C-18 budget: <= 4000 chars for SKILL.md, <= 500 for its description."""
+        """C-20 budget: <= 4000 chars for SKILL.md, <= 500 for its description."""
         import re
 
         text = _skill_text("SKILL.md")
-        assert len(text) <= 4000, f"SKILL.md is {len(text)} chars (C-18 budget: 4000)"
+        assert len(text) <= 4000, f"SKILL.md is {len(text)} chars (C-20 budget: 4000)"
         assert len(text.encode("utf-8")) <= 4000
 
         frontmatter = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
         assert frontmatter is not None, "SKILL.md lost its frontmatter"
         description = frontmatter.group(1).split("description: >", 1)[1].strip()
-        assert len(description) <= 500, f"skill description is {len(description)} chars (C-18 budget: 500)"
+        assert len(description) <= 500, f"skill description is {len(description)} chars (C-20 budget: 500)"
 
     def test_observation_policy_lives_in_the_skill(self) -> None:
         """Relocated from the injected block to references/observations.md."""

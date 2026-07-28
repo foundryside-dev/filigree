@@ -466,7 +466,7 @@ class TestCLIActorValidationEnvelope:
 # enum (filigree-adbdda2ee5). Loaded the same way the package ships them.
 #
 # The enumeration lives in the skill's error-code reference sheet, not in the
-# always-loaded instruction block or SKILL.md body (weft-6a1fdb0192 / C-18):
+# always-loaded instruction block or SKILL.md body (weft-6a1fdb0192 / C-20):
 # those are budgeted, and a 16-value enum spent a third of the block. The
 # invariant is unchanged — exactly one bundled sheet carries the *complete*
 # list, and the surfaces above point at it (see the pointer test below). A

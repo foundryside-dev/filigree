@@ -56,7 +56,7 @@ LIVE_AGENT_DOCS = (
     "src/filigree/skills/filigree-workflow/SKILL.md",
     "src/filigree/skills/filigree-workflow/references/workflow-patterns.md",
     "src/filigree/skills/filigree-workflow/references/team-coordination.md",
-    # C-18 (weft-6a1fdb0192) relocated the tool-name-bearing prose out of the
+    # C-20 (weft-6a1fdb0192) relocated the tool-name-bearing prose out of the
     # budgeted SKILL.md into these sheets; the guard follows the content.
     "src/filigree/skills/filigree-workflow/references/commands.md",
     "src/filigree/skills/filigree-workflow/references/observations.md",
@@ -71,7 +71,7 @@ LIVE_AGENT_DOCS = (
 #     of a CLI command (`filigree observe`). Exempted ONLY in the two files
 #     where the bare token legitimately occurs as English/CLI:
 #     docs/federation/contracts.md (the `cli_commands/observations.py` command
-#     list) and references/observations.md ("Don't observe things…" — C-18
+#     list) and references/observations.md ("Don't observe things…" — C-20
 #     moved that prose out of SKILL.md, so the exemption moved with it). The
 #     bare-token guard stays ACTIVE for `observe` in the other files (mcp.md,
 #     instructions.md, SKILL.md, …) so a stale bare `observe` that should be
