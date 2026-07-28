@@ -5,6 +5,10 @@ The command catalogue is discoverable: `filigree --help` and `filigree <verb>
 authoritative for `mcp__filigree__*`. You do not need to memorise either. This
 sheet collects the parts an agent reaches for most, plus the project enums.
 
+Project data lives in the machine-owned store dir, resolved in this order: a
+`weft.toml` `[filigree].store_dir` override (project-relative only), then
+`.weft/filigree/`, then the legacy `.filigree/`.
+
 ## Priority Semantics
 
 | Priority | Meaning | Action |
