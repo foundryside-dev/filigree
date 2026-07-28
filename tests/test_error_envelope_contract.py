@@ -464,8 +464,19 @@ class TestCLIActorValidationEnvelope:
 # Bundled agent-instruction surfaces must enumerate every current ErrorCode, so
 # agents following installed/bundled guidance never branch on a stale, partial
 # enum (filigree-adbdda2ee5). Loaded the same way the package ships them.
+#
+# The enumeration lives in the skill's error-code reference sheet, not in the
+# always-loaded instruction block or SKILL.md body (weft-6a1fdb0192 / C-18):
+# those are budgeted, and a 16-value enum spent a third of the block. The
+# invariant is unchanged — exactly one bundled sheet carries the *complete*
+# list, and the surfaces above point at it (see the pointer test below). A
+# partial teaser anywhere would re-create the original defect.
 _INSTRUCTION_DOCS: list[str] = [
-    "data/instructions.md",
+    "skills/filigree-workflow/references/error-codes.md",
+]
+
+# Surfaces that must route an agent to the complete list rather than restate it.
+_ERROR_CODE_POINTER_DOCS: list[str] = [
     "skills/filigree-workflow/SKILL.md",
 ]
 
@@ -475,3 +486,10 @@ def test_bundled_instructions_enumerate_every_error_code(doc: str) -> None:
     text = (importlib.resources.files("filigree") / doc).read_text(encoding="utf-8")
     missing = sorted(code for code in _VALID_CODES if f"`{code}`" not in text)
     assert not missing, f"{doc} omits current ErrorCode value(s): {missing}"
+
+
+@pytest.mark.parametrize("doc", _ERROR_CODE_POINTER_DOCS)
+def test_bundled_instructions_point_at_the_error_code_sheet(doc: str) -> None:
+    """The pointer must not rot: the sheet is only reachable if it is named."""
+    text = (importlib.resources.files("filigree") / doc).read_text(encoding="utf-8")
+    assert "references/error-codes.md" in text, f"{doc} no longer points at the ErrorCode reference sheet"

@@ -45,6 +45,14 @@ _DOC_FILES = (
     _REPO_ROOT / "docs" / "agent-integration.md",
     _SRC_ROOT / "data" / "instructions.md",
     _SRC_ROOT / "skills" / "filigree-workflow" / "SKILL.md",
+    # C-18 (weft-6a1fdb0192) budgeted instructions.md and SKILL.md and moved
+    # the tool-naming prose into the skill's reference sheets. The guard
+    # follows the content, or it goes dark on everything that moved.
+    _SRC_ROOT / "skills" / "filigree-workflow" / "references" / "commands.md",
+    _SRC_ROOT / "skills" / "filigree-workflow" / "references" / "observations.md",
+    _SRC_ROOT / "skills" / "filigree-workflow" / "references" / "error-codes.md",
+    _SRC_ROOT / "skills" / "filigree-workflow" / "references" / "workflow-patterns.md",
+    _SRC_ROOT / "skills" / "filigree-workflow" / "references" / "team-coordination.md",
 )
 
 # A backticked OLD tool name. Longest-first alternation; the backticks are the
