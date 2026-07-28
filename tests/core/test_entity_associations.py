@@ -429,6 +429,31 @@ class TestReverseLookupLifecycleFacts:
         assert "claim_commit" not in fwd
         assert "close_commit" not in fwd
 
+    def test_forward_list_freshness_defaults_unknown(self, db: FiligreeDB) -> None:
+        """Without supplied current hashes the forward list keeps the ``unknown``
+        sentinel — the data layer never resolves drift itself (no network)."""
+        issue = db.create_issue("freshness default", priority=2)
+        db.add_entity_association(issue.id, "py:func:fresh-target", content_hash="h1", actor="alice")
+        (fwd,) = db.list_entity_associations(issue.id)
+        assert fwd["freshness_status"] == "unknown"
+
+    def test_forward_list_freshness_from_supplied_hashes(self, db: FiligreeDB) -> None:
+        """Bonus (RED-1): when a caller supplies resolved current hashes, the
+        forward list populates ``freshness_status`` per row (fresh / stale),
+        mirroring the reverse-lookup consumer-supplies-hashes convention."""
+        issue = db.create_issue("freshness supplied", priority=2)
+        db.add_entity_association(issue.id, "py:func:fresh", content_hash="h1", actor="alice")
+        db.add_entity_association(issue.id, "py:func:drifted", content_hash="h1", actor="alice")
+        rows = {
+            r["loomweave_entity_id"]: r
+            for r in db.list_entity_associations(
+                issue.id,
+                current_content_hashes={"py:func:fresh": "h1", "py:func:drifted": "h2"},
+            )
+        }
+        assert rows["py:func:fresh"]["freshness_status"] == "fresh"
+        assert rows["py:func:drifted"]["freshness_status"] == "stale"
+
     def test_closed_with_commit_row_exposes_close_commit(self, db: FiligreeDB) -> None:
         """The reverse row carries the close commit anchor (warpline correlates
         'changed since closed' on the COMMIT, not the clock)."""

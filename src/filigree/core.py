@@ -53,6 +53,7 @@ from filigree.registry import (
     DEFAULT_LOOMWEAVE_TOKEN_ENV,
     BatchQuery,
     BatchResolution,
+    EntityHashResolution,
     LocalRegistry,
     LoomweaveCapabilities,
     LoomweaveRegistry,
@@ -1453,6 +1454,22 @@ class _LoomweaveLocalFallbackRegistry:
                 },
             )
             return self._fallback.resolve_files_batch(queries, actor=actor)
+
+    def resolve_entity_content_hashes(self, entity_ids: list[str]) -> EntityHashResolution:
+        """Delegate entity content-hash resolution to the Loomweave primary.
+
+        There is no *local* analogue (a local registry cannot compute a drift
+        hash), so this only forwards. A whole-backend availability failure
+        propagates as :class:`RegistryUnavailableError` — the closure-gate
+        consumer catches it and degrades to a discriminated freshness UNKNOWN
+        without hard-blocking the close (enrich-only). A primary that predates
+        this surface (an older injected fake) resolves every id to UNKNOWN.
+        """
+        primary_method = getattr(self._primary, "resolve_entity_content_hashes", None)
+        if primary_method is None:
+            return EntityHashResolution(resolved={}, unresolved=list(entity_ids))
+        result: EntityHashResolution = primary_method(entity_ids)
+        return result
 
     def is_displaced(self) -> bool:
         return self._primary.is_displaced()
