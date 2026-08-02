@@ -29,7 +29,7 @@ dependencies = [
     "click>=8.0",
     "fastapi>=0.115",
     "httpx>=0.28",
-    "mcp>=1.0,<2",
+    "mcp>=1.0,<3",
     "portalocker>=2.7,<4",
     # Pinned explicitly (not just via fastapi's unbounded starlette>=0.46): the
     # bearer-auth middleware (dashboard_auth) is built on Starlette 1.0
