@@ -1201,12 +1201,19 @@ class TestInitMode:
 
     def test_init_existing_project_updates_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         """Running init --mode=server on an existing project updates the mode."""
+        server_config_dir = tmp_path / ".server-config"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", server_config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", server_config_dir / "server.json")
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", server_config_dir / "server.pid")
         monkeypatch.chdir(tmp_path)
         cli_runner.invoke(cli, ["init"])
         result = cli_runner.invoke(cli, ["init", "--mode", "server"])
         assert result.exit_code == 0
         config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
         assert config["mode"] == "server"
+        from filigree.server import read_server_config
+
+        assert set(read_server_config().projects) == {str((tmp_path / ".weft" / "filigree").resolve())}
 
     def test_init_existing_project_updates_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         """Running init --name=X on an existing project updates the name."""
@@ -1277,6 +1284,82 @@ class TestInitConfCutover:
         update = cli_runner.invoke(cli, ["update", issue.id, "--title", "renamed", "--json"])
         assert update.exit_code == 0, update.output
         assert json.loads(update.output)["title"] == "renamed"
+
+    def test_init_legacy_server_install_reregisters_migrated_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A confless server install must replace its stale legacy registry key
+        when ``init`` migrates the store to ``.weft/filigree``.
+
+        Since the config-anchor cutover retired ``.filigree.conf``, a daemon can
+        no longer follow the old key to the migrated database. Leaving that key
+        behind makes the daemon create a new empty legacy store on restart.
+        """
+        from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, FiligreeDB, write_config
+        from filigree.server import read_server_config, register_project
+
+        project_root = tmp_path / "myproj"
+        project_root.mkdir()
+        legacy_store = project_root / FILIGREE_DIR_NAME
+        legacy_store.mkdir()
+        seed = FiligreeDB(legacy_store / DB_FILENAME, prefix="myproj")
+        seed.initialize()
+        sentinel = seed.create_issue("must survive migration")
+        seed.close()
+        write_config(
+            legacy_store,
+            {
+                "prefix": "myproj",
+                "name": "My Project",
+                "version": 1,
+                "mode": "server",
+                "enabled_packs": ["core", "planning", "release"],
+                "registry_backend": "local",
+            },
+        )
+
+        server_config_dir = tmp_path / ".server-config"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", server_config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", server_config_dir / "server.json")
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", server_config_dir / "server.pid")
+        register_project(legacy_store)
+
+        monkeypatch.chdir(project_root)
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+
+        canonical_store = (project_root / ".weft" / "filigree").resolve()
+        assert set(read_server_config().projects) == {str(canonical_store)}
+        assert not (legacy_store / DB_FILENAME).exists()
+        migrated = FiligreeDB.from_store_dir(canonical_store, project_root=project_root)
+        try:
+            assert migrated.get_issue(sentinel.id).title == "must survive migration"
+        finally:
+            migrated.close()
+
+    def test_init_existing_server_install_repairs_stale_legacy_registry_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A no-op init repairs projects migrated by an older affected binary."""
+        from filigree.server import ServerConfig, read_server_config, write_server_config
+
+        project_root = tmp_path / "myproj"
+        project_root.mkdir()
+        server_config_dir = tmp_path / ".server-config"
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_DIR", server_config_dir)
+        monkeypatch.setattr("filigree.server.SERVER_CONFIG_FILE", server_config_dir / "server.json")
+        monkeypatch.setattr("filigree.server.SERVER_PID_FILE", server_config_dir / "server.pid")
+
+        monkeypatch.chdir(project_root)
+        first = cli_runner.invoke(cli, ["init", "--mode", "server"])
+        assert first.exit_code == 0, first.output
+        stale_store = (project_root / ".filigree").resolve()
+        write_server_config(ServerConfig(projects={str(stale_store): {"prefix": "myproj"}}))
+
+        repair = cli_runner.invoke(cli, ["init"])
+        assert repair.exit_code == 0, repair.output
+        canonical_store = (project_root / ".weft" / "filigree").resolve()
+        assert set(read_server_config().projects) == {str(canonical_store)}
 
     def test_init_imports_and_retires_conf_conf_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         """A present .filigree.conf is imported into config.json (conf-wins on the

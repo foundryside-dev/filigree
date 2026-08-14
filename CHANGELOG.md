@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the entry point, where the full reference lives, and the two rules `--help`
   cannot teach (claim atomically; stop, don't retry, on `SCHEMA_MISMATCH`).
 
+### Fixed
+
+- **Server-mode `filigree init` now reconciles the canonical store registration
+  (filigree-08fcf12671).** After `.filigree/` was migrated to
+  `.weft/filigree/`, `server.json` could retain only the obsolete legacy path.
+  Since `.filigree.conf` is now retired, a restarted daemon could not redirect
+  that key and created a new empty legacy database. Existing-project `init` now
+  re-registers every server-mode store at its resolved path, atomically replacing
+  the stale key by project root; a no-op rerun also repairs installs affected by
+  an older binary.
+
 ## [3.1.0] - 2026-06-25
 
 ### Added

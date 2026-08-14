@@ -221,6 +221,35 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             click.echo(f"  Mode: {mode}")
         if updated:
             write_config(store_dir, config)
+
+        # Reconcile durable server routing after every existing-project init in
+        # server mode. This is mandatory after a legacy-store migration: the
+        # config-anchor cutover retired .filigree.conf, so a daemon can no longer
+        # resolve an old ``.filigree`` registry key through the conf's rewritten
+        # DB path. ``register_project`` deduplicates entries by project root and
+        # atomically replaces that stale key with the canonical store path. Run
+        # this on no-op init too so installs affected before this fix self-heal.
+        try:
+            effective_mode = get_mode(store_dir)
+        except ValueError as exc:
+            click.echo(f"Invalid project config: {exc}", err=True)
+            sys.exit(1)
+        if effective_mode == "server":
+            from filigree.cli_commands.server import _reload_server_daemon_if_running
+            from filigree.server import register_project
+
+            try:
+                register_project(store_dir)
+            except Exception as exc:
+                click.echo(f"Failed to register server project: {exc}", err=True)
+                sys.exit(1)
+            click.echo(f"  Server registration: {store_dir}")
+            ok, reason = _reload_server_daemon_if_running()
+            if not ok:
+                click.echo(f"Warning: {reason}", err=True)
+                click.echo("Restart the daemon manually: `filigree server stop && filigree server start`", err=True)
+            elif reason == "daemon_reloaded":
+                click.echo("  Server reload: reloaded running daemon")
         return
 
     prefix = prefix or cwd.name
