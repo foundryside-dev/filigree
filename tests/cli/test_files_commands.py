@@ -2231,9 +2231,8 @@ class TestPromoteFindingHonoursGlobalActor:
             finding_id = initialized_project_with_finding.finding_id
             result = runner.invoke(cli, ["--actor", "bot-1", "promote-finding", finding_id, "--json"])
             assert result.exit_code == 0, result.output
-            # Read clean stdout: a genuine --actor differing from the OS user
-            # emits a non-blocking ACTOR_MISMATCH warning on stderr, which
-            # CliRunner merges into result.output in Click 8.3.1 (ADR-012).
+            # Read stdout directly so Click's merged output cannot contaminate
+            # the JSON contract if unrelated stderr diagnostics are added.
             data = json.loads(result.stdout)
             events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
             assert events_result.exit_code == 0, events_result.output
@@ -2251,8 +2250,8 @@ class TestPromoteFindingHonoursGlobalActor:
             finding_id = initialized_project_with_finding.finding_id
             result = runner.invoke(cli, ["--actor", "triager-1", "update-finding", finding_id, "--status", "acknowledged", "--json"])
             assert result.exit_code == 0, result.output
-            # Read clean stdout: the genuine --actor emits an ACTOR_MISMATCH
-            # warning on stderr, merged into result.output by CliRunner (ADR-012).
+            # Read stdout directly to keep the JSON contract isolated from
+            # unrelated stderr diagnostics.
             data = json.loads(result.stdout)
             assert data["finding_id"] == finding_id
             assert data["updated_by"] == "triager-1"
@@ -2279,8 +2278,8 @@ class TestPromoteFindingHonoursGlobalActor:
                 ],
             )
             assert result.exit_code == 0, result.output
-            # Read clean stdout: the genuine --actor emits an ACTOR_MISMATCH
-            # warning on stderr, merged into result.output by CliRunner (ADR-012).
+            # Read stdout directly to keep the JSON contract isolated from
+            # unrelated stderr diagnostics.
             data = json.loads(result.stdout)
             events_result = runner.invoke(cli, ["events", data["issue_id"], "--json"])
             assert events_result.exit_code == 0, events_result.output

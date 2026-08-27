@@ -101,20 +101,6 @@ def cli(ctx: click.Context, actor: str) -> None:
     # default an omitted --assignee from an *explicit* actor identity only.
     ctx.obj["actor_explicit"] = ctx.get_parameter_source("actor") != ParameterSource.DEFAULT
 
-    # ADR-012: surface a non-blocking warning when the claimed --actor disagrees
-    # with the transport-verified OS identity. Resolution + warning never raise
-    # and never block the command. Placeholder defaults ("cli") are suppressed
-    # by actor_mismatch_warning.
-    from filigree import actor_identity
-
-    verified = actor_identity.resolve_os_actor()
-    mismatch = actor_identity.actor_mismatch_warning(cleaned, verified)
-    if mismatch is not None:
-        click.echo(
-            f"warning: {mismatch['code']} claimed={mismatch['claimed']!r} verified={mismatch['verified']!r}",
-            err=True,
-        )
-
 
 # Register domain command modules
 for _mod in (issues, planning, meta, workflow, admin, server, observations, files, annotations_cmds, scanners, sei):

@@ -853,6 +853,20 @@ class TestComments:
         assert data["code"] == ErrorCode.CONFLICT
         assert data["details"] == {"issue_id": issue.id, "observed": "agent-holder", "expected": "other-agent"}
 
+    async def test_add_comment_accepts_actor_matching_held_issue(self, mcp_db: FiligreeDB) -> None:
+        issue = mcp_db.create_issue("Claim-aware matching comment")
+        mcp_db.claim_issue(issue.id, assignee="claude-fable")
+
+        result = await call_tool(
+            "comment_add",
+            {"issue_id": issue.id, "text": "matching holder note", "actor": "claude-fable"},
+        )
+
+        data = _parse(result)
+        assert data["issue_id"] == issue.id
+        assert data["comment"]["author"] == "claude-fable"
+        assert not any(w["code"] == "ACTOR_MISMATCH" for w in data.get("warnings", []))
+
     async def test_get_comments(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("With comments")
         mcp_db.add_comment(issue.id, "First", author="alice")

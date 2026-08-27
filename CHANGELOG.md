@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Agent aliases are authoritative for operational attribution.** Explicit
+  aliases such as `claude-fable` no longer emit `ACTOR_MISMATCH` warnings merely
+  because the Filigree process runs under a shared OS account such as `john`.
+  The claimed `actor` remains the identity used by claim-aware writes, while
+  `verified_actor` / `verified_author` continue to record transport provenance
+  separately.
+
 ## [3.1.0] - 2026-06-25
 
 ### Added

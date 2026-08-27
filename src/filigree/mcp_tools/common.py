@@ -96,10 +96,10 @@ def _text(content: object) -> list[TextContent]:
 def _inject_warnings(result: list[TextContent], warnings: list[dict[str, Any]]) -> list[TextContent]:
     """Add a top-level ``warnings`` array to a tool's JSON envelope.
 
-    Post-processing hook so warning producers (e.g. ADR-012 actor mismatch) need
-    not touch every handler. Parses the first text element; if it is a JSON
-    object, appends to (or creates) its ``warnings`` list. Bare-string and
-    non-object responses are returned untouched. Never raises.
+    Generic post-processing hook for response metadata producers. Parses the
+    first text element; if it is a JSON object, appends to (or creates) its
+    ``warnings`` list. Bare-string and non-object responses are returned
+    untouched. Never raises.
     """
     if not warnings or not result:
         return result

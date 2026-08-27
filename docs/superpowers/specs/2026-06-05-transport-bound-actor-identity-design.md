@@ -24,7 +24,7 @@ running as X did this." This is the keystone schema change (v24) that the other
 | Scope | Schema + CLI + MCP-stdio. Defer MCP-HTTP and dashboard auth. |
 | Schema | Nullable `verified_*` column on **all runtime event-bearing tables**. `actor`/`author` stay as the claimed value — no rename, no backfill. `NULL` = no transport proof (all historical rows + unverified surfaces). |
 | Plumbing | **Session-level**: `FiligreeDB` carries `self._verified_actor: str \| None`, set once at the entry point. No per-call kwarg, no public-signature churn. |
-| Conflict | **Record both + warn on mismatch.** Claimed value stored as given; verified value stored alongside; a structured warning is emitted when claimed ≠ verified. Never block. |
+| Conflict | **Record both without comparison.** Claimed value is the operational alias; verified value is stored alongside as transport provenance. Their namespaces differ, so inequality emits no warning and never blocks. |
 | Column naming | Mirror the existing claimed column: `verified_author` on `comments`, `verified_actor` elsewhere. |
 
 ## 3. Data model — schema v24
@@ -85,18 +85,15 @@ def resolve_os_actor() -> str | None:
   context setup. (Windows lacks `pwd`; `resolve_os_actor` returns `None` →
   `verified_actor` stays `NULL`, no crash.)
 
-## 6. Mismatch warning + read path
+## 6. Alias/provenance policy + read path
 
-- **Mismatch detection happens at the entry point, not per-insert.** Low-level
-  insert sites only *stamp* `self._verified_actor`; they do not raise warnings
-  (they cannot reach the response envelope). The CLI dispatch / MCP tool wrapper
-  already knows both the claimed `actor` it is about to use and the resolved
-  verified identity, so it performs one check per call: if both are non-empty and
-  differ, emit a structured warning
-  `{"code": "ACTOR_MISMATCH", "claimed": <actor>, "verified": <verified>}` —
-  CLI logs to stderr; MCP/HTTP add it to the response envelope `warnings` list.
-  Never raises. A shared helper `actor_mismatch_warning(claimed, verified)` keeps
-  CLI and MCP consistent.
+- **Logical aliases and OS principals are recorded without comparison.**
+  Low-level insert sites stamp `self._verified_actor` while the caller-supplied
+  `actor` remains the operational identity used for claim-aware writes. Shared
+  development accounts routinely run several distinct agent aliases, so a
+  difference between the two namespaces is expected and emits no warning. The
+  original `ACTOR_MISMATCH` response/stderr policy was retired after it drove
+  agents away from MCP toward the equally self-asserted CLI actor flag.
 - **Read path**: `EventRecord` TypedDict (`types/events.py`) gains
   `verified_actor: str | None`; `_build_event_record(_with_title)` projects the
   new column. Comment/observation read projections gain the mirrored field.
@@ -122,8 +119,8 @@ def resolve_os_actor() -> str | None:
 3. **CLI write**: stamps `verified_actor = resolve_os_actor()` on the event.
 4. **MCP-stdio write**: stamps verified identity.
 5. **Session propagation**: `borrow_for_worker_thread` clone keeps the identity.
-6. **Conflict**: claimed == verified → no warning; claimed ≠ verified → both
-   stored + `ACTOR_MISMATCH` warning emitted.
+6. **Alias/provenance separation**: whether claimed and verified values match or
+   differ, both are stored and no mismatch warning is emitted.
 7. **Unverified surface**: with no resolver set, writes store `verified_actor =
    NULL`, no warning.
 8. **Read path**: `EventRecord` exposes `verified_actor`; historical rows → `None`.

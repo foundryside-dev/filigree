@@ -186,9 +186,8 @@ class TestActorFlag:
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["--actor", "test-agent", "create", "Actor test"])
         assert r.exit_code == 0
-        # Read clean stdout: a genuine --actor differing from the OS user emits a
-        # non-blocking ACTOR_MISMATCH warning on stderr, which CliRunner merges
-        # into r.output in Click 8.3.1 (ADR-012).
+        # Read stdout directly so Click merged output cannot contaminate the JSON
+        # contract with unrelated stderr diagnostics.
         issue_id = _extract_id(r.stdout)
         result = runner.invoke(cli, ["show", issue_id, "--json"])
         data = json.loads(result.output)
