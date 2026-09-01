@@ -52,7 +52,7 @@ Three layers, mirroring the sibling federation oracles
   in which case an absent source is a hard failure.
 
 Byte-identical provenance: the vendored copy's sha256 is
-``a864724a18e6268788efb96bab5a493a32629e482442a121be1d033062e3de95`` — identical
+``61020b20aadaef75a3de523f0a8f83be03d1d503ffdca719c78d949d20beeced`` — identical
 to the producer report's sha256 for the authority golden.
 """
 
@@ -276,12 +276,11 @@ def test_real_probe_tolerates_unconsumed_extra_fields() -> None:
         # Tolerated: the augmented body is accepted, not rejected.
         validate_loomweave_capabilities(caps, base_url=url)
 
-    # Neither unconsumed field leaks into the parsed consumer view.
-    assert "version" not in caps, "the probe must not surface an unconsumed top-level `version`"
-    assert "an_unknown_future_field" not in caps, "the probe must not surface unknown extra fields"
-
     # The consumer-extracted fields are exactly what the clean golden yielded — the
     # extra fields are inert, neither dropped a real field nor perturbed one.
+    # (``probe_loomweave_capabilities`` builds a fixed-key ``LoomweaveCapabilities``
+    # literal, so an unconsumed field cannot leak by construction; this equality
+    # is the load-bearing check.)
     assert caps == baseline, (
         f"extra unconsumed fields perturbed the consumer-extracted capabilities view:\n  clean={baseline!r}\n  augmented={caps!r}"
     )

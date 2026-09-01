@@ -692,12 +692,22 @@ _WEFT_ISSUE_FIXTURE_SLUGS: list[str] = [
 ]
 
 
-# Fixture replay runs against an UNSEEDED dashboard, so an example flagged
-# ``requires_seeded_state`` (a populated-success golden whose id can't exist
-# here) is excluded; its producer oracle under tests/federation/ seeds real
-# rows and pins that shape instead.
+# Fixture replay runs against an UNSEEDED dashboard. A populated-success golden
+# whose id cannot exist here is excluded BY NAME (the fixture is a normative
+# cross-repo contract byte-mirrored by Loomweave, so it carries no harness
+# control flags); its producer oracle under tests/federation/ seeds a real row
+# and pins that shape instead.
+_SEEDED_ONLY_EXAMPLES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("issues-get", "live_v_issue_detail_200"),  # tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
+    }
+)
+
 _WEFT_ISSUE_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
-    (slug, ex) for slug in _WEFT_ISSUE_FIXTURE_SLUGS for ex in _examples_for("weft", slug) if not ex.get("requires_seeded_state")
+    (slug, ex)
+    for slug in _WEFT_ISSUE_FIXTURE_SLUGS
+    for ex in _examples_for("weft", slug)
+    if (slug, ex["name"]) not in _SEEDED_ONLY_EXAMPLES
 ]
 
 

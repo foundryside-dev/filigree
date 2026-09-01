@@ -92,17 +92,20 @@ def _finding_from_vector(vec: dict[str, Any]) -> dict[str, Any]:
     are required), so this constructs the smallest valid finding that carries the
     vector's identity fields exactly as the real scan-results wire delivers them:
 
-    * ``fingerprint`` — the bare 64-hex digest (``wire_fingerprint``); this is the
-      value Filigree's ``(scan_source, fingerprint)`` join keys on. ``to_jsonl``
-      emits the bare form, so that is what the consumer receives on the wire.
+    * ``fingerprint`` — the scheme-STAMPED form (``stamped_fingerprint``,
+      ``wlfp2:<64-hex>``); this is the value Filigree's ``(scan_source, fingerprint)``
+      join keys on. Wardline's HTTP emitter stamps the scheme prefix onto every
+      fingerprint it POSTs (the vendored scan-results wire golden shows the same
+      form), whereas ``wire_fingerprint`` (bare hex) is the JSONL *file* form,
+      which Filigree has no ingest path for.
     * ``line_start``/``line_end`` — the span the wire carries as flat columns
       (Filigree persists these on ``scan_findings``).
     * ``metadata.wardline.qualname`` — the nested qualname axis Filigree consumes
-      as a server-side finding-list filter. We store the ``to_jsonl`` wire form
-      (``wire_jsonl_qualname``) and query the SAME value; the choice between
-      ``wire_qualname`` and ``wire_jsonl_qualname`` is not load-bearing for the
-      round-trip because Filigree stores and matches the value verbatim (pure
-      equality on ``$.wardline.qualname``, no normalization).
+      as a server-side finding-list filter. We store the HTTP wire form
+      (``wire_qualname``, e.g. ``app.model.Config.value``) and query the SAME
+      value. ``wire_jsonl_qualname`` (the ``:setter``-suffixed JSONL file form) is
+      deliberately NOT used: it never reaches Filigree, so proving the round-trip
+      for it would prove nothing about the seam.
 
     Severity is NOT part of identity (the golden omits it); we use a Filigree-valid
     value (``high``) to avoid the unknown-severity warning path. We deliberately do
@@ -113,7 +116,7 @@ def _finding_from_vector(vec: dict[str, Any]) -> dict[str, Any]:
     collision-pair join-key soundness check below.
     """
     spans = vec["spans"]
-    wire_qualname = vec["wire_jsonl_qualname"]
+    wire_qualname = vec["wire_qualname"]
     metadata: dict[str, Any] = {"wardline": {}}
     if wire_qualname is not None:
         metadata["wardline"]["qualname"] = wire_qualname
@@ -124,7 +127,7 @@ def _finding_from_vector(vec: dict[str, Any]) -> dict[str, Any]:
         "severity": "high",
         "line_start": spans["line_start"],
         "line_end": spans["line_end"],
-        "fingerprint": vec["wire_fingerprint"],
+        "fingerprint": vec["stamped_fingerprint"],
         "metadata": metadata,
     }
 
@@ -183,7 +186,7 @@ def test_real_ingest_persists_and_round_trips_each_identity(tmp_path: Path) -> N
         assert result["findings_created"] == len(vectors)
 
         for name, vec in vectors.items():
-            fingerprint = vec["wire_fingerprint"]
+            fingerprint = vec["stamped_fingerprint"]
             persisted = db.find_finding_by_fingerprint(scan_source, fingerprint)
             assert persisted is not None, f"{name}: fingerprint not persisted: {fingerprint}"
             # The join key round-trips byte-for-byte (the bare 64-hex digest).
@@ -251,7 +254,7 @@ def test_real_query_resolves_finding_by_nested_qualname_axis(tmp_path: Path) -> 
             fingerprint_scheme=golden["fingerprint_scheme"],
         )
         for name, vec in vectors.items():
-            wire_qualname = vec["wire_jsonl_qualname"]
+            wire_qualname = vec["wire_qualname"]
             if wire_qualname is None:
                 continue
             got = db.list_findings_global(qualname=wire_qualname, suppression="all", limit=1000)
@@ -259,7 +262,7 @@ def test_real_query_resolves_finding_by_nested_qualname_axis(tmp_path: Path) -> 
             # query keys on the SAME nested value the golden authored, so a
             # consumer that failed to index the nested qualname axis reds.
             fingerprints = {f["fingerprint"] for f in got["findings"]}
-            assert vec["wire_fingerprint"] in fingerprints, (
+            assert vec["stamped_fingerprint"] in fingerprints, (
                 f"{name}: qualname={wire_qualname!r} did not resolve its finding via the nested-metadata query"
             )
     finally:
@@ -302,7 +305,7 @@ def test_collision_pair_remains_distinct_findings_on_the_join_key(tmp_path: Path
     assert a["spans"]["line_start"] == b["spans"]["line_start"], (
         "collision-pair vectors must share line_start (the legacy dedup discriminator) so the test is non-vacuous"
     )
-    assert a["wire_fingerprint"] != b["wire_fingerprint"], (
+    assert a["stamped_fingerprint"] != b["stamped_fingerprint"], (
         "collision-pair vectors must carry DISTINCT fingerprints (the only field that separates them)"
     )
 
@@ -324,8 +327,8 @@ def test_collision_pair_remains_distinct_findings_on_the_join_key(tmp_path: Path
             "the cross-tool join key is unsound"
         )
 
-        found_a = db.find_finding_by_fingerprint(scan_source, a["wire_fingerprint"])
-        found_b = db.find_finding_by_fingerprint(scan_source, b["wire_fingerprint"])
+        found_a = db.find_finding_by_fingerprint(scan_source, a["stamped_fingerprint"])
+        found_b = db.find_finding_by_fingerprint(scan_source, b["stamped_fingerprint"])
         assert found_a is not None, "fingerprint a must resolve to a persisted finding"
         assert found_b is not None, "fingerprint b must resolve to a persisted finding"
         assert found_a["id"] != found_b["id"], (

@@ -25,14 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quoted *inside* any tool's managed block does not trigger detection, and
   C-4 foreign-block safety holds on both files.
 
+### Removed
+
+- **`ACTOR_MISMATCH` warnings.** The `warnings[]` entry emitted (CLI and MCP)
+  when the claimed `actor` differed from the OS-derived `verified_actor` is
+  gone from every surface: comparing a logical agent alias such as
+  `claude-filigree` against a shared OS account such as `john` only ever
+  produced false positives. The claimed `actor` remains the identity used by
+  claim-aware writes, and `verified_actor` / `verified_author` are still
+  recorded as transport provenance. `actor_mismatch_warning()` is retained as
+  an import-compatible shim that always returns `None`.
+
 ### Changed
 
-- **Agent aliases are authoritative for operational attribution.** Explicit
-  aliases such as `claude-fable` no longer emit `ACTOR_MISMATCH` warnings merely
-  because the Filigree process runs under a shared OS account such as `john`.
-  The claimed `actor` remains the identity used by claim-aware writes, while
-  `verified_actor` / `verified_author` continue to record transport provenance
-  separately.
 - **Always-loaded agent context cut to the C-20 budgets (weft-6a1fdb0192).**
   The injected `CLAUDE.md`/`AGENTS.md` block is 5739 → 792 bytes and the
   bundled `filigree-workflow` SKILL.md is 13840 → 3725 bytes. Nothing was

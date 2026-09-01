@@ -145,6 +145,11 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
     db.initialize()
     try:
         result = db.process_scan_results(**parsed)
+        # ``process_scan_results`` normalises the finding dicts IN PLACE (path,
+        # severity, language), and ``parsed["findings"]`` aliases the golden's
+        # list — so every comparison below must run against a pristine re-read,
+        # or intake-time mangling could never red.
+        golden = _load_golden()
 
         # Every wire finding was ingested (none dropped at the boundary).
         assert result["findings_created"] == len(golden["findings"])

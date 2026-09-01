@@ -104,6 +104,7 @@ jobs:
           tests/federation/test_entity_associations_wire_conformance_oracle.py
           tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
           tests/federation/test_capabilities_wire_conformance_oracle.py
+          tests/federation/test_signoff_binding_wire_conformance_oracle.py
 
   live-loomweave:
     name: Live Loomweave Integration
