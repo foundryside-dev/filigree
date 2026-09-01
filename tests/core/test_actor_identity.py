@@ -26,24 +26,9 @@ def test_resolve_os_actor_returns_none_when_pwd_unavailable(monkeypatch) -> None
     assert resolve_os_actor() is None  # does not raise
 
 
-def test_mismatch_warning_none_when_equal() -> None:
+def test_logical_actor_alias_never_conflicts_with_os_provenance() -> None:
+    assert actor_mismatch_warning("agent-x", "alice") is None
     assert actor_mismatch_warning("alice", "alice") is None
-
-
-def test_mismatch_warning_none_when_either_empty() -> None:
-    assert actor_mismatch_warning("alice", None) is None
-    assert actor_mismatch_warning("alice", "") is None
-    assert actor_mismatch_warning(None, "alice") is None
-    assert actor_mismatch_warning("", "alice") is None
-
-
-def test_mismatch_warning_emitted_when_both_present_and_differ() -> None:
-    warning = actor_mismatch_warning("agent-x", "alice")
-    assert warning == {"code": "ACTOR_MISMATCH", "claimed": "agent-x", "verified": "alice"}
-
-
-def test_mismatch_warning_suppressed_for_placeholder_default_claims() -> None:
-    # Framework auto-defaults are not genuine claims — no warning even though
-    # "cli"/"mcp" differ from the verified OS user.
+    assert actor_mismatch_warning("agent-x", None) is None
     assert actor_mismatch_warning("cli", "alice") is None
     assert actor_mismatch_warning("mcp", "alice") is None

@@ -941,23 +941,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     async def _run() -> list[TextContent]:
         try:
             out: list[TextContent] = await handler(arguments)
-            # ADR-012: surface a non-blocking actor mismatch in the response
-            # envelope's ``warnings`` list. Best-effort — never break a tool call.
-            try:
-                from filigree import actor_identity
-                from filigree.mcp_tools.common import _inject_warnings
-
-                run_db = _request_db.get() or db
-                if run_db is not None:
-                    mismatch = actor_identity.actor_mismatch_warning(arguments.get("actor"), run_db._verified_actor)
-                    if mismatch is not None:
-                        out = _inject_warnings(out, [dict(mismatch)])
-            except Exception:
-                # Non-blocking by design (a mismatch must never break a tool
-                # call) but never silent: a systemic break here would make
-                # every MCP actor-mismatch invisible server-wide. See
-                # filigree-61127de02c.
-                logging.getLogger(__name__).debug("actor-mismatch warning injection failed", exc_info=True)
             return out
         except Exception:
             if _logger:

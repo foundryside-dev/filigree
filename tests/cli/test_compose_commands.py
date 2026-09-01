@@ -260,7 +260,7 @@ class TestStartWorkIdentityDefaulting:
         result = runner.invoke(cli, ["--actor", "agent-x", "start-work", issue_id, "--json"])
 
         assert result.exit_code == 0, result.output
-        # result.stdout excludes the ADR-012 actor-mismatch warning on stderr.
+        # Read stdout directly so unrelated stderr diagnostics cannot contaminate JSON.
         data = json.loads(result.stdout)
         assert data["assignee"] == "agent-x"
         assert data["status"] == "in_progress"

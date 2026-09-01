@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.2.0] - 2026-09-02
+
+### Added
+
+- **Redirect-aware instruction injection (C-20, weft-6a1fdb0192).** When a
+  project's `CLAUDE.md` is only a pointer at `AGENTS.md` — a line that is
+  solely `@AGENTS.md` / `@./AGENTS.md`, outside any managed block — filigree
+  now keeps its managed block in `AGENTS.md` alone: `filigree install`
+  writes/refreshes it there (creating `AGENTS.md` if absent) and migrates any
+  legacy `CLAUDE.md` block off, instead of maintaining two always-loaded
+  copies. The SessionStart freshness refresh honours the redirect too, and
+  migrates a legacy block even when its hash is current. `doctor` stops
+  demanding a block in a pointer-only `CLAUDE.md`, flags one that still
+  carries a legacy block, and treats a missing `AGENTS.md` under a redirect as
+  a real failure. Projects without a redirect are unaffected. An `@AGENTS.md`
+  quoted *inside* any tool's managed block does not trigger detection, and
+  C-4 foreign-block safety holds on both files.
+
+### Removed
+
+- **`ACTOR_MISMATCH` warnings.** The `warnings[]` entry emitted (CLI and MCP)
+  when the claimed `actor` differed from the OS-derived `verified_actor` is
+  gone from every surface: comparing a logical agent alias such as
+  `claude-filigree` against a shared OS account such as `john` only ever
+  produced false positives. The claimed `actor` remains the identity used by
+  claim-aware writes, and `verified_actor` / `verified_author` are still
+  recorded as transport provenance. `actor_mismatch_warning()` is retained as
+  an import-compatible shim that always returns `None`.
+
+### Changed
+
+- **Always-loaded agent context cut to the C-20 budgets (weft-6a1fdb0192).**
+  The injected `CLAUDE.md`/`AGENTS.md` block is 5739 → 792 bytes and the
+  bundled `filigree-workflow` SKILL.md is 13840 → 3725 bytes. Nothing was
+  deleted: the command catalogue, priority scale, `--actor` attribution,
+  entity bindings, observations discipline, response envelopes and the
+  complete `ErrorCode` set moved into on-demand skill reference sheets
+  (`references/commands.md`, `references/observations.md`,
+  `references/error-codes.md`), which SKILL.md indexes. The block now carries
+  the entry point, where the full reference lives, and the two rules `--help`
+  cannot teach (claim atomically; stop, don't retry, on `SCHEMA_MISMATCH`).
+
+### Fixed
+
+- **Server-mode `filigree init` now reconciles the canonical store registration
+  (filigree-08fcf12671).** After `.filigree/` was migrated to
+  `.weft/filigree/`, `server.json` could retain only the obsolete legacy path.
+  Since `.filigree.conf` is now retired, a restarted daemon could not redirect
+  that key and created a new empty legacy database. Existing-project `init` now
+  re-registers every server-mode store at its resolved path, atomically replacing
+  the stale key by project root; a no-op rerun also repairs installs affected by
+  an older binary.
+
 ## [3.1.0] - 2026-06-25
 
 ### Added

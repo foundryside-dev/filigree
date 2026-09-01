@@ -477,10 +477,14 @@ filigree dashboard --port=8377</code></pre>
           This is the one <code>partial</code> in Filigree's matrix slice, and we render
           it as <code>partial</code>.
         </Banner>
-        <Banner client:visible tone="danger" title="Not a security boundary.">
-          Filigree does not encrypt, sandbox, or harden stored project data beyond
-          ordinary filesystem permissions. It is deconfliction-first, not security. Do
-          not use it for secure, regulated, confidential, or business-sensitive data.
+        <Banner client:visible tone="danger" title="Not a security boundary — a claim coordinates, it does not authorize.">
+          A work-claim is <strong>optimistic concurrency control</strong> so two agents
+          do not collide on the same issue — it is <strong>not access control, not a
+          permission, and not a security lock</strong>, and it cannot stop an actor who
+          ignores it. Filigree likewise does not encrypt, sandbox, or harden stored
+          project data beyond ordinary filesystem permissions. It is
+          deconfliction-first, not security: do not use it for secure, regulated,
+          confidential, or business-sensitive data.
         </Banner>
         <Banner client:visible tone="info" title="Consumes identity; never an authority.">
           Filigree keys its facts on the <code>SEI</code> but treats it as opaque and
@@ -630,7 +634,7 @@ filigree dashboard --port=8377</code></pre>
   .lane__cards { display: flex; flex-direction: column; gap: 8px; }
   .icard { background: var(--surface-card); border: 1px solid var(--border-hairline); border-left: 3px solid var(--thread-400); border-radius: var(--radius-sm); padding: 10px; }
   .icard--bug { border-left-color: var(--madder-600, var(--member-wardline)); }
-  .icard--feature { border-left-color: var(--woad-600, var(--member-charter)); }
+  .icard--feature { border-left-color: var(--woad-600, var(--member-plainweave)); }
   .icard--task { border-left-color: var(--indigo-500, var(--member-loomweave)); }
   .icard__top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
   .icard__id { font: var(--type-mono-sm); color: var(--text-muted); font-size: var(--text-2xs); }

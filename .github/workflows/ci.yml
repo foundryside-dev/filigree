@@ -97,6 +97,14 @@ jobs:
           tests/core/test_registry_backend_matrix.py
           tests/api/test_weft_auth.py
           tests/federation/test_sei_conformance_oracle.py
+          tests/federation/test_suppression_filter_conformance_oracle.py
+          tests/federation/test_scan_results_wire_conformance_oracle.py
+          tests/federation/test_loomweave_scan_results_wire_conformance_oracle.py
+          tests/federation/test_finding_identity_wire_conformance_oracle.py
+          tests/federation/test_entity_associations_wire_conformance_oracle.py
+          tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
+          tests/federation/test_capabilities_wire_conformance_oracle.py
+          tests/federation/test_signoff_binding_wire_conformance_oracle.py
 
   live-loomweave:
     name: Live Loomweave Integration

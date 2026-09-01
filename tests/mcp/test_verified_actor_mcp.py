@@ -11,7 +11,6 @@ closes the DB in a finally to avoid leaking state into the broad suite.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import pytest
@@ -56,7 +55,7 @@ def test_attempt_startup_sets_verified_actor(tmp_path: Path, monkeypatch: pytest
             mcp_server.db.close()
 
 
-async def test_call_tool_injects_actor_mismatch_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_tool_accepts_claimed_actor_alias_without_mismatch_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("filigree.actor_identity.resolve_os_actor", lambda: "alice")
     _reset_globals(monkeypatch)
     filigree_dir = _make_project(tmp_path)
@@ -64,44 +63,11 @@ async def test_call_tool_injects_actor_mismatch_warning(tmp_path: Path, monkeypa
     try:
         result = await mcp_server.call_tool("issue_create", {"type": "task", "title": "t", "actor": "agent-x"})
         payload = json.loads(result[0].text)
-        assert "warnings" in payload
-        assert any(w["code"] == "ACTOR_MISMATCH" for w in payload["warnings"])
-    finally:
-        if mcp_server.db is not None:
-            mcp_server._tool_locks.pop(mcp_server.db, None)
-            mcp_server.db.close()
-
-
-async def test_call_tool_logs_when_warning_injection_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A failure in the ADR-012 mismatch-surfacing block must stay non-blocking
-    but emit a DEBUG signal (filigree-61127de02c) — never a silent ``pass``.
-
-    Without the log, a systemic break in injection would make EVERY MCP
-    actor-mismatch invisible server-wide with zero signal.
-    """
-    monkeypatch.setattr("filigree.actor_identity.resolve_os_actor", lambda: "alice")
-    _reset_globals(monkeypatch)
-
-    def _boom(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("injection blew up")
-
-    # Imported at call time inside the try, so patching the source module bites.
-    monkeypatch.setattr("filigree.mcp_tools.common._inject_warnings", _boom)
-
-    filigree_dir = _make_project(tmp_path)
-    mcp_server._attempt_startup(filigree_dir)
-    try:
-        with caplog.at_level(logging.DEBUG, logger="filigree.mcp_server"):
-            # actor=agent-x ≠ verified alice → mismatch is non-None → injection runs → raises.
-            result = await mcp_server.call_tool("issue_create", {"type": "task", "title": "t", "actor": "agent-x"})
-        # Non-blocking: the tool call still succeeds (no warning could be injected).
-        payload = json.loads(result[0].text)
-        assert payload.get("issue_id")
-        assert "ACTOR_MISMATCH" not in result[0].text
-        # Discriminating assertion: the failure left a DEBUG breadcrumb.
-        assert any("actor-mismatch warning injection failed" in r.message and r.levelno == logging.DEBUG for r in caplog.records)
+        assert not any(w["code"] == "ACTOR_MISMATCH" for w in payload.get("warnings", []))
+        assert mcp_server.db is not None
+        row = mcp_server.db.conn.execute("SELECT actor, verified_actor FROM events WHERE event_type = 'created' LIMIT 1").fetchone()
+        assert row["actor"] == "agent-x"
+        assert row["verified_actor"] == "alice"
     finally:
         if mcp_server.db is not None:
             mcp_server._tool_locks.pop(mcp_server.db, None)
@@ -115,7 +81,7 @@ async def test_call_tool_no_warning_for_placeholder_actor(tmp_path: Path, monkey
     mcp_server._attempt_startup(filigree_dir)
     try:
         result = await mcp_server.call_tool("issue_create", {"type": "task", "title": "t", "actor": "mcp"})
-        assert "ACTOR_MISMATCH" not in result[0].text  # placeholder claim → no warning
+        assert "ACTOR_MISMATCH" not in result[0].text
     finally:
         if mcp_server.db is not None:
             mcp_server._tool_locks.pop(mcp_server.db, None)

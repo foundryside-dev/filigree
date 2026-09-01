@@ -222,6 +222,35 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             click.echo(f"  Mode: {mode}")
         if updated:
             write_config(store_dir, config)
+
+        # Reconcile durable server routing after every existing-project init in
+        # server mode. This is mandatory after a legacy-store migration: the
+        # config-anchor cutover retired .filigree.conf, so a daemon can no longer
+        # resolve an old ``.filigree`` registry key through the conf's rewritten
+        # DB path. ``register_project`` deduplicates entries by project root and
+        # atomically replaces that stale key with the canonical store path. Run
+        # this on no-op init too so installs affected before this fix self-heal.
+        try:
+            effective_mode = get_mode(store_dir)
+        except ValueError as exc:
+            click.echo(f"Invalid project config: {exc}", err=True)
+            sys.exit(1)
+        if effective_mode == "server":
+            from filigree.cli_commands.server import _reload_server_daemon_if_running
+            from filigree.server import register_project
+
+            try:
+                register_project(store_dir)
+            except Exception as exc:
+                click.echo(f"Failed to register server project: {exc}", err=True)
+                sys.exit(1)
+            click.echo(f"  Server registration: {store_dir}")
+            ok, reason = _reload_server_daemon_if_running()
+            if not ok:
+                click.echo(f"Warning: {reason}", err=True)
+                click.echo("Restart the daemon manually: `filigree server stop && filigree server start`", err=True)
+            elif reason == "daemon_reloaded":
+                click.echo("  Server reload: reloaded running daemon")
         return
 
     prefix = prefix or cwd.name
@@ -277,7 +306,11 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
 @click.command()
 @click.option("--claude-code", is_flag=True, help="Install MCP for Claude Code only")
 @click.option("--codex", is_flag=True, help="Install MCP for Codex only")
-@click.option("--claude-md", is_flag=True, help="Inject instructions into CLAUDE.md only")
+@click.option(
+    "--claude-md",
+    is_flag=True,
+    help="Inject instructions into CLAUDE.md only (into AGENTS.md when CLAUDE.md only redirects there)",
+)
 @click.option("--agents-md", is_flag=True, help="Inject instructions into AGENTS.md only")
 @click.option("--gitignore", is_flag=True, help="Add .filigree/ to .gitignore only")
 @click.option("--hooks", "hooks_only", is_flag=True, help="Install Claude Code hooks only")
@@ -315,6 +348,7 @@ def install(
         install_codex_mcp,
         install_codex_skills,
         install_skills,
+        is_agents_md_redirect,
     )
 
     try:
@@ -365,6 +399,13 @@ def install(
         except Exception:
             logging.getLogger(__name__).debug("Failed to read server config port; defaulting to 8377", exc_info=True)
 
+    # C-20 (weft-6a1fdb0192): in a project whose CLAUDE.md just redirects to
+    # AGENTS.md, the CLAUDE.md step already maintains the AGENTS.md block (and
+    # migrates any legacy CLAUDE.md block off), so running both steps would
+    # write one file twice and print two lines for one action. `--agents-md`
+    # on its own still runs — it is correct standalone.
+    _agents_md_covered_by_claude_md_step = (install_all or claude_md) and is_agents_md_redirect(project_root / "CLAUDE.md")
+
     install_steps: list[tuple[bool, str, Callable[[], tuple[bool, str]]]] = [
         (
             install_all or claude_code,
@@ -382,7 +423,7 @@ def install(
             lambda: inject_instructions(project_root / "CLAUDE.md"),
         ),
         (
-            install_all or agents_md,
+            (install_all or agents_md) and not _agents_md_covered_by_claude_md_step,
             "AGENTS.md",
             lambda: inject_instructions(project_root / "AGENTS.md"),
         ),

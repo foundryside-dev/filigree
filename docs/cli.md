@@ -77,7 +77,7 @@ filigree init --mode=server                # Initialize in persistent server mod
 filigree install                           # Install everything: MCP, instructions, .gitignore
 filigree install --claude-code             # Claude Code MCP server only
 filigree install --codex                   # OpenAI Codex MCP server only (~/.codex/config.toml, autodiscovery)
-filigree install --claude-md               # Inject instructions into CLAUDE.md only
+filigree install --claude-md               # Inject instructions into CLAUDE.md only (see redirect note)
 filigree install --agents-md               # Inject instructions into AGENTS.md only
 filigree install --gitignore               # Add .filigree/ to .gitignore only
 filigree install --hooks                   # Install Claude Code hooks only
@@ -116,6 +116,14 @@ Install filigree into the current project. With no flags, installs everything: M
 | `--skills` | flag | Install Claude Code skills only |
 | `--codex-skills` | flag | Install Codex skills only |
 | `--mode` | `ethereal`/`server` | Installation mode (`preserve existing`, else `ethereal`) |
+
+**CLAUDE.md → AGENTS.md redirect.** When a project's `CLAUDE.md` is only a
+pointer at `AGENTS.md` — a line that is solely `@AGENTS.md` (or `@./AGENTS.md`),
+outside any managed instruction block — filigree keeps its managed block in
+`AGENTS.md` alone: `--claude-md` (and a flagless `install`) writes `AGENTS.md`,
+creates it if absent, and migrates any legacy block out of `CLAUDE.md`. Projects
+without a redirect are unaffected: both files are managed as before. The same
+rule governs the SessionStart freshness refresh and `doctor`.
 
 ### `doctor`
 

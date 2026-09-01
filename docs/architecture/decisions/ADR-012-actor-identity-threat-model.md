@@ -150,15 +150,15 @@ while the remaining surfaces stay explicitly deferred.
   path (`_attempt_startup`) set the verified actor. These are the surfaces
   whose transport boundary directly identifies an OS user.
 
-- **Conflict policy: record both, warn, never block.** Both the claimed and
-  verified identities are persisted. On mismatch a non-blocking `ACTOR_MISMATCH`
-  warning is surfaced; the write always proceeds. Placeholder framework default
-  claims (`cli`, `mcp`) are suppressed — they are not a real disagreement, so
-  they raise no warning. Two surfaces carry the warning: the CLI emits it on
-  **stderr** (always, so production stderr never pollutes `--json` stdout);
-  MCP injects a top-level `warnings` array into the tool-response envelope
-  (`_inject_warnings`). The MCP `add_comment` result also exposes
-  `verified_author` via `comment_to_mcp`.
+- **Alias/provenance policy: record both without comparing namespaces.** Both
+  identities are persisted, but the claimed `actor` is the operational alias
+  used for claims and claim-aware writes while `verified_*` is separate
+  transport provenance. A logical agent alias such as `claude-fable` is not
+  expected to equal the shared POSIX account such as `john`; their difference
+  therefore emits no warning. The earlier `ACTOR_MISMATCH` warning was removed
+  because it made correct MCP writes look unsafe and pushed agents toward the
+  equally caller-controlled CLI actor flag. The MCP `add_comment` result still
+  exposes `verified_author` via `comment_to_mcp`.
 
 - **Backup/restore preserves, does not re-stamp.** `export_jsonl` carries
   `verified_*` (it is a `SELECT *`); `import_jsonl` preserves the stored value

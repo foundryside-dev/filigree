@@ -44,6 +44,7 @@ from filigree.install_support.hooks import (
     _has_hook_command,
 )
 from filigree.install_support.integrations import _codex_config_path
+from filigree.install_support.redirect import is_agents_md_redirect
 
 logger = logging.getLogger(__name__)
 
@@ -1286,6 +1287,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
 
     # 10. Check CLAUDE.md has instructions
     claude_md = project_root / "CLAUDE.md"
+    redirects_to_agents = is_agents_md_redirect(claude_md)
     if claude_md.exists():
         try:
             content = claude_md.read_text()
@@ -1299,7 +1301,21 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                 )
             )
         else:
-            if FILIGREE_INSTRUCTIONS_MARKER in content:
+            if redirects_to_agents and FILIGREE_INSTRUCTIONS_MARKER not in content:
+                # C-20: a pointer-only CLAUDE.md is *correct* without a block —
+                # the instructions live in AGENTS.md. Demanding one here would
+                # fail a healthy project forever (`--fix` writes AGENTS.md).
+                results.append(CheckResult("CLAUDE.md", True, "Redirects to AGENTS.md; instructions live there"))
+            elif redirects_to_agents:
+                results.append(
+                    CheckResult(
+                        "CLAUDE.md",
+                        False,
+                        "Redirects to AGENTS.md but still carries a legacy filigree block",
+                        fix_hint="Run: filigree install --claude-md",
+                    )
+                )
+            elif FILIGREE_INSTRUCTIONS_MARKER in content:
                 results.append(CheckResult("CLAUDE.md", True, "Filigree instructions present"))
             else:
                 results.append(
@@ -1346,7 +1362,18 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                         fix_hint="Run: filigree install --agents-md",
                     )
                 )
-    # AGENTS.md is optional — don't warn if it doesn't exist
+    elif redirects_to_agents:
+        # AGENTS.md is optional in general — but not when CLAUDE.md points at
+        # it: then it is where the instructions are supposed to live (C-20).
+        results.append(
+            CheckResult(
+                "AGENTS.md",
+                False,
+                "CLAUDE.md redirects here but AGENTS.md does not exist",
+                fix_hint="Run: filigree install --agents-md",
+            )
+        )
+    # Otherwise AGENTS.md is optional — don't warn if it doesn't exist
 
     # 12. Mode-specific checks
     from filigree.core import get_mode
