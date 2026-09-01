@@ -266,7 +266,18 @@ def _instruction_write_lock(file_path: Path) -> Iterator[None]:
 
     lock_path = store_dir / "instructions.lock"
     try:
-        lock_fd = open(lock_path, "w")  # noqa: SIM115 — held for the with-block
+        # The store is repository-controlled, so the lock may be an attacker-
+        # supplied symlink.  Open without following links and without truncating
+        # an existing lock; validate the opened object before passing it to flock.
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(lock_path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"instruction lock is not a regular file: {lock_path}")
+            lock_fd = os.fdopen(fd, "r+")
+        except BaseException:
+            os.close(fd)
+            raise
     except OSError as exc:
         # Can't create the lock file (read-only dir, etc.). Don't block a
         # legitimate single-writer install on a locking-substrate failure.

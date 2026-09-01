@@ -234,6 +234,21 @@ class TestInstructionWriteLock:
         assert (weft_store / "instructions.lock").exists()
         assert not (tmp_path / FILIGREE_DIR_NAME / "instructions.lock").exists()
 
+    def test_symlinked_lock_does_not_truncate_target(self, tmp_path: Path) -> None:
+        """A repository-controlled lock symlink must never be followed."""
+        weft_store = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        weft_store.mkdir(parents=True)
+        victim = tmp_path / "victim"
+        victim.write_text("do not truncate")
+        (weft_store / "instructions.lock").symlink_to(victim)
+
+        with patch("filigree.install.portalocker.lock") as mock_lock:
+            ok, _msg = inject_instructions(tmp_path / "CLAUDE.md")
+
+        assert ok
+        assert victim.read_text() == "do not truncate"
+        mock_lock.assert_not_called()
+
     def test_proceeds_unlocked_without_any_store_dir(self, tmp_path: Path) -> None:
         target = tmp_path / "CLAUDE.md"
         with patch("filigree.install.portalocker.lock") as mock_lock:
