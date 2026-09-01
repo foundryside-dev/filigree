@@ -119,13 +119,7 @@ from filigree.core import FiligreeDB
 from filigree.dashboard_routes.files import _parse_scan_results_body
 
 # The vendored consumer copy of Loomweave's authoritative scan-results wire.
-GOLDEN_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "tests"
-    / "fixtures"
-    / "contracts"
-    / "loomweave-scan-results-wire.golden.json"
-)
+GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loomweave-scan-results-wire.golden.json"
 
 # Git-blob sha1 of the vendored golden (``sha1(b"blob %d\0" % len + data)``).
 # Recomputed from bytes by ``test_vendored_golden_byte_pin`` so any edit to the
@@ -338,8 +332,7 @@ def test_real_intake_round_trips_production_subset(tmp_path: Path) -> None:
             assert isinstance(persisted_lw, dict), f"loomweave metadata not persisted for {key}"
             for axis, wire_value in wire_lw.items():
                 assert persisted_lw.get(axis) == wire_value, (
-                    f"metadata.loomweave[{axis!r}] did not round-trip for {key}: "
-                    f"wire={wire_value!r} persisted={persisted_lw.get(axis)!r}"
+                    f"metadata.loomweave[{axis!r}] did not round-trip for {key}: wire={wire_value!r} persisted={persisted_lw.get(axis)!r}"
                 )
             # Top-level metadata.kind (Loomweave nests kind here, NOT under
             # metadata.wardline) also survives.

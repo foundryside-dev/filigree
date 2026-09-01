@@ -71,12 +71,10 @@ def _weft_body_bytes(body: dict[str, Any]) -> bytes:
     """
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+
 # The vendored authoritative legis sign-off binding REQUEST body. legis is the
 # producer/authority; this is a byte-identical copy.
-GOLDEN_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "tests" / "fixtures" / "contracts" / "legis-signoff-binding-request.json"
-)
+GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "legis-signoff-binding-request.json"
 
 # Git-blob sha1 of the vendored golden (``sha1(b"blob <len>\0" + data)``).
 # Recomputed from bytes by ``test_vendored_golden_byte_pin`` so any edit reds in the
@@ -237,8 +235,10 @@ async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monk
     # stubbed to "unreachable" — filigree never actually calls a network Legis here.
     monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
     from filigree.legis_client import LegisGateResult, LegisGateStatus
+
     monkeypatch.setattr(
-        governance, "check_closure_gate",
+        governance,
+        "check_closure_gate",
         lambda iid: LegisGateResult(LegisGateStatus.UNREACHABLE),
     )
 
@@ -258,8 +258,7 @@ async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monk
 
     ungoverned_decision = governance.evaluate_closure_gate(consumer_db, ungoverned.id)
     assert ungoverned_decision.outcome is GateOutcome.PROCEED, (
-        "an ungoverned binding (no signature) must proceed — proves it is the parsed "
-        "signature that governs, not a blanket default"
+        "an ungoverned binding (no signature) must proceed — proves it is the parsed signature that governs, not a blanket default"
     )
 
 

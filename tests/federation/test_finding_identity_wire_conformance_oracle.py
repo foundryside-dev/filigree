@@ -333,9 +333,7 @@ def test_collision_pair_remains_distinct_findings_on_the_join_key(tmp_path: Path
         )
 
         listed = db.list_findings_global(rule_id=a_in["rule_id"], suppression="all", limit=1000)
-        assert listed["total"] == 2, (
-            f"expected both collision-pair findings under rule {a_in['rule_id']!r}, got {listed['total']}"
-        )
+        assert listed["total"] == 2, f"expected both collision-pair findings under rule {a_in['rule_id']!r}, got {listed['total']}"
     finally:
         db.close()
 

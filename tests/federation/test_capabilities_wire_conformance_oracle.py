@@ -283,8 +283,7 @@ def test_real_probe_tolerates_unconsumed_extra_fields() -> None:
     # The consumer-extracted fields are exactly what the clean golden yielded — the
     # extra fields are inert, neither dropped a real field nor perturbed one.
     assert caps == baseline, (
-        "extra unconsumed fields perturbed the consumer-extracted capabilities view:\n"
-        f"  clean={baseline!r}\n  augmented={caps!r}"
+        f"extra unconsumed fields perturbed the consumer-extracted capabilities view:\n  clean={baseline!r}\n  augmented={caps!r}"
     )
 
 
