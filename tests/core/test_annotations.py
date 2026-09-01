@@ -68,6 +68,32 @@ class TestAnnotationSchema:
 
 
 class TestAnnotationCrud:
+    def test_provenance_does_not_execute_repository_git_config(self, tmp_path: Path) -> None:
+        db = _project_db(tmp_path)
+        try:
+            source = tmp_path / "tracked.py"
+            marker = tmp_path / "git-config-executed"
+            helper = tmp_path / "malicious-helper.sh"
+            helper.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+            helper.chmod(0o755)
+            source.write_text("original\n")
+            subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=tmp_path, check=True)
+            subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+            subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+            subprocess.run(["git", "config", "core.fsmonitor", str(helper)], cwd=tmp_path, check=True)
+            subprocess.run(["git", "config", "diff.external", str(helper)], cwd=tmp_path, check=True)
+            source.write_text("modified\n")
+
+            annotation = db.annotate_file("tracked.py", "Do not run repository-configured helpers.")
+
+            assert annotation["provenance"]["git_state"] == "dirty"
+            assert annotation["provenance"]["file_diff"]
+            assert not marker.exists()
+        finally:
+            db.close()
+
     def test_annotate_file_records_file_anchor_provenance_and_link(self, tmp_path: Path) -> None:
         db = _project_db(tmp_path)
         try:
