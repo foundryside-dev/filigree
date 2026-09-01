@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Store migration refuses symlinked `.weft` destinations.** Legacy migration
+  now rejects symlinks at `.weft` and `.weft/filigree` before making any
+  filesystem changes, preventing a crafted project from redirecting the atomic
+  database publish into another project's store.
 - **Warpline reverify ingest filed an issue and bound its SEI
   non-atomically.** `warpline_worklist_ingest` created the issue and attached
   its SEI association in two separate transactions, so a non-retryable storage

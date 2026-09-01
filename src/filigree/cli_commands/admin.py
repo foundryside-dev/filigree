@@ -27,6 +27,7 @@ from filigree.core import (
     ProjectNotInitialisedError,
     StoreMigrationBusyError,
     StoreMigrationConfUnreadableError,
+    StoreMigrationUnsafePathError,
     WeftConfigUnreadableError,
     _load_weft_filigree_table,
     find_filigree_anchor,
@@ -102,9 +103,9 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
         # the ONE explicit place migration happens (never on passive discovery).
         try:
             store_dir, migrated = migrate_store_to_weft(cwd)
-        except (StoreMigrationBusyError, StoreMigrationConfUnreadableError) as exc:
+        except (StoreMigrationBusyError, StoreMigrationConfUnreadableError, StoreMigrationUnsafePathError) as exc:
             # Refused before any mutation — a live writer holds the DB, or the
-            # .filigree.conf is present-but-unreadable. The legacy layout is left
+            # configuration/destination is unsafe. The legacy layout is left
             # intact; the message tells the operator what to fix.
             click.echo(str(exc), err=True)
             sys.exit(1)
