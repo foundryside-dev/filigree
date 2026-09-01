@@ -692,8 +692,12 @@ _WEFT_ISSUE_FIXTURE_SLUGS: list[str] = [
 ]
 
 
+# Fixture replay runs against an UNSEEDED dashboard, so an example flagged
+# ``requires_seeded_state`` (a populated-success golden whose id can't exist
+# here) is excluded; its producer oracle under tests/federation/ seeds real
+# rows and pins that shape instead.
 _WEFT_ISSUE_EXAMPLES: list[tuple[str, dict[str, Any]]] = [
-    (slug, ex) for slug in _WEFT_ISSUE_FIXTURE_SLUGS for ex in _examples_for("weft", slug)
+    (slug, ex) for slug in _WEFT_ISSUE_FIXTURE_SLUGS for ex in _examples_for("weft", slug) if not ex.get("requires_seeded_state")
 ]
 
 

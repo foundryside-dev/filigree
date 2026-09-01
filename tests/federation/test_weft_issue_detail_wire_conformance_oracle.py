@@ -61,7 +61,7 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 # Git-blob sha1 of the committed golden (``sha1(b"blob %d\0" % len + data)``).
 # Recomputed from bytes by ``test_golden_byte_pin`` so any edit to the fixture
 # reds in the default suite, on every CI run.
-UPSTREAM_BLOB_SHA = "c9efff0aaf28d492d0d472dbde12deb2bc3f50b1"
+UPSTREAM_BLOB_SHA = "a5561853c4192c7abe7bcc4fba64b07d4032a8a6"
 
 
 def _blob_sha(data: bytes) -> str:
