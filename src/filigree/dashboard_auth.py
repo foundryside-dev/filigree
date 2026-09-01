@@ -60,7 +60,7 @@ def extract_federation_scope(path: str, project_query: str | None) -> str | None
 
     Returns the ``/api/p/{key}`` path segment when present; otherwise the
     ``?project=`` query value when *path* is part of the weft federation surface
-    (uniform with how ``/mcp`` is scoped by its ASGI wrapper); otherwise ``None``
+    (``/mcp`` is scoped the same way: ``ProjectMiddleware`` sets the ContextVar the MCP db resolver reads); otherwise ``None``
     (unscoped → falls back to the daemon's default project for reads, or fails
     closed for writes). Used to scope routing (the request ContextVar) and auth
     (the per-project token) from one predicate so they cannot diverge.

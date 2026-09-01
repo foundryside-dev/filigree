@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -607,6 +608,42 @@ class TestMultiProjectRouting:
         assert resp.status_code == 404
         data = resp.json()
         assert data["code"] == ErrorCode.NOT_FOUND
+
+    async def test_mcp_repeated_project_uses_same_scope_as_middleware(
+        self, project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP routing resolves ``?project=`` exactly as ProjectMiddleware does.
+
+        The retired ASGI wrapper re-parsed the raw query string with ``parse_qs``
+        (first value wins) while auth and the middleware use Starlette's
+        ``query_params`` (last value wins), so a repeated key could authenticate
+        against one project while routing MCP to another. The real MCP handler
+        only mounts under a federation token, so mount a recording stand-in and
+        check that the key it observes is the one the middleware resolved.
+        """
+        from filigree.dashboard import _DASHBOARD_STATE_ATTR
+
+        seen: list[str] = []
+
+        async def _recorder(scope: Any, receive: Any, send: Any) -> None:
+            state = getattr(scope["app"].state, _DASHBOARD_STATE_ATTR)
+            seen.append(state.current_project_key.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        monkeypatch.setattr("filigree.mcp_server.create_mcp_app", lambda db_resolver: (_recorder, None))
+        monkeypatch.setenv("WEFT_FEDERATION_TOKEN", "tok")
+        dash_module._project_store = project_store
+        try:
+            app = create_app(server_mode=True)
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+                for query in ("project=nonexistent&project=bravo", "project=bravo&project=nonexistent"):
+                    resp = await c.get(f"/mcp/?{query}", headers={"Authorization": "Bearer tok"})
+                    assert resp.status_code == 200, resp.text
+        finally:
+            dash_module._project_store = None
+        # Starlette last-value semantics — the same resolution auth uses.
+        assert seen == ["bravo", "nonexistent"]
 
     async def test_stats_per_project(self, multi_client: AsyncClient) -> None:
         """Stats endpoint returns different prefixes per project."""
