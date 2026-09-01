@@ -8,11 +8,13 @@ This guide covers version-to-version Filigree upgrades. For Beads import, see
 ## Upgrading to 3.0.0 (store consolidation)
 
 Filigree 3.0.0 moves the machine-owned store from the legacy `.filigree/`
-directory to the federation convention `.weft/filigree/` (the `.filigree.conf`
-anchor stays). The move happens **only** on an explicit `filigree init` against a
-legacy install — never on passive discovery — and is crash-convergent: it copies
-the database forward, rewrites the conf, then removes the legacy database. A
-re-run resumes a half-finished move.
+directory to the federation convention `.weft/filigree/`. The project anchor
+moves with it: `filigree init` imports a legacy `.filigree.conf` into the store's
+`config.json` and retires the old file to `.filigree.conf.imported`. The move
+happens **only** on an explicit `filigree init` against a legacy install — never
+on passive discovery — and is crash-convergent: it copies the database forward,
+publishes the canonical config, then removes the legacy database. A re-run
+resumes a half-finished move.
 
 ### Stop ALL writers before upgrading — this is mandatory, not advisory
 
@@ -37,9 +39,12 @@ the upgrade) is not registered anywhere and cannot be detected — you must stop
 yourself. When in doubt, quiesce everything and re-run; the migration is
 idempotent and safe to repeat.
 
-After the migration completes, restart the dashboard / server / MCP processes so
-they reopen against `.weft/filigree/`. A daemon left running from before the move
-keeps writing to its now-stale connection until it is restarted.
+For a server-mode project, `filigree init` also replaces the old `.filigree`
+entry in `server.json` with the canonical `.weft/filigree` path. This step is
+idempotent: rerunning `filigree init` repairs an affected registration left by an
+older binary. After the migration completes, restart the dashboard / server / MCP
+processes so they reopen against `.weft/filigree/`. A daemon left running from
+before the move keeps writing to its now-stale connection until it is restarted.
 
 ## Upgrading to 3.0.0 (MCP tool-name namespacing)
 

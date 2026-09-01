@@ -399,7 +399,12 @@ class EntityAssociationsMixin(DBMixinProtocol):
             )
         return cursor.rowcount > 0
 
-    def list_entity_associations(self, issue_id: IssueId) -> list[EntityAssociationRow]:
+    def list_entity_associations(
+        self,
+        issue_id: IssueId,
+        *,
+        current_content_hashes: Mapping[str, str] | None = None,
+    ) -> list[EntityAssociationRow]:
         """Return all entity associations for an issue.
 
         Returns raw rows in attach-time order. Drift detection is the
@@ -407,6 +412,16 @@ class EntityAssociationsMixin(DBMixinProtocol):
         ``drift_warning`` here per ADR-029 §"Decision 3"; that's the
         consumer's (Loomweave's ``issues_for``) responsibility after
         fetching the rows.
+
+        ``current_content_hashes`` is an OPTIONAL ``entity_id -> current
+        content_hash`` map a caller may supply when it has already resolved live
+        hashes (e.g. from ``registry.resolve_entity_content_hashes``). When
+        provided, each row's ``freshness_status`` is computed against the matching
+        current hash (``fresh`` / ``stale``); rows with no entry — and the default
+        ``None`` map — keep the ``"unknown"`` sentinel. The data layer itself
+        never performs a network resolve (mirrors the reverse-lookup
+        ``list_associations_by_entity`` convention): resolution stays on the
+        network-allowed registry layer, the read surface only joins it in.
         """
         issue_id = make_issue_id(issue_id)
         self._check_id_prefix(issue_id)
@@ -421,7 +436,8 @@ class EntityAssociationsMixin(DBMixinProtocol):
             """,
             (issue_id,),
         ).fetchall()
-        return [_row_to_entity_association(r) for r in rows]
+        hashes = current_content_hashes or {}
+        return [_row_to_entity_association(r, current_content_hash=hashes.get(str(r["loomweave_entity_id"]))) for r in rows]
 
     def _row_to_by_entity_association(
         self, r: Mapping[str, Any], *, current_content_hash: str | None = None

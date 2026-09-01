@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import filigree as filigree_pkg
 from filigree.core import DB_FILENAME, FILIGREE_DIR_NAME, SUMMARY_FILENAME, FiligreeDB, write_config
 from filigree.db_schema import CURRENT_SCHEMA_VERSION
 from filigree.mcp_server import (  # type: ignore[attr-defined]
@@ -2843,11 +2844,23 @@ class TestPromptRuntimeErrorNarrowing:
             mcp_mod.generate_summary = original  # type: ignore[attr-defined]
 
 
+# The bundled skill pack, read from source (the ``.claude/`` and ``.agents/``
+# copies are install-time byte-copies of these files).
+_SKILL_DIR = Path(filigree_pkg.__file__).resolve().parent / "skills" / "filigree-workflow"
+
+
+def _skill_text(rel: str) -> str:
+    return (_SKILL_DIR / rel).read_text(encoding="utf-8")
+
+
 class TestInstructionsUpdate:
-    """The injected prompt is intentionally lean — command catalogues are
-    discoverable via `--help` and MCP tool schemas. What the prompt itself
-    must pre-load is the action loop, behavioural policy, and project enums.
-    These tests pin the load-bearing pieces."""
+    """The injected block is intentionally lean — command catalogues are
+    discoverable via `--help` and MCP tool schemas, and the depth lives in the
+    on-demand skill pack. C-20 (weft-6a1fdb0192) budgets the block to 800
+    characters: what it must still pre-load is the entry point and the two
+    rules an agent cannot discover from `--help`. Everything else was
+    *relocated*, not dropped — the tests below pin each piece at its new home
+    so the relocation stays honest."""
 
     def test_instructions_include_atomic_workflow(self) -> None:
         from filigree.install import FILIGREE_INSTRUCTIONS
@@ -2856,27 +2869,93 @@ class TestInstructionsUpdate:
         assert "start-work" in FILIGREE_INSTRUCTIONS
         assert "session-context" in FILIGREE_INSTRUCTIONS
 
-    def test_instructions_include_observation_policy(self) -> None:
+    def test_instructions_include_schema_mismatch_rule(self) -> None:
+        """The other rule `--help` cannot teach: stop, don't retry, tell the user."""
         from filigree.install import FILIGREE_INSTRUCTIONS
 
-        lower = FILIGREE_INSTRUCTIONS.lower()
+        assert "SCHEMA_MISMATCH" in FILIGREE_INSTRUCTIONS
+        assert "do not retry" in FILIGREE_INSTRUCTIONS.lower()
+
+    def test_instructions_point_at_the_skill(self) -> None:
+        """The block is only lean because the depth is one hop away."""
+        from filigree.install import FILIGREE_INSTRUCTIONS
+
+        assert "filigree-workflow" in FILIGREE_INSTRUCTIONS
+        assert "--help" in FILIGREE_INSTRUCTIONS
+
+    def test_instructions_stay_within_c18_budget(self) -> None:
+        """C-20 budget: <= 800 chars for the injected template (weft-6a1fdb0192).
+
+        Measured on the template, not the assembled block: the block embeds
+        ``_instructions_version()``, which differs between a source checkout
+        and an installed dist.
+        """
+        from filigree.install import _instructions_text
+
+        text = _instructions_text()
+        assert len(text) <= 800, f"instructions.md is {len(text)} chars (C-20 budget: 800)"
+        assert len(text.encode("utf-8")) <= 800
+
+    def test_skill_stays_within_c18_budget(self) -> None:
+        """C-20 budget: <= 4000 chars for SKILL.md, <= 500 for its description."""
+        import re
+
+        text = _skill_text("SKILL.md")
+        assert len(text) <= 4000, f"SKILL.md is {len(text)} chars (C-20 budget: 4000)"
+        assert len(text.encode("utf-8")) <= 4000
+
+        frontmatter = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
+        assert frontmatter is not None, "SKILL.md lost its frontmatter"
+        description = frontmatter.group(1).split("description: >", 1)[1].strip()
+        assert len(description) <= 500, f"skill description is {len(description)} chars (C-20 budget: 500)"
+
+    def test_observation_policy_lives_in_the_skill(self) -> None:
+        """Relocated from the injected block to references/observations.md."""
+        lower = _skill_text("references/observations.md").lower()
         assert "incidental" in lower
         assert "current task" in lower
 
-    def test_instructions_include_priority_scale(self) -> None:
-        from filigree.install import FILIGREE_INSTRUCTIONS
-
+    def test_priority_scale_lives_in_the_skill(self) -> None:
+        """Relocated from the injected block to references/commands.md."""
+        text = _skill_text("references/commands.md")
         for level in ("P0", "P1", "P2", "P3", "P4"):
-            assert level in FILIGREE_INSTRUCTIONS
+            assert level in text
 
-    def test_instructions_include_invalid_transition_recovery(self) -> None:
-        """An agent hitting INVALID_TRANSITION needs to know how to recover."""
-        from filigree.install import FILIGREE_INSTRUCTIONS
+    def test_invalid_transition_recovery_lives_in_the_skill(self) -> None:
+        """An agent hitting INVALID_TRANSITION needs to know how to recover.
 
-        assert "INVALID_TRANSITION" in FILIGREE_INSTRUCTIONS
+        Named in SKILL.md (so the failure is recognisable without a second
+        hop); the recovery procedure is in the error-code sheet.
+        """
+        assert "INVALID_TRANSITION" in _skill_text("SKILL.md")
+
+        recovery = _skill_text("references/error-codes.md")
+        assert "INVALID_TRANSITION" in recovery
         # MCP tool namespaced old->new (ADR-016 §7): get_valid_transitions is
         # now served as workflow_transition_list.
-        assert "workflow_transition_list" in FILIGREE_INSTRUCTIONS
+        assert "workflow_transition_list" in recovery
+
+    def test_relocated_skill_sheets_exist(self) -> None:
+        """Non-vacuity: a moved/renamed sheet must fail loudly, not go dark."""
+        missing = [
+            rel
+            for rel in (
+                "SKILL.md",
+                "references/commands.md",
+                "references/observations.md",
+                "references/error-codes.md",
+                "references/workflow-patterns.md",
+                "references/team-coordination.md",
+            )
+            if not (_SKILL_DIR / rel).is_file()
+        ]
+        assert not missing, f"bundled skill sheet(s) not found: {missing}"
+
+    def test_skill_points_at_every_reference_sheet(self) -> None:
+        """SKILL.md is the index; an unlinked sheet is an unreachable sheet."""
+        text = _skill_text("SKILL.md")
+        for rel in sorted(p.name for p in (_SKILL_DIR / "references").glob("*.md")):
+            assert f"references/{rel}" in text, f"SKILL.md does not link references/{rel}"
 
 
 class TestSafePath:

@@ -26,13 +26,17 @@ DECISIONS (see the B5 design notes):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
 from filigree import legis_client
 from filigree.legis_client import LegisGateResult, LegisGateStatus
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
 from filigree.types.core import make_issue_id
+
+logger = logging.getLogger(__name__)
 
 
 class GateOutcome(Enum):
@@ -107,6 +111,79 @@ def _signed_row_is_stale(row: Any) -> bool:
     return bool(signed != row.get("content_hash_at_attach"))
 
 
+def _row_entity_id(row: Any) -> str:
+    """The opaque entity id a binding row points at (forward or by-entity row)."""
+    return str(row.get("loomweave_entity_id") or row.get("entity_id") or "")
+
+
+def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> GateDecision | None:
+    """Compare each governed binding's CURRENT content against its attach snapshot.
+
+    RED-1: the sign-off-snapshot staleness check (``_signed_row_is_stale``) only
+    catches a *re-attach* that advanced ``content_hash_at_attach`` past the signed
+    snapshot. It cannot catch the bound CODE drifting while nobody re-attaches —
+    then ``content_hash_at_attach`` stays frozen at (and equal to) the signed
+    snapshot, so the close was waved through despite the code having moved on.
+
+    Filigree owns this comparison (ADR-029 Decision 3; hub ruling 2026-06-29):
+    resolve each governed binding's CURRENT ``content_hash`` from the Loomweave
+    registry consumer and compare it to ``content_hash_at_attach``.
+
+    Returns a ``STALE`` :class:`GateDecision` if ANY governed binding's current
+    content differs from its attach snapshot; otherwise ``None`` (no current-code
+    drift — the caller proceeds to the existing Legis gate). The check is
+    **enrich-only**: when Loomweave is unreachable / unsupported (no registry,
+    no resolver surface, availability error) or an individual entity is
+    unresolvable (orphaned / not_found / invalid), the binding's freshness is a
+    discriminated UNKNOWN — logged, never silently treated as fresh, and never a
+    hard block. The core close must not become load-bearing on Loomweave.
+    """
+    resolver = getattr(getattr(db, "registry", None), "resolve_entity_content_hashes", None)
+    if resolver is None:
+        # Local-mode / injected fake / pre-surface fallback registry: cannot
+        # determine current-code drift. Flag UNKNOWN, do not block.
+        logger.info(
+            "closure-gate drift check: no Loomweave resolver; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
+            extra={"issue_id": issue_id, "freshness": "unknown", "reason": "no_resolver"},
+        )
+        return None
+
+    entity_ids = [_row_entity_id(row) for row in signed_rows if _row_entity_id(row)]
+    try:
+        resolution = resolver(entity_ids)
+    except (RegistryUnavailableError, RegistryVersionMismatchError) as exc:
+        logger.warning(
+            "closure-gate drift check: Loomweave unavailable; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
+            extra={"issue_id": issue_id, "freshness": "unknown", "reason": "registry_unavailable", "detail": str(exc)},
+        )
+        return None
+
+    resolved: dict[str, str] = dict(resolution.get("resolved", {}))
+    drifted: list[str] = []
+    unknown: list[str] = []
+    for row in signed_rows:
+        entity_id = _row_entity_id(row)
+        if not entity_id:
+            continue
+        current = resolved.get(entity_id)
+        attach = row.get("content_hash_at_attach")
+        if current is None:
+            unknown.append(entity_id)
+        elif attach is not None and current != attach:
+            drifted.append(entity_id)
+    if unknown:
+        logger.warning(
+            "closure-gate drift check: entity content unresolvable; freshness UNKNOWN (enrich-only, close not blocked on this axis)",
+            extra={"issue_id": issue_id, "freshness": "unknown", "reason": "entity_unresolved", "entity_ids": unknown},
+        )
+    if drifted:
+        return GateDecision(
+            GateOutcome.STALE,
+            "entity content drifted since attach (current code no longer matches content at attach); awaiting re-attest",
+        )
+    return None
+
+
 def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: bool = False) -> GateDecision:
     """Decide whether *issue_id* may be closed.
 
@@ -140,6 +217,15 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: 
         # Fail closed locally — do NOT consult Legis (it is asked only issue_id
         # and would answer for the stale snapshot it last saw).
         return GateDecision(GateOutcome.STALE, "entity content drifted since the Legis sign-off; awaiting re-sign")
+    drift = _evaluate_current_drift(db, str(issue_id), signed_rows)
+    if drift is not None:
+        # Current code has moved on since the binding was attached — fail closed
+        # as STALE, like the sign-off-snapshot drift above. This runs BEFORE the
+        # legis_known_down short-circuit (same load-bearing ordering as the
+        # snapshot check): a drifted binding must report STALE, never be masked
+        # as a transient UNAVAILABLE. A Loomweave outage does NOT reach here as a
+        # block — it degrades to UNKNOWN inside the helper (enrich-only).
+        return drift
     if legis_known_down:
         # A governed, non-stale issue needs a Legis round-trip, but a prior issue
         # in this batch already proved Legis unreachable — fail closed without
