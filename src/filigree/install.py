@@ -266,8 +266,24 @@ def _instruction_write_lock(file_path: Path) -> Iterator[None]:
 
     lock_path = store_dir / "instructions.lock"
     try:
-        lock_fd = open(lock_path, "w")  # noqa: SIM115 — held for the with-block
-    except OSError as exc:
+        # The store is repository-controlled.  Validate every existing path
+        # component, then open without truncation or symlink following.  The
+        # fstat/lstat comparison also protects platforms without O_NOFOLLOW
+        # and detects replacement of the directory entry during open.
+        relative_lock = lock_path.relative_to(file_path.parent)
+        lock_path = project_path(file_path.parent, *relative_lock.parts)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(lock_path, flags, 0o600)
+        try:
+            opened = os.fstat(fd)
+            named = lock_path.lstat()
+            if not stat.S_ISREG(opened.st_mode) or opened.st_dev != named.st_dev or opened.st_ino != named.st_ino:
+                raise UnsafeInstallPathError(f"Unsafe instruction lock file: {lock_path}")
+            lock_fd = os.fdopen(fd, "r+", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+    except (OSError, UnsafeInstallPathError, ValueError) as exc:
         # Can't create the lock file (read-only dir, etc.). Don't block a
         # legitimate single-writer install on a locking-substrate failure.
         logger.debug("instruction write lock unavailable (%s); proceeding unlocked", exc)
