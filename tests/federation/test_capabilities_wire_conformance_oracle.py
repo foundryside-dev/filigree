@@ -89,12 +89,12 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 # Git-blob sha1 of the vendored golden (``sha1(b"blob %d\0" % len + data)``).
 # Recomputed from bytes by ``test_vendored_golden_byte_pin`` so any edit to the
 # fixture reds in the default suite, on every CI run.
-UPSTREAM_BLOB_SHA = "ff2f9d64bc1421d4bf054bfa3b53aa794d6d89fd"
+UPSTREAM_BLOB_SHA = "c739e2a64550856de77668e70d9eb7faf413b43b"
 
 # sha256 of the authority golden, copied verbatim from the producer report. A
 # byte-identical vendoring reproduces it; recomputed by the byte-pin test as a
 # cross-check independent of the git-blob convention.
-UPSTREAM_SHA256 = "a864724a18e6268788efb96bab5a493a32629e482442a121be1d033062e3de95"
+UPSTREAM_SHA256 = "61020b20aadaef75a3de523f0a8f83be03d1d503ffdca719c78d949d20beeced"
 
 
 def _blob_sha(data: bytes) -> str:
