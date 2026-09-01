@@ -926,12 +926,6 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     if isinstance(override, str) and override:
         return resolve_store_dir(project_root), False
 
-    # The default destination is repository-controlled. Reject both directory
-    # components before any existence/idempotency checks or filesystem mutation:
-    # tempfile creation and os.replace otherwise follow a directory symlink and
-    # can overwrite another project's fixed-name database and metadata files.
-    _refuse_symlinked_weft_store(project_root)
-
     if not legacy_dir.is_dir():
         return resolve_store_dir(project_root), False
 
@@ -978,6 +972,14 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # — so we refuse up front and tell the operator to stop it. Runs BEFORE any
     # mutation so a refusal never litters a weft husk. Best-effort: detection that
     # itself fails never blocks migration (filigree-031f9a413f).
+    # The default destination is repository-controlled. Having DECIDED to
+    # migrate, reject a symlinked `.weft` / `.weft/filigree` before any
+    # filesystem mutation: tempfile creation and os.replace otherwise follow a
+    # directory symlink and can overwrite another project's fixed-name database
+    # and metadata files. Deliberately AFTER the no-op decisions above: a project
+    # with nothing to migrate (fresh 3.0 init, or already migrated and later
+    # relocated via a symlinked `.weft`) must keep working through `init`.
+    _refuse_symlinked_weft_store(project_root)
     _refuse_if_daemon_serving(project_root)
 
     # Second pre-mutation gate: a present .filigree.conf must be READABLE before

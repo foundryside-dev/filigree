@@ -272,6 +272,36 @@ class TestMigrateStoreToWeft:
         assert (victim / DB_FILENAME).read_bytes() == before
         assert (attacker / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
 
+    @pytest.mark.parametrize("symlink_component", [WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR])
+    def test_symlinked_destination_with_nothing_to_migrate_is_noop(self, tmp_path: Path, symlink_component: str) -> None:
+        """No legacy store → nothing to migrate → a symlinked .weft must not refuse `init`."""
+        real = tmp_path / "real-store"
+        real.mkdir()
+        if symlink_component == WEFT_DIR_NAME:
+            (tmp_path / WEFT_DIR_NAME).symlink_to(real, target_is_directory=True)
+        else:
+            (tmp_path / WEFT_DIR_NAME).mkdir()
+            (tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR).symlink_to(real, target_is_directory=True)
+
+        _store_dir, migrated = migrate_store_to_weft(tmp_path)
+
+        assert migrated is False
+
+    def test_symlinked_weft_after_completed_migration_is_idempotent_noop(self, tmp_path: Path) -> None:
+        """An operator who relocates a *migrated* .weft via symlink keeps a working `init`."""
+        _make_legacy_install(tmp_path)
+        _store_dir, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+
+        relocated = tmp_path.parent / f"{tmp_path.name}-weft-relocated"
+        (tmp_path / WEFT_DIR_NAME).rename(relocated)
+        (tmp_path / WEFT_DIR_NAME).symlink_to(relocated, target_is_directory=True)
+
+        store_dir, migrated = migrate_store_to_weft(tmp_path)
+
+        assert migrated is False
+        assert store_dir == tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+
     def test_migration_preserves_app_id_and_data(self, tmp_path: Path) -> None:
         legacy = _make_legacy_install(tmp_path)
         # seed an issue in the legacy db
