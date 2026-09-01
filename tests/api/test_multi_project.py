@@ -608,6 +608,15 @@ class TestMultiProjectRouting:
         data = resp.json()
         assert data["code"] == ErrorCode.NOT_FOUND
 
+    async def test_mcp_repeated_project_uses_same_scope_as_middleware(self, multi_client: AsyncClient) -> None:
+        """Repeated scope keys cannot make MCP route differently from auth.
+
+        Starlette consistently resolves the last value, so an attacker cannot
+        authenticate for ``bravo`` while routing MCP to the first, unknown key.
+        """
+        resp = await multi_client.get("/mcp/?project=nonexistent&project=bravo")
+        assert resp.status_code != 404, resp.text
+
     async def test_stats_per_project(self, multi_client: AsyncClient) -> None:
         """Stats endpoint returns different prefixes per project."""
         alpha_resp = await multi_client.get("/api/p/alpha/stats")
