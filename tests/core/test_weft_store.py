@@ -36,6 +36,7 @@ from filigree.core import (
     FiligreeDB,
     StoreMigrationBusyError,
     StoreMigrationConfUnreadableError,
+    StoreMigrationUnsafePathError,
     WeftConfigUnreadableError,
     _ephemeral_dashboard_port_if_live,
     _migration_write_fence,
@@ -243,6 +244,33 @@ class TestMigrateStoreToWeft:
         # legacy dir left in place with a breadcrumb (no destructive delete)
         assert (tmp_path / FILIGREE_DIR_NAME / LEGACY_MOVED_BREADCRUMB).is_file()
         assert not (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).exists()
+
+    @pytest.mark.parametrize("symlink_component", [WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR])
+    def test_refuses_symlinked_destination_without_overwriting_victim(self, tmp_path: Path, symlink_component: str) -> None:
+        """A checked-in destination symlink must not redirect the DB publish."""
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        _make_legacy_install(attacker)
+
+        victim = tmp_path / "victim-store"
+        victim.mkdir()
+        victim_db = FiligreeDB(victim / DB_FILENAME, prefix="victim")
+        victim_db.initialize()
+        victim_db.create_issue("victim sentinel", type="task")
+        victim_db.close()
+        before = (victim / DB_FILENAME).read_bytes()
+
+        if symlink_component == WEFT_DIR_NAME:
+            (attacker / WEFT_DIR_NAME).symlink_to(victim, target_is_directory=True)
+        else:
+            (attacker / WEFT_DIR_NAME).mkdir()
+            (attacker / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR).symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(StoreMigrationUnsafePathError, match="symlinked destination"):
+            migrate_store_to_weft(attacker)
+
+        assert (victim / DB_FILENAME).read_bytes() == before
+        assert (attacker / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
 
     def test_migration_preserves_app_id_and_data(self, tmp_path: Path) -> None:
         legacy = _make_legacy_install(tmp_path)

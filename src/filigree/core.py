@@ -602,6 +602,28 @@ class StoreMigrationConfUnreadableError(RuntimeError):
     """
 
 
+class StoreMigrationUnsafePathError(RuntimeError):
+    """A migration destination component is a symlink and may redirect writes."""
+
+
+def _refuse_symlinked_weft_store(project_root: Path) -> None:
+    """Reject repository-controlled symlinks in the default migration target.
+
+    Migration atomically replaces files below ``.weft/filigree``.  Following a
+    symlink for either directory would therefore let one project replace files
+    in another location.  ``Path.is_symlink`` also detects dangling links, unlike
+    an existence check.
+    """
+    weft_root = project_root / WEFT_DIR_NAME
+    weft_store = weft_root / WEFT_MEMBER_SUBDIR
+    for component in (weft_root, weft_store):
+        if component.is_symlink():
+            raise StoreMigrationUnsafePathError(
+                f"Cannot migrate store: refusing to write through symlinked destination {component}. "
+                "Replace the symlink with a real directory, then re-run."
+            )
+
+
 @contextlib.contextmanager
 def _migration_write_fence(legacy_db: Path) -> Iterator[None]:
     """Hold an exclusive write fence on *legacy_db* across the copy→unlink window.
@@ -903,6 +925,12 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     override = (_load_weft_filigree_table(project_root) or {}).get("store_dir")
     if isinstance(override, str) and override:
         return resolve_store_dir(project_root), False
+
+    # The default destination is repository-controlled. Reject both directory
+    # components before any existence/idempotency checks or filesystem mutation:
+    # tempfile creation and os.replace otherwise follow a directory symlink and
+    # can overwrite another project's fixed-name database and metadata files.
+    _refuse_symlinked_weft_store(project_root)
 
     if not legacy_dir.is_dir():
         return resolve_store_dir(project_root), False
