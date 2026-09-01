@@ -244,6 +244,32 @@ class TestInstructionWriteLock:
         assert FILIGREE_INSTRUCTIONS_MARKER in target.read_text()
         mock_lock.assert_not_called()
 
+    def test_lock_symlink_does_not_truncate_target(self, tmp_path: Path) -> None:
+        """A hostile repository cannot redirect the lock open outside itself."""
+        store_dir = tmp_path / FILIGREE_DIR_NAME
+        store_dir.mkdir()
+        victim = tmp_path.parent / f"{tmp_path.name}-victim.txt"
+        original = "content that must not be truncated\n"
+        victim.write_text(original)
+        (store_dir / "instructions.lock").symlink_to(victim)
+
+        ok, _msg = inject_instructions(tmp_path / "CLAUDE.md")
+
+        assert ok
+        assert victim.read_text() == original
+        assert (store_dir / "instructions.lock").is_symlink()
+
+    def test_existing_lock_file_is_not_truncated(self, tmp_path: Path) -> None:
+        store_dir = tmp_path / FILIGREE_DIR_NAME
+        store_dir.mkdir()
+        lock_path = store_dir / "instructions.lock"
+        lock_path.write_text("existing lock data")
+
+        ok, _msg = inject_instructions(tmp_path / "CLAUDE.md")
+
+        assert ok
+        assert lock_path.read_text() == "existing lock data"
+
     def test_concurrent_injections_preserve_user_content(self, tmp_path: Path) -> None:
         """Serialised real-flock injections must not drop surrounding user text."""
         (tmp_path / FILIGREE_DIR_NAME).mkdir()

@@ -602,6 +602,28 @@ class StoreMigrationConfUnreadableError(RuntimeError):
     """
 
 
+class StoreMigrationUnsafePathError(RuntimeError):
+    """A migration destination component is a symlink and may redirect writes."""
+
+
+def _refuse_symlinked_weft_store(project_root: Path) -> None:
+    """Reject repository-controlled symlinks in the default migration target.
+
+    Migration atomically replaces files below ``.weft/filigree``.  Following a
+    symlink for either directory would therefore let one project replace files
+    in another location.  ``Path.is_symlink`` also detects dangling links, unlike
+    an existence check.
+    """
+    weft_root = project_root / WEFT_DIR_NAME
+    weft_store = weft_root / WEFT_MEMBER_SUBDIR
+    for component in (weft_root, weft_store):
+        if component.is_symlink():
+            raise StoreMigrationUnsafePathError(
+                f"Cannot migrate store: refusing to write through symlinked destination {component}. "
+                "Replace the symlink with a real directory, then re-run."
+            )
+
+
 @contextlib.contextmanager
 def _migration_write_fence(legacy_db: Path) -> Iterator[None]:
     """Hold an exclusive write fence on *legacy_db* across the copy→unlink window.
@@ -950,6 +972,14 @@ def migrate_store_to_weft(project_root: Path) -> tuple[Path, bool]:
     # — so we refuse up front and tell the operator to stop it. Runs BEFORE any
     # mutation so a refusal never litters a weft husk. Best-effort: detection that
     # itself fails never blocks migration (filigree-031f9a413f).
+    # The default destination is repository-controlled. Having DECIDED to
+    # migrate, reject a symlinked `.weft` / `.weft/filigree` before any
+    # filesystem mutation: tempfile creation and os.replace otherwise follow a
+    # directory symlink and can overwrite another project's fixed-name database
+    # and metadata files. Deliberately AFTER the no-op decisions above: a project
+    # with nothing to migrate (fresh 3.0 init, or already migrated and later
+    # relocated via a symlinked `.weft`) must keep working through `init`.
+    _refuse_symlinked_weft_store(project_root)
     _refuse_if_daemon_serving(project_root)
 
     # Second pre-mutation gate: a present .filigree.conf must be READABLE before

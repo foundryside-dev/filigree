@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
     from starlette.middleware.base import RequestResponseEndpoint
     from starlette.responses import Response
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp
 
 from starlette.requests import Request
 
@@ -957,8 +957,8 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                 # fail closed. The classic surface stays lenient — the dashboard's
                 # no-project default view legitimately writes to /api and relies on
                 # default-project resolution, so fail-closing it would break "close
-                # issue" from that view. /mcp is excluded — it carries protocol
-                # messages and self-scopes via ?project= at the transport.
+                # issue" from that view. /mcp is excluded because it carries
+                # protocol messages rather than federation writes.
                 is_federation = is_weft_scoped_path(path) and not is_mcp
                 if request.method not in ("GET", "HEAD", "OPTIONS") and is_federation:
                     return _error_response(
@@ -1056,33 +1056,11 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     if _mcp_handler is not None:
         from starlette.routing import Mount
 
-        if server_mode:
-            # Wrap MCP handler to extract ?project= query param
-            from urllib.parse import parse_qs
-
-            class _McpProjectWrapper:
-                """ASGI wrapper that sets _current_project_key from ?project= query param."""
-
-                def __init__(self, inner: ASGIApp) -> None:
-                    self._inner = inner
-
-                async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-                    if scope["type"] in ("http", "websocket"):
-                        qs = scope.get("query_string", b"").decode()
-                        params = parse_qs(qs)
-                        project_vals = params.get("project", [])
-                        if project_vals:
-                            token = dashboard_state.current_project_key.set(project_vals[0])
-                            try:
-                                await self._inner(scope, receive, send)
-                                return
-                            finally:
-                                dashboard_state.current_project_key.reset(token)
-                    await self._inner(scope, receive, send)
-
-            app.routes.append(Mount("/mcp", app=_McpProjectWrapper(_mcp_handler)))
-        else:
-            app.routes.append(Mount("/mcp", app=_mcp_handler))
+        # In server mode ProjectMiddleware has already resolved ?project= and set
+        # current_project_key.  Do not parse the query again here: independent
+        # parsers can disagree about repeated parameters and let authentication
+        # and MCP database routing select different projects.
+        app.routes.append(Mount("/mcp", app=_mcp_handler))
 
     return app
 

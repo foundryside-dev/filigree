@@ -36,6 +36,7 @@ from filigree.core import (
     FiligreeDB,
     StoreMigrationBusyError,
     StoreMigrationConfUnreadableError,
+    StoreMigrationUnsafePathError,
     WeftConfigUnreadableError,
     _ephemeral_dashboard_port_if_live,
     _migration_write_fence,
@@ -243,6 +244,63 @@ class TestMigrateStoreToWeft:
         # legacy dir left in place with a breadcrumb (no destructive delete)
         assert (tmp_path / FILIGREE_DIR_NAME / LEGACY_MOVED_BREADCRUMB).is_file()
         assert not (tmp_path / FILIGREE_DIR_NAME / DB_FILENAME).exists()
+
+    @pytest.mark.parametrize("symlink_component", [WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR])
+    def test_refuses_symlinked_destination_without_overwriting_victim(self, tmp_path: Path, symlink_component: str) -> None:
+        """A checked-in destination symlink must not redirect the DB publish."""
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        _make_legacy_install(attacker)
+
+        victim = tmp_path / "victim-store"
+        victim.mkdir()
+        victim_db = FiligreeDB(victim / DB_FILENAME, prefix="victim")
+        victim_db.initialize()
+        victim_db.create_issue("victim sentinel", type="task")
+        victim_db.close()
+        before = (victim / DB_FILENAME).read_bytes()
+
+        if symlink_component == WEFT_DIR_NAME:
+            (attacker / WEFT_DIR_NAME).symlink_to(victim, target_is_directory=True)
+        else:
+            (attacker / WEFT_DIR_NAME).mkdir()
+            (attacker / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR).symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(StoreMigrationUnsafePathError, match="symlinked destination"):
+            migrate_store_to_weft(attacker)
+
+        assert (victim / DB_FILENAME).read_bytes() == before
+        assert (attacker / FILIGREE_DIR_NAME / DB_FILENAME).is_file()
+
+    @pytest.mark.parametrize("symlink_component", [WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR])
+    def test_symlinked_destination_with_nothing_to_migrate_is_noop(self, tmp_path: Path, symlink_component: str) -> None:
+        """No legacy store → nothing to migrate → a symlinked .weft must not refuse `init`."""
+        real = tmp_path / "real-store"
+        real.mkdir()
+        if symlink_component == WEFT_DIR_NAME:
+            (tmp_path / WEFT_DIR_NAME).symlink_to(real, target_is_directory=True)
+        else:
+            (tmp_path / WEFT_DIR_NAME).mkdir()
+            (tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR).symlink_to(real, target_is_directory=True)
+
+        _store_dir, migrated = migrate_store_to_weft(tmp_path)
+
+        assert migrated is False
+
+    def test_symlinked_weft_after_completed_migration_is_idempotent_noop(self, tmp_path: Path) -> None:
+        """An operator who relocates a *migrated* .weft via symlink keeps a working `init`."""
+        _make_legacy_install(tmp_path)
+        _store_dir, migrated = migrate_store_to_weft(tmp_path)
+        assert migrated is True
+
+        relocated = tmp_path.parent / f"{tmp_path.name}-weft-relocated"
+        (tmp_path / WEFT_DIR_NAME).rename(relocated)
+        (tmp_path / WEFT_DIR_NAME).symlink_to(relocated, target_is_directory=True)
+
+        store_dir, migrated = migrate_store_to_weft(tmp_path)
+
+        assert migrated is False
+        assert store_dir == tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
 
     def test_migration_preserves_app_id_and_data(self, tmp_path: Path) -> None:
         legacy = _make_legacy_install(tmp_path)
