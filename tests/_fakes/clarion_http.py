@@ -66,6 +66,19 @@ class ClarionStubState:
     # Every POST /api/v1/files/batch request body (parsed). Tests assert the
     # number of entries (request count) and the queries-per-chunk shape.
     batch_requests: list[dict[str, list[dict[str, str]]]] = field(default_factory=list)
+    # Content-Length of every ACCEPTED ``POST /api/v1/files/batch`` body, in
+    # arrival order (parallel to ``batch_requests``). Tests assert the wire
+    # size directly rather than re-serialising ``batch_requests``.
+    batch_request_body_bytes: list[int] = field(default_factory=list)
+    # Loomweave pins a 16 KiB transport-level body cap on the whole
+    # ``/api/v1/*`` group (``RequestBodyLimitLayer``; contracts.md
+    # "max 16 KiB" / "413 n/a"). When set, any POST body longer than this is
+    # answered ``413 text/plain "length limit exceeded"`` — the framework's
+    # verbatim reply — BEFORE the JSON is parsed, and the rejected size is
+    # appended to ``rejected_body_bytes``. ``None`` (default) disables the
+    # cap so pre-existing tests keep their footing.
+    max_body_bytes: int | None = None
+    rejected_body_bytes: list[int] = field(default_factory=list)
     # ---- SEI (ADR-038) surface -------------------------------------------
     # ``include_sei_capability`` controls whether ``_capabilities`` carries the
     # nested ``sei`` object at all (a pre-SEI Clarion omits it); ``sei_supported``
@@ -93,6 +106,8 @@ class ClarionStubState:
     sei_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Every POST /api/v1/identity/resolve:batch request's ``locators`` list.
     identity_resolve_requests: list[list[str]] = field(default_factory=list)
+    # Content-Length of every ACCEPTED resolve:batch body (parallel list).
+    identity_resolve_request_body_bytes: list[int] = field(default_factory=list)
 
 
 def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
@@ -119,6 +134,26 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
             return False
 
+        def _read_body_or_reject(self) -> bytes | None:
+            """Read the POST body; answer 413 and return ``None`` when it exceeds the cap.
+
+            Mirrors tower-http's ``RequestBodyLimitLayer``: the body is drained
+            and the reply is ``413 Payload Too Large`` with a ``text/plain``
+            ``length limit exceeded`` body — NOT a JSON error envelope.
+            """
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b""
+            if state.max_body_bytes is not None and length > state.max_body_bytes:
+                state.rejected_body_bytes.append(length)
+                body = b"length limit exceeded"
+                self.send_response(413)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return None
+            return raw
+
         def _write_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode()
             self.send_response(status)
@@ -134,8 +169,9 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             SEI-shaped inputs (reserved ``loomweave:eid:`` prefix) are rejected into
             ``invalid`` (REQ-F-02); everything else falls to ``not_found``.
             """
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length) if length else b""
+            raw = self._read_body_or_reject()
+            if raw is None:
+                return
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -149,6 +185,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self._write_json(400, {"error": "batch too large", "code": "BATCH_TOO_LARGE"})
                 return
             state.identity_resolve_requests.append(list(locators))
+            state.identity_resolve_request_body_bytes.append(len(raw))
             resolved: dict[str, dict[str, Any]] = {}
             invalid: list[str] = []
             not_found: list[str] = []
@@ -263,8 +300,9 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self.send_response(404)
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length) if length else b""
+            raw = self._read_body_or_reject()
+            if raw is None:
+                return
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -276,6 +314,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self.end_headers()
                 return
             state.batch_requests.append({"queries": payload["queries"]})
+            state.batch_request_body_bytes.append(len(raw))
             queries = payload["queries"]
             if len(queries) > 256:
                 body = json.dumps({"error": "batch too large", "code": "BATCH_TOO_LARGE"}).encode()
@@ -337,6 +376,7 @@ def clarion_stub(
     sei_supported: bool = False,
     sei_by_locator: dict[str, str] | None = None,
     authentication: dict[str, Any] | None = None,
+    max_body_bytes: int | None = None,
 ) -> Iterator[tuple[str, ClarionStubState]]:
     """Run a Clarion HTTP stub serving ``_capabilities``, ``files``, and the SEI surface.
 
@@ -348,7 +388,9 @@ def clarion_stub(
     SEI options seed the state up front so the capability probe a FiligreeDB runs
     at construction sees the intended ``sei`` advertisement. ``authentication``
     (ADR-056 discovery block) is omitted from ``_capabilities`` when ``None``
-    (pre-ADR-056 Loomweave); pass a dict to advertise a mode.
+    (pre-ADR-056 Loomweave); pass a dict to advertise a mode. ``max_body_bytes``
+    enables Loomweave's transport-level POST body cap (``413 text/plain`` over
+    the limit); ``None`` leaves it off.
     """
     state = ClarionStubState(
         instance_id=instance_id,
@@ -359,6 +401,7 @@ def clarion_stub(
         sei_supported=sei_supported,
         sei_by_locator=dict(sei_by_locator) if sei_by_locator else {},
         authentication=dict(authentication) if authentication is not None else None,
+        max_body_bytes=max_body_bytes,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), _build_handler(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

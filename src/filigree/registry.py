@@ -40,7 +40,7 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
-from typing import Any, Literal, Protocol, TypeAlias, TypedDict
+from typing import Any, Literal, Protocol, TypeAlias, TypedDict, TypeVar
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
@@ -163,10 +163,12 @@ class BatchResolution(TypedDict):
     ``messages`` is an optional per-path sidecar carrying the original
     registry exception's ``str()`` for items in ``not_found`` /
     ``briefing_blocked``. Wire-protocol batch responses do not populate it
-    (those channels are bare path lists on the wire); the loop-fallback
-    adapter populates it from the single-item exception messages so call
-    sites can preserve the original context when promoting batch channels
-    back into per-item exceptions.
+    for those channels (they are bare path lists on the wire); the
+    loop-fallback adapter populates it from the single-item exception
+    messages, and the wire path populates it for ``BODY_TOO_LARGE``
+    ``errors`` entries (a single query that cannot fit under Loomweave's
+    16 KiB body cap), so call sites can preserve the original context when
+    promoting batch channels back into per-item exceptions.
     """
 
     resolved: dict[str, ResolvedFile]
@@ -212,6 +214,118 @@ class SeiResolution(TypedDict):
 # sending so it never trips the cap; the constant is exposed so callers
 # can size their inputs deliberately.
 LOOMWEAVE_BATCH_MAX_QUERIES = 256
+
+# Loomweave ALSO caps every ``/api/v1/*`` request body at 16 KiB at the
+# transport layer (``RequestBodyLimitLayer``; contracts.md §POST
+# /api/v1/files/batch "max 16 KiB", "413 n/a"). An over-cap body is answered
+# ``413 text/plain "length limit exceeded"`` before any JSON is parsed — no
+# error envelope, no ``code``. 256 real-world paths serialize to ~25 KiB, so
+# chunking by count alone trips it (filigree-b57d4eb7d9). Filigree therefore
+# sizes chunks by serialized body bytes as well: ``LOOMWEAVE_BATCH_MAX_BODY_BYTES``
+# is the client-side target — the contract cap minus headroom, so a
+# measurement discrepancy on the server side never surfaces as a 413 — and
+# ``LOOMWEAVE_BATCH_BODY_CAP_BYTES`` is the hard contract figure a single query
+# provably cannot exceed and still be accepted.
+LOOMWEAVE_BATCH_BODY_CAP_BYTES = 16 * 1024
+LOOMWEAVE_BATCH_BODY_HEADROOM_BYTES = 1024
+LOOMWEAVE_BATCH_MAX_BODY_BYTES = LOOMWEAVE_BATCH_BODY_CAP_BYTES - LOOMWEAVE_BATCH_BODY_HEADROOM_BYTES
+
+# ``errors[].code`` Filigree synthesizes (Loomweave never emits it) for a
+# single query whose body cannot fit under the transport cap: the item is
+# reported unresolved on its own channel instead of failing the whole batch.
+LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE = "BODY_TOO_LARGE"
+
+
+def loomweave_wire_body_size(payload: object) -> int:
+    """Byte length of ``payload`` exactly as httpx puts it on the wire for ``json=``.
+
+    httpx 0.28 encodes ``json=`` with ``ensure_ascii=False`` and compact
+    separators, then UTF-8 — so a non-ASCII path costs its UTF-8 width, not its
+    escaped ``\\uXXXX`` width. The chunker measures with the SAME settings so
+    its arithmetic is the request's Content-Length, not an estimate. Keep this
+    in lockstep with :func:`httpx._content.encode_json`.
+    """
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+_ChunkItem = TypeVar("_ChunkItem")
+
+
+def _chunk_by_wire_size(
+    items: list[_ChunkItem],
+    *,
+    envelope_key: str,
+    wire_item: Callable[[_ChunkItem], object],
+    max_items: int = LOOMWEAVE_BATCH_MAX_QUERIES,
+    max_body_bytes: int = LOOMWEAVE_BATCH_MAX_BODY_BYTES,
+) -> list[list[_ChunkItem]]:
+    """Greedily pack ``items`` into chunks bounded by BOTH count and body bytes.
+
+    The body shape is ``{"<envelope_key>":[<wire_item>, ...]}``; each item's
+    cost is its compact-JSON UTF-8 length plus the separating comma. Order is
+    preserved and nothing is dropped: an item that cannot fit under
+    ``max_body_bytes`` even alone becomes a single-item chunk (the caller
+    decides how to report it — see :meth:`LoomweaveRegistry.resolve_files_batch`).
+    """
+    envelope_overhead = loomweave_wire_body_size({envelope_key: []})
+    chunks: list[list[_ChunkItem]] = []
+    current: list[_ChunkItem] = []
+    current_bytes = envelope_overhead
+    for item in items:
+        item_bytes = loomweave_wire_body_size(wire_item(item))
+        added = item_bytes + (1 if current else 0)  # +1 for the "," separator
+        if current and (len(current) >= max_items or current_bytes + added > max_body_bytes):
+            chunks.append(current)
+            current = []
+            current_bytes = envelope_overhead
+            added = item_bytes
+        current.append(item)
+        current_bytes += added
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _batch_query_wire_item(query: BatchQuery) -> dict[str, str]:
+    """The exact per-query object ``POST /api/v1/files/batch`` carries."""
+    return {"path": query["path"], "language": query.get("language", "")}
+
+
+def chunk_batch_queries(queries: list[BatchQuery]) -> list[list[BatchQuery]]:
+    """Split ``queries`` for ``POST /api/v1/files/batch`` by count AND body bytes.
+
+    Every chunk holds at most ``LOOMWEAVE_BATCH_MAX_QUERIES`` queries and
+    serializes to at most ``LOOMWEAVE_BATCH_MAX_BODY_BYTES`` — except a single
+    query that is over the cap by itself, which is isolated into its own chunk
+    so the resolver can report it unresolved without losing its neighbours.
+    """
+    return _chunk_by_wire_size(queries, envelope_key="queries", wire_item=_batch_query_wire_item)
+
+
+def _chunk_locators(locators: list[str]) -> list[list[str]]:
+    """Split ``locators`` for ``POST /api/v1/identity/resolve:batch`` by count AND body bytes."""
+    return _chunk_by_wire_size(locators, envelope_key="locators", wire_item=lambda locator: locator)
+
+
+def _merge_batch_resolution(into: BatchResolution, part: BatchResolution) -> None:
+    into["resolved"].update(part["resolved"])
+    into["not_found"].extend(part["not_found"])
+    into["briefing_blocked"].extend(part["briefing_blocked"])
+    into["errors"].extend(part["errors"])
+    into["messages"].update(part.get("messages", {}))
+
+
+class _BatchBodyTooLargeError(Exception):
+    """Internal: Loomweave answered HTTP 413 (transport body cap) for a chunk.
+
+    Never escapes ``LoomweaveRegistry`` — the batch resolvers catch it and
+    either split the chunk or report the lone item unresolved.
+    """
+
+    def __init__(self, *, url: str, body_bytes: int) -> None:
+        super().__init__(f"HTTP 413 from {url} for a {body_bytes}-byte body")
+        self.url = url
+        self.body_bytes = body_bytes
 
 
 class EntityHashResolution(TypedDict):
@@ -902,32 +1016,79 @@ class LoomweaveRegistry:
     ) -> BatchResolution:
         """CONTRACT-1 batch resolution: POST /api/v1/files/batch.
 
-        Chunks ``queries`` into runs of ``LOOMWEAVE_BATCH_MAX_QUERIES`` (256)
-        and merges the per-chunk results into a single ``BatchResolution``.
-        Whole-batch availability failures (network, timeout, HTTP 5xx,
-        HTTP 401 auth) raise ``RegistryUnavailableError`` — fallback policy
-        applies. Malformed reachable responses use
-        ``cause_kind="invalid_response"`` so fallback wrappers can fail closed.
-        Per-item failures (not_found, briefing_blocked, structured errors)
-        populate the corresponding channel and the call still returns; callers
-        decide whether to raise per item.
+        Chunks ``queries`` by BOTH the 256-query count cap and the 16 KiB
+        transport body cap (:func:`chunk_batch_queries`) and merges the
+        per-chunk results into a single ``BatchResolution``. A chunk Loomweave
+        still refuses with HTTP 413 is halved and retried (bounded: at most
+        log2(256) levels); a single query that cannot fit is reported on the
+        ``errors`` channel with ``code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE``
+        rather than failing the batch. Whole-batch availability failures
+        (network, timeout, HTTP 5xx, HTTP 401 auth) raise
+        ``RegistryUnavailableError`` — fallback policy applies. Malformed
+        reachable responses use ``cause_kind="invalid_response"`` so fallback
+        wrappers can fail closed. Per-item failures (not_found,
+        briefing_blocked, structured errors) populate the corresponding channel
+        and the call still returns; callers decide whether to raise per item.
         """
         aggregate = BatchResolution(resolved={}, not_found=[], briefing_blocked=[], errors=[], messages={})
         if not queries:
             return aggregate
-        for start in range(0, len(queries), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = queries[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
-            chunk_result = self._resolve_files_batch_chunk(chunk)
-            aggregate["resolved"].update(chunk_result["resolved"])
-            aggregate["not_found"].extend(chunk_result["not_found"])
-            aggregate["briefing_blocked"].extend(chunk_result["briefing_blocked"])
-            aggregate["errors"].extend(chunk_result["errors"])
-            aggregate["messages"].update(chunk_result.get("messages", {}))
+        for chunk in chunk_batch_queries(queries):
+            _merge_batch_resolution(aggregate, self._resolve_files_batch_chunk_splitting(chunk))
         return aggregate
+
+    def _resolve_files_batch_chunk_splitting(self, chunk: list[BatchQuery]) -> BatchResolution:
+        """Resolve one chunk, splitting on HTTP 413 until every query has an outcome.
+
+        A lone query whose body provably exceeds the contract cap
+        (``LOOMWEAVE_BATCH_BODY_CAP_BYTES``) is never put on the wire; one
+        Loomweave refuses anyway (a tighter-than-documented deployment) lands in
+        the same ``BODY_TOO_LARGE`` error entry after the 413.
+        """
+        url = loomweave_files_batch_url(self.base_url)
+        if len(chunk) == 1:
+            body_bytes = loomweave_wire_body_size({"queries": [_batch_query_wire_item(chunk[0])]})
+            if body_bytes > LOOMWEAVE_BATCH_BODY_CAP_BYTES:
+                return self._body_too_large_resolution(chunk[0]["path"], url=url, body_bytes=body_bytes, status="pre-flight")
+        try:
+            return self._resolve_files_batch_chunk(chunk)
+        except _BatchBodyTooLargeError as exc:
+            if len(chunk) == 1:
+                return self._body_too_large_resolution(chunk[0]["path"], url=url, body_bytes=exc.body_bytes, status="HTTP 413")
+            mid = len(chunk) // 2
+            logger.warning(
+                "Loomweave batch resolve at %s answered HTTP 413 for a %d-query, %d-byte chunk; splitting %d/%d",
+                url,
+                len(chunk),
+                exc.body_bytes,
+                mid,
+                len(chunk) - mid,
+            )
+            result = self._resolve_files_batch_chunk_splitting(chunk[:mid])
+            _merge_batch_resolution(result, self._resolve_files_batch_chunk_splitting(chunk[mid:]))
+            return result
+
+    @staticmethod
+    def _body_too_large_resolution(path: str, *, url: str, body_bytes: int, status: str) -> BatchResolution:
+        # The offending path is by definition enormous; show enough to identify it.
+        shown = path if len(path) <= 200 else f"{path[:200]}…(+{len(path) - 200} chars)"
+        msg = (
+            f"Loomweave batch resolve at {url} cannot carry file {shown!r}: "
+            f"{body_bytes}-byte request body exceeds the {LOOMWEAVE_BATCH_BODY_CAP_BYTES // 1024} KiB "
+            f"transport cap ({status})"
+        )
+        logger.warning(msg)
+        return BatchResolution(
+            resolved={},
+            not_found=[],
+            briefing_blocked=[],
+            errors=[BatchResolutionError(requested_path=path, code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE, message=msg)],
+            messages={path: msg},
+        )
 
     def _resolve_files_batch_chunk(self, chunk: list[BatchQuery]) -> BatchResolution:
         url = loomweave_files_batch_url(self.base_url)
-        body = {"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}
+        body = {"queries": [_batch_query_wire_item(q) for q in chunk]}
         # Batch resolve is an idempotent read, so it retries transient 5xx and
         # network failures on the same deadline/backoff budget as the
         # single-file ``resolve_file`` path (CONTRACT-1 retry parity). Auth and
@@ -960,6 +1121,10 @@ class LoomweaveRegistry:
                     if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
                         msg = f"Loomweave batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
                         raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+                    if response.status_code == 413:
+                        # Transport body cap (text/plain, no envelope): the
+                        # caller splits the chunk rather than failing the batch.
+                        raise _BatchBodyTooLargeError(url=url, body_bytes=len(response.request.content))
                     if 400 <= response.status_code < 500:
                         msg = f"Loomweave batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
                         raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
@@ -1085,9 +1250,10 @@ class LoomweaveRegistry:
     def resolve_locators_batch(self, locators: list[str]) -> SeiResolution:
         """Resolve a batch of locators to SEIs via ``POST /api/v1/identity/resolve:batch``.
 
-        Chunks ``locators`` into runs of ``LOOMWEAVE_BATCH_MAX_QUERIES`` (256 — the
-        per-batch cap Loomweave pins on the identity surface, same as files) and
-        merges the per-chunk channels. Whole-batch failures (network, timeout,
+        Chunks ``locators`` by the 256 per-batch count cap Loomweave pins on the
+        identity surface (same as files) AND the 16 KiB ``/api/v1/*`` transport
+        body cap, merging the per-chunk channels; a chunk refused with HTTP 413
+        is halved and retried. Whole-batch failures (network, timeout,
         HTTP 5xx, malformed body, 401 auth) raise ``RegistryUnavailableError``;
         per-locator outcomes (resolved / orphaned / already-migrated) populate
         the returned :class:`SeiResolution`. This is the resolve client the
@@ -1097,13 +1263,44 @@ class LoomweaveRegistry:
         aggregate = SeiResolution(resolved={}, orphaned=[], already_migrated=[])
         if not locators:
             return aggregate
-        for start in range(0, len(locators), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = locators[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
-            chunk_result = self._resolve_locators_batch_chunk(chunk)
+        for chunk in _chunk_locators(locators):
+            chunk_result = self._resolve_locators_batch_chunk_splitting(chunk)
             aggregate["resolved"].update(chunk_result["resolved"])
             aggregate["orphaned"].extend(chunk_result["orphaned"])
             aggregate["already_migrated"].extend(chunk_result["already_migrated"])
         return aggregate
+
+    def _resolve_locators_batch_chunk_splitting(self, chunk: list[str]) -> SeiResolution:
+        """Resolve one locator chunk, halving on HTTP 413 (bounded by the chunk size).
+
+        A single locator Loomweave still refuses surfaces as the same
+        ``RegistryResolutionError`` (HTTP 413) any other deterministic 4xx does —
+        a >16 KiB locator is malformed, not a batch-sizing problem.
+        """
+        try:
+            return self._resolve_locators_batch_chunk(chunk)
+        except _BatchBodyTooLargeError as exc:
+            if len(chunk) == 1:
+                msg = (
+                    f"Loomweave identity resolve rejected request at {exc.url}: "
+                    f"HTTP 413 ({exc.body_bytes}-byte body over the transport cap)"
+                )
+                raise RegistryResolutionError(msg, status_code=413, url=exc.url) from exc
+            mid = len(chunk) // 2
+            logger.warning(
+                "Loomweave identity resolve at %s answered HTTP 413 for a %d-locator, %d-byte chunk; splitting %d/%d",
+                exc.url,
+                len(chunk),
+                exc.body_bytes,
+                mid,
+                len(chunk) - mid,
+            )
+            result = self._resolve_locators_batch_chunk_splitting(chunk[:mid])
+            rest = self._resolve_locators_batch_chunk_splitting(chunk[mid:])
+            result["resolved"].update(rest["resolved"])
+            result["orphaned"].extend(rest["orphaned"])
+            result["already_migrated"].extend(rest["already_migrated"])
+            return result
 
     def _resolve_locators_batch_chunk(self, chunk: list[str]) -> SeiResolution:
         url = loomweave_identity_resolve_batch_url(self.base_url)
@@ -1137,6 +1334,8 @@ class LoomweaveRegistry:
                     if response.status_code == 401:
                         msg = f"Loomweave identity resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
                         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                    if response.status_code == 413:
+                        raise _BatchBodyTooLargeError(url=url, body_bytes=len(response.request.content))
                     if 400 <= response.status_code < 500:
                         msg = f"Loomweave identity resolve rejected request at {url}: HTTP {response.status_code} {reason}"
                         raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
@@ -1283,12 +1482,12 @@ class LoomweaveRegistry:
         Returns a map of submitted locator → current content_hash for ALIVE
         locators only; a locator Loomweave reports in ``not_found`` / ``invalid``
         (or as a non-alive resolved record) is simply absent from the map. Chunks
-        at the 256 per-batch cap like the sibling resolve paths.
+        at the 256 per-batch count cap AND the 16 KiB transport body cap like
+        the sibling resolve paths.
         """
         out: dict[str, str] = {}
         url = loomweave_identity_resolve_batch_url(self.base_url)
-        for start in range(0, len(locators), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = locators[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
+        for chunk in _chunk_locators(locators):
             payload = self._request_identity_json("POST", url, body={"locators": chunk})
             resolved = payload.get("resolved")
             if not isinstance(resolved, dict):
