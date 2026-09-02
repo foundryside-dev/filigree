@@ -27,7 +27,7 @@ DECISIONS (see the B5 design notes):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol
 
@@ -65,6 +65,12 @@ class GateDecision:
 
     outcome: GateOutcome
     reason: str = ""
+    # The RED-1 drift check could not consult Loomweave for this issue (whole-
+    # backend outage / version mismatch / batch caller already knew it was
+    # down); the binding's freshness was UNKNOWN. Advisory only: it lets a batch
+    # caller thread ``loomweave_known_down`` and bound a down Loomweave to one
+    # probe per batch. Never affects ``allowed`` — Loomweave is enrich-only.
+    loomweave_unavailable: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -116,7 +122,23 @@ def _row_entity_id(row: Any) -> str:
     return str(row.get("loomweave_entity_id") or row.get("entity_id") or "")
 
 
-def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> GateDecision | None:
+@dataclass(frozen=True)
+class _DriftCheck:
+    """Result of :func:`_evaluate_current_drift`.
+
+    ``decision`` is a ``STALE`` verdict (current code drifted) or ``None`` (no
+    known drift — proceed to the Legis gate). ``loomweave_unavailable`` is True
+    only when the check could not consult Loomweave at all because of a
+    whole-backend failure or a caller-supplied known-down; it is False on the
+    no-resolver path (local mode — no network happened) and on per-entity
+    ``unresolved`` degrades (Loomweave answered).
+    """
+
+    decision: GateDecision | None
+    loomweave_unavailable: bool
+
+
+def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, loomweave_known_down: bool = False) -> _DriftCheck:
     """Compare each governed binding's CURRENT content against its attach snapshot.
 
     RED-1: the sign-off-snapshot staleness check (``_signed_row_is_stale``) only
@@ -129,14 +151,22 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> G
     resolve each governed binding's CURRENT ``content_hash`` from the Loomweave
     registry consumer and compare it to ``content_hash_at_attach``.
 
-    Returns a ``STALE`` :class:`GateDecision` if ANY governed binding's current
-    content differs from its attach snapshot; otherwise ``None`` (no current-code
-    drift — the caller proceeds to the existing Legis gate). The check is
-    **enrich-only**: when Loomweave is unreachable / unsupported (no registry,
-    no resolver surface, availability error) or an individual entity is
-    unresolvable (orphaned / not_found / invalid), the binding's freshness is a
-    discriminated UNKNOWN — logged, never silently treated as fresh, and never a
-    hard block. The core close must not become load-bearing on Loomweave.
+    Returns a :class:`_DriftCheck` whose ``decision`` is a ``STALE``
+    :class:`GateDecision` if ANY governed binding's current content differs from
+    its attach snapshot; otherwise ``None`` (no current-code drift — the caller
+    proceeds to the existing Legis gate). The check is **enrich-only**: when
+    Loomweave is unreachable / unsupported (no registry, no resolver surface,
+    availability error) or an individual entity is unresolvable (orphaned /
+    not_found / invalid), the binding's freshness is a discriminated UNKNOWN —
+    logged, never silently treated as fresh, and never a hard block. The core
+    close must not become load-bearing on Loomweave.
+
+    ``loomweave_known_down`` (batch callers): skip the resolver call because an
+    earlier issue in the same sweep already proved Loomweave down — freshness is
+    UNKNOWN for this issue without re-incurring the resolver's retry budget. The
+    check's ``loomweave_unavailable`` reports True for that case and for a
+    whole-backend failure raised by the resolver, so the caller can set the flag
+    for the rest of its batch.
     """
     resolver = getattr(getattr(db, "registry", None), "resolve_entity_content_hashes", None)
     if resolver is None:
@@ -146,7 +176,18 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> G
             "closure-gate drift check: no Loomweave resolver; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
             extra={"issue_id": issue_id, "freshness": "unknown", "reason": "no_resolver"},
         )
-        return None
+        return _DriftCheck(None, False)
+
+    if loomweave_known_down:
+        # An earlier issue in this batch already proved Loomweave down — do not
+        # re-incur the resolver's deadline/retry budget. Freshness UNKNOWN, and
+        # (unlike Legis) the issue still proceeds to its own Legis verdict.
+        logger.info(
+            "closure-gate drift check: Loomweave unavailable earlier in this batch; entity freshness UNKNOWN "
+            "(enrich-only, close not blocked on this axis)",
+            extra={"issue_id": issue_id, "freshness": "unknown", "reason": "registry_unavailable_earlier_in_batch"},
+        )
+        return _DriftCheck(None, True)
 
     entity_ids = [_row_entity_id(row) for row in signed_rows if _row_entity_id(row)]
     try:
@@ -156,7 +197,7 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> G
             "closure-gate drift check: Loomweave unavailable; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
             extra={"issue_id": issue_id, "freshness": "unknown", "reason": "registry_unavailable", "detail": str(exc)},
         )
-        return None
+        return _DriftCheck(None, True)
 
     resolved: dict[str, str] = dict(resolution.get("resolved", {}))
     drifted: list[str] = []
@@ -177,14 +218,23 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any]) -> G
             extra={"issue_id": issue_id, "freshness": "unknown", "reason": "entity_unresolved", "entity_ids": unknown},
         )
     if drifted:
-        return GateDecision(
-            GateOutcome.STALE,
-            "entity content drifted since attach (current code no longer matches content at attach); awaiting re-attest",
+        return _DriftCheck(
+            GateDecision(
+                GateOutcome.STALE,
+                "entity content drifted since attach (current code no longer matches content at attach); awaiting re-attest",
+            ),
+            False,
         )
-    return None
+    return _DriftCheck(None, False)
 
 
-def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: bool = False) -> GateDecision:
+def evaluate_closure_gate(
+    db: _AssocReader,
+    issue_id: str,
+    *,
+    legis_known_down: bool = False,
+    loomweave_known_down: bool = False,
+) -> GateDecision:
     """Decide whether *issue_id* may be closed.
 
     Short-circuits to ``PROCEED`` when governance is off, and again for
@@ -203,6 +253,16 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: 
     or governance-off issue later in the batch still PROCEEDs and a stale one
     still reports ``STALE``. A governed, non-stale issue fails closed as
     ``UNAVAILABLE`` (DECISION 2) with no further network call.
+
+    ``loomweave_known_down`` is the same bound for the RED-1 drift probe: once
+    an earlier issue in the batch proved Loomweave down, the per-issue resolver
+    call (and its retry budget) is skipped. Unlike Legis it is **enrich-only**:
+    the issue still gets its own Legis verdict — only the drift probe is skipped,
+    freshness is UNKNOWN (logged), and the resulting decision reports
+    ``loomweave_unavailable=True`` so the caller can keep the flag set. It is
+    applied inside the drift helper at the resolver call — after the
+    ungoverned and snapshot-STALE short-circuits, before the
+    ``legis_known_down`` short-circuit — so a drifted sign-off is never masked.
     """
     if not legis_client.is_configured():
         return _PROCEED
@@ -217,21 +277,27 @@ def evaluate_closure_gate(db: _AssocReader, issue_id: str, *, legis_known_down: 
         # Fail closed locally — do NOT consult Legis (it is asked only issue_id
         # and would answer for the stale snapshot it last saw).
         return GateDecision(GateOutcome.STALE, "entity content drifted since the Legis sign-off; awaiting re-sign")
-    drift = _evaluate_current_drift(db, str(issue_id), signed_rows)
-    if drift is not None:
+    check = _evaluate_current_drift(db, str(issue_id), signed_rows, loomweave_known_down=loomweave_known_down)
+    if check.decision is not None:
         # Current code has moved on since the binding was attached — fail closed
         # as STALE, like the sign-off-snapshot drift above. This runs BEFORE the
         # legis_known_down short-circuit (same load-bearing ordering as the
         # snapshot check): a drifted binding must report STALE, never be masked
         # as a transient UNAVAILABLE. A Loomweave outage does NOT reach here as a
         # block — it degrades to UNKNOWN inside the helper (enrich-only).
-        return drift
+        # loomweave_known_down is likewise applied INSIDE the helper, at the
+        # resolver call — after the ungoverned and snapshot-STALE short-circuits,
+        # before the legis_known_down short-circuit.
+        return check.decision
     if legis_known_down:
         # A governed, non-stale issue needs a Legis round-trip, but a prior issue
         # in this batch already proved Legis unreachable — fail closed without
         # re-incurring the timeout (DECISION 2).
-        return GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
-    return _map_result(check_closure_gate(str(issue_id)))
+        decision = GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
+    else:
+        decision = _map_result(check_closure_gate(str(issue_id)))
+    # Stamp the advisory flag on a copy — ``_PROCEED`` is a shared singleton.
+    return replace(decision, loomweave_unavailable=True) if check.loomweave_unavailable else decision
 
 
 def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_status: str | None) -> GateDecision:

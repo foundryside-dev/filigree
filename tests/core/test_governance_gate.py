@@ -534,3 +534,156 @@ def test_no_registry_attribute_degrades_to_unknown(monkeypatch: pytest.MonkeyPat
     db = _FakeDB(_governed_rows_attached_at("py:func:mod::f", "h1"))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
+
+
+# --- loomweave_known_down batch short-circuit (hub weft-aee5769607 item 1) ----
+# The RED-1 drift check costs one Loomweave round-trip (with its own deadline /
+# retry budget) per governed, non-stale issue. ``loomweave_known_down`` lets a
+# batch caller skip that probe once an earlier issue already proved Loomweave
+# down, and ``GateDecision.loomweave_unavailable`` is how the gate tells the
+# caller that happened. Unlike ``legis_known_down`` this is ENRICH-ONLY: the
+# issue still proceeds to its own Legis verdict — freshness is UNKNOWN, never a
+# block. Ordering mirrors the Legis analogue: applied at the resolver call,
+# after the ungoverned / snapshot-STALE short-circuits.
+
+
+class _FakeRegistryRaising(_FakeRegistry):
+    """``_FakeRegistry`` that raises an arbitrary exception on resolve."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__({})
+        self._exc = exc
+
+    def resolve_entity_content_hashes(self, entity_ids: list[str]) -> dict[str, object]:
+        self.calls.append(list(entity_ids))
+        raise self._exc
+
+
+def _loomweave_outage_exceptions() -> list[Exception]:
+    from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+
+    return [
+        RegistryUnavailableError("loomweave down", url="http://loomweave.invalid", cause_kind="network"),
+        RegistryVersionMismatchError("api_version 99", url="http://loomweave.invalid", expected=1, advertised=99),
+    ]
+
+
+@pytest.mark.parametrize("exc", _loomweave_outage_exceptions(), ids=["unavailable", "version_mismatch"])
+def test_loomweave_outage_flags_decision_loomweave_unavailable(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    """(a) A whole-backend Loomweave failure during the drift probe still
+    PROCEEDs (enrich-only) but stamps ``loomweave_unavailable=True`` so a batch
+    caller can bound the outage to one probe."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    registry = _FakeRegistryRaising(exc)
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is True
+    assert registry.calls == [[entity_id]]  # the probe was attempted exactly once
+
+
+def test_loomweave_known_down_skips_resolver_and_still_proceeds_to_legis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(b) With Loomweave already known down in this batch, the resolver is NOT
+    called, the decision reports ``loomweave_unavailable``, and the issue still
+    gets its own Legis verdict (enrich-only: Loomweave-down never blocks)."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid) or LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    registry = _FakeRegistry({entity_id: "h2"})  # would report drift if consulted
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
+    assert registry.calls == []  # probe suppressed by the batch-level known-down flag
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is True
+    assert spy == ["test-1"]  # Legis was still consulted
+
+
+def test_healthy_loomweave_decision_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(c) Normal resolution, a per-entity unresolved degrade, and a db with no
+    ``.registry`` all leave ``loomweave_unavailable`` False — no whole-backend
+    outage happened, so there is nothing for a batch caller to bound."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    healthy = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), _FakeRegistry({entity_id: "h1"}))
+    assert governance.evaluate_closure_gate(healthy, "test-1").loomweave_unavailable is False
+    unresolved = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), _FakeRegistry({}))
+    assert governance.evaluate_closure_gate(unresolved, "test-1").loomweave_unavailable is False
+    no_registry = _FakeDB(_governed_rows_attached_at(entity_id, "h1"))
+    assert governance.evaluate_closure_gate(no_registry, "test-1").loomweave_unavailable is False
+    # And a drifted (STALE) verdict from a healthy Loomweave is not flagged either.
+    drifted = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), _FakeRegistry({entity_id: "h2"}))
+    stale = governance.evaluate_closure_gate(drifted, "test-1")
+    assert stale.outcome is GateOutcome.STALE
+    assert stale.loomweave_unavailable is False
+
+
+def test_loomweave_known_down_does_not_mask_snapshot_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(d) Ordering pin: the snapshot-STALE short-circuit runs BEFORE the
+    known-down flag is consulted — a drifted sign-off still reports STALE with
+    no resolver call and no Legis call."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    registry = _FakeRegistry({"sei:a": "h2"})
+    db = _FakeDBWithRegistry(_stale_governed_rows(), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
+    assert decision.outcome is GateOutcome.STALE
+    assert decision.loomweave_unavailable is False  # never reached the resolver
+    assert registry.calls == []
+    assert spy == []
+
+
+def test_ungoverned_with_loomweave_known_down_proceeds_unflagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ungoverned short-circuit precedes the flag: PROCEED, not flagged, no calls."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    registry = _FakeRegistry({"sei:a": "h2"})
+    db = _FakeDBWithRegistry(_ungoverned_rows(), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is False
+    assert registry.calls == []
+    assert spy == []
+
+
+def test_both_known_down_is_unavailable_with_zero_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(e) Loomweave AND Legis both known down: the Legis short-circuit still
+    fails closed as UNAVAILABLE (DECISION 2), no probe of either backend, and
+    the decision carries the Loomweave flag."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    entity_id = "py:func:mod::f"
+    registry = _FakeRegistry({entity_id: "h1"})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True, legis_known_down=True)
+    assert decision.outcome is GateOutcome.UNAVAILABLE
+    assert decision.loomweave_unavailable is True
+    assert registry.calls == []
+    assert spy == []
+
+
+def test_legis_known_down_semantics_unchanged_by_loomweave_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``legis_known_down`` alone (Loomweave healthy) still runs the drift probe
+    first and then fails closed as UNAVAILABLE — the drift-before-Legis ordering
+    is untouched, and a drifted binding is reported STALE, not UNAVAILABLE."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    entity_id = "py:func:mod::f"
+    fresh = _FakeRegistry({entity_id: "h1"})
+    decision = governance.evaluate_closure_gate(
+        _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), fresh), "test-1", legis_known_down=True
+    )
+    assert decision.outcome is GateOutcome.UNAVAILABLE
+    assert decision.loomweave_unavailable is False
+    assert fresh.calls == [[entity_id]]  # drift probe still ran
+    drifted = _FakeRegistry({entity_id: "h2"})
+    decision = governance.evaluate_closure_gate(
+        _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), drifted), "test-1", legis_known_down=True
+    )
+    assert decision.outcome is GateOutcome.STALE
+    assert spy == []

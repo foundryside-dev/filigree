@@ -123,16 +123,29 @@ class FindingIssueCascadeService:
         not connectivity problems, so neither sets ``legis_down``: a single
         malformed Legis answer fails closed for its own issue while every later
         issue in the batch still gets its own gate evaluation.
+
+        The RED-1 current-code drift probe (a Loomweave round-trip per governed,
+        non-stale issue) is bounded the same way via ``loomweave_known_down``,
+        but as an *enrich-only* signal: a down Loomweave costs one retry budget
+        per batch, and the remaining governed issues get freshness UNKNOWN
+        (logged) while still receiving their own Legis verdict. It never
+        converts into a deferral or reconciliation debt — the gate reports it on
+        ``GateDecision.loomweave_unavailable`` rather than through an outcome.
         """
         from filigree import governance
         from filigree.governance import GateOutcome
 
         closed: list[str] = []
         legis_down = False
+        loomweave_down = False
         for finding_id, issue_id in candidates:
-            decision = governance.evaluate_closure_gate(self.store, issue_id, legis_known_down=legis_down)
+            decision = governance.evaluate_closure_gate(
+                self.store, issue_id, legis_known_down=legis_down, loomweave_known_down=loomweave_down
+            )
             if decision.outcome is GateOutcome.UNAVAILABLE:
                 legis_down = True
+            if decision.loomweave_unavailable:
+                loomweave_down = True
             if self._apply_close_decision(finding_id, issue_id, decision, warnings=warnings):
                 closed.append(issue_id)
         return closed
