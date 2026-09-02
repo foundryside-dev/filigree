@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Loomweave capabilities `authentication` posture (ADR-056, fixture v6).**
+  The capabilities probe now extracts `{protected_routes, capabilities_probe,
+  contract_version}` into `LoomweaveCapabilities.authentication` (new
+  `LoomweaveAuthentication` TypedDict), and `validate_loomweave_capabilities`
+  fails fast at startup/reprobe with
+  `RegistryUnavailableError(cause_kind='auth_mode_unsupported')` naming the
+  field, mode and URL when Loomweave advertises a `protected_routes` mode
+  outside `none`/`bearer` (for example `hmac`, which Filigree does not
+  implement) or a `capabilities_probe` mode other than `none`. A Loomweave
+  that omits the block (pre-ADR-056) is treated as `none`/`none`/`1` and keeps
+  working; a present-but-malformed block is an `invalid_response` wire-shape
+  break; a `contract_version` other than 1 logs a warning and is not
+  rejected. Gate order is api_version, then role, then authentication. An
+  HMAC-mode Loomweave that previously limped along with per-operation
+  `cause_kind='auth'` 401s is now refused once at the probe, or downgraded to
+  a warning plus local fallback when `allow_local_fallback` is set.
+
 ### Changed
 
 - **Installation mode vocabulary: `ephemeral` is canonical** (hub
@@ -46,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   briefing-blocks 67 test entities on false positives (68 -> 1; the remaining
   block is the real, gitignored `.env`, deliberately not baselined).
   `tests/test_secret_scan_hygiene.py` guards both sites.
+- **Live Loomweave integration lane renamed off its Clarion-era names.** The
+  repository secret is now `LOOMWEAVE_STAGING_BASE_URL` (was
+  `CLARION_STAGING_BASE_URL`), the required-mode flag is
+  `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` (was `FILIGREE_REQUIRE_LIVE_CLARION`), and
+  the lane's test modules moved to
+  `tests/integration/test_loomweave_staging_smoke.py`,
+  `tests/integration/test_loomweave_phase_d_e2e.py` and
+  `tests/federation/test_sei_oracle_live_loomweave.py` (git mv). No
+  compatibility alias: no secret was ever provisioned under the old name, so
+  the scheduled lane stays red until `LOOMWEAVE_STAGING_BASE_URL` is set.
 - **docs(federation): contracts.md §G10** ratifies server-mode project
   scoping of `GET /api/entity-associations` (path-scoped via `/api/p/{key}`,
   default-project fallback with `X-Filigree-Project` echo, `?project=` not
