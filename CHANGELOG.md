@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cause_kind='auth'` 401s is now refused once at the probe, or downgraded to
   a warning plus local fallback when `allow_local_fallback` is set.
 
+- **Rename lineage on orphaned bindings.** The closure-gate drift check now
+  relays Loomweave's latest `sei_lineage` event for a governed SEI reported
+  `alive:false`, preferring the `lineage` list inlined on the by-SEI body and
+  falling back to `GET /api/v1/identity/lineage/:sei` only when the body
+  carries none. `GateDecision` gains an advisory `lineage_hints` field, a
+  non-PROCEED gate reason is suffixed with `rename lineage: <sei> ->
+  <new_locator> (<event>)`, and the `entity_unresolved` drift-gate log record
+  carries the hints. Enrich-only: an older Loomweave without the route, an
+  unreachable one, or a malformed body yields no hint and never changes the
+  gate outcome; `loomweave_known_down` skips the lookup. (filigree-4e13d133f7)
+
 ### Changed
 
 - **Installation mode vocabulary: `ephemeral` is canonical** (hub
