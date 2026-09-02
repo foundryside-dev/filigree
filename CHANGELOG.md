@@ -83,6 +83,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Loomweave batch POSTs are chunked by body bytes, not just count.**
+  Loomweave caps every `/api/v1/*` request body at 16 KiB (transport-level
+  HTTP 413), so a 256-row `/api/v1/files/batch` chunk of real paths (about
+  25 KiB) was rejected and `migrate-registry` marked every row unresolved;
+  `identity/resolve:batch` (sei-backfill, closure-gate drift reads) had the
+  same latent failure. `LoomweaveRegistry` now targets
+  `LOOMWEAVE_BATCH_MAX_BODY_BYTES` (16 KiB minus 1 KiB headroom, measured
+  with the exact httpx `json=` encoding) alongside the 256-query cap, halves
+  and retries a chunk Loomweave still answers 413 to, and reports a single
+  query that cannot fit on the `errors` channel with `code=BODY_TOO_LARGE`
+  instead of failing the batch. Small batches keep a byte-identical wire
+  shape. (filigree-b57d4eb7d9)
+- **Fail-closed Loomweave outage renders as an error envelope, not a
+  traceback.** With `registry_backend=loomweave`, `allow_local_fallback=false`
+  and Loomweave unreachable, every CLI verb died with a raw
+  `RegistryUnavailableError`. `cli_common.get_db` now emits the shared
+  `REGISTRY_UNAVAILABLE` envelope (exit 1): one stderr line naming backend,
+  `cause_kind` and probed URL plus a remedy line (`loomweave serve` or
+  `loomweave.allow_local_fallback=true`); `--json` carries the same envelope
+  with `details.backend` and `details.hint`. The MCP stdio server starts in
+  degraded mode (`mcp_status_get.status == "registry_unavailable"`), the HTTP
+  MCP resolver and dashboard server-mode project open answer the envelope,
+  and dashboard ephemeral startup exits 1 cleanly. (filigree-8fd300e2f7)
 - **Cascade batch bounds a down Loomweave to one probe.** The RED-1
   current-code drift check added a Loomweave round-trip (with its own
   deadline/retry budget) per governed close; `close_resolved_findings` now
