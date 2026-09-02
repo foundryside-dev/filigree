@@ -114,6 +114,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PR #85 review fixes (Loomweave fail-closed paths).**
+  `filigree init` and the `filigree session-context` hook now render the
+  shared `REGISTRY_UNAVAILABLE` envelope and remedy when the project cannot
+  open in fail-closed loomweave mode, instead of a raw traceback (init) or a
+  generic "hook failed" warning (hook). The legacy `.filigree.conf`
+  carry-forward tolerates a non-canonical `mode` spelling and falls back to
+  `ephemeral` with a warning for an unknown value, so the conf still retires
+  instead of aborting. The stdio MCP server no longer latches a startup
+  registry failure for the process lifetime: `call_tool` re-attempts startup
+  at most once per 10 s and clears degraded mode once Loomweave is back
+  (`mcp_status_get.registry_retry` reports the schedule). The remedy hint is
+  now specific to `cause_kind` across CLI, MCP and dashboard (`auth` /
+  `auth_token_missing` name the token env; `role_declined` /
+  `auth_mode_unsupported` point at Loomweave's configuration;
+  `invalid_response` suggests no fallback; only reachability failures say
+  "start Loomweave"), and dashboard envelopes for a request-time registry
+  failure read "while handling request" rather than claiming the database
+  failed to open.
+- **Closure-gate batch bound only trips on real outages.** Only
+  connectivity-class failures (network, timeout, and a retried-out gateway
+  502/503/504) flip the cascade's `loomweave_known_down`; a deterministic
+  4xx or plain 500 degrades only that issue to UNKNOWN, so one issue's
+  oversize locator can no longer mask a later issue's drifted binding. The
+  orphan rename-hint fallback has its own advisory
+  `GateDecision.lineage_unavailable` flag, a single bounded attempt and a
+  per-instance memo of a missing lineage route, and is never folded into the
+  batch bound. `_resolve_locator_content_hashes` gets the same 413
+  halve-and-retry as the other batch paths, and the three 413 splitters
+  share one helper. New `LOOMWEAVE_GATEWAY_STATUS_CODES` /
+  `is_loomweave_backend_unreachable()` classifier in `filigree.registry`.
+- **A scan-results batch no longer fails on one over-cap path.**
+  `process_scan_results` reports a `BODY_TOO_LARGE` path on `warnings` and
+  ingests the rest of the batch instead of re-promoting it to a whole-batch
+  `RegistryResolutionError`; other structured error codes keep the
+  fail-closed rejection.
+- **Live-lane arming flag uses the shared parser.**
+  `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` accepts `1/true/yes/on` like the sibling
+  drift flags (junk raises) via `tests/federation/_oracle`; contracts.md §G10
+  uses the canonical `ephemeral` spelling.
 - **Loomweave batch POSTs are chunked by body bytes, not just count.**
   Loomweave caps every `/api/v1/*` request body at 16 KiB (transport-level
   HTTP 413), so a 256-row `/api/v1/files/batch` chunk of real paths (about
