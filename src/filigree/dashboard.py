@@ -59,7 +59,9 @@ from filigree.core import (
 # Re-export so test imports continue to work.
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
-from filigree.types.api import SchemaVersionMismatchError
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry_errors import registry_startup_error_response, registry_startup_hint
+from filigree.types.api import SchemaVersionMismatchError, errorcode_to_http_status
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 8377
@@ -831,6 +833,19 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
             status_code=409,
         )
 
+    @app.exception_handler(RegistryVersionMismatchError)
+    @app.exception_handler(RegistryUnavailableError)
+    async def _registry_startup_error_to_envelope(
+        _request: Any, exc: RegistryVersionMismatchError | RegistryUnavailableError
+    ) -> JSONResponse:
+        # Server mode opens each project's DB lazily on first request; a project
+        # in loomweave mode with allow_local_fallback=false and an unreachable
+        # Loomweave raises here (RuntimeError — no other handler catches it).
+        # 503 for this project only; other projects keep serving
+        # (filigree-8fd300e2f7).
+        response = registry_startup_error_response(exc, action="opening project database")
+        return JSONResponse(response, status_code=errorcode_to_http_status(response["code"]))
+
     @app.exception_handler(_StarletteHTTPException)
     async def _http_exception_to_envelope(_request: Any, exc: _StarletteHTTPException) -> JSONResponse:
         detail = exc.detail
@@ -1176,6 +1191,23 @@ def main(
             sys.exit(3)
         except _EXPECTED_PROJECT_CONFIG_ERRORS as exc:
             _exit_dashboard_config_error(exc)
+        except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+            # Loomweave mode, fail-closed: wire break or unreachable registry with
+            # allow_local_fallback=false. Same "no traceback at startup" promise
+            # as the branches around it; exit 1 with the public envelope text and
+            # the remedy line (`--allow-local-fallback` is the dashboard-side
+            # escape hatch). (filigree-8fd300e2f7)
+            response = registry_startup_error_response(exc, action="opening project database")
+            logger.warning(
+                "dashboard_registry_startup_error",
+                extra={
+                    "tool": "dashboard",
+                    "args_data": {"code": response["code"], "url": exc.url, "cause_kind": getattr(exc, "cause_kind", None)},
+                },
+            )
+            print(response["error"], file=sys.stderr)
+            print(registry_startup_hint(exc), file=sys.stderr)
+            sys.exit(1)
         except (OSError, sqlite3.Error) as exc:
             # Locked DB / permission denied / on-disk corruption etc. The
             # F2 fix only covered v+1; this sibling branch keeps the same

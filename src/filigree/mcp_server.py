@@ -52,8 +52,8 @@ from filigree.mcp_tools.common import (  # noqa: F401  — re-exported for backw
     _MAX_LIST_RESULTS,
     _text,
 )
-from filigree.registry import RegistryVersionMismatchError
-from filigree.registry_errors import registry_error_response
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry_errors import RegistryStartupError, registry_startup_error_response, registry_startup_hint
 from filigree.summary import generate_summary, write_summary
 from filigree.types.api import ErrorCode, ErrorResponse, SchemaVersionMismatchError, errorcode_to_http_status
 
@@ -79,7 +79,11 @@ _schema_mismatch: SchemaVersionMismatchError | None = None
 # Set when Loomweave advertises an incompatible registry API version at startup.
 # Mirrors schema-mismatch degraded mode: list_tools stays available, while
 # call_tool surfaces a structured LOOMWEAVE_REGISTRY_VERSION_MISMATCH envelope.
-_registry_startup_error: RegistryVersionMismatchError | None = None
+# Registry failure that prevented the DB from opening in loomweave mode: a wire
+# break (``RegistryVersionMismatchError``) or a fail-closed outage
+# (``RegistryUnavailableError`` with allow_local_fallback=false). Either keeps the
+# server up in degraded mode with every tool short-circuiting to an envelope.
+_registry_startup_error: RegistryStartupError | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing
 # file, permission denied, on-disk corruption). The server cannot run without
@@ -240,9 +244,12 @@ def get_mcp_status_payload() -> dict[str, Any]:
         }
 
     if _registry_startup_error is not None:
-        response = registry_error_response(_registry_startup_error, action="opening project database")
+        response = registry_startup_error_response(_registry_startup_error, action="opening project database")
+        registry_status = (
+            "registry_unavailable" if isinstance(_registry_startup_error, RegistryUnavailableError) else "registry_version_mismatch"
+        )
         return {
-            "status": "registry_version_mismatch",
+            "status": registry_status,
             "db_initialized": False,
             "schema_compatible": True,
             "installed_schema_version": installed,
@@ -250,7 +257,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": response["code"],
             "error": response["error"],
             "details": response.get("details"),
-            "guidance": "Upgrade Filigree or Loomweave so their registry API versions match.",
+            "guidance": registry_startup_hint(_registry_startup_error),
             "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
@@ -637,7 +644,7 @@ def _context_resource_error() -> ErrorResponse | None:
             code=ErrorCode.SCHEMA_MISMATCH,
         )
     if _registry_startup_error is not None:
-        return registry_error_response(_registry_startup_error, action="opening project database")
+        return registry_startup_error_response(_registry_startup_error, action="opening project database")
     if _db_open_error is not None:
         return ErrorResponse(error=f"Database not initialized: {_db_open_error}", code=ErrorCode.IO)
 
@@ -885,7 +892,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if _registry_startup_error is not None and name != "get_mcp_status":
         from filigree.mcp_tools.common import _text as _common_text
 
-        return _common_text(registry_error_response(_registry_startup_error, action="opening project database"))
+        return _common_text(registry_startup_error_response(_registry_startup_error, action="opening project database"))
 
     # Runtime drift gate: a long-running MCP session can have its DB
     # forward-migrated under it (sibling MCP at a newer version, manual
@@ -1027,8 +1034,8 @@ def create_mcp_app(
                 )
                 await resp(scope, receive, send)
                 return
-            except RegistryVersionMismatchError as exc:
-                response = registry_error_response(exc, action="opening project database")
+            except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+                response = registry_startup_error_response(exc, action="opening project database")
                 resp = JSONResponse(
                     response,
                     status_code=errorcode_to_http_status(response["code"]),
@@ -1165,7 +1172,10 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
         _schema_mismatch = exc
         _registry_startup_error = None
         _db_open_error = None
-    except RegistryVersionMismatchError as exc:
+    except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+        # ``RegistryUnavailableError`` is a RuntimeError: without this arm a
+        # fail-closed Loomweave outage escaped startup as a traceback and the
+        # stdio transport dropped (filigree-8fd300e2f7).
         db = None
         _schema_mismatch = None
         _registry_startup_error = exc
@@ -1247,7 +1257,7 @@ def _log_startup_status(logger: logging.Logger) -> None:
                 },
             },
         )
-    elif _registry_startup_error is not None:
+    elif isinstance(_registry_startup_error, RegistryVersionMismatchError):
         logger.warning(
             "mcp_server_registry_version_mismatch",
             extra={
@@ -1255,6 +1265,17 @@ def _log_startup_status(logger: logging.Logger) -> None:
                 "args_data": {
                     "expected": _registry_startup_error.expected,
                     "advertised": _registry_startup_error.advertised,
+                    "url": _registry_startup_error.url,
+                },
+            },
+        )
+    elif _registry_startup_error is not None:
+        logger.warning(
+            "mcp_server_registry_unavailable",
+            extra={
+                "tool": "server",
+                "args_data": {
+                    "cause_kind": _registry_startup_error.cause_kind,
                     "url": _registry_startup_error.url,
                 },
             },

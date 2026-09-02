@@ -24,8 +24,8 @@ from filigree.core import (
     find_filigree_anchor,
     find_filigree_root,
 )
-from filigree.registry import RegistryVersionMismatchError
-from filigree.registry_errors import registry_error_response
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry_errors import RegistryStartupError, registry_startup_error_response, registry_startup_hint
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 from filigree.validation import sanitize_actor
@@ -191,13 +191,21 @@ def _emit_startup_failure(exc: Exception, code: ErrorCode, *, human_prefix: str 
         click.echo(f"{human_prefix}{exc}" if human_prefix else str(exc), err=True)
 
 
-def _emit_registry_startup_failure(exc: RegistryVersionMismatchError) -> None:
-    """Render registry protocol failures from DB startup with public envelopes."""
-    response = registry_error_response(exc, action="opening project database")
+def _emit_registry_startup_failure(exc: RegistryStartupError) -> None:
+    """Render registry protocol failures from DB startup with public envelopes.
+
+    Plain mode prints the one-line error followed by the one-line remedy on
+    stderr; ``--json`` prints the envelope (remedy under ``details.hint``) on
+    stdout. Covers both the wire-break (``RegistryVersionMismatchError``) and
+    the fail-closed outage (``RegistryUnavailableError`` with
+    ``allow_local_fallback=false``) — filigree-8fd300e2f7.
+    """
+    response = registry_startup_error_response(exc, action="opening project database")
     if _wants_json():
         click.echo(json_mod.dumps(response))
     else:
         click.echo(response["error"], err=True)
+        click.echo(registry_startup_hint(exc), err=True)
 
 
 def get_db() -> FiligreeDB:
@@ -216,7 +224,9 @@ def get_db() -> FiligreeDB:
     ``db``, non-list ``enabled_packs``, missing required keys) — see GH PR
     #33 review. ``SchemaVersionMismatchError`` is a ``ValueError`` subclass
     and so must be caught before the broader ``ValueError`` arm to map to
-    its own ``SCHEMA_MISMATCH`` code.
+    its own ``SCHEMA_MISMATCH`` code. Registry startup failures
+    (``RegistryVersionMismatchError`` / ``RegistryUnavailableError``) map to
+    their public envelopes plus a remedy hint.
     """
     try:
         anchor = find_filigree_anchor()
@@ -233,7 +243,11 @@ def get_db() -> FiligreeDB:
     except SchemaVersionMismatchError as exc:
         _emit_startup_failure(exc, ErrorCode.SCHEMA_MISMATCH, human_prefix="Error opening project database: ")
         sys.exit(1)
-    except RegistryVersionMismatchError as exc:
+    except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+        # Both escape ``from_anchor`` in loomweave mode: a wire-protocol break, or
+        # an unreachable / role-declining Loomweave with allow_local_fallback=false
+        # (fail-closed per ADR-014 §7). ``RegistryUnavailableError`` is a
+        # RuntimeError, so no other arm below would catch it (filigree-8fd300e2f7).
         _emit_registry_startup_failure(exc)
         sys.exit(1)
     except (OSError, sqlite3.Error) as exc:
