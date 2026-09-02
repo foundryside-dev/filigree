@@ -20,19 +20,29 @@ import pytest
 from filigree.core import VALID_REGISTRY_BACKENDS, FiligreeDB
 from filigree.models import FileRecord
 from filigree.registry import (
+    EXPECTED_LOOMWEAVE_API_VERSION,
+    EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+    LEGACY_LOOMWEAVE_AUTHENTICATION,
     LOOMWEAVE_BATCH_MAX_QUERIES,
+    SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES,
+    SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES,
     BatchQuery,
     BatchResolution,
     LocalRegistry,
     LocalResolvedFile,
+    LoomweaveAuthentication,
+    LoomweaveCapabilities,
     LoomweaveRegistry,
     LoomweaveResolvedFile,
     RegistryBriefingBlockedError,
     RegistryFileNotFoundError,
     RegistryResolutionError,
     RegistryUnavailableError,
+    RegistryVersionMismatchError,
     ResolvedFile,
+    loomweave_capabilities_url,
     probe_loomweave_capabilities,
+    validate_loomweave_capabilities,
 )
 from filigree.types.core import ContentHash, EntityId, FileId, FileRecordDict, LoomweaveConfig, ProjectConfig, RegistryBackend
 
@@ -1157,10 +1167,197 @@ def test_loomweave_capability_probe_uses_runtime_http_policy(monkeypatch: pytest
     )
 
     assert capabilities["registry_backend"] is True
+    # No ``authentication`` block on the wire (pre-ADR-056 Loomweave) -> the
+    # consumer assumes the legacy ``none``/``none``/``1`` posture.
+    assert capabilities["authentication"] == LEGACY_LOOMWEAVE_AUTHENTICATION
     assert observed["trust_env"] is False
     assert observed["follow_redirects"] is False
     assert observed["headers"] == {"Authorization": "Bearer test-weft-token"}
     assert observed["timeout"] == 2
+
+
+def _capabilities_body(**overrides: object) -> bytes:
+    """A minimal valid ``_capabilities`` body (every required top-level field) plus overrides."""
+    body: dict[str, object] = {
+        "registry_backend": True,
+        "file_registry": True,
+        "api_version": 1,
+        "instance_id": "loomweave-test",
+    }
+    body.update(overrides)
+    return json.dumps(body).encode()
+
+
+def test_loomweave_capability_probe_extracts_authentication_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ADR-056 ``authentication`` discovery block (fixture v6) is extracted verbatim."""
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def get(self, _url: str, *, headers: dict[str, str], timeout: float) -> httpx.Response:
+            assert headers == {}
+            assert timeout == 1
+            return httpx.Response(
+                200,
+                content=_capabilities_body(
+                    authentication={"protected_routes": "bearer", "capabilities_probe": "none", "contract_version": 1},
+                    sei={"supported": True, "version": 1},
+                ),
+            )
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
+
+    capabilities = probe_loomweave_capabilities("http://127.0.0.1:8765", timeout_seconds=1)
+
+    assert capabilities["authentication"] == {"protected_routes": "bearer", "capabilities_probe": "none", "contract_version": 1}
+    assert capabilities["sei_supported"] is True
+
+
+def test_loomweave_capability_probe_warns_on_unexpected_auth_contract_version(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ``authentication.contract_version`` this build was not written against is
+    a WARN, not a rejection (owner decision: gate on modes only)."""
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def get(self, _url: str, *, headers: dict[str, str], timeout: float) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_capabilities_body(
+                    authentication={
+                        "protected_routes": "none",
+                        "capabilities_probe": "none",
+                        "contract_version": EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION + 1,
+                    },
+                ),
+            )
+
+    monkeypatch.setattr("filigree.registry.httpx.Client", FakeClient)
+
+    with caplog.at_level(logging.WARNING, logger="filigree.registry"):
+        capabilities = probe_loomweave_capabilities("http://127.0.0.1:8765", timeout_seconds=1)
+        validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765")
+
+    assert capabilities["authentication"]["contract_version"] == EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION + 1
+    assert "authentication.contract_version" in caplog.text
+    assert str(EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION + 1) in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("protected_routes", "capabilities_probe", "rejected_field"),
+    [
+        ("none", "none", None),
+        ("bearer", "none", None),
+        ("hmac", "none", "protected_routes"),
+        ("none", "bearer", "capabilities_probe"),
+        ("mtls", "none", "protected_routes"),  # unknown future mode: rejected by design
+        ("hmac", "hmac", "protected_routes"),  # both bad: protected_routes is named first
+    ],
+)
+def test_validate_loomweave_capabilities_gates_authentication_modes(
+    protected_routes: str,
+    capabilities_probe: str,
+    rejected_field: str | None,
+) -> None:
+    """Only the modes Filigree implements (``Authorization: Bearer`` for routes,
+    unauthenticated ``_capabilities``) pass the gate; anything else is refused with
+    ``cause_kind='auth_mode_unsupported'`` naming the field, the mode and the URL."""
+    base_url = "http://127.0.0.1:8765"
+    authentication = LoomweaveAuthentication(
+        protected_routes=protected_routes,
+        capabilities_probe=capabilities_probe,
+        contract_version=EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+    )
+    capabilities = LoomweaveCapabilities(
+        registry_backend=True,
+        file_registry=True,
+        api_version=EXPECTED_LOOMWEAVE_API_VERSION,
+        instance_id="loomweave-test",
+        sei_supported=True,
+        sei_version=1,
+        authentication=authentication,
+    )
+
+    if rejected_field is None:
+        validate_loomweave_capabilities(capabilities, base_url=base_url)
+        return
+
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(capabilities, base_url=base_url)
+
+    exc = exc_info.value
+    assert exc.cause_kind == "auth_mode_unsupported"
+    assert exc.url == loomweave_capabilities_url(base_url)
+    mode = authentication[rejected_field]  # type: ignore[literal-required]
+    supported = (
+        SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES if rejected_field == "protected_routes" else SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES
+    )
+    assert f"authentication.{rejected_field}={mode!r}" in str(exc)
+    assert str(sorted(supported)) in str(exc)
+    assert loomweave_capabilities_url(base_url) in str(exc)
+
+
+def test_validate_loomweave_capabilities_accepts_legacy_authentication_default() -> None:
+    """The absent-block default (pre-ADR-056 Loomweave) is exactly the accepted posture."""
+    assert LEGACY_LOOMWEAVE_AUTHENTICATION == {"protected_routes": "none", "capabilities_probe": "none", "contract_version": 1}
+    capabilities = LoomweaveCapabilities(
+        registry_backend=True,
+        file_registry=True,
+        api_version=EXPECTED_LOOMWEAVE_API_VERSION,
+        instance_id="loomweave-test",
+        sei_supported=False,
+        sei_version=0,
+        authentication=LEGACY_LOOMWEAVE_AUTHENTICATION,
+    )
+    validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765")
+
+
+def test_validate_api_version_mismatch_takes_precedence_over_auth_mode() -> None:
+    """Gate order is api_version -> role -> authentication: a wire-break stays the loudest signal."""
+    capabilities = LoomweaveCapabilities(
+        registry_backend=True,
+        file_registry=True,
+        api_version=EXPECTED_LOOMWEAVE_API_VERSION + 1,
+        instance_id="loomweave-test",
+        sei_supported=True,
+        sei_version=1,
+        authentication=LoomweaveAuthentication(protected_routes="hmac", capabilities_probe="none", contract_version=1),
+    )
+    with pytest.raises(RegistryVersionMismatchError):
+        validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765")
+
+
+def test_validate_role_declined_takes_precedence_over_auth_mode() -> None:
+    """Second half of the gate-order pin: role_declined fires before the auth-mode gate."""
+    capabilities = LoomweaveCapabilities(
+        registry_backend=False,
+        file_registry=True,
+        api_version=EXPECTED_LOOMWEAVE_API_VERSION,
+        instance_id="loomweave-test",
+        sei_supported=True,
+        sei_version=1,
+        authentication=LoomweaveAuthentication(protected_routes="hmac", capabilities_probe="none", contract_version=1),
+    )
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765")
+    assert exc_info.value.cause_kind == "role_declined"
 
 
 @pytest.mark.parametrize(
@@ -1172,6 +1369,35 @@ def test_loomweave_capability_probe_uses_runtime_http_policy(monkeypatch: pytest
         (
             json.dumps({"registry_backend": True, "file_registry": True, "api_version": True}).encode(),
             "missing integer field 'api_version'",
+        ),
+        # ADR-056 ``authentication`` block: present-but-malformed is a shape break.
+        (
+            _capabilities_body(authentication="none"),
+            "'authentication' must be an object",
+        ),
+        (
+            _capabilities_body(authentication={"protected_routes": 1, "capabilities_probe": "none", "contract_version": 1}),
+            "'authentication.protected_routes' must be a non-empty string",
+        ),
+        (
+            _capabilities_body(authentication={"capabilities_probe": "none", "contract_version": 1}),
+            "'authentication.protected_routes' must be a non-empty string",
+        ),
+        (
+            _capabilities_body(authentication={"protected_routes": "none", "capabilities_probe": "", "contract_version": 1}),
+            "'authentication.capabilities_probe' must be a non-empty string",
+        ),
+        (
+            _capabilities_body(authentication={"protected_routes": "none", "capabilities_probe": "none", "contract_version": True}),
+            "'authentication.contract_version' must be an integer",
+        ),
+        (
+            _capabilities_body(authentication={"protected_routes": "none", "capabilities_probe": "none", "contract_version": "1"}),
+            "'authentication.contract_version' must be an integer",
+        ),
+        (
+            _capabilities_body(authentication={"protected_routes": "none", "capabilities_probe": "none"}),
+            "'authentication.contract_version' must be an integer",
         ),
     ],
 )

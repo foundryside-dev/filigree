@@ -43,6 +43,18 @@ Three layers, mirroring the sibling federation oracles
   ``RegistryVersionMismatchError``, and that a type/shape violation hard-fails
   with ``RegistryUnavailableError(cause_kind='invalid_response')``. These are real
   RED targets driven through the production code path.
+- **Consumer auth posture (ADR-056, fixture v6).** The golden's normative
+  ``authentication`` block (``{protected_routes, capabilities_probe,
+  contract_version}``) is CONSUMED: the probe shape-parses it into
+  ``caps["authentication"]`` and ``validate_loomweave_capabilities`` gates the
+  mode vocabulary. Filigree sends only ``Authorization: Bearer`` and owns no HMAC
+  contract, so ``protected_routes`` outside ``{none, bearer}`` or a
+  ``capabilities_probe`` other than ``none`` is refused with one named
+  ``RegistryUnavailableError(cause_kind='auth_mode_unsupported')`` at the
+  probe/validate pair instead of surfacing later as per-operation 401s. A
+  Loomweave that omits the block (pre-ADR-056) is treated as
+  ``none``/``none``/``contract_version 1`` and keeps working; a malformed block
+  is a shape break (``invalid_response``).
 - **Layer 2 — drift recheck against Loomweave's authority source.** Lives in
   ``test_sibling_drift.py`` (registry entry ``capabilities``): byte-compares the
   vendored copy against Loomweave's producer golden
@@ -75,6 +87,7 @@ import pytest
 # fallback-policy try/except around this same pair.
 from filigree.registry import (
     EXPECTED_LOOMWEAVE_API_VERSION,
+    LEGACY_LOOMWEAVE_AUTHENTICATION,
     RegistryUnavailableError,
     RegistryVersionMismatchError,
     probe_loomweave_capabilities,
@@ -196,10 +209,11 @@ def test_real_probe_accepts_golden_wire() -> None:
     declared values. Non-circular: the assertion can only pass because the live
     parser genuinely extracted these values from the served wire bytes.
 
-    Only the fields the consumer extracts are asserted. ``probe`` deliberately
-    ignores ``linkages`` and ``taint_store`` (and would ignore a ``version``
-    field), so this does NOT assert they round-trip — asserting that would red
-    against correct code.
+    Only the fields the consumer extracts are asserted — including the ADR-056
+    ``authentication`` block (fixture v6), which the consumer now extracts
+    verbatim. ``probe`` deliberately ignores ``linkages`` and ``taint_store``
+    (and would ignore a ``version`` field), so this does NOT assert they
+    round-trip — asserting that would red against correct code.
     """
     body = _golden_body()
     with _CapabilitiesServer(body) as url:
@@ -216,6 +230,11 @@ def test_real_probe_accepts_golden_wire() -> None:
     # Nested ``sei`` object → flattened consumer fields (ADR-038).
     assert caps["sei_supported"] == body["sei"]["supported"]
     assert caps["sei_version"] == body["sei"]["version"]
+    # ADR-056 ``authentication`` discovery block → extracted verbatim, through the
+    # REAL httpx + parse path. The golden advertises ``none``/``none``/``1``,
+    # which is exactly the posture this consumer accepts without a gate trip.
+    assert caps["authentication"] == body["authentication"]
+    assert caps["authentication"] == {"protected_routes": "none", "capabilities_probe": "none", "contract_version": 1}
 
     # Sanity: the golden's api_version is exactly the version this build gates on,
     # which is why the accept path above did not raise.
@@ -322,3 +341,82 @@ def test_real_probe_rejects_wrong_typed_top_level_field() -> None:
     with _CapabilitiesServer(bad) as url, pytest.raises(RegistryUnavailableError) as excinfo:
         probe_loomweave_capabilities(url, timeout_seconds=5)
     assert excinfo.value.cause_kind == "invalid_response"
+
+
+# ---------------------------------------------------------------------------
+# Consumer auth posture — ADR-056 ``authentication`` block (fixture v6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "mode"),
+    [
+        ("protected_routes", "hmac"),
+        ("capabilities_probe", "bearer"),
+    ],
+)
+def test_real_validate_rejects_unimplemented_auth_mode(field: str, mode: str) -> None:
+    """A protected mode Filigree cannot satisfy is refused with ONE named error.
+
+    Loomweave's ``AuthenticationMode`` vocabulary is ``none|bearer|hmac``
+    (ADR-056 §1). Filigree only ever sends ``Authorization: Bearer`` and owns no
+    HMAC contract, so an ``hmac`` ``protected_routes`` (or any
+    ``capabilities_probe`` other than ``none``) must not be silently marked
+    usable and then fail per-operation with ``cause_kind='auth'`` 401s. Mutating
+    ONLY the one auth field (a ``deepcopy``; the golden file is never touched):
+    the REAL probe ACCEPTS (it is a well-shaped block — shape check, not value
+    gate) and ``validate_loomweave_capabilities`` raises
+    ``RegistryUnavailableError(cause_kind='auth_mode_unsupported')`` naming the
+    field and the offending mode.
+    """
+    bad = copy.deepcopy(_golden_body())
+    bad["authentication"][field] = mode
+    with _CapabilitiesServer(bad) as url:
+        caps = probe_loomweave_capabilities(url, timeout_seconds=5)
+        assert dict(caps["authentication"])[field] == mode
+        with pytest.raises(RegistryUnavailableError) as excinfo:
+            validate_loomweave_capabilities(caps, base_url=url)
+    assert excinfo.value.cause_kind == "auth_mode_unsupported"
+    assert f"authentication.{field}" in str(excinfo.value)
+    assert repr(mode) in str(excinfo.value)
+
+
+def test_real_probe_degrades_when_authentication_block_absent() -> None:
+    """A pre-ADR-056 Loomweave (no ``authentication`` block) keeps working.
+
+    Deleting the block (a ``deepcopy``; the golden file is never touched) must
+    make the REAL probe + validate ACCEPT, with ``caps["authentication"]`` set to
+    the legacy assumption (``none``/``none``/``contract_version 1``) and every
+    other consumer-extracted field identical to the clean golden's baseline —
+    the older-Loomweave posture degrades, it does not crash.
+    """
+    clean = _golden_body()
+    with _CapabilitiesServer(clean) as url:
+        baseline = probe_loomweave_capabilities(url, timeout_seconds=5)
+        validate_loomweave_capabilities(baseline, base_url=url)
+
+    bad = copy.deepcopy(clean)
+    del bad["authentication"]
+    with _CapabilitiesServer(bad) as url:
+        caps = probe_loomweave_capabilities(url, timeout_seconds=5)
+        validate_loomweave_capabilities(caps, base_url=url)
+
+    assert caps["authentication"] == LEGACY_LOOMWEAVE_AUTHENTICATION
+    assert caps["authentication"] == {"protected_routes": "none", "capabilities_probe": "none", "contract_version": 1}
+    assert {k: v for k, v in caps.items() if k != "authentication"} == {k: v for k, v in baseline.items() if k != "authentication"}
+
+
+def test_real_probe_rejects_malformed_authentication_block() -> None:
+    """A present-but-malformed ``authentication`` block is a wire-shape break.
+
+    ``authentication: "none"`` (a string where ADR-056 mandates an object) must
+    make the REAL probe raise ``RegistryUnavailableError`` with
+    ``cause_kind='invalid_response'`` — the consumer fails closed on a malformed
+    advertisement, it does not guess at a mode.
+    """
+    bad = copy.deepcopy(_golden_body())
+    bad["authentication"] = "none"
+    with _CapabilitiesServer(bad) as url, pytest.raises(RegistryUnavailableError) as excinfo:
+        probe_loomweave_capabilities(url, timeout_seconds=5)
+    assert excinfo.value.cause_kind == "invalid_response"
+    assert "'authentication' must be an object" in str(excinfo.value)

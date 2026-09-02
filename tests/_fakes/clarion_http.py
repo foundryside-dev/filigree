@@ -74,6 +74,14 @@ class ClarionStubState:
     include_sei_capability: bool = True
     sei_supported: bool = False
     sei_version: int = 1
+    # ---- ADR-056 ``authentication`` discovery block (fixture v6) -----------
+    # ``None`` (default) omits the block entirely — the pre-ADR-056 Loomweave
+    # posture Filigree treats as ``none``/``none``/``contract_version 1`` — so
+    # every existing FiligreeDB-level test keeps its older-Loomweave footing.
+    # Set to a dict (e.g. ``{"protected_routes": "hmac", "capabilities_probe":
+    # "none", "contract_version": 1}``) to advertise a mode and exercise the
+    # consumer's ``auth_mode_unsupported`` gate.
+    authentication: dict[str, Any] | None = None
     # locator -> alive SEI. A submitted locator absent here resolves to the
     # ``not_found`` channel (orphaned); a submitted SEI-shaped string (reserved
     # ``loomweave:eid:`` prefix) is rejected into the ``invalid`` channel (REQ-F-02).
@@ -187,6 +195,8 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 }
                 if state.include_sei_capability:
                     capabilities["sei"] = {"supported": state.sei_supported, "version": state.sei_version}
+                if state.authentication is not None:
+                    capabilities["authentication"] = dict(state.authentication)
                 body = json.dumps(capabilities).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -326,6 +336,7 @@ def clarion_stub(
     include_sei_capability: bool = True,
     sei_supported: bool = False,
     sei_by_locator: dict[str, str] | None = None,
+    authentication: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, ClarionStubState]]:
     """Run a Clarion HTTP stub serving ``_capabilities``, ``files``, and the SEI surface.
 
@@ -335,7 +346,9 @@ def clarion_stub(
     against (``file_requests``, ``capability_requests``, ``identity_resolve_requests``).
 
     SEI options seed the state up front so the capability probe a FiligreeDB runs
-    at construction sees the intended ``sei`` advertisement.
+    at construction sees the intended ``sei`` advertisement. ``authentication``
+    (ADR-056 discovery block) is omitted from ``_capabilities`` when ``None``
+    (pre-ADR-056 Loomweave); pass a dict to advertise a mode.
     """
     state = ClarionStubState(
         instance_id=instance_id,
@@ -345,6 +358,7 @@ def clarion_stub(
         include_sei_capability=include_sei_capability,
         sei_supported=sei_supported,
         sei_by_locator=dict(sei_by_locator) if sei_by_locator else {},
+        authentication=dict(authentication) if authentication is not None else None,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), _build_handler(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

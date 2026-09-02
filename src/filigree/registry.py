@@ -75,6 +75,25 @@ LOOMWEAVE_SEI_PREFIX = "loomweave:eid:"
 # Briefing-block masking section).
 EXPECTED_LOOMWEAVE_API_VERSION = 1
 
+# ADR-056 authentication discovery (Loomweave capabilities fixture v6). The
+# `_capabilities` body carries a normative ``authentication`` block
+# ``{protected_routes, capabilities_probe, contract_version}`` naming the serving
+# mode. Loomweave's producer vocabulary (``AuthenticationMode``) serialises exactly
+# ``none | bearer | hmac``; ``capabilities_probe`` is the literal ``"none"`` (the
+# probe itself is never authenticated) and ``contract_version`` is ``1``.
+#
+# Filigree implements ONLY bearer: ``_loomweave_headers`` attaches
+# ``Authorization: Bearer <token>`` and nothing else, and Filigree owns no HMAC
+# signing contract. ``hmac`` is therefore deliberately absent from the supported
+# set — a Loomweave advertising it is refused at the probe/validate pair with one
+# named ``RegistryUnavailableError(cause_kind='auth_mode_unsupported')`` rather
+# than being marked usable and failing per-operation with 401s. Unknown future
+# modes are refused by the same gate; widen the set in lockstep with the
+# re-vendored fixture when Filigree actually implements a mode.
+EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION = 1
+SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES: frozenset[str] = frozenset({"none", "bearer"})
+SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES: frozenset[str] = frozenset({"none"})
+
 
 class LocalResolvedFile(TypedDict):
     """File identity resolved by the local (Filigree-native) registry.
@@ -336,6 +355,33 @@ class RegistryVersionMismatchError(RuntimeError):
         self.advertised = advertised
 
 
+class LoomweaveAuthentication(TypedDict):
+    """Loomweave's ADR-056 ``authentication`` discovery block, verbatim from the wire.
+
+    ``protected_routes`` names the mode Loomweave enforces on its protected
+    routes (producer vocabulary ``none | bearer | hmac``); ``capabilities_probe``
+    names the mode on ``_capabilities`` itself (always ``none``);
+    ``contract_version`` versions this descriptor (currently ``1``). The probe
+    only shape-checks these — the mode-vocabulary gate lives in
+    ``validate_loomweave_capabilities``.
+    """
+
+    protected_routes: str
+    capabilities_probe: str
+    contract_version: int
+
+
+# What a Loomweave that predates ADR-056 (capabilities fixture < v6) is taken to
+# mean when it omits the ``authentication`` block: unauthenticated routes and
+# probe, descriptor version 1. The consumer degrades to this assumption and keeps
+# working (mirrors the ``sei`` absent-object default) instead of crashing.
+LEGACY_LOOMWEAVE_AUTHENTICATION: LoomweaveAuthentication = {
+    "protected_routes": "none",
+    "capabilities_probe": "none",
+    "contract_version": EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+}
+
+
 class LoomweaveCapabilities(TypedDict):
     """Loomweave ``GET /api/v1/_capabilities`` response shape.
 
@@ -360,6 +406,12 @@ class LoomweaveCapabilities(TypedDict):
     # ``sei_supported``.
     sei_supported: bool
     sei_version: int
+    # ADR-056 ``authentication`` discovery block (fixture v6), extracted verbatim.
+    # A Loomweave that omits the block (pre-ADR-056) yields
+    # ``LEGACY_LOOMWEAVE_AUTHENTICATION`` (``none``/``none``/``1``) so the
+    # consumer keeps working on the legacy assumption; a present block is
+    # shape-checked by the probe and mode-gated by ``validate_loomweave_capabilities``.
+    authentication: LoomweaveAuthentication
 
 
 def loomweave_capabilities_url(base_url: str) -> str:
@@ -428,9 +480,14 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
     On HTTP-level failure (network, timeout, non-200) raises
     ``RegistryUnavailableError`` so callers can treat probe-time and
     resolve-time outages with the same fallback policy.
-    On schema-level failure (missing field, wrong type) raises
-    ``RegistryUnavailableError`` with ``cause_kind='invalid_response'``.
-    Version-mismatch checks are layered on by ``validate_loomweave_capabilities``.
+    On schema-level failure (missing field, wrong type — including a malformed
+    ADR-056 ``authentication`` block) raises ``RegistryUnavailableError`` with
+    ``cause_kind='invalid_response'``. The nested ``sei`` and ``authentication``
+    objects are tolerated when ABSENT (older Loomweave; see
+    ``_parse_sei_capability`` / ``_parse_authentication_capability``).
+    Version-mismatch and auth-mode gates are layered on by
+    ``validate_loomweave_capabilities`` — the probe is shape only, never a value
+    gate.
     """
     url = loomweave_capabilities_url(base_url)
     _validate_loomweave_token_origin(url, auth_token=auth_token)
@@ -471,6 +528,7 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
     sei_supported, sei_version = _parse_sei_capability(payload, url=url)
+    authentication = _parse_authentication_capability(payload, url=url)
 
     return LoomweaveCapabilities(
         registry_backend=payload["registry_backend"],
@@ -479,6 +537,7 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
         instance_id=payload["instance_id"],
         sei_supported=sei_supported,
         sei_version=sei_version,
+        authentication=authentication,
     )
 
 
@@ -508,13 +567,65 @@ def _parse_sei_capability(payload: dict[str, Any], *, url: str) -> tuple[bool, i
     return (supported, version)
 
 
+def _parse_authentication_capability(payload: dict[str, Any], *, url: str) -> LoomweaveAuthentication:
+    """Read Loomweave's ADR-056 ``authentication`` block, tolerating a pre-ADR-056 Loomweave.
+
+    A Loomweave older than capabilities fixture v6 omits the block entirely; that
+    is not an error — it means "legacy posture" and yields
+    ``LEGACY_LOOMWEAVE_AUTHENTICATION`` (``none``/``none``/``1``). When the block
+    IS present it must be well-formed: ``protected_routes`` and
+    ``capabilities_probe`` non-empty strings, ``contract_version`` an integer.
+    A malformed block is a wire-contract break and raises ``invalid_response``
+    like every other shape check.
+
+    Shape ONLY. The mode vocabulary (``none``/``bearer`` vs ``hmac``/unknown) is
+    a value gate and lives in ``validate_loomweave_capabilities`` — putting it
+    here would make an ``hmac`` Loomweave fail as a *shape* error instead of the
+    named ``auth_mode_unsupported`` error operators are meant to see.
+    """
+    authentication = payload.get("authentication")
+    if authentication is None:
+        return LEGACY_LOOMWEAVE_AUTHENTICATION.copy()
+    if not isinstance(authentication, dict):
+        msg = f"Loomweave capability probe from {url}: 'authentication' must be an object, got {type(authentication).__name__}"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    modes: dict[str, str] = {}
+    for field in ("protected_routes", "capabilities_probe"):
+        mode = authentication.get(field)
+        if not isinstance(mode, str) or not mode:
+            msg = f"Loomweave capability probe from {url}: 'authentication.{field}' must be a non-empty string"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        modes[field] = mode
+    contract_version = authentication.get("contract_version")
+    if not isinstance(contract_version, int) or isinstance(contract_version, bool):
+        msg = f"Loomweave capability probe from {url}: 'authentication.contract_version' must be an integer"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    return LoomweaveAuthentication(
+        protected_routes=modes["protected_routes"],
+        capabilities_probe=modes["capabilities_probe"],
+        contract_version=contract_version,
+    )
+
+
 def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base_url: str) -> None:
     """Reject Loomweave advertisements that contradict ADR-014's contract.
 
     Raises ``RegistryVersionMismatchError`` on api_version mismatch (no fallback
     can fix a wire-protocol break). Raises ``RegistryUnavailableError`` when
-    Loomweave reports it is unwilling to serve registry-backend traffic — this is
-    a transient configuration issue, so fallback semantics apply.
+    Loomweave reports it is unwilling to serve registry-backend traffic
+    (``cause_kind='role_declined'``) — this is a transient configuration issue,
+    so fallback semantics apply. Raises ``RegistryUnavailableError`` with
+    ``cause_kind='auth_mode_unsupported'`` when the ADR-056 ``authentication``
+    block advertises a ``protected_routes`` mode outside
+    ``SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES`` (e.g. ``hmac``, which Filigree
+    does not implement) or a ``capabilities_probe`` mode outside
+    ``SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES`` — same fallback policy as
+    ``role_declined``. An ``authentication.contract_version`` other than
+    ``EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION`` is logged at WARN, never
+    rejected (the gate is on modes only).
+
+    Gate order is api_version → role → authentication, so a wire-protocol break
+    stays the loudest signal.
     """
     url = loomweave_capabilities_url(base_url)
     advertised = capabilities["api_version"]
@@ -538,6 +649,34 @@ def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base
             "Reconfigure Loomweave or switch this project to registry_backend='local'."
         )
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="role_declined")
+
+    authentication = capabilities["authentication"]
+    contract_version = authentication["contract_version"]
+    if contract_version != EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION:
+        logger.warning(
+            "Loomweave at %s advertised authentication.contract_version=%r; this Filigree was written against "
+            "contract_version=%r. Proceeding on the mode gate alone — verify the ADR-056 descriptor did not change shape.",
+            url,
+            contract_version,
+            EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+            extra={
+                "url": url,
+                "advertised_auth_contract_version": contract_version,
+                "expected_auth_contract_version": EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+            },
+        )
+    mode_gates: tuple[tuple[str, str, frozenset[str]], ...] = (
+        ("protected_routes", authentication["protected_routes"], SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES),
+        ("capabilities_probe", authentication["capabilities_probe"], SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES),
+    )
+    for field, mode, supported in mode_gates:
+        if mode not in supported:
+            msg = (
+                f"Loomweave at {url} advertised authentication.{field}={mode!r}, which this Filigree does not implement "
+                f"(supported: {sorted(supported)}; Filigree sends only 'Authorization: Bearer'). "
+                "Reconfigure Loomweave's serving mode or switch this project to registry_backend='local'."
+            )
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth_mode_unsupported")
 
 
 def _is_briefing_blocked_payload(raw: str | bytes | bytearray) -> bool:
