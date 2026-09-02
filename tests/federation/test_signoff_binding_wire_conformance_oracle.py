@@ -38,18 +38,20 @@ Layout mirrors ``test_entity_associations_wire_conformance_oracle.py``:
 - **Consumer wire oracle (the non-circular core, default suite).** POSTs the RAW
   golden bytes through the REAL route over the live ASGI app and asserts the parse +
   persistence + governed effect.
-- **Reverse drift recheck (skip-clean).** legis's vendored authority copy must be
-  byte-identical; skips when the sibling repo is absent.
+- **Layer 2 — drift recheck (skip-clean).** Lives in ``test_sibling_drift.py``
+  (registry entry ``legis_signoff_binding``): legis's authority copy
+  (``tests/contract/weft/vectors/signoff_binding.v1.json`` in the sibling checkout)
+  must be byte-identical to the vendored golden; skips when the sibling is absent
+  unless ``FILIGREE_REQUIRE_LEGIS_REPO`` arms it.
 
 All oracles are in-process (ASGITransport, no network), so they run in the default
-suite with no new pytest marker.
+suite; the ``federation_contract`` marker only selects them into the
+``loomweave-contract`` CI job.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,9 @@ from httpx import ASGITransport, AsyncClient
 import filigree.dashboard as dash_module
 from filigree.core import FiligreeDB
 from filigree.dashboard import create_app
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 
 def _weft_body_bytes(body: dict[str, Any]) -> bytes:
@@ -83,16 +88,6 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 VENDORED_BLOB_SHA = "8796aeb5b8d7d067c82af17e361aa45fe5007b4e"
 
 
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``."""
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
-
-
 # ---------------------------------------------------------------------------
 # Layer 1 — byte-pin (default suite)
 # ---------------------------------------------------------------------------
@@ -104,7 +99,7 @@ def test_vendored_golden_byte_pin() -> None:
     A single-byte edit changes the sha and reds this in the default suite — the
     cheapest drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == VENDORED_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == VENDORED_BLOB_SHA
 
 
 def test_golden_carries_the_distinct_governed_extension_fields() -> None:
@@ -112,7 +107,7 @@ def test_golden_carries_the_distinct_governed_extension_fields() -> None:
     legis-specific extension that distinguishes this wire from the base
     entity-association shape (already covered by the reverse-lookup oracle).
     """
-    body = _load_golden()["request_body"]
+    body = load_golden(GOLDEN_PATH)["request_body"]
     assert set(body) == {"entity_id", "content_hash", "actor", "signoff_seq", "signature"}
     assert isinstance(body["signoff_seq"], int)
     assert not isinstance(body["signoff_seq"], bool)
@@ -173,7 +168,7 @@ async def test_real_handler_parses_and_persists_the_golden_signoff(consumer_db: 
     layer (``list_entity_associations``). A consumer that stopped parsing
     ``signoff_seq``/``signature``, renamed a column, or dropped one would red here.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     body = golden["request_body"]
     raw = GOLDEN_PATH.read_bytes()
     # The raw POST body is the canonical request body inside the golden envelope —
@@ -183,7 +178,7 @@ async def test_real_handler_parses_and_persists_the_golden_signoff(consumer_db: 
     # Sanity: the golden file is the byte-pinned authority copy (proves we are not
     # hand-minting), and the POST body is legis's canonical wire serialization of the
     # golden's recorded request_body.
-    assert _blob_sha(raw) == VENDORED_BLOB_SHA
+    assert blob_sha(raw) == VENDORED_BLOB_SHA
 
     # Seed the issue the binding targets (FK requirement). Filigree generates the id
     # under its project prefix; the path issue_id need not equal the golden's signed
@@ -227,7 +222,7 @@ async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monk
     from filigree import governance, legis_client
     from filigree.governance import GateOutcome
 
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     body = golden["request_body"]
     raw_body = _weft_body_bytes(body)
 
@@ -269,42 +264,10 @@ async def test_governed_binding_is_non_removable(consumer_db: FiligreeDB) -> Non
     """
     from filigree.db_entity_associations import GovernedAssociationRemovalError
 
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     body = golden["request_body"]
     issue = consumer_db.create_issue("non-removable", priority=2)
     await _post_raw_golden(consumer_db, issue.id, _weft_body_bytes(body))
 
     with pytest.raises(GovernedAssociationRemovalError):
         consumer_db.remove_entity_association(issue.id, body["entity_id"], actor="agent")
-
-
-# ---------------------------------------------------------------------------
-# Reverse drift recheck against legis's vendored authority (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _legis_vendored_authority() -> Path | None:
-    """Locate legis's authority copy, if the sibling repo is present.
-
-    Honors a ``LEGIS_REPO`` override; defaults to ``/home/john/legis``.
-    """
-    repo = Path(os.environ.get("LEGIS_REPO", "/home/john/legis"))
-    source = repo / "tests" / "contract" / "weft" / "vectors" / "signoff_binding.v1.json"
-    return source if source.exists() else None
-
-
-def test_legis_authority_copy_matches_vendored() -> None:
-    """legis's authority golden must be BYTE-identical to filigree's vendored copy.
-
-    legis is the producer/authority for this request body; the vendored copy is a
-    sync, not a second source of truth. Fails closed on any divergence; skips cleanly
-    when the sibling repo is absent (e.g. CI), where Layer 1 + the consumer oracle
-    still gate the PR.
-    """
-    authority = _legis_vendored_authority()
-    if authority is None:
-        pytest.skip("legis repo not found (set LEGIS_REPO to enable the reverse byte-drift check)")
-    assert authority.read_bytes() == GOLDEN_PATH.read_bytes(), (
-        "legis's authority signoff_binding.v1.json has drifted from filigree's vendored "
-        "copy; re-sync byte-identical (legis is the producer)."
-    )

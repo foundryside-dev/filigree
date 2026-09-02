@@ -36,6 +36,8 @@ from filigree.registry import (
 )
 from filigree.types.core import ContentHash, EntityId, FileId, FileRecordDict, LoomweaveConfig, ProjectConfig, RegistryBackend
 
+pytestmark = pytest.mark.federation_contract
+
 
 def test_local_registry_resolves_file_with_local_identity() -> None:
     issued: list[str] = []

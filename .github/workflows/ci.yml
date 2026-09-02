@@ -90,21 +90,13 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - run: uv sync --group dev
-      - run: >
-          uv run pytest
-          tests/unit/test_registry.py
-          tests/api/test_registry_backend_integration.py
-          tests/core/test_registry_backend_matrix.py
-          tests/api/test_weft_auth.py
-          tests/federation/test_sei_conformance_oracle.py
-          tests/federation/test_suppression_filter_conformance_oracle.py
-          tests/federation/test_scan_results_wire_conformance_oracle.py
-          tests/federation/test_loomweave_scan_results_wire_conformance_oracle.py
-          tests/federation/test_finding_identity_wire_conformance_oracle.py
-          tests/federation/test_entity_associations_wire_conformance_oracle.py
-          tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
-          tests/federation/test_capabilities_wire_conformance_oracle.py
-          tests/federation/test_signoff_binding_wire_conformance_oracle.py
+      # Marker-selected (not a hand-enumerated file list): every cross-repo
+      # wire/contract oracle carries ``pytestmark = pytest.mark.federation_contract``
+      # and tests/federation/test_oracle_helpers.py guards that no federation
+      # module is silently left out. No sibling repo is checked out here, so the
+      # Layer-2 drift params in test_sibling_drift.py skip; do NOT set
+      # FILIGREE_REQUIRE_<SIBLING>_REPO in this job.
+      - run: uv run pytest -m federation_contract
 
   live-loomweave:
     name: Live Loomweave Integration

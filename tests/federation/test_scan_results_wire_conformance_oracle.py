@@ -29,20 +29,17 @@ the suppression-filter oracle (``test_suppression_filter_conformance_oracle.py``
   intake, not the golden against itself: if Filigree's parser rejected a field
   the wire carries, or the ingest dropped/garbled a finding or its nested
   axes, this reds.
-- **Layer 2 — drift recheck (release-gate, skip-clean).** Byte-compares the
-  vendored copy against Wardline's authority source
-  (``$WARDLINE_REPO/tests/conformance/fixtures/wardline-scan-results-wire.golden.json``,
-  default ``/home/john/wardline``). Skips cleanly when the sibling repo is absent
-  (e.g. CI); fails closed on any byte divergence.
+- **Layer 2 — drift recheck (release-gate, skip-clean).** Lives in
+  ``test_sibling_drift.py`` (registry entry ``wardline_scan_results``):
+  byte-compares the vendored copy against Wardline's authority source
+  (``tests/conformance/fixtures/wardline-scan-results-wire.golden.json`` in the
+  sibling checkout located by ``_oracle.sibling_source``). Skips cleanly when the
+  sibling is absent unless ``FILIGREE_REQUIRE_WARDLINE_REPO`` arms it.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -56,6 +53,9 @@ from filigree.core import FiligreeDB
 # driving the real intake — the route adds only the HTTP envelope and the
 # worker-thread hop, not any parsing/persistence logic of its own.
 from filigree.dashboard_routes.files import _parse_scan_results_body
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored consumer copy of Wardline's authoritative scan-results wire.
 GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "wardline-scan-results-wire.golden.json"
@@ -64,21 +64,6 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 # Recomputed from bytes by ``test_vendored_golden_byte_pin`` so any edit to the
 # fixture reds in the default suite, on every CI run.
 UPSTREAM_BLOB_SHA = "164404bea8a8c29eec9814156441c38a098b9fc8"
-
-
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +77,7 @@ def test_vendored_golden_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +96,7 @@ def test_real_intake_accepts_golden_body() -> None:
     field Filigree's validator rejects (or tightened a bound the wire trips),
     this reds.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     parsed = _parse_scan_results_body(golden)
     # A validation failure is a dataclass instance, not a plain kwargs dict.
     assert isinstance(parsed, dict), f"intake rejected the golden wire: {parsed!r}"
@@ -137,7 +122,7 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
     If Filigree's intake dropped a finding, mangled a fingerprint, or flattened
     the nested wardline metadata, this reds.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     parsed = _parse_scan_results_body(golden)
     assert isinstance(parsed, dict)
 
@@ -149,7 +134,7 @@ def test_real_intake_persists_and_round_trips_golden(tmp_path: Path) -> None:
         # severity, language), and ``parsed["findings"]`` aliases the golden's
         # list — so every comparison below must run against a pristine re-read,
         # or intake-time mangling could never red.
-        golden = _load_golden()
+        golden = load_golden(GOLDEN_PATH)
 
         # Every wire finding was ingested (none dropped at the boundary).
         assert result["findings_created"] == len(golden["findings"])
@@ -215,7 +200,7 @@ def test_real_intake_round_trips_suppression_and_kind_axes(tmp_path: Path) -> No
     suppression/kind mix, the derived expectation tracks it, and a consumer that
     failed to index a new axis value reds.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     parsed = _parse_scan_results_body(golden)
     assert isinstance(parsed, dict)
 
@@ -247,31 +232,3 @@ def test_real_intake_round_trips_suppression_and_kind_axes(tmp_path: Path) -> No
             assert got["total"] == count, f"kind={kind!r}: expected {count}, got {got['total']}"
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — drift recheck against Wardline's authority source (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _wardline_authority_source() -> Path | None:
-    """Locate Wardline's canonical scan-results wire golden, if the sibling repo
-    is present. Honors a ``WARDLINE_REPO`` override; defaults to
-    ``/home/john/wardline``.
-    """
-    repo = Path(os.environ.get("WARDLINE_REPO", "/home/john/wardline"))
-    source = repo / "tests" / "conformance" / "fixtures" / "wardline-scan-results-wire.golden.json"
-    return source if source.exists() else None
-
-
-def test_vendored_golden_matches_wardline_authority_source() -> None:
-    """The vendored consumer copy must be BYTE-identical to Wardline's authority
-    source. Fails closed on any divergence; skips cleanly when the sibling repo
-    is absent (e.g. CI), where Layer 1 + the consumer intake oracle still gate
-    the PR."""
-    source = _wardline_authority_source()
-    if source is None:
-        pytest.skip("Wardline repo not found (set WARDLINE_REPO to enable the byte-drift check)")
-    assert GOLDEN_PATH.read_bytes() == source.read_bytes(), (
-        "Vendored wardline-scan-results-wire.golden.json has drifted from Wardline's authority source; re-vendor it byte-identical."
-    )

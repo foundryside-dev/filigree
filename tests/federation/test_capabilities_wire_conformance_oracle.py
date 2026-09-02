@@ -43,17 +43,16 @@ Three layers, mirroring the sibling federation oracles
   ``RegistryVersionMismatchError``, and that a type/shape violation hard-fails
   with ``RegistryUnavailableError(cause_kind='invalid_response')``. These are real
   RED targets driven through the production code path.
-- **Layer 2 — drift recheck against Loomweave's authority source (skip-clean +
-  fail-closed arming env).** Byte-compares the vendored copy against Loomweave's
-  producer golden (``$LOOMWEAVE_REPO/docs/federation/fixtures/get-api-v1-capabilities.json``,
-  default ``/home/john/loomweave``). Fails closed on any byte divergence. When the
-  sibling repo is absent it skips cleanly (matching the five sibling oracles, so
-  CI behaviour is unchanged) UNLESS ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` arms it,
-  in which case an absent source is a hard failure.
+- **Layer 2 — drift recheck against Loomweave's authority source.** Lives in
+  ``test_sibling_drift.py`` (registry entry ``capabilities``): byte-compares the
+  vendored copy against Loomweave's producer golden
+  (``docs/federation/fixtures/get-api-v1-capabilities.json`` in the sibling
+  checkout located by ``_oracle.sibling_source``). Skip-clean when the sibling
+  is absent unless ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` arms it.
 
-Byte-identical provenance: the vendored copy's sha256 is
-``61020b20aadaef75a3de523f0a8f83be03d1d503ffdca719c78d949d20beeced`` — identical
-to the producer report's sha256 for the authority golden.
+Byte-identical provenance: the vendored copy's
+sha256 ``61020b20aadaef75a3de523f0a8f83be03d1d503ffdca719c78d949d20beeced``
+is identical to the producer report's sha256 for the authority golden.
 """
 
 from __future__ import annotations
@@ -61,7 +60,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,6 +80,9 @@ from filigree.registry import (
     probe_loomweave_capabilities,
     validate_loomweave_capabilities,
 )
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored consumer copy of Loomweave's authoritative capabilities wire.
 GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "get-api-v1-capabilities.json"
@@ -97,24 +98,9 @@ UPSTREAM_BLOB_SHA = "c739e2a64550856de77668e70d9eb7faf413b43b"
 UPSTREAM_SHA256 = "61020b20aadaef75a3de523f0a8f83be03d1d503ffdca719c78d949d20beeced"
 
 
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
-
-
 def _golden_body() -> dict[str, Any]:
     """The ``capabilities_200`` example response body the consumer parses."""
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     for example in golden["examples"]:
         if example["name"] == "capabilities_200":
             body: dict[str, Any] = example["response"]["body"]
@@ -180,7 +166,7 @@ def test_vendored_golden_byte_pin() -> None:
     report's authority digest.
     """
     data = GOLDEN_PATH.read_bytes()
-    assert _blob_sha(data) == UPSTREAM_BLOB_SHA
+    assert blob_sha(data) == UPSTREAM_BLOB_SHA
     assert hashlib.sha256(data).hexdigest() == UPSTREAM_SHA256
 
 
@@ -190,7 +176,7 @@ def test_vendored_golden_byte_pin_rejects_a_mutated_byte() -> None:
     the producer's ``capabilities_golden_byte_pin_rejects_a_mutated_byte``)."""
     tampered = bytearray(GOLDEN_PATH.read_bytes())
     tampered[0] ^= 0x01
-    assert _blob_sha(bytes(tampered)) != UPSTREAM_BLOB_SHA
+    assert blob_sha(bytes(tampered)) != UPSTREAM_BLOB_SHA
     assert hashlib.sha256(bytes(tampered)).hexdigest() != UPSTREAM_SHA256
 
 
@@ -336,43 +322,3 @@ def test_real_probe_rejects_wrong_typed_top_level_field() -> None:
     with _CapabilitiesServer(bad) as url, pytest.raises(RegistryUnavailableError) as excinfo:
         probe_loomweave_capabilities(url, timeout_seconds=5)
     assert excinfo.value.cause_kind == "invalid_response"
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — drift recheck against Loomweave's authority source (skip-clean +
-# fail-closed arming env)
-# ---------------------------------------------------------------------------
-
-
-def _loomweave_authority_source() -> Path | None:
-    """Locate Loomweave's producer golden, if the sibling repo is present.
-
-    Honors a ``LOOMWEAVE_REPO`` override; defaults to ``/home/john/loomweave``.
-    """
-    repo = Path(os.environ.get("LOOMWEAVE_REPO", "/home/john/loomweave"))
-    source = repo / "docs" / "federation" / "fixtures" / "get-api-v1-capabilities.json"
-    return source if source.exists() else None
-
-
-def test_vendored_golden_matches_loomweave_authority_source() -> None:
-    """The vendored consumer copy must be BYTE-identical to Loomweave's producer
-    golden. Fails closed on any byte divergence.
-
-    Skips cleanly when the sibling repo is absent (e.g. CI), matching the five
-    sibling federation oracles, so Layer 1 + the consumer oracle still gate the
-    PR. Setting ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` (the strict arming env, off by
-    default, NOT set in the ``loomweave-contract`` CI job) turns an absent source
-    into a hard failure instead of a skip.
-    """
-    source = _loomweave_authority_source()
-    if source is None:
-        if os.environ.get("FILIGREE_REQUIRE_LOOMWEAVE_REPO"):
-            pytest.fail(
-                "FILIGREE_REQUIRE_LOOMWEAVE_REPO is set but Loomweave's producer golden was not found "
-                "(set LOOMWEAVE_REPO to the sibling repo so the byte-drift check can arm)."
-            )
-        pytest.skip("Loomweave repo not found (set LOOMWEAVE_REPO to enable the byte-drift check)")
-    assert GOLDEN_PATH.read_bytes() == source.read_bytes(), (
-        "Vendored get-api-v1-capabilities.json has drifted from Loomweave's authority source; "
-        "re-vendor it byte-identical (Loomweave is the producer)."
-    )

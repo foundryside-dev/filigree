@@ -40,24 +40,25 @@ suppression-filter oracle, and the scan-results wire oracle:
   that fell back to the legacy ``(file, rule, line_start)`` dedup heuristic would
   collapse them to one and red here. This reads the real ingest, not the golden
   against itself.
-- **Layer 2 — drift recheck (release-gate, skip-clean).** Byte-compares the
-  vendored copy against Wardline's authority source
-  (``$WARDLINE_REPO/tests/conformance/fixtures/wardline-finding-identity-wire.golden.json``,
-  default ``/home/john/wardline``). Skips cleanly when the sibling repo is absent
-  (e.g. CI); fails closed on any byte divergence.
+- **Layer 2 — drift recheck (release-gate, skip-clean).** Lives in
+  ``test_sibling_drift.py`` (registry entry ``wardline_finding_identity``):
+  byte-compares the vendored copy against Wardline's authority source
+  (``tests/conformance/fixtures/wardline-finding-identity-wire.golden.json`` in
+  the sibling checkout located by ``_oracle.sibling_source``). Skips cleanly when
+  the sibling is absent unless ``FILIGREE_REQUIRE_WARDLINE_REPO`` arms it.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from filigree.core import FiligreeDB
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored consumer copy of Wardline's authoritative finding-identity wire.
 GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "wardline-finding-identity-wire.golden.json"
@@ -68,21 +69,6 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 # Wardline's producer test (``test_filigree_finding_identity_wire_golden.py``)
 # pins, because the vendored copy is byte-identical to the authority source.
 UPSTREAM_BLOB_SHA = "4eec05f0c53b301cb433331092731c567a7754db"
-
-
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
 
 
 def _finding_from_vector(vec: dict[str, Any]) -> dict[str, Any]:
@@ -143,7 +129,7 @@ def test_vendored_golden_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +153,7 @@ def test_real_ingest_persists_and_round_trips_each_identity(tmp_path: Path) -> N
     line-attribution guard does not reject these synthetic spans against
     nonexistent files.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     vectors = golden["vectors"]
     assert vectors, "identity golden carries no vectors — a vacuous corpus must not pass"
     scan_source = "wardline"
@@ -210,7 +196,7 @@ def test_real_ingest_records_declared_fingerprint_scheme(tmp_path: Path) -> None
     proving the consumer consumes the identity SCHEME, not just the digest. Read
     back through the real accessor (``_get_scan_source_scheme``), not a restatement.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     scan_source = "wardline"
     findings = [_finding_from_vector(vec) for vec in golden["vectors"].values()]
 
@@ -240,7 +226,7 @@ def test_real_query_resolves_finding_by_nested_qualname_axis(tmp_path: Path) -> 
     query grammar. The expected value is the wire qualname the golden froze, so the
     assertion stays tied to Wardline's authored identity.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     vectors = golden["vectors"]
     scan_source = "wardline"
     findings = [_finding_from_vector(vec) for vec in vectors.values()]
@@ -291,7 +277,7 @@ def test_collision_pair_remains_distinct_findings_on_the_join_key(tmp_path: Path
     across the seam — via the fingerprint join key — without Filigree needing a
     first-class column field at all.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     a = golden["vectors"]["collision_pair_a"]
     b = golden["vectors"]["collision_pair_b"]
 
@@ -339,30 +325,3 @@ def test_collision_pair_remains_distinct_findings_on_the_join_key(tmp_path: Path
         assert listed["total"] == 2, f"expected both collision-pair findings under rule {a_in['rule_id']!r}, got {listed['total']}"
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — drift recheck against Wardline's authority source (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _wardline_authority_source() -> Path | None:
-    """Locate Wardline's canonical finding-identity wire golden, if the sibling
-    repo is present. Honors a ``WARDLINE_REPO`` override; defaults to
-    ``/home/john/wardline``.
-    """
-    repo = Path(os.environ.get("WARDLINE_REPO", "/home/john/wardline"))
-    source = repo / "tests" / "conformance" / "fixtures" / "wardline-finding-identity-wire.golden.json"
-    return source if source.exists() else None
-
-
-def test_vendored_golden_matches_wardline_authority_source() -> None:
-    """The vendored consumer copy must be BYTE-identical to Wardline's authority
-    source. Fails closed on any divergence; skips cleanly when the sibling repo is
-    absent (e.g. CI), where Layer 1 + the consumer ingest oracle still gate the PR."""
-    source = _wardline_authority_source()
-    if source is None:
-        pytest.skip("Wardline repo not found (set WARDLINE_REPO to enable the byte-drift check)")
-    assert GOLDEN_PATH.read_bytes() == source.read_bytes(), (
-        "Vendored wardline-finding-identity-wire.golden.json has drifted from Wardline's authority source; re-vendor it byte-identical."
-    )

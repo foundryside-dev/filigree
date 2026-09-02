@@ -72,12 +72,16 @@ def test_development_docs_list_node_as_pytest_prerequisite() -> None:
 def test_ci_has_required_loomweave_contract_lane() -> None:
     workflow = _read(".github/workflows/ci.yml")
 
+    contract_job = _workflow_job(workflow, "loomweave-contract")
+
     assert "loomweave-contract:" in workflow
-    assert "tests/unit/test_registry.py" in workflow
-    assert "tests/api/test_registry_backend_integration.py" in workflow
-    assert "tests/core/test_registry_backend_matrix.py" in workflow
-    assert "tests/api/test_weft_auth.py" in workflow
-    assert "tests/federation/test_sei_conformance_oracle.py" in workflow
+    # Marker-selected since 3.3.0 (filigree-4a4a10f93a): the job must not
+    # regress to a hand-enumerated file list, and it must not arm the Layer-2
+    # sibling drift checks (no sibling repo is checked out in CI).
+    code_lines = [line for line in contract_job.splitlines() if not line.lstrip().startswith("#")]
+    assert any("uv run pytest -m federation_contract" in line for line in code_lines)
+    assert not any("tests/federation/" in line for line in code_lines)
+    assert not any("FILIGREE_REQUIRE_" in line for line in code_lines)
 
 
 def test_ci_has_gated_live_loomweave_lane() -> None:

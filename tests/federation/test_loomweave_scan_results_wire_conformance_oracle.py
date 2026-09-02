@@ -40,44 +40,41 @@ entity-associations oracle:
   ``_parse_scan_results_body`` (the shared request validator) then
   ``FiligreeDB.process_scan_results`` (the ingest primitive). It asserts BOTH:
 
-  * the WHOLE golden is REJECTED at the boundary, because its synthetic-anchor
-    row carries the absolute placeholder ``path="/repo/root"`` and Filigree's
-    intake (``_is_project_relative_scan_path``) rejects absolute paths — this is
-    by-design on BOTH sides (see the SEAM NOTE below), surfaced rather than
-    buried; and
-  * the PRODUCTION-REPRESENTATIVE subset (synthetic-anchor rows dropped, exactly
-    as production Loomweave does — see the SEAM NOTE) ROUND-TRIPS through the
-    legacy positional dedup path with ``fingerprint==''`` and the nested
-    ``metadata.loomweave.*`` axes preserved.
+  * the WIRE-REPRESENTATIVE subset is exactly the golden minus the ONE
+    producer-fixture artifact row (``path="/repo/root"``, see the SEAM NOTE) —
+    surfaced by an explicit composition pin, not sliced away silently; and
+  * that subset ROUND-TRIPS through the legacy positional dedup path with
+    ``fingerprint==''`` and the nested ``metadata.loomweave.*`` axes preserved.
 
-- **Layer 2 — drift recheck (release-gate, skip-clean + fail-closed arming
-  env).** Byte-compares the vendored copy against Loomweave's authority source
-  (``$LOOMWEAVE_REPO/docs/federation/fixtures/loomweave-scan-results-wire.golden.json``,
-  default ``/home/john/loomweave``). Fails closed on any byte divergence. When
-  the sibling repo is absent it skips cleanly (e.g. CI) UNLESS
-  ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` arms it — matching the capabilities oracle's
-  arming env — in which case an absent source is a hard failure, so a release-gate
-  run can be made to never silently skip the cross-repo authority recheck.
+- **Layer 2 — drift recheck (release-gate, skip-clean).** Lives in
+  ``test_sibling_drift.py`` (registry entry ``loomweave_scan_results``):
+  byte-compares the vendored copy against Loomweave's authority source
+  (``docs/federation/fixtures/loomweave-scan-results-wire.golden.json`` in the
+  sibling checkout located by ``_oracle.sibling_source``). Skips cleanly when the
+  sibling is absent unless ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` arms it.
 
-── SEAM NOTE: the synthetic-anchor row is rejected BY DESIGN on both sides ──
+── SEAM NOTE: the synthetic-anchor row is a producer-oracle fixture artifact, not wire ──
 
 The golden's finding[2] (a subsystem ``synthetic_anchor=true`` finding) carries
 ``path="/repo/root"``. That value is a PRODUCER-ORACLE FIXTURE ARTIFACT: the
 Loomweave producer oracle's ``fixed_opts()`` sets ``default_path=Some("/repo/root")``
-purely to exercise the synthetic-anchor *emit* branch in isolation (its own
-docstring disclaims that this shape is ingestible — Filigree computes dedup
-server-side). In REAL ``loomweave analyze`` Phase 8 the emit caller sets
-``default_path = None`` (verified in Loomweave source
-``crates/loomweave-cli/src/analyze.rs`` ~line 4090, whose comment documents the
-*exact* Filigree constraint: "Filigree's scan-results intake rejects every
-synthetic stand-in: an absolute project root (absolute paths rejected), AND the
-relative '.' …"), so ``wire_finding`` returns ``None`` for path-less rows and
-they are SKIPPED — they never reach the wire. So a path-less synthetic-anchor
-finding is NOT a shape Filigree ever receives in production; both peers already
-agree it must not be sent. This is therefore NOT a seam defect: the rejection is
-correct on both sides. We assert it explicitly (not slice it away silently) so a
-future regression that started sending such a row — or a Filigree change that
-silently accepted an absolute path — would red.
+(``crates/loomweave-federation/tests/scan_results_wire_conformance_oracle.rs``
+~lines 145-152) purely to exercise the synthetic-anchor *emit* branch in
+isolation (its own docstring disclaims that this shape is ingestible — Filigree
+computes dedup server-side). Production's single ``emit_findings_to_filigree``
+(``crates/loomweave-cli/src/analyze.rs``, used for both Phase 8 and Phase 8c)
+hardcodes ``let default_path = None;`` (analyze.rs ~lines 5372-5383, whose
+comment documents the *exact* Filigree constraint: "Filigree's scan-results
+intake rejects every synthetic stand-in: an absolute project root (absolute
+paths rejected), AND the relative '.' …"), so ``wire_finding``
+(``crates/loomweave-federation/src/scan_results.rs``) returns ``None`` for
+path-less rows and they are counted ``skipped_no_path`` — they never cross the
+wire. ``_wire_representative_subset`` therefore RE-IMPLEMENTS the producer's
+skip rule in consumer code as an INTERIM measure; the deeper mechanism is a
+fixture-level marker owned by Loomweave (the producer) — see filigree-9c16595d70.
+The composition pin (exactly one excluded row, identified as the ``/repo/root``
+artifact) is the tripwire: a golden re-vendor that adds, removes, or re-paths
+artifact rows reds there instead of being silently sliced.
 
 NOTE on the suppression/kind axis: unlike the wardline oracle, this oracle does
 NOT assert server-side ``kind`` / ``suppression`` finding-list filters. Those
@@ -100,9 +97,6 @@ performs the vocabulary mapping.
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +111,9 @@ from filigree.core import FiligreeDB
 # is driving the real intake — the route adds only the HTTP envelope and the
 # worker-thread hop, not any parsing/persistence logic of its own.
 from filigree.dashboard_routes.files import _parse_scan_results_body
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored consumer copy of Loomweave's authoritative scan-results wire.
 GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "loomweave-scan-results-wire.golden.json"
@@ -127,27 +124,14 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 UPSTREAM_BLOB_SHA = "3f20f1ea95f5152e3dc9d848c721ed376670fae1"
 
 
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
-
-
 def _is_synthetic_anchor(finding: dict[str, Any]) -> bool:
     """A finding whose ``metadata.loomweave.synthetic_anchor`` is truthy.
 
     These path-less anchors emit ONLY when the producer is handed a
-    ``default_path`` fallback (the producer-oracle fixture does; production sets
-    ``default_path=None`` and skips them). See the module SEAM NOTE.
+    ``default_path`` fallback (the producer-oracle fixture does; production
+    ``analyze.rs`` sets ``default_path = None`` and skips them). Because the flag
+    is set only when that fallback fires, it IS the producer-artifact signature —
+    do not replace it with a ``Path.is_absolute()`` heuristic. See the SEAM NOTE.
     """
     md = finding.get("metadata")
     if not isinstance(md, dict):
@@ -158,16 +142,23 @@ def _is_synthetic_anchor(finding: dict[str, Any]) -> bool:
     return bool(lw.get("synthetic_anchor"))
 
 
-def _production_representative_subset(golden: dict[str, Any]) -> dict[str, Any]:
-    """The findings Filigree actually receives in production: synthetic-anchor
-    rows dropped, mirroring production Loomweave's ``default_path=None`` skip.
+def _wire_representative_subset(golden: dict[str, Any]) -> dict[str, Any]:
+    """The golden minus its producer-oracle fixture artifact: the rows that
+    actually cross the wire.
 
-    A principled, documented filter — NOT a slice to fake a green. The whole-body
-    rejection is asserted separately (see ``test_real_intake_rejects_whole_golden``)
-    so the dropped row is surfaced, not buried.
+    INTERIM consumer-side mirror of the producer's skip rule: production
+    ``emit_findings_to_filigree`` hardcodes ``default_path = None`` so
+    ``wire_finding`` drops every path-less (``synthetic_anchor``) row before the
+    POST (see the module SEAM NOTE). The principled fix is a fixture-level marker
+    owned by Loomweave (filigree-9c16595d70); until then this predicate is pinned
+    by ``test_wire_representative_subset_excludes_only_the_producer_fixture_artifact``
+    so the dropped row is surfaced, not buried. Returns a deep copy so callers may
+    hand it to the mutating ingest without touching the golden.
     """
     subset = copy.deepcopy(golden)
-    subset["findings"] = [f for f in golden["findings"] if not _is_synthetic_anchor(f)]
+    # Filter the COPY's rows (not the golden's) so no finding dict is aliased —
+    # the ingest normalises finding dicts in place.
+    subset["findings"] = [f for f in subset["findings"] if not _is_synthetic_anchor(f)]
     return subset
 
 
@@ -182,7 +173,7 @@ def test_vendored_golden_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 def test_byte_pin_rejects_a_mutated_byte() -> None:
@@ -191,7 +182,7 @@ def test_byte_pin_rejects_a_mutated_byte() -> None:
     silent single-byte edit of the fixture), not decorative."""
     tampered = bytearray(GOLDEN_PATH.read_bytes())
     tampered[0] ^= 0x01
-    assert _blob_sha(bytes(tampered)) != UPSTREAM_BLOB_SHA
+    assert blob_sha(bytes(tampered)) != UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -199,20 +190,20 @@ def test_byte_pin_rejects_a_mutated_byte() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_real_intake_accepts_production_representative_subset() -> None:
-    """Filigree's REAL request validator accepts Loomweave's production wire.
+def test_real_intake_accepts_wire_representative_subset() -> None:
+    """Filigree's REAL request validator accepts Loomweave's wire.
 
     ``_parse_scan_results_body`` is the single shared validator every
     scan-results route runs before any persistence. Feeding it the
-    production-representative subset (synthetic-anchor rows dropped) must yield
-    the parsed ingest-kwargs dict, NOT a ``_ScanResultsBodyError``.
+    wire-representative subset (the producer-fixture artifact row dropped) must
+    yield the parsed ingest-kwargs dict, NOT a ``_ScanResultsBodyError``.
 
     This affirmatively pins the fingerprint-LESS / scheme-LESS / scanned_paths-LESS
     contract: the parser accepts a body with NO ``fingerprint_scheme`` (defaults
     to ``''``) and NO ``scanned_paths`` (defaults to ``[]``), and the per-finding
     rows carry no ``fingerprint``.
     """
-    subset = _production_representative_subset(_load_golden())
+    subset = _wire_representative_subset(load_golden(GOLDEN_PATH))
     parsed = _parse_scan_results_body(subset)
     # A validation failure is a dataclass instance, not a plain kwargs dict.
     assert isinstance(parsed, dict), f"intake rejected the loomweave wire: {parsed!r}"
@@ -229,43 +220,49 @@ def test_real_intake_accepts_production_representative_subset() -> None:
         assert "fingerprint" not in finding, "loomweave findings carry no fingerprint"
 
 
-def test_real_intake_rejects_whole_golden(tmp_path: Path) -> None:
-    """The WHOLE golden is rejected at Filigree's intake boundary — BY DESIGN.
+def test_wire_representative_subset_excludes_only_the_producer_fixture_artifact() -> None:
+    """Composition pin: the wire-representative subset is the golden minus EXACTLY
+    the one producer-oracle fixture artifact row, and nothing else.
 
-    The golden's synthetic-anchor finding[2] carries the absolute placeholder
-    ``path="/repo/root"``; Filigree's ``_validate_scan_findings`` rejects
-    absolute paths (``_is_project_relative_scan_path``) BEFORE any writes, so the
-    whole batch 400s atomically (no finding persists). This is correct on BOTH
-    sides of the seam — production Loomweave sets ``default_path=None`` and never
-    emits such a row (see the module SEAM NOTE).
+    Pins the artifact's identity (``path="/repo/root"``, the subsystem-cohesion
+    rule, no ``line_start``) so a golden re-vendor that adds, removes, or re-paths
+    artifact rows is surfaced here rather than silently sliced. Every remaining
+    row is genuinely wire-representative (project-relative path), order is
+    preserved, and the subset is a deep copy (callers hand it to the in-place
+    mutating ingest and then re-load a pristine golden).
 
-    We surface this explicitly so a regression that began sending an absolute-path
-    finding, OR a Filigree change that silently accepted one, would red here.
+    This replaces a whole-golden ``pytest.raises(ValueError, match="project-relative")``
+    pin: that asserted Filigree's absolute-path rejection against a body Loomweave
+    never sends (production hardcodes ``default_path = None``, so the artifact row
+    is ``skipped_no_path`` before the POST), i.e. it pinned a producer test
+    fixture, not the wire. Filigree's own path-rejection contract stays covered
+    by ``tests/core/test_files.py::test_scan_result_paths_must_be_project_relative``
+    (and the ``register_file`` absolute-path case there).
     """
-    golden = _load_golden()
-    # Sanity: the golden genuinely contains a synthetic-anchor absolute-path row,
-    # so this rejection assertion is meaningful (not vacuously true).
-    synthetic = [f for f in golden["findings"] if _is_synthetic_anchor(f)]
-    assert synthetic, "expected the golden to carry a synthetic-anchor row"
-    assert any(Path(f["path"]).is_absolute() for f in synthetic), "expected an absolute synthetic-anchor path"
+    golden = load_golden(GOLDEN_PATH)
 
-    parsed = _parse_scan_results_body(golden)
-    assert isinstance(parsed, dict), f"unexpected body-validation failure: {parsed!r}"
+    excluded = [f for f in golden["findings"] if _is_synthetic_anchor(f)]
+    assert len(excluded) == 1, f"expected exactly one producer-fixture artifact row, got {len(excluded)}"
+    artifact = excluded[0]
+    assert artifact["path"] == "/repo/root"
+    assert artifact["rule_id"] == "LMWV-SUBSYSTEM-COHESION"
+    assert "line_start" not in artifact
 
-    db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
-    db.initialize()
-    try:
-        with pytest.raises(ValueError, match="project-relative"):
-            db.process_scan_results(**parsed)
-        # Atomic: nothing persisted from the rejected batch.
-        assert db.list_findings_global(suppression="all", limit=1000)["total"] == 0
-    finally:
-        db.close()
+    subset = _wire_representative_subset(golden)
+    assert len(subset["findings"]) == len(golden["findings"]) - 1
+    # Order preserved; only the artifact row is gone.
+    assert [f["rule_id"] for f in subset["findings"]] == [f["rule_id"] for f in golden["findings"] if not _is_synthetic_anchor(f)]
+    # Every remaining row is wire-representative: a project-relative path.
+    for finding in subset["findings"]:
+        assert not Path(finding["path"]).is_absolute(), f"non-relative path survived the subset: {finding['path']!r}"
+    # Deep copy: mutating the subset never touches the golden the caller holds.
+    subset["findings"][0]["severity"] = "mangled"
+    assert golden["findings"][0]["severity"] != "mangled"
 
 
-def test_real_intake_round_trips_production_subset(tmp_path: Path) -> None:
-    """Drive Loomweave's production wire through Filigree's REAL ingest and read
-    it back — the non-circular core.
+def test_real_intake_round_trips_wire_representative_subset(tmp_path: Path) -> None:
+    """Drive Loomweave's wire-representative subset through Filigree's REAL
+    ingest and read it back — the non-circular core.
 
     Every fingerprint-LESS finding must persist through the LEGACY positional
     dedup branch (``_upsert_finding`` ~db_files.py:1288, taken when
@@ -275,15 +272,15 @@ def test_real_intake_round_trips_production_subset(tmp_path: Path) -> None:
     match on ``(rule_id, line_start)`` since there is NO fingerprint to key on —
     that absence is itself the legacy-path contract.
     """
-    golden = _load_golden()
-    subset = _production_representative_subset(golden)
+    golden = load_golden(GOLDEN_PATH)
+    subset = _wire_representative_subset(golden)
     parsed = _parse_scan_results_body(subset)
     assert isinstance(parsed, dict)
     # ``process_scan_results`` mutates ``parsed["findings"]`` in place (path /
     # severity normalization), so assert the round-trip against a PRISTINE re-load
     # of the wire rather than the just-ingested objects — keeps the comparison
     # non-circular (the persisted row is checked against the untouched golden).
-    wire_findings = _production_representative_subset(_load_golden())["findings"]
+    wire_findings = _wire_representative_subset(load_golden(GOLDEN_PATH))["findings"]
 
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
@@ -350,9 +347,9 @@ def test_high_and_critical_severities_round_trip(tmp_path: Path) -> None:
     """ERROR→``high`` and CRITICAL→``critical`` severities round-trip through the
     consumer's severity-normalization path unchanged.
 
-    The golden's only ``high`` row is the synthetic-anchor (absolute-path, rejected
-    by design), so the production-subset round-trip test exercises only ``medium`` /
-    ``info``. This closes that coverage gap WITHOUT editing the golden (no byte-pin
+    The golden's only ``high`` row is the synthetic-anchor (a producer-fixture
+    artifact that never crosses the wire), so the wire-subset round-trip test
+    exercises only ``medium`` / ``info``. This closes that coverage gap WITHOUT editing the golden (no byte-pin
     / cross-repo blast radius): it DERIVES an in-test fixture by deep-copying a real
     relative-path golden finding and forcing ``severity`` to ``high`` then
     ``critical`` on distinct paths/rules (so they don't collide with the originals),
@@ -361,7 +358,7 @@ def test_high_and_critical_severities_round_trip(tmp_path: Path) -> None:
     is an identity no-op here; this proves that holds for high/critical too — and
     would RED if Filigree mangled a high/critical severity on the legacy path.
     """
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     # A real, ingestible relative-path finding to clone (NOT the synthetic anchor).
     template = next(f for f in golden["findings"] if not _is_synthetic_anchor(f))
     assert not Path(template["path"]).is_absolute()
@@ -383,16 +380,24 @@ def test_high_and_critical_severities_round_trip(tmp_path: Path) -> None:
 
     parsed = _parse_scan_results_body(body)
     assert isinstance(parsed, dict), f"intake rejected the derived high/critical wire: {parsed!r}"
+    # ``_parse_scan_results_body`` returns the caller's list object unchanged and
+    # ``_validate_scan_findings`` (db_files.py) rewrites ``severity`` / ``path`` on
+    # each finding dict IN PLACE, so ``derived`` ALIASES ``parsed["findings"]``.
+    # Snapshot the wire rows BEFORE ingest and compare against the snapshot —
+    # otherwise the assertion below compares the persisted severity against an
+    # already-normalised object and can never red on intake mangling.
+    wire_rows = copy.deepcopy(derived)
+    assert all(w is not p for w in wire_rows for p in parsed["findings"])
 
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
     try:
         result = db.process_scan_results(**parsed)
-        assert result["findings_created"] == len(derived)
+        assert result["findings_created"] == len(wire_rows)
 
         listed = db.list_findings_global(suppression="all", limit=1000)
         persisted_by_rule = {row["rule_id"]: row for row in listed["findings"]}
-        for wire in derived:
+        for wire in wire_rows:
             persisted = persisted_by_rule.get(wire["rule_id"])
             assert persisted is not None, f"derived finding {wire['rule_id']!r} not persisted"
             # The load-bearing assertion: high/critical survive the consumer's
@@ -417,19 +422,19 @@ def test_legacy_positional_path_dedups_on_re_ingest(tmp_path: Path) -> None:
     fingerprint to distinguish them), so ``findings_created==0`` and the total
     stays put. This proves the dedup leg the test name claims, not just insertion.
     """
-    subset = _production_representative_subset(_load_golden())
+    subset = _wire_representative_subset(load_golden(GOLDEN_PATH))
     expected = len(subset["findings"])
 
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
     db.initialize()
     try:
-        first = _parse_scan_results_body(_production_representative_subset(_load_golden()))
+        first = _parse_scan_results_body(_wire_representative_subset(load_golden(GOLDEN_PATH)))
         assert isinstance(first, dict)
         r1 = db.process_scan_results(**first)
         assert r1["findings_created"] == expected
 
         # Identical re-ingest: the positional dedup SELECT matches every row.
-        second = _parse_scan_results_body(_production_representative_subset(_load_golden()))
+        second = _parse_scan_results_body(_wire_representative_subset(load_golden(GOLDEN_PATH)))
         assert isinstance(second, dict)
         r2 = db.process_scan_results(**second)
         assert r2["findings_created"] == 0, "fingerprint-less re-ingest must dedup, not duplicate"
@@ -438,44 +443,3 @@ def test_legacy_positional_path_dedups_on_re_ingest(tmp_path: Path) -> None:
         assert db.list_findings_global(suppression="all", limit=1000)["total"] == expected
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — drift recheck against Loomweave's authority source (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _loomweave_authority_source() -> Path | None:
-    """Locate Loomweave's canonical scan-results wire golden, if the sibling repo
-    is present. Honors a ``LOOMWEAVE_REPO`` override; defaults to
-    ``/home/john/loomweave``.
-    """
-    repo = Path(os.environ.get("LOOMWEAVE_REPO", "/home/john/loomweave"))
-    source = repo / "docs" / "federation" / "fixtures" / "loomweave-scan-results-wire.golden.json"
-    return source if source.exists() else None
-
-
-def test_vendored_golden_matches_loomweave_authority_source() -> None:
-    """The vendored consumer copy must be BYTE-identical to Loomweave's authority
-    source. Fails closed on any divergence; skips cleanly when the sibling repo is
-    absent (e.g. CI), where Layer 1 + the consumer intake oracle still gate the
-    PR. Loomweave is the producer/authority for this body; the consumer copy is a
-    sync, not a second source of truth.
-
-    Setting ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` (the strict arming env, off by
-    default, NOT set in the ``loomweave-contract`` CI job) turns an absent source
-    into a hard failure instead of a skip — matching the capabilities oracle's
-    arming env, so a release-gate run can require the cross-repo recheck to
-    actually execute rather than silently skip."""
-    source = _loomweave_authority_source()
-    if source is None:
-        if os.environ.get("FILIGREE_REQUIRE_LOOMWEAVE_REPO"):
-            pytest.fail(
-                "FILIGREE_REQUIRE_LOOMWEAVE_REPO is set but Loomweave's authority golden was not found "
-                "(set LOOMWEAVE_REPO to the sibling repo so the byte-drift check can arm)."
-            )
-        pytest.skip("Loomweave repo not found (set LOOMWEAVE_REPO to enable the byte-drift check)")
-    assert GOLDEN_PATH.read_bytes() == source.read_bytes(), (
-        "Vendored loomweave-scan-results-wire.golden.json has drifted from Loomweave's authority "
-        "source; re-vendor it byte-identical (Loomweave is the producer)."
-    )

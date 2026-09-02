@@ -170,6 +170,7 @@ asyncio_mode = "auto"
 markers = [
     "slow: tests that take >0.3s (subprocess, file locks, large data)",
     "integration: tests spanning multiple modules",
+    "federation_contract: cross-repo wire/contract oracles run by the loomweave-contract CI job (select with -m federation_contract)",
 ]
 filterwarnings = [
     "error::ResourceWarning",

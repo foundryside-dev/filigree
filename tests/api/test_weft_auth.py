@@ -18,7 +18,9 @@ from filigree.dashboard import ProjectStore, create_app
 from filigree.dashboard_auth import _token_matches, is_weft_scoped_path
 from tests.conftest import PopulatedDB
 
-TOKEN = "s3cret-federation-token"  # noqa: S105 — test fixture
+pytestmark = pytest.mark.federation_contract
+
+TOKEN = "s3cret-federation-token"  # noqa: S105 — test fixture  # secret-scan: allow-this-line
 
 
 class TestIsWeftScopedPath:

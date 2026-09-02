@@ -14,6 +14,8 @@ from filigree.core import FiligreeDB
 from filigree.dashboard import create_app
 from tests._fakes.clarion_http import clarion_stub
 
+pytestmark = pytest.mark.federation_contract
+
 
 async def _post_scan_results(db: FiligreeDB) -> dict[str, object]:
     dash_module._db = db

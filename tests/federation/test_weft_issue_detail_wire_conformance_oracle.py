@@ -35,15 +35,14 @@ Mirrors the federation oracle layout
   seeds defeating circularity.
 
 Filigree is the authority here, so — unlike the consumer oracles — there is NO
-external Layer-2 drift-check (nothing upstream to point at) and no reverse
-consumer-copy recheck (Loomweave vendors no copy of this body).
+external Layer-2 drift-check (nothing upstream to point at). The *reverse* check —
+that Loomweave's vendored copy (``docs/federation/fixtures/filigree-issues-get.json``)
+is byte-identical to this producer golden — lives in ``test_sibling_drift.py``
+(registry entry ``weft_issue_detail``, direction ``downstream``).
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -54,11 +53,14 @@ from httpx import ASGITransport, AsyncClient
 import filigree.dashboard as dash_module
 from filigree.core import FiligreeDB
 from filigree.dashboard import create_app
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The committed authoritative weft issue-detail contract fixture. Filigree is the
 # producer/authority for this body; Loomweave byte-mirrors it as
 # ``docs/federation/fixtures/filigree-issues-get.json`` (the reverse drift
-# recheck at the bottom of this module keeps the two copies identical).
+# recheck in ``test_sibling_drift.py`` keeps the two copies identical).
 GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "weft" / "issues-get.json"
 
 # Git-blob sha1 of the committed golden (``sha1(b"blob %d\0" % len + data)``).
@@ -67,23 +69,8 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 UPSTREAM_BLOB_SHA = "c9efff0aaf28d492d0d472dbde12deb2bc3f50b1"
 
 
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
-
-
 def _golden_example_body(example_name: str) -> dict[str, Any]:
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     for example in golden["examples"]:
         if example["name"] == example_name:
             body: dict[str, Any] = example["response"]["body"]
@@ -102,7 +89,7 @@ def test_golden_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -277,42 +264,3 @@ async def test_real_handler_produces_golden_not_found_envelope(producer_db: Fili
     # The message echoes the self-owned absent id (proves the live handler ran,
     # not a static golden echo whose id is ``genp-deadbeef00``).
     assert body["error"] == f"Issue not found: {absent_id}"
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — reverse drift recheck against Loomweave's consumer copy (skip-clean +
-# fail-closed arming env). Filigree is the producer here, so the direction is
-# inverted relative to the other oracles: OUR fixture is the authority and
-# Loomweave's vendored copy must not have drifted from it.
-# ---------------------------------------------------------------------------
-
-
-def _loomweave_consumer_copy() -> Path | None:
-    """Locate Loomweave's vendored copy of this fixture, if the sibling repo is present.
-
-    Honors a ``LOOMWEAVE_REPO`` override; defaults to ``/home/john/loomweave``.
-    """
-    repo = Path(os.environ.get("LOOMWEAVE_REPO", "/home/john/loomweave"))
-    copy = repo / "docs" / "federation" / "fixtures" / "filigree-issues-get.json"
-    return copy if copy.exists() else None
-
-
-def test_loomweave_consumer_copy_matches_authority_golden() -> None:
-    """Loomweave's vendored copy must be BYTE-identical to this producer golden.
-
-    Skips cleanly when the sibling repo is absent (e.g. CI), matching the sibling
-    federation oracles. Setting ``FILIGREE_REQUIRE_LOOMWEAVE_REPO`` turns an absent
-    copy into a hard failure instead of a skip.
-    """
-    copy = _loomweave_consumer_copy()
-    if copy is None:
-        if os.environ.get("FILIGREE_REQUIRE_LOOMWEAVE_REPO"):
-            pytest.fail(
-                "FILIGREE_REQUIRE_LOOMWEAVE_REPO is set but Loomweave's vendored issues-get copy was not found "
-                "(set LOOMWEAVE_REPO to the sibling repo so the byte-drift check can arm)."
-            )
-        pytest.skip("Loomweave repo not found (set LOOMWEAVE_REPO to enable the byte-drift check)")
-    assert copy.read_bytes() == GOLDEN_PATH.read_bytes(), (
-        "Loomweave's vendored filigree-issues-get.json has drifted from Filigree's authority golden; "
-        "re-vendor it on the Loomweave side byte-identical (Filigree is the producer)."
-    )
