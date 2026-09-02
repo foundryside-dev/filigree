@@ -50,19 +50,19 @@ pytestmark = [
 ]
 
 
-def _clarion_unavailable_action(*, require_live: bool | None = None) -> str:
+def _loomweave_unavailable_action(*, require_live: bool | None = None) -> str:
     """Return whether live-Loomweave unavailability should skip or fail.
 
     Normal contributor lanes may not have Loomweave installed. Release lanes can
-    set ``FILIGREE_REQUIRE_LIVE_CLARION=1`` so cross-product drift is fatal
+    set ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE=1`` so cross-product drift is fatal
     instead of silently reported as a skip.
     """
-    required = os.environ.get("FILIGREE_REQUIRE_LIVE_CLARION") == "1" if require_live is None else require_live
+    required = os.environ.get("FILIGREE_REQUIRE_LIVE_LOOMWEAVE") == "1" if require_live is None else require_live
     return "fail" if required else "skip"
 
 
 def _loomweave_unavailable(reason: str) -> None:
-    if _clarion_unavailable_action() == "fail":
+    if _loomweave_unavailable_action() == "fail":
         pytest.fail(reason)
     pytest.skip(reason)
 

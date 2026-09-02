@@ -49,7 +49,7 @@ pytestmark = pytest.mark.federation_contract
 # Modules under tests/federation/ that are NOT Layer-2 contract oracles and so
 # must NOT carry the marker (they belong to other CI lanes).
 _NOT_CONTRACT_MODULES = {
-    "test_sei_oracle_live_clarion",  # live-serve integration lane (integration+slow)
+    "test_sei_oracle_live_loomweave",  # live-serve integration lane (integration+slow)
 }
 
 

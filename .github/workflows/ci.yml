@@ -103,8 +103,8 @@ jobs:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_live_loomweave) }}
     runs-on: ubuntu-latest
     env:
-      CLARION_STAGING_BASE_URL: ${{ secrets.CLARION_STAGING_BASE_URL }}
-      FILIGREE_REQUIRE_LIVE_CLARION: "1"
+      LOOMWEAVE_STAGING_BASE_URL: ${{ secrets.LOOMWEAVE_STAGING_BASE_URL }}
+      FILIGREE_REQUIRE_LIVE_LOOMWEAVE: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -115,10 +115,10 @@ jobs:
       - name: Run live Loomweave checks
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            uv run pytest tests/integration/test_clarion_staging_smoke.py
+            uv run pytest tests/integration/test_loomweave_staging_smoke.py
           else
             uv run pytest \
-              tests/integration/test_clarion_staging_smoke.py \
-              tests/integration/test_clarion_phase_d_e2e.py \
-              tests/federation/test_sei_oracle_live_clarion.py
+              tests/integration/test_loomweave_staging_smoke.py \
+              tests/integration/test_loomweave_phase_d_e2e.py \
+              tests/federation/test_sei_oracle_live_loomweave.py
           fi

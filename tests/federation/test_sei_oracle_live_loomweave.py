@@ -18,9 +18,9 @@ same shared fixture (``cargo test -p loomweave-storage --test
 sei_conformance_oracle``). Filigree's job is to store the SEI opaquely and
 degrade honestly, which is what this test exercises end to end.
 
-Opt-in / skip rules mirror ``tests/integration/test_clarion_phase_d_e2e.py``:
+Opt-in / skip rules mirror ``tests/integration/test_loomweave_phase_d_e2e.py``:
 the ``loomweave`` CLI must be on PATH and new enough to ship the SEI surface;
-otherwise the test skips (or fails when ``FILIGREE_REQUIRE_LIVE_CLARION=1``).
+otherwise the test skips (or fails when ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE=1``).
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ pytestmark = [
 
 
 def _live_unavailable(reason: str) -> None:
-    if os.environ.get("FILIGREE_REQUIRE_LIVE_CLARION") == "1":
+    if os.environ.get("FILIGREE_REQUIRE_LIVE_LOOMWEAVE") == "1":
         pytest.fail(reason)
     pytest.skip(reason)
 
@@ -78,7 +78,7 @@ def _spawn_loomweave_serve(project_root: Path) -> Iterator[tuple[str, dict[str, 
     """Install, analyze, and serve a real Loomweave over loopback HTTP.
 
     Yields ``(base_url, capabilities)``. Skips (or fails under
-    ``FILIGREE_REQUIRE_LIVE_CLARION``) when Loomweave is absent or too old.
+    ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE``) when Loomweave is absent or too old.
     """
     if shutil.which("loomweave") is None:
         _live_unavailable("loomweave CLI is not on PATH; install Loomweave to run this integration test")

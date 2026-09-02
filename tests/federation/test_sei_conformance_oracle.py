@@ -23,7 +23,7 @@ resume, the ``invalid`` (REQ-F-02) channel, PK-collision merge, and the
 historical ``deleted_issues.entity_ids`` rewrite (REQ-F-01).
 
 The faithful "no grandfathering" gate — the same scenarios against a live
-``loomweave serve`` — lives in ``test_sei_oracle_live_clarion.py``. The vendored
+``loomweave serve`` — lives in ``test_sei_oracle_live_loomweave.py``. The vendored
 fixture's byte-drift check against Loomweave's canonical copy lives in
 ``test_sibling_drift.py`` (registry entry ``sei_conformance_oracle``).
 """
