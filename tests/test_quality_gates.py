@@ -114,6 +114,53 @@ def test_ci_has_gated_live_loomweave_lane() -> None:
     assert "CLARION" not in workflow
 
 
+# The three sibling repos the scheduled federation-drift lane checks out, each
+# with the per-sibling override + arming env that tests/federation/_oracle.py
+# reads (SIBLING_REPO_ENV / arming_env_name). Pinned here so a sibling rename
+# cannot land in the workflow without the oracle (or vice versa).
+_FEDERATION_DRIFT_SIBLINGS = (
+    ("loomweave", "LOOMWEAVE_REPO", "FILIGREE_REQUIRE_LOOMWEAVE_REPO"),
+    ("wardline", "WARDLINE_REPO", "FILIGREE_REQUIRE_WARDLINE_REPO"),
+    ("legis", "LEGIS_REPO", "FILIGREE_REQUIRE_LEGIS_REPO"),
+)
+
+
+def test_ci_has_gated_federation_drift_lane() -> None:
+    """The Layer-2 sibling drift checks must EXECUTE somewhere in CI.
+
+    ``loomweave-contract`` runs them skip-clean (no sibling checked out); the
+    ``federation-drift`` lane is the one that checks the three siblings out,
+    arms ``FILIGREE_REQUIRE_<SIBLING>_REPO`` so an absent/mislocated sibling is
+    a hard failure, and runs the marker-selected drift module. Gated like the
+    live-Loomweave lane: weekly schedule + opt-in workflow_dispatch input.
+    """
+    workflow = _read(".github/workflows/ci.yml")
+    drift_job = _workflow_job(workflow, "federation-drift")
+    code_lines = [line for line in drift_job.splitlines() if not line.lstrip().startswith("#")]
+    code = "\n".join(code_lines)
+
+    assert "require_federation_drift:" in workflow
+    assert "github.event_name == 'schedule'" in code
+    assert "github.event_name == 'workflow_dispatch' && inputs.require_federation_drift" in code
+    for sibling, override_env, arming_env in _FEDERATION_DRIFT_SIBLINGS:
+        assert f"repository: foundryside-dev/{sibling}" in code, f"drift lane no longer checks out {sibling}"
+        # The override must name exactly where the checkout landed: an armed
+        # sibling whose override points elsewhere fails every param, and a
+        # checkout onto the workspace root would shadow this repo's tree.
+        assert f"path: .siblings/{sibling}" in code, f"{sibling} checkout is not under .siblings/"
+        assert f"{override_env}: ${{{{ github.workspace }}}}/.siblings/{sibling}" in code, (
+            f"drift lane does not point {override_env} at the {sibling} checkout"
+        )
+        assert f'{arming_env}: "1"' in code, f"drift lane does not arm {arming_env}"
+    # Sibling checkouts are private-capable: the default GITHUB_TOKEN cannot read
+    # a sibling private repo, so the lane must honour FEDERATION_CHECKOUT_TOKEN
+    # (falling back to github.token for public siblings) — no invented secret.
+    assert "secrets.FEDERATION_CHECKOUT_TOKEN || github.token" in code
+    # Marker-selected AND scoped to the drift module: the lane exists to run
+    # test_sibling_drift.py for real, not to re-run the whole federation suite.
+    assert any("uv run pytest -m federation_contract tests/federation/test_sibling_drift.py" in line for line in code_lines)
+
+
 def test_release_workflow_emits_live_loomweave_release_checklist_warning() -> None:
     workflow = _read(".github/workflows/release.yml")
 

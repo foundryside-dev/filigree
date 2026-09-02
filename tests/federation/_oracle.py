@@ -20,8 +20,10 @@ sibling is expected next to this checkout (``<parent-of-filigree>/<sibling>``).
 Absent siblings SKIP the drift check unless the per-sibling arming env
 ``FILIGREE_REQUIRE_<SIBLING>_REPO`` is set (``arming_requested``): ``1`` /
 ``true`` / ``yes`` / ``on`` arm it, ``0`` / ``false`` / ``no`` / ``off`` / empty
-do not, anything else raises. Neither CI job checks out a sibling, so neither
-arms it; the arming env exists for release-gate runs on a machine that does.
+do not, anything else raises. The per-PR CI jobs check out no sibling, so
+they never arm it; the scheduled ``federation-drift`` lane in ci.yml checks
+out all three siblings, points the ``<SIBLING>_REPO`` overrides at them and
+arms all three, so the drift params execute for real there.
 
 This module is deliberately pytest-fixture-free; ``require_sibling_source`` is
 the only place it touches pytest (to centralise the skip-vs-fail decision).

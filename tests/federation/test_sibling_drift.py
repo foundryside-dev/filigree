@@ -7,9 +7,10 @@ This module is the third layer for ALL of them at once: every entry of
 sibling repo that holds the other copy, and which side is the authority. The
 two must be BYTE-identical.
 
-Skip-clean by default: neither CI job checks out a sibling repo, so the
+Skip-clean by default: the per-PR CI jobs check out no sibling repo, so the
 parametrized test skips there and Layer 1 + the per-oracle core still gate the
-PR. On a machine with the siblings next to this checkout (or pointed at by
+PR; the scheduled ``federation-drift`` lane checks the siblings out and arms
+every param. On a machine with the siblings next to this checkout (or pointed at by
 ``LOOMWEAVE_REPO`` / ``WARDLINE_REPO`` / ``LEGIS_REPO``) it runs for real, and
 ``FILIGREE_REQUIRE_<SIBLING>_REPO=1`` turns an absent sibling into a hard
 failure so a release-gate run can never silently skip the cross-repo recheck.

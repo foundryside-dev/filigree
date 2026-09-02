@@ -15,5 +15,10 @@ vendored copy is byte-for-byte equal to Loomweave's. The checkout is located by
 `tests/federation/_oracle.py::sibling_source` — `LOOMWEAVE_REPO` (the legacy
 `CLARION_REPO` alias is still honoured) or, by default, the `loomweave` checkout
 next to this repo. Set `FILIGREE_REQUIRE_LOOMWEAVE_REPO=1` to make an absent
-checkout a hard failure instead of a skip. If you update the fixture, update it
-in Loomweave first, then re-copy here — never edit this copy by hand.
+checkout a hard failure instead of a skip. In CI that drift check executes in
+the weekly `federation-drift` lane of `.github/workflows/ci.yml` (also
+`workflow_dispatch` with `require_federation_drift=true`), which checks the
+three siblings out and arms all three `FILIGREE_REQUIRE_<SIBLING>_REPO` envs;
+the per-PR `loomweave-contract` job runs it skip-clean. If you update the
+fixture, update it in Loomweave first, then re-copy here — never edit this copy
+by hand.
