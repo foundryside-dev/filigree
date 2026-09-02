@@ -101,6 +101,21 @@ Initialize `.filigree/` in the current directory.
 | `--prefix` | string | directory name | ID prefix for issues |
 | `--mode` | `ephemeral`/`server` | `ephemeral` | Installation mode (`ethereal` is the pre-3.3.0 alias, normalized to `ephemeral` on write) |
 
+In fail-closed loomweave mode (`registry_backend=loomweave` with
+`loomweave.allow_local_fallback=false`) an unreachable Loomweave makes `init`
+— and `list`, `show` and every other verb that opens the project database —
+exit 1 with the shared `REGISTRY_UNAVAILABLE` envelope instead of a traceback.
+Plain mode prints one stderr line naming the backend, `cause_kind` and probed
+URL, then one remedy line specific to the cause (start `loomweave serve` for a
+reachability failure; the token env var for `auth` / `auth_token_missing`;
+Loomweave's serving configuration for `role_declined` /
+`auth_mode_unsupported`; upgrade to a matching pair for
+`invalid_response`; every remedy except `invalid_response` also offers
+`loomweave.allow_local_fallback=true` as an interim fallback). `--json` prints
+the same envelope on stdout with `details.backend` and `details.hint`.
+`session-context` is the exception: it always exits 0 and prints the error
+and remedy inside the snapshot.
+
 ### `install`
 
 Install filigree into the current project. With no flags, installs everything: MCP servers, instructions, gitignore, hooks, and skills. With specific flags, installs only the selected components.
@@ -183,7 +198,7 @@ filigree server stop                        # Stop daemon
 
 ### `session-context`
 
-Output a session bootstrap snapshot (ready work, in-progress work, critical path, stats).
+Output a session bootstrap snapshot (ready work, in-progress work, critical path, stats). The command always exits 0; when the project database cannot open in fail-closed loomweave mode, the snapshot carries the `REGISTRY_UNAVAILABLE` error and its remedy line instead of the generic hook-failed warning (see `init`).
 
 ### `ensure-dashboard`
 
@@ -1046,6 +1061,33 @@ Delete a tracked file record. By default, this refuses records that still have i
 | `--force` | flag | Cascade associations and open findings |
 
 JSON output echoes the global `--actor` that performed the deletion.
+
+### `migrate-registry`
+
+Rewrite `file_records` IDs to another registry backend (currently
+`loomweave`), or roll a migration back from its manifest (also reachable as
+`file migrate-registry`). With neither `--dry-run` nor `--execute`, the
+command plans only.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--to` | `loomweave` | Target registry backend (required unless `--rollback`) |
+| `--dry-run` | flag | Plan the migration without changing the database (default) |
+| `--execute` | flag | Apply the migration and write a rollback manifest |
+| `--manifest` | path | Manifest path for `--execute` (default: `<project-root>/registry-migration-<UTC timestamp>.json`) |
+| `--rollback` | path | Roll back using a manifest (cannot combine with `--to`/`--dry-run`/`--execute`) |
+| `--json` | flag | Output the plan / result (`planned`, `unresolved`, …) as JSON |
+
+Rows are resolved through Loomweave's `/api/v1/files/batch` in chunks bounded
+by both query count (256) and serialized body bytes (Loomweave caps every
+`/api/v1/*` request body at 16 KiB; Filigree targets 15 KiB and
+halves-and-retries a chunk Loomweave still answers 413 to), so a store of
+long paths no longer has
+every row marked unresolved by a transport 413. A single path that cannot fit
+under the cap on its own is listed in `unresolved` with a
+`BODY_TOO_LARGE: …` error while the other rows are still `planned`;
+`--execute` refuses while `unresolved` is non-empty, so resolve or remove
+that row first.
 
 ### `list-findings`
 

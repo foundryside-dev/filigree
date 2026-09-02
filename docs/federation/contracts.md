@@ -333,6 +333,165 @@ The Filigree-side contract is pinned by
 against both the default local backend and a live loopback implementation of
 Loomweave's read API.
 
+### Consumer posture: capabilities `authentication` block (3.3.0)
+
+Loomweave's capabilities body (`GET /api/v1/_capabilities` — Loomweave
+`docs/federation/contracts.md` §`GET /api/v1/_capabilities`; ADR-056,
+capabilities fixture v6) carries an `authentication` block
+`{protected_routes, capabilities_probe, contract_version}`. Loomweave owns
+that vocabulary (`none | bearer | hmac`; see its §Authentication for the
+serving-mode trust matrix). Filigree is a **consumer** of the block, and this
+is what it does with it (`registry.py`: `_parse_authentication_capability`,
+`validate_loomweave_capabilities`):
+
+- **Fields consumed.** All three, verbatim, into
+  `LoomweaveCapabilities.authentication` (the `LoomweaveAuthentication`
+  TypedDict). The probe is shape-only: `protected_routes` and
+  `capabilities_probe` must be non-empty strings and `contract_version` an
+  integer; a present-but-malformed block is `cause_kind='invalid_response'`
+  like every other wire-shape break.
+- **Absent block = legacy posture.** A Loomweave that omits the block
+  (pre-ADR-056) is read as `none`/`none`/`1`
+  (`LEGACY_LOOMWEAVE_AUTHENTICATION`) and keeps working.
+- **Accepted modes.** `protected_routes` must be `none` or `bearer`;
+  `capabilities_probe` must be `none`. Filigree sends only
+  `Authorization: Bearer <token>` (the token read from the env var named by
+  `loomweave.token_env`, default `WEFT_TOKEN`) and owns no HMAC signing
+  contract, so `hmac` — and any future mode — is refused at the probe with
+  one `RegistryUnavailableError(cause_kind='auth_mode_unsupported')` naming
+  the field, mode and URL, instead of being marked usable and failing every
+  protected operation with a 401. The probe request itself carries whatever
+  bearer token Filigree resolved; Loomweave documents `_capabilities` as
+  always unauthenticated, which is why `capabilities_probe` must be `none` —
+  Filigree has no other probe-time scheme to offer.
+- **`contract_version` is warn-only.** A value other than `1`
+  (`EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION`) logs a WARN and proceeds on the
+  mode gate alone; it is never rejected.
+- **Gate order.** `api_version` (mismatch → `RegistryVersionMismatchError`,
+  never fallback-able) → role (`registry_backend` / `file_registry` false →
+  `cause_kind='role_declined'`) → authentication mode
+  (`auth_mode_unsupported`) → token presence (`auth_token_missing`). A
+  wire-protocol break stays the loudest signal and an unimplemented mode wins
+  over a merely-missing token.
+- **Token-missing fail-fast.** When `protected_routes='bearer'` but Filigree
+  resolved no token (the `token_env` variable unset or empty), the probe
+  raises one `RegistryUnavailableError(cause_kind='auth_token_missing')`
+  naming the probe URL and the env var to export, instead of N per-operation
+  `cause_kind='auth'` 401s later.
+- **Fallback policy.** Every `RegistryUnavailableError` the probe raises —
+  `auth_mode_unsupported` and `auth_token_missing` included — honours
+  `loomweave.allow_local_fallback` exactly like `role_declined`: `true`
+  downgrades the failure to a WARN and routes auto-creates through
+  `LocalRegistry` until Loomweave recovers; `false` (the default) fails
+  closed at DB open, and every surface renders the `REGISTRY_UNAVAILABLE`
+  envelope with a `cause_kind`-specific remedy line
+  (`registry_errors.registry_unavailable_hint`; the per-surface rendering is
+  in the runbook's "Failure Modes"). `RegistryVersionMismatchError` bypasses
+  fallback entirely.
+
+Pinned by `tests/unit/test_registry.py`,
+`tests/unit/test_clarion_capabilities_probe.py` and the vendored-golden
+oracle `tests/federation/test_capabilities_wire_conformance_oracle.py`
+(`tests/fixtures/contracts/get-api-v1-capabilities.json`, fixture v6).
+
+### Consumer posture: batch body cap (3.3.0)
+
+Loomweave caps every `/api/v1/*` request body at 16 KiB at the transport
+layer (Loomweave `contracts.md` §`POST /api/v1/files/batch`, "413 n/a";
+§`POST /api/v1/identity/resolve:batch`). An over-cap body is answered
+`413 text/plain` before any JSON is parsed — no envelope, no `code`. That
+cap sits alongside the 256-query count cap (`400 BATCH_TOO_LARGE`), and 256
+real-world paths serialise to roughly 25 KiB, so chunking by count alone
+trips it (filigree-b57d4eb7d9). `LoomweaveRegistry` honours both caps on
+every batch POST it issues — `/api/v1/files/batch` for scan ingest and
+`migrate-registry`, `/api/v1/identity/resolve:batch` for `sei-backfill` and
+the closure-gate drift read:
+
+- **Chunking by bytes and count.** Chunks are packed greedily to at most
+  `LOOMWEAVE_BATCH_MAX_QUERIES` (256) items **and** at most
+  `LOOMWEAVE_BATCH_MAX_BODY_BYTES` (16 KiB minus 1 KiB headroom, 15360
+  bytes) of serialised body, measured with the exact httpx `json=` encoding
+  (`loomweave_wire_body_size`: compact separators, `ensure_ascii=False`,
+  UTF-8) so the arithmetic is the request's `Content-Length`, not an
+  estimate. Order is preserved and nothing is dropped; small batches keep a
+  byte-identical wire shape.
+- **413 halve-and-retry.** A chunk Loomweave still refuses with HTTP 413 is
+  split in two and both halves retried, bounded at log2(chunk) levels
+  (`_resolve_chunk_splitting_on_413`, one splitter shared by all three
+  batch paths).
+- **Lone over-cap item.** A single query that cannot fit under the cap by
+  itself is never a whole-batch failure. On `/api/v1/files/batch` it is
+  reported on the `errors[]` channel as `code=BODY_TOO_LARGE`
+  (`LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE`) — a code Filigree synthesises;
+  Loomweave never emits it — with `messages[path]` carrying the diagnostic;
+  a query provably over `LOOMWEAVE_BATCH_BODY_CAP_BYTES` (16384) on its own
+  is reported that way pre-flight without touching the wire. On
+  `identity/resolve:batch` a lone refused locator surfaces to `sei-backfill`
+  as `RegistryResolutionError` (HTTP 413) — a >16 KiB locator is malformed,
+  not a sizing problem — and to the drift read as freshness UNKNOWN for that
+  binding only.
+- **Scan-results ingest.** `process_scan_results` does not promote
+  `BODY_TOO_LARGE` to the whole-batch `RegistryResolutionError` the other
+  structured error codes still get. The path is reported on the response's
+  `warnings[]` and the rest of the batch is ingested: findings for an
+  unregistered over-cap path are dropped (warned as "not ingested"), and
+  findings for an already-registered one are ingested against the stored
+  identity (warned as "not refreshed"). Only a batch that would ingest
+  nothing still raises, so a single-finding report keeps its error envelope.
+- **`migrate-registry`.** A `BODY_TOO_LARGE` row lands in the plan's
+  `unresolved[]` (`error: "BODY_TOO_LARGE: …"`), and the unresolved-rows
+  rule — no `--execute` while any row is unresolved — applies unchanged.
+
+Pinned by `tests/unit/test_registry_batch_chunking.py` and
+`tests/core/test_scan_ingest_registry.py`.
+
+### Consumer posture: rename lineage consumption (3.3.0)
+
+This is the identity (SEI) axis of the closure gate. During the RED-1 drift
+check (`governance._evaluate_current_drift`), a governed binding whose id is
+an SEI is read through `GET /api/v1/identity/sei/:sei` (Loomweave
+`contracts.md` §`GET /api/v1/identity/sei/:sei`). When Loomweave reports
+`alive: false`, Filigree relays the SEI's **latest** `sei_lineage` event as
+a re-bind hint (filigree-4e13d133f7). Consumer rules
+(`LoomweaveRegistry._resolve_sei_lineage_hint`):
+
+- **Inline lineage first.** The `lineage` list Loomweave inlines on the
+  `alive:false` by-SEI body is the preferred source — no second round-trip.
+  An inline empty list is an authoritative "no lineage" and is not re-asked.
+- **Route fallback: one bounded attempt.** Only a body that carries no
+  `lineage` list at all falls back to `GET /api/v1/identity/lineage/:sei`
+  (§`GET /api/v1/identity/lineage/:sei`): a single attempt with no retry
+  budget, under `min(loomweave.timeout_seconds, 1.0)` seconds.
+- **Memoised 404.** A 404 (an older Loomweave without the route) is memoised
+  per `LoomweaveRegistry` instance, so each registry asks the route at most
+  once.
+  A connectivity-class failure (`network` / `timeout`) suppresses the route
+  for the rest of the same resolution and is reported on the advisory
+  `lineage_unavailable` flag.
+- **Hint shape.** The last event, projected onto the documented five keys
+  `{event, old_locator, new_locator, run_id, recorded_at}` (`LineageEvent`);
+  extra producer keys are dropped and a malformed last event yields no hint.
+  Locator-form ids never get a hint (`resolve:batch` has no lineage
+  surface).
+- **Advisory only.** Every failure of the hint lookup — 404, 5xx,
+  network/timeout, malformed body — is swallowed inside the registry and
+  yields no hint. It never raises `RegistryUnavailableError`, never changes
+  `resolved` / `unresolved`, and never changes the gate outcome: an orphaned
+  binding stays freshness UNKNOWN. `lineage_unavailable` is deliberately
+  kept separate from `GateDecision.loomweave_unavailable` and never counts
+  toward the cascade's `loomweave_known_down` bound (the primary by-SEI
+  answer moments earlier is direct evidence Loomweave is up).
+- **Where the hint surfaces.** `GateDecision.lineage_hints`, keyed by the
+  bound entity id; a non-PROCEED gate `reason` is suffixed with
+  `rename lineage: <sei> -> <new_locator> (<event>)` (or `<sei>: <event>`
+  when the event names no new locator) — the one channel every close surface
+  renders — while a PROCEED keeps `reason` empty and carries the hint as
+  data only; and the `entity_unresolved` drift-gate log record carries the
+  hints.
+
+Pinned by `tests/unit/test_entity_content_hash_resolve.py` and
+`tests/core/test_governance_gate.py`.
+
 ## F5 — Deletion signal (`issue_deleted` on `/api/weft/changes`) (2026-05-30)
 
 A hard delete (`issue_delete` / `filigree delete-issue`) removes the issue row
@@ -528,5 +687,10 @@ Pinned by `tests/api/test_multi_project.py::TestServerModeEntityAssociationRever
 - **2.0 work package** (the execution sequence): `docs/plans/2026-04-24-2.0-federation-work-package.md`.
 - **ADR-017 audit** (verifies classic-generation semantics are preserved on the 2.0 branch): `docs/plans/2026-04-24-adr017-audit.md`.
 - **SEI conformance position** (Filigree's obligations + emerging requirements for the SEI lock window): `docs/superpowers/specs/2026-06-01-filigree-roadmap-to-first-class.md` Appendix A.
+- **Loomweave federation contracts** (producer side of the 3.3.0 consumer
+  posture above): `/home/user/loomweave/docs/federation/contracts.md` —
+  §Authentication, §`GET /api/v1/_capabilities`, §`POST /api/v1/files/batch`,
+  §`POST /api/v1/identity/resolve:batch`, §`GET /api/v1/identity/sei/:sei`,
+  §`GET /api/v1/identity/lineage/:sei`.
 - **Loomweave ADR-004** (finding exchange format): `/home/user/loomweave/docs/loomweave/adr/ADR-004-finding-exchange-format.md`.
 - **Loomweave ADR-017** (severity + dedup): `/home/user/loomweave/docs/loomweave/adr/ADR-017-severity-and-dedup.md`.

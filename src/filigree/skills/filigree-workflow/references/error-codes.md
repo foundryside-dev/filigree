@@ -41,7 +41,29 @@ at exit 1 needs operator intervention.
   database. The error message contains upgrade guidance. Surface it to the
   user; do not retry.
 - **`CONFLICT`** — someone else holds the claim, or the record changed under
-  you. Safe to retry against different work; never force-overwrite.
+  you. Safe to retry against different work; never force-overwrite. A close
+  of a Legis-governed issue also returns `CONFLICT` when the closure gate
+  does not PROCEED (a tampered-ledger integrity failure is `INTERNAL`
+  instead); `error` is the gate reason and may end in
+  `rename lineage: <sei> -> <new_locator> (<event>)` — Loomweave reports the
+  bound SEI orphaned, so re-bind to the new locator rather than retrying.
+- **`REGISTRY_UNAVAILABLE`** — Loomweave could not be reached or negotiated
+  with in fail-closed loomweave mode (`registry_backend=loomweave`,
+  `loomweave.allow_local_fallback=false`). CLI verbs exit 1 with the
+  envelope; the stdio MCP server stays up in degraded mode
+  (`mcp_status_get.status == "registry_unavailable"`, re-probing at most
+  once per 10 s — `registry_retry` shows the schedule) and every other tool
+  returns this code until Loomweave answers; the `session-context` hook
+  (always exit 0) prints the remedy inside the snapshot instead of the
+  generic hook-failed warning. `details` carry `cause_kind`, `url`,
+  `backend` and `hint`, a remedy specific to `cause_kind`: only
+  reachability failures (`network` / `timeout` / `http_error`) are fixed by
+  `loomweave serve`; `auth` / `auth_token_missing` name the bearer-token env
+  var to export; `role_declined` / `auth_mode_unsupported` point at
+  Loomweave's serving configuration; `invalid_response` needs a matching
+  Filigree/Loomweave pair. Every hint except `invalid_response` also offers
+  `loomweave.allow_local_fallback=true` as an interim fallback to local file
+  ids. Surface the hint; do not retry in a loop.
 - **`ForeignDatabaseError`** — filigree found a parent project's database but
   no local `.filigree.conf`. Run `filigree init` in the current directory. Do
   **not** `cd` upward to a different project unless that was the actual intent.
