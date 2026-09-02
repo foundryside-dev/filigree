@@ -17,7 +17,7 @@ from click.testing import CliRunner
 
 from filigree import cli_common
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
-from filigree.registry_errors import registry_startup_error_response, registry_startup_hint
+from filigree.registry_errors import registry_startup_error_response, registry_startup_hint, registry_unavailable_hint
 from filigree.types.api import ErrorCode
 
 UNAVAILABLE = RegistryUnavailableError(
@@ -66,6 +66,85 @@ class TestRegistryStartupHint:
         assert details["cause_kind"] == "network"
         assert details["url"] == UNAVAILABLE.url
         assert details["hint"] == registry_startup_hint(UNAVAILABLE)
+
+
+class TestRegistryUnavailableHintByCauseKind:
+    """The remedy line is a function of ``cause_kind`` (review F5/F8).
+
+    "Start Loomweave" is only a remedy when Loomweave is unreachable; a
+    declined role, an unsupported auth mode, a missing / rejected token, or a
+    malformed response all need a different fix and must not be answered with
+    the generic outage line.
+    """
+
+    def _unavailable(self, cause_kind: str) -> RegistryUnavailableError:
+        return RegistryUnavailableError("probe failed", url=UNAVAILABLE.url, cause_kind=cause_kind)
+
+    @pytest.mark.parametrize("cause_kind", ["network", "timeout", "http_error", "unknown"])
+    def test_outage_kinds_say_start_loomweave_or_fall_back(self, cause_kind: str) -> None:
+        hint = registry_unavailable_hint(cause_kind)
+        assert "loomweave serve" in hint
+        assert "allow_local_fallback" in hint
+        assert registry_startup_hint(self._unavailable(cause_kind)) == hint
+
+    def test_auth_token_missing_names_the_token_env(self) -> None:
+        hint = registry_unavailable_hint("auth_token_missing")
+        assert "WEFT_TOKEN" in hint
+        assert "token_env" in hint
+        assert "loomweave serve" not in hint
+        assert "allow_local_fallback" in hint
+
+    def test_auth_rejected_names_the_token_env(self) -> None:
+        hint = registry_unavailable_hint("auth")
+        assert "WEFT_TOKEN" in hint
+        assert "401" in hint
+        assert "loomweave serve" not in hint
+
+    def test_auth_mode_unsupported_points_at_loomweave_serving_mode(self) -> None:
+        hint = registry_unavailable_hint("auth_mode_unsupported")
+        assert "authentication" in hint
+        assert "registry_backend='local'" in hint
+        assert "loomweave serve" not in hint
+
+    def test_role_declined_points_at_loomweave_role_config(self) -> None:
+        hint = registry_unavailable_hint("role_declined")
+        assert "registry_backend" in hint
+        assert "file_registry" in hint
+        assert "loomweave serve" not in hint
+
+    def test_invalid_response_does_not_offer_fallback(self) -> None:
+        hint = registry_unavailable_hint("invalid_response")
+        assert "base_url" in hint
+        assert "loomweave serve" not in hint
+        assert "allow_local_fallback" not in hint
+
+    @pytest.mark.parametrize(
+        "cause_kind",
+        [
+            "network",
+            "timeout",
+            "http_error",
+            "auth",
+            "auth_token_missing",
+            "auth_mode_unsupported",
+            "role_declined",
+            "invalid_response",
+            "unknown",
+        ],
+    )
+    def test_every_hint_is_one_line(self, cause_kind: str) -> None:
+        assert "\n" not in registry_unavailable_hint(cause_kind)
+
+    def test_startup_response_hint_switches_with_cause_kind(self) -> None:
+        exc = self._unavailable("auth_token_missing")
+        response = registry_startup_error_response(exc, action="opening project database")
+        assert response["details"]["hint"] == registry_unavailable_hint("auth_token_missing")
+        assert "WEFT_TOKEN" in response["details"]["hint"]
+
+    def test_plain_cli_prints_the_cause_specific_hint(self) -> None:
+        _stdout, stderr = _invoke(False, self._unavailable("role_declined"))
+        lines = stderr.splitlines()
+        assert lines[1] == registry_unavailable_hint("role_declined")
 
 
 class TestEmitRegistryStartupFailure:

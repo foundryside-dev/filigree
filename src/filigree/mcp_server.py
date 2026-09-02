@@ -21,6 +21,7 @@ import time
 import weakref
 from collections.abc import Callable
 from contextvars import ContextVar, Token
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,28 @@ _schema_mismatch: SchemaVersionMismatchError | None = None
 # (``RegistryUnavailableError`` with allow_local_fallback=false). Either keeps the
 # server up in degraded mode with every tool short-circuiting to an envelope.
 _registry_startup_error: RegistryStartupError | None = None
+
+# Registry degraded mode is NOT latched for the process lifetime: a transient
+# fail-closed outage at stdio startup would otherwise answer every tool call
+# with REGISTRY_UNAVAILABLE forever — while the hint says "start Loomweave",
+# which would then change nothing. ``call_tool`` re-attempts startup at most
+# once per ``_REGISTRY_RETRY_INTERVAL_SECONDS`` (monotonic clock) via
+# :func:`_maybe_retry_registry_startup` and clears the latch on success.
+# ``_startup_args`` is what ``_attempt_startup`` was first called with;
+# ``_registry_retry_last_monotonic`` gates the interval and
+# ``_registry_retry_last_at`` is its wall-clock twin for ``mcp_status_get``.
+# ``_registry_retry_stamped_error`` is the exact exception object the retry
+# machinery owns: a retry only fires while the latched sentinel IS that object,
+# so a latch seeded by hand (unit tests, any future direct writer) is never
+# re-probed against whatever ``_startup_args`` last held — even when a stamp
+# from an earlier real startup leaked. A retry that resolves into a
+# non-registry open failure re-stamps ``_db_open_error`` so the interval retry
+# keeps covering it (genuine startup exits on that sentinel; a retry cannot).
+_REGISTRY_RETRY_INTERVAL_SECONDS = 10.0
+_startup_args: tuple[Path, Path | None, Path | None] | None = None
+_registry_retry_last_monotonic: float | None = None
+_registry_retry_last_at: str | None = None
+_registry_retry_stamped_error: Exception | None = None
 
 # Set when startup hits a non-mismatch DB-open failure (locked file, missing
 # file, permission denied, on-disk corruption). The server cannot run without
@@ -258,6 +281,7 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "error": response["error"],
             "details": response.get("details"),
             "guidance": registry_startup_hint(_registry_startup_error),
+            "registry_retry": _registry_retry_status(),
             "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
@@ -273,6 +297,9 @@ def get_mcp_status_payload() -> dict[str, Any]:
             "code": ErrorCode.IO,
             "error": str(_db_open_error),
             "guidance": "Run `filigree doctor` for diagnosis.",
+            # Present only when this sentinel came out of a registry startup
+            # retry (and is therefore still being retried on the interval).
+            "registry_retry": _registry_retry_status() if _registry_retry_stamped_error is _db_open_error else None,
             "project_root": str(project_root) if project_root is not None else None,
             "filigree_dir": str(filigree_dir) if filigree_dir is not None else None,
             "runtime": _runtime_diagnostics(),
@@ -889,10 +916,36 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
         )
 
-    if _registry_startup_error is not None and name != "get_mcp_status":
+    if (_registry_startup_error is not None or _db_open_error is not None) and name != "get_mcp_status":
         from filigree.mcp_tools.common import _text as _common_text
 
-        return _common_text(registry_startup_error_response(_registry_startup_error, action="opening project database"))
+        # Bounded recovery: re-attempt startup at most once per interval so a
+        # Loomweave that came back is picked up without an MCP restart. The
+        # retry may resolve into any of the startup outcomes (open DB, schema
+        # mismatch, registry failure again, or a plain DB-open error), so every
+        # degraded-mode guard below re-reads the globals it just rewrote.
+        _maybe_retry_registry_startup()
+        if _schema_mismatch is not None:
+            return _common_text(
+                ErrorResponse(
+                    error=format_schema_mismatch_guidance(_schema_mismatch.installed, _schema_mismatch.database),
+                    code=ErrorCode.SCHEMA_MISMATCH,
+                )
+            )
+        if _registry_startup_error is not None:
+            return _common_text(registry_startup_error_response(_registry_startup_error, action="opening project database"))
+        if _db_open_error is not None:
+            # Only reachable after a registry retry resolved into a
+            # non-registry open failure (``_run`` exits at startup on this
+            # sentinel). Without the guard the handler would hit ``_get_db``
+            # and raise out of the tool call instead of answering an envelope;
+            # the retry above keeps re-probing it on the same interval.
+            return _common_text(
+                ErrorResponse(
+                    error=f"Database not initialized: {_db_open_error}. Run `filigree doctor` for diagnosis.",
+                    code=ErrorCode.IO,
+                )
+            )
 
     # Runtime drift gate: a long-running MCP session can have its DB
     # forward-migrated under it (sibling MCP at a newer version, manual
@@ -1144,9 +1197,11 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
     ``_run`` consults the sentinel after calling us and exits cleanly.
     """
     global db, _filigree_dir, _project_root, _schema_mismatch, _registry_startup_error, _db_open_error
+    global _startup_args
 
     _filigree_dir = filigree_dir
     _project_root = project_root
+    _startup_args = (filigree_dir, conf_path, project_root)
     try:
         if conf_path is not None:
             db = FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
@@ -1167,11 +1222,13 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
         _schema_mismatch = None
         _registry_startup_error = None
         _db_open_error = None
+        _clear_registry_retry_stamp()
     except SchemaVersionMismatchError as exc:
         db = None
         _schema_mismatch = exc
         _registry_startup_error = None
         _db_open_error = None
+        _clear_registry_retry_stamp()
     except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
         # ``RegistryUnavailableError`` is a RuntimeError: without this arm a
         # fail-closed Loomweave outage escaped startup as a traceback and the
@@ -1180,11 +1237,130 @@ def _attempt_startup(filigree_dir: Path, conf_path: Path | None = None, project_
         _schema_mismatch = None
         _registry_startup_error = exc
         _db_open_error = None
+        # This attempt counts as the last retry: the first re-probe from
+        # ``call_tool`` waits a full interval rather than hammering a
+        # Loomweave that just failed. The stamp also names THIS exception as
+        # the one the retry owns — ``_maybe_retry_registry_startup`` refuses
+        # to retry any latch that is not the stamped object.
+        _stamp_registry_retry(exc)
     except (OSError, sqlite3.Error, ValueError) as exc:
         db = None
         _schema_mismatch = None
         _registry_startup_error = None
         _db_open_error = exc
+        _clear_registry_retry_stamp()
+
+
+def _stamp_registry_retry(exc: Exception) -> None:
+    """Record ``exc`` as the sentinel the interval retry owns, and now as the last attempt."""
+    global _registry_retry_last_monotonic, _registry_retry_last_at, _registry_retry_stamped_error
+    _registry_retry_last_monotonic = time.monotonic()
+    _registry_retry_last_at = datetime.now(UTC).isoformat()
+    _registry_retry_stamped_error = exc
+
+
+def _clear_registry_retry_stamp() -> None:
+    """Forget the last registry retry: only a live retry-owned latch carries a stamp."""
+    global _registry_retry_last_monotonic, _registry_retry_last_at, _registry_retry_stamped_error
+    _registry_retry_last_monotonic = None
+    _registry_retry_last_at = None
+    _registry_retry_stamped_error = None
+
+
+def _retry_owned_latch() -> Exception | None:
+    """The degraded-mode sentinel the interval retry may re-probe, or ``None``.
+
+    Identity, not presence: the latched object must BE the stamped one. A
+    stamp leaked from an earlier real startup (tests that monkeypatch only the
+    sentinels, not the stamp) never licenses a retry of a hand-seeded latch.
+    """
+    latched = _registry_startup_error if _registry_startup_error is not None else _db_open_error
+    if latched is None or latched is not _registry_retry_stamped_error:
+        return None
+    return latched
+
+
+def _registry_failure_signature(exc: Exception) -> tuple[str, str | None]:
+    """What an operator would call "the same failure": error class + ``cause_kind``."""
+    return (type(exc).__name__, getattr(exc, "cause_kind", None))
+
+
+def _registry_retry_seconds_remaining(now: float | None = None) -> float:
+    """Seconds until the next registry startup retry is eligible (0 when due)."""
+    if _registry_retry_last_monotonic is None:
+        return 0.0
+    now = time.monotonic() if now is None else now
+    return max(0.0, _REGISTRY_RETRY_INTERVAL_SECONDS - (now - _registry_retry_last_monotonic))
+
+
+def _registry_retry_status() -> dict[str, Any]:
+    """Retry schedule for ``mcp_status_get`` while in registry degraded mode."""
+    return {
+        "interval_seconds": _REGISTRY_RETRY_INTERVAL_SECONDS,
+        "last_retry_at": _registry_retry_last_at,
+        "next_retry_after": round(_registry_retry_seconds_remaining(), 3),
+    }
+
+
+def _maybe_retry_registry_startup() -> bool:
+    """Re-attempt startup once the retry interval has elapsed; return whether the DB is open.
+
+    Called from ``call_tool`` while ``_registry_startup_error`` or
+    ``_db_open_error`` is latched. A no-op inside the interval, and a no-op
+    for a latch the retry does not own: only ``_attempt_startup``'s
+    registry-failure arm (and this function, for a retry that resolves into a
+    plain DB-open failure) stamps the exact exception object, so a latch
+    seeded by hand (unit tests, or any future direct writer) is never
+    re-probed against whatever ``_startup_args`` last held — even when an
+    earlier real startup leaked its stamp. Synchronous like
+    ``_attempt_startup`` — the capability probe blocks for at most
+    ``loomweave.timeout_seconds``, and the interval bounds how often that cost
+    is paid while Loomweave stays down. Every call reads the interval gate and
+    stamps the new attempt before probing, so concurrent tool calls on the
+    same loop tick cannot double-probe.
+
+    A retry that ends in ``_db_open_error`` (e.g. a transient lock while
+    Loomweave came back) is re-stamped rather than latched: genuine startup
+    exits the process on that sentinel so a supervisor can restart it, but a
+    live server has no such escape hatch, so the interval retry keeps
+    covering it until the open succeeds.
+
+    Logging: recovery is INFO; a re-probe that fails the SAME way as before
+    (class + ``cause_kind``) is INFO too, so a long outage does not emit one
+    WARNING per interval; only a changed failure re-issues the startup WARNING.
+    """
+    previous = _retry_owned_latch()
+    if previous is None:
+        return db is not None
+    if _startup_args is None or _registry_retry_seconds_remaining() > 0:
+        return False
+    _stamp_registry_retry(previous)
+    filigree_dir, conf_path, project_root = _startup_args
+    _attempt_startup(filigree_dir, conf_path=conf_path, project_root=project_root)
+    if _db_open_error is not None:
+        _stamp_registry_retry(_db_open_error)
+    if _logger is not None:
+        current: Exception | None = _registry_startup_error if _registry_startup_error is not None else _db_open_error
+        if current is None and db is not None:
+            _logger.info(
+                "mcp_server_registry_recovered",
+                extra={"tool": "server", "args_data": {"previous_error": str(previous)}},
+            )
+        elif current is not None and _registry_failure_signature(current) == _registry_failure_signature(previous):
+            _logger.info(
+                "mcp_server_registry_retry_failed",
+                extra={
+                    "tool": "server",
+                    "args_data": {
+                        "cause_kind": getattr(current, "cause_kind", None),
+                        "url": getattr(current, "url", None),
+                        "next_retry_after": round(_registry_retry_seconds_remaining(), 3),
+                    },
+                },
+            )
+        else:
+            _log_startup_status(_logger)
+    return db is not None
 
 
 async def _run(project_path: Path | None) -> None:

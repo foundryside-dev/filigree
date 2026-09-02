@@ -150,6 +150,12 @@ class TestMcpStartupFailsClosedWithEnvelope:
         monkeypatch.setattr(mcp_mod, "_schema_mismatch", None)
         monkeypatch.setattr(mcp_mod, "_registry_startup_error", None)
         monkeypatch.setattr(mcp_mod, "_db_open_error", None)
+        # ``_attempt_startup`` also writes the retry state; restore it too, or
+        # a later test that hand-seeds ``_registry_startup_error`` would find
+        # ``_startup_args`` pointing at this (by then torn-down) project.
+        monkeypatch.setattr(mcp_mod, "_startup_args", None)
+        monkeypatch.setattr(mcp_mod, "_registry_retry_last_monotonic", None)
+        monkeypatch.setattr(mcp_mod, "_registry_retry_last_at", None)
 
         mcp_mod._attempt_startup(filigree_dir)
 
@@ -242,3 +248,46 @@ class TestDashboardFailsClosedWithEnvelope:
 
         assert response.status_code == 503
         _assert_envelope(response.json(), base_url)
+        # The lazy per-project open IS a DB open: keep that wording.
+        assert "while opening project database" in response.json()["error"]
+
+    async def test_request_time_registry_failure_is_labelled_as_request_handling(self, tmp_path: Path) -> None:
+        """A registry failure AFTER the DB opened (e.g. ``POST /api/observations``
+        -> ``register_file``) reaches the app-wide handler; it must not claim the
+        project database failed to open (review F8)."""
+        import filigree.dashboard as dash_module
+        from filigree.dashboard import create_app
+        from tests._fakes.clarion_http import clarion_stub
+
+        with clarion_stub() as (base_url, _state):
+            db = FiligreeDB(
+                tmp_path / "filigree.db",
+                prefix="test",
+                check_same_thread=False,
+                registry_backend="loomweave",
+                loomweave_config={"base_url": base_url, "timeout_seconds": 0.5, "allow_local_fallback": False},
+            )
+            db.initialize()
+        # Loomweave is now down; the DB is open and fail-closed.
+        dash_module._db = db
+        try:
+            app = create_app()
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/api/observations",
+                    json={"summary": "registry down mid-session", "file_path": "src/main.py"},
+                )
+        finally:
+            dash_module._db = None
+            db.close()
+
+        assert response.status_code == 503, response.text
+        payload = response.json()
+        assert payload["code"] == ErrorCode.REGISTRY_UNAVAILABLE
+        assert "while handling request" in payload["error"]
+        assert "opening project database" not in payload["error"]
+        assert payload["details"]["cause_kind"] == "network"
+        assert payload["details"]["backend"] == "loomweave"
+        for fragment in HINT_FRAGMENTS:
+            assert fragment in payload["details"]["hint"]

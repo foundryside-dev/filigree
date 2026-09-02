@@ -60,7 +60,7 @@ from filigree.core import (
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
-from filigree.registry_errors import registry_startup_error_response, registry_startup_hint
+from filigree.registry_errors import REGISTRY_REQUEST_ACTION, registry_startup_error_response, registry_startup_hint
 from filigree.types.api import SchemaVersionMismatchError, errorcode_to_http_status
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -655,6 +655,12 @@ def _get_db(request: Request) -> FiligreeDB:
             raise HTTPException(status_code=404, detail=f"Unknown project: {key!r}") from None
         except SchemaVersionMismatchError:
             raise
+        except (RegistryVersionMismatchError, RegistryUnavailableError):
+            # Lazy per-project open failed on the registry: tag the request so
+            # the app-wide handler labels the envelope as a DB-open failure
+            # rather than a request-time resolve failure.
+            request.state.filigree_registry_action = "opening project database"
+            raise
         except (ProjectNotInitialisedError, ValueError, TypeError) as exc:
             raise HTTPException(
                 status_code=400,
@@ -836,14 +842,19 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     @app.exception_handler(RegistryVersionMismatchError)
     @app.exception_handler(RegistryUnavailableError)
     async def _registry_startup_error_to_envelope(
-        _request: Any, exc: RegistryVersionMismatchError | RegistryUnavailableError
+        request: Any, exc: RegistryVersionMismatchError | RegistryUnavailableError
     ) -> JSONResponse:
-        # Server mode opens each project's DB lazily on first request; a project
-        # in loomweave mode with allow_local_fallback=false and an unreachable
-        # Loomweave raises here (RuntimeError — no other handler catches it).
-        # 503 for this project only; other projects keep serving
-        # (filigree-8fd300e2f7).
-        response = registry_startup_error_response(exc, action="opening project database")
+        # Two distinct paths land here (RuntimeError — no other handler catches
+        # either). Server mode opens each project's DB lazily on first request,
+        # so a fail-closed loomweave project raises out of ``_get_db``; that
+        # path tags the request so the envelope keeps its "opening project
+        # database" wording (filigree-8fd300e2f7). A registry failure raised
+        # while serving a request against an already-open DB (e.g.
+        # ``POST /api/observations`` -> ``register_file`` -> resolve) is NOT a
+        # DB-open failure and is labelled as request handling instead. 503 for
+        # this project only; other projects keep serving.
+        action = getattr(getattr(request, "state", None), "filigree_registry_action", None) or REGISTRY_REQUEST_ACTION
+        response = registry_startup_error_response(exc, action=action)
         return JSONResponse(response, status_code=errorcode_to_http_status(response["code"]))
 
     @app.exception_handler(_StarletteHTTPException)
