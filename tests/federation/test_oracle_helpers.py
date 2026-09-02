@@ -35,11 +35,14 @@ import pytest
 from tests.federation._oracle import (
     DRIFT_REGISTRY,
     FEDERATION_FIXTURES_DIR,
+    LIVE_LOOMWEAVE_ARMING_ENV,
     SIBLING_REPO_ENV,
     _golden_bytes,
     arming_env_name,
+    arming_flag_requested,
     arming_requested,
     blob_sha,
+    live_loomweave_required,
     load_golden,
     sibling_source,
 )
@@ -226,6 +229,72 @@ def test_arming_requested_rejects_unrecognised_values(monkeypatch: pytest.Monkey
     monkeypatch.setenv("FILIGREE_REQUIRE_LEGIS_REPO", value)
     with pytest.raises(ValueError, match="FILIGREE_REQUIRE_LEGIS_REPO"):
         arming_requested("legis")
+
+
+# ---------------------------------------------------------------------------
+# live-lane arming flag — same parser as the sibling-repo flags
+# ---------------------------------------------------------------------------
+
+
+def test_live_loomweave_arming_env_name_is_the_ci_flag() -> None:
+    assert LIVE_LOOMWEAVE_ARMING_ENV == "FILIGREE_REQUIRE_LIVE_LOOMWEAVE"
+
+
+def test_live_loomweave_required_is_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(LIVE_LOOMWEAVE_ARMING_ENV, raising=False)
+    assert live_loomweave_required() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " on "], ids=repr)
+def test_live_loomweave_required_arms_on_every_truthy_spelling(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """``=true`` arms the live lane exactly like ``=1`` — one parser, not a second ``== "1"``."""
+    monkeypatch.setenv(LIVE_LOOMWEAVE_ARMING_ENV, value)
+    assert live_loomweave_required() is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off"], ids=repr)
+def test_live_loomweave_required_disarms_on_falsey_spellings(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv(LIVE_LOOMWEAVE_ARMING_ENV, value)
+    assert live_loomweave_required() is False
+
+
+def test_live_loomweave_required_rejects_junk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(LIVE_LOOMWEAVE_ARMING_ENV, "maybe")
+    with pytest.raises(ValueError, match=LIVE_LOOMWEAVE_ARMING_ENV):
+        live_loomweave_required()
+
+
+def test_arming_flag_requested_is_the_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``arming_requested`` and ``live_loomweave_required`` are both thin wrappers over it."""
+    monkeypatch.setenv("FILIGREE_REQUIRE_LEGIS_REPO", "yes")
+    assert arming_flag_requested("FILIGREE_REQUIRE_LEGIS_REPO") is arming_requested("legis") is True
+    monkeypatch.setenv("FILIGREE_REQUIRE_LEGIS_REPO", "t")
+    with pytest.raises(ValueError, match="FILIGREE_REQUIRE_LEGIS_REPO='t'"):
+        arming_flag_requested("FILIGREE_REQUIRE_LEGIS_REPO")
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "tests.integration.test_loomweave_phase_d_e2e",
+        "tests.integration.test_loomweave_staging_smoke",
+        "tests.federation.test_sei_oracle_live_loomweave",
+    ],
+)
+def test_live_lane_modules_route_the_flag_through_the_shared_parser(monkeypatch: pytest.MonkeyPatch, module_name: str) -> None:
+    """The three live-lane skip-or-fail helpers must not carry a private ``== "1"`` parse."""
+    module = importlib.import_module(module_name)
+    source = Path(str(module.__file__)).read_text(encoding="utf-8")
+    assert 'os.environ.get("FILIGREE_REQUIRE_LIVE_LOOMWEAVE")' not in source
+    assert "live_loomweave_required" in source
+    unavailable = getattr(module, "_live_unavailable", None) or getattr(module, "_loomweave_unavailable", None)
+    assert unavailable is not None
+    monkeypatch.setenv(LIVE_LOOMWEAVE_ARMING_ENV, "true")
+    with pytest.raises(pytest.fail.Exception, match="armed"):
+        unavailable("armed by =true")
+    monkeypatch.setenv(LIVE_LOOMWEAVE_ARMING_ENV, "off")
+    with pytest.raises(pytest.skip.Exception):
+        unavailable("skipped by =off")
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,6 @@ otherwise the test skips (or fails when ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE=1``).
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -41,6 +40,7 @@ import pytest
 from filigree.core import FiligreeDB
 from filigree.registry import LoomweaveRegistry
 from filigree.sei_backfill import run_sei_backfill
+from tests.federation._oracle import live_loomweave_required
 
 pytestmark = [
     pytest.mark.integration,
@@ -49,7 +49,7 @@ pytestmark = [
 
 
 def _live_unavailable(reason: str) -> None:
-    if os.environ.get("FILIGREE_REQUIRE_LIVE_LOOMWEAVE") == "1":
+    if live_loomweave_required():
         pytest.fail(reason)
     pytest.skip(reason)
 

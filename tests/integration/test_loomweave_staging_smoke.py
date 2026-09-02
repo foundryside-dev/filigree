@@ -20,6 +20,7 @@ from filigree.registry import (
     probe_loomweave_capabilities,
     validate_loomweave_capabilities,
 )
+from tests.federation._oracle import live_loomweave_required
 
 pytestmark = [
     pytest.mark.integration,
@@ -28,7 +29,7 @@ pytestmark = [
 
 
 def _live_unavailable(reason: str) -> None:
-    if os.environ.get("FILIGREE_REQUIRE_LIVE_LOOMWEAVE") == "1":
+    if live_loomweave_required():
         pytest.fail(reason)
     pytest.skip(reason)
 

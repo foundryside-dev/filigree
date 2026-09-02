@@ -61,6 +61,11 @@ SIBLING_REPO_ENV: dict[str, tuple[str, ...]] = {
 _ARM_TRUE = frozenset({"1", "true", "yes", "on"})
 _ARM_FALSE = frozenset({"", "0", "false", "no", "off"})
 
+# The live-Loomweave lane's arming env (ci.yml ``live-loomweave`` job): when
+# armed, an absent / too-old Loomweave FAILS the live-lane modules instead of
+# skipping them. Same spellings as the per-sibling drift flags above.
+LIVE_LOOMWEAVE_ARMING_ENV = "FILIGREE_REQUIRE_LIVE_LOOMWEAVE"
+
 
 def blob_sha(data: bytes) -> str:
     """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
@@ -117,15 +122,14 @@ def arming_env_name(sibling: str) -> str:
     return f"FILIGREE_REQUIRE_{sibling.upper()}_REPO"
 
 
-def arming_requested(sibling: str) -> bool:
-    """The one documented parse of the arming env.
+def arming_flag_requested(name: str) -> bool:
+    """The one documented parse of an arming env, by env name.
 
     ``1`` / ``true`` / ``yes`` / ``on`` (any case, surrounding whitespace
-    ignored) arm the drift check so an absent sibling is a hard failure;
-    unset / empty / ``0`` / ``false`` / ``no`` / ``off`` leave it skip-clean.
-    Any other value raises ``ValueError`` so a typo cannot silently disarm.
+    ignored) arm the check so an absent sibling is a hard failure; unset /
+    empty / ``0`` / ``false`` / ``no`` / ``off`` leave it skip-clean. Any other
+    value raises ``ValueError`` so a typo cannot silently disarm.
     """
-    name = arming_env_name(sibling)
     raw = os.environ.get(name, "")
     value = raw.strip().lower()
     if value in _ARM_TRUE:
@@ -133,6 +137,16 @@ def arming_requested(sibling: str) -> bool:
     if value in _ARM_FALSE:
         return False
     raise ValueError(f"{name}={raw!r} is not a recognised arming value (use 1/true/yes/on or 0/false/no/off)")
+
+
+def arming_requested(sibling: str) -> bool:
+    """``arming_flag_requested`` for the per-sibling ``FILIGREE_REQUIRE_<SIBLING>_REPO`` env."""
+    return arming_flag_requested(arming_env_name(sibling))
+
+
+def live_loomweave_required() -> bool:
+    """``arming_flag_requested`` for the live-lane ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE`` env."""
+    return arming_flag_requested(LIVE_LOOMWEAVE_ARMING_ENV)
 
 
 @dataclass(frozen=True)
