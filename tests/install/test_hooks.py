@@ -310,6 +310,32 @@ class TestGenerateSessionContext:
         assert result is not None
         assert "Filigree Project Snapshot" in result
 
+    def test_registry_unavailable_returns_remedy_not_traceback(self, db: FiligreeDB) -> None:
+        """A fail-closed Loomweave outage at DB open (``RegistryUnavailableError``
+        is a RuntimeError, not sqlite3/ValueError/OSError) must render the shared
+        REGISTRY_UNAVAILABLE line plus its remedy in the returned context — not
+        escape to the CLI wrapper's generic 'hook failed' traceback."""
+        from filigree.registry import RegistryUnavailableError
+
+        anchor = _anchor_for_db(db)
+        exc = RegistryUnavailableError(
+            "Loomweave capability probe unreachable at http://127.0.0.1:1/api/v1/_capabilities: refused",
+            url="http://127.0.0.1:1/api/v1/_capabilities",
+            cause_kind="network",
+        )
+        with (
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
+            patch("filigree.hooks.FiligreeDB.from_anchor", side_effect=exc),
+        ):
+            result = generate_session_context()
+        assert result is not None
+        assert "Filigree Project Snapshot" in result
+        assert "Registry unavailable" in result
+        assert "cause_kind=network" in result
+        assert "http://127.0.0.1:1" in result
+        assert "loomweave serve" in result
+        assert "allow_local_fallback" in result
+
 
 class TestIsPortListening:
     def test_unused_port_returns_false(self) -> None:

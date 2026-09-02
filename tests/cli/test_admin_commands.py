@@ -1468,6 +1468,58 @@ class TestInitConfCutover:
         final = json.loads((store / "config.json").read_text())
         assert final["prefix"] == "confpfx"
 
+    def test_init_conf_mode_carry_forward_is_case_insensitive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A legacy conf spelling the mode in a different case ('Ethereal') still
+        imports: the canonical ``ephemeral`` lands in config.json and the conf is
+        retired — a ValueError from normalize_mode must not abort the cutover."""
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        store = tmp_path / ".weft" / "filigree"
+        cfg_path = store / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg.pop("mode", None)  # config.json has no mode → conf's value carries forward
+        cfg_path.write_text(json.dumps(cfg))
+        conf = tmp_path / ".filigree.conf"
+        conf.write_text(
+            json.dumps({"version": 1, "project_name": "p", "prefix": "p", "db": ".weft/filigree/filigree.db", "mode": "Ethereal"})
+        )
+
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        assert not conf.exists()
+        assert (tmp_path / ".filigree.conf.imported").exists()
+        assert json.loads(cfg_path.read_text())["mode"] == "ephemeral"
+        assert "Warning" not in result.stderr
+
+    def test_init_conf_unknown_mode_falls_back_to_default_with_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A legacy conf carrying an unrecognised mode must not crash init: the
+        default mode is persisted, a warning names the rejected value, and the
+        cutover (conf → .imported) still completes."""
+        monkeypatch.chdir(tmp_path)
+        cli_runner.invoke(cli, ["init"])
+        store = tmp_path / ".weft" / "filigree"
+        cfg_path = store / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg.pop("mode", None)
+        cfg_path.write_text(json.dumps(cfg))
+        conf = tmp_path / ".filigree.conf"
+        conf.write_text(
+            json.dumps({"version": 1, "project_name": "p", "prefix": "p", "db": ".weft/filigree/filigree.db", "mode": "banana"})
+        )
+
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        assert result.exception is None
+        assert not conf.exists()
+        assert (tmp_path / ".filigree.conf.imported").exists()
+        assert json.loads(cfg_path.read_text())["mode"] == "ephemeral"
+        assert "banana" in result.stderr
+        assert "ephemeral" in result.stderr
+
     def test_corrupt_config_json_refuses_open_not_silent_drift(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
     ) -> None:
@@ -1485,6 +1537,70 @@ class TestInitConfCutover:
         payload = json.loads(result.output)
         assert payload["code"] == ErrorCode.VALIDATION
         assert "config.json" in payload["error"]
+
+
+class TestInitRegistryUnavailable:
+    """With ``registry_backend=loomweave`` and ``allow_local_fallback=false``, an
+    unreachable Loomweave must surface as the same REGISTRY_UNAVAILABLE rendering
+    ``cli_common.get_db`` uses — never as a raw ``RegistryUnavailableError``
+    traceback from ``filigree init`` or a swallowed one from the
+    ``session-context`` hook."""
+
+    @pytest.fixture
+    def unreachable_loomweave_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+        import socket
+
+        from filigree.core import DB_FILENAME, WEFT_DIR_NAME, WEFT_MEMBER_SUBDIR, FiligreeDB, write_config
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        base_url = f"http://127.0.0.1:{port}"
+        # Canonical .weft/filigree/ store: the session-context hook discovers
+        # only the canonical anchor (include_legacy_dir=False), so a bare legacy
+        # .filigree/ dir would make the hook exit silently rather than exercise
+        # the registry path.
+        filigree_dir = tmp_path / WEFT_DIR_NAME / WEFT_MEMBER_SUBDIR
+        filigree_dir.mkdir(parents=True)
+        db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="proj")
+        db.initialize()
+        db.close()
+        write_config(
+            filigree_dir,
+            {
+                "prefix": "proj",
+                "version": 1,
+                "registry_backend": "loomweave",
+                "loomweave": {"base_url": base_url, "timeout_seconds": 1, "allow_local_fallback": False},
+            },
+        )
+        monkeypatch.chdir(tmp_path)
+        return tmp_path, base_url
+
+    def test_init_exits_1_with_envelope_not_traceback(self, unreachable_loomweave_project: tuple[Path, str], cli_runner: CliRunner) -> None:
+        _, base_url = unreachable_loomweave_project
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+        assert "Traceback" not in result.stderr
+        assert "Registry unavailable" in result.stderr
+        assert base_url in result.stderr
+        assert "loomweave serve" in result.stderr
+        assert "allow_local_fallback" in result.stderr
+
+    def test_session_context_prints_remedy_not_traceback(
+        self, unreachable_loomweave_project: tuple[Path, str], cli_runner: CliRunner
+    ) -> None:
+        _, base_url = unreachable_loomweave_project
+        result = cli_runner.invoke(cli, ["session-context"])
+        assert result.exit_code == 0, result.output
+        assert "Traceback" not in result.stderr
+        assert "session-context hook failed" not in result.stderr
+        # The remedy reaches the agent on the hook's stdout, not a log line.
+        assert "Registry unavailable" in result.stdout
+        assert base_url in result.stdout
+        assert "loomweave serve" in result.stdout
+        assert "allow_local_fallback" in result.stdout
 
 
 class TestInitSchemaMigration:

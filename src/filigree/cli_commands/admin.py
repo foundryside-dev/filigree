@@ -13,7 +13,7 @@ from pathlib import Path
 import click
 
 from filigree.cli_commands.files import finding_group
-from filigree.cli_common import add_hidden_flat_alias, get_db, refresh_summary
+from filigree.cli_common import _emit_registry_startup_failure, add_hidden_flat_alias, get_db, refresh_summary
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
@@ -52,6 +52,7 @@ from filigree.install_support.version_marker import (
     read_install_version,
     write_install_version,
 )
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
 from filigree.summary import write_summary
 from filigree.types.api import ErrorCode, SchemaVersionMismatchError
 
@@ -146,8 +147,19 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             # ``mode`` is config.json-authoritative at runtime (``get_mode``); only
             # carry the conf's value forward when config.json has none.
             if "mode" not in config and "mode" in existing_conf:
-                # A new store is being created: persist the canonical spelling.
-                config["mode"] = normalize_mode(existing_conf["mode"])
+                # Persist the canonical spelling. The conf was hand-editable, so
+                # tolerate case ('Ethereal') and never let an unknown value abort
+                # the cutover: fall back to the default mode with a warning so the
+                # conf still retires and runtime opens confless.
+                raw_mode = existing_conf["mode"]
+                try:
+                    config["mode"] = normalize_mode(raw_mode.lower() if isinstance(raw_mode, str) else raw_mode)
+                except ValueError:
+                    click.echo(
+                        f"  Warning: ignoring unknown mode {raw_mode!r} in {CONF_FILENAME}; using default mode {EPHEMERAL_MODE!r}",
+                        err=True,
+                    )
+                    config["mode"] = EPHEMERAL_MODE
             config.pop("db", None)  # type: ignore[typeddict-item]  # strip a hand-edited db key; never stored in config.json
             write_config(store_dir, config)
             imported_path = cwd / (CONF_FILENAME + ".imported")
@@ -180,6 +192,13 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
                 err=True,
             )
             sys.exit(3)
+        except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+            # loomweave mode with allow_local_fallback=false (or a wire-protocol
+            # break): the startup capability probe fails closed. Render the same
+            # REGISTRY_UNAVAILABLE / version-mismatch envelope + remedy that
+            # every other CLI verb gets from ``get_db`` instead of a traceback.
+            _emit_registry_startup_failure(exc)
+            sys.exit(1)
         try:
             new_version = db.get_schema_version()
             opened_prefix = db.prefix
