@@ -98,7 +98,10 @@ EXPECTED_LOOMWEAVE_API_VERSION = 1
 # named ``RegistryUnavailableError(cause_kind='auth_mode_unsupported')`` rather
 # than being marked usable and failing per-operation with 401s. Unknown future
 # modes are refused by the same gate; widen the set in lockstep with the
-# re-vendored fixture when Filigree actually implements a mode.
+# re-vendored fixture when Filigree actually implements a mode. The one other
+# predictable per-operation-401 case — ``bearer`` routes while Filigree resolved
+# NO token — is refused by the same validate step (``cause_kind='auth_token_missing'``)
+# when the caller passes ``token_present``.
 EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION = 1
 SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES: frozenset[str] = frozenset({"none", "bearer"})
 SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES: frozenset[str] = frozenset({"none"})
@@ -778,7 +781,13 @@ def _parse_authentication_capability(payload: dict[str, Any], *, url: str) -> Lo
     )
 
 
-def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base_url: str) -> None:
+def validate_loomweave_capabilities(
+    capabilities: LoomweaveCapabilities,
+    *,
+    base_url: str,
+    token_present: bool | None = None,
+    token_env: str = DEFAULT_LOOMWEAVE_TOKEN_ENV,
+) -> None:
     """Reject Loomweave advertisements that contradict ADR-014's contract.
 
     Raises ``RegistryVersionMismatchError`` on api_version mismatch (no fallback
@@ -795,8 +804,19 @@ def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base
     ``EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION`` is logged at WARN, never
     rejected (the gate is on modes only).
 
-    Gate order is api_version → role → authentication, so a wire-protocol break
-    stays the loudest signal.
+    ``token_present`` is whether the caller resolved a Bearer token for this
+    Loomweave (``None`` = unknown: the check is skipped, so callers that never
+    learned the token keep the mode-only gate byte-identically). When it is
+    ``False`` and ``protected_routes == 'bearer'`` every protected call would
+    fail with a 401, so the gate raises ONE ``RegistryUnavailableError`` with
+    ``cause_kind='auth_token_missing'`` at probe time naming the URL and the env
+    var Filigree reads (``token_env``, the ``loomweave.token_env`` config key,
+    default ``WEFT_TOKEN``) — same fallback policy as ``role_declined``. This is
+    an enrich-only/functional gate, not a security boundary.
+
+    Gate order is api_version → role → authentication mode → token presence,
+    so a wire-protocol break stays the loudest signal and an unimplemented mode
+    wins over a merely-missing token.
     """
     url = loomweave_capabilities_url(base_url)
     advertised = capabilities["api_version"]
@@ -848,6 +868,14 @@ def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base
                 "Reconfigure Loomweave's serving mode or switch this project to registry_backend='local'."
             )
             raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth_mode_unsupported")
+    if token_present is False and authentication["protected_routes"] == "bearer":
+        msg = (
+            f"Loomweave at {url} advertised authentication.protected_routes='bearer' but Filigree resolved no token: "
+            f"environment variable {token_env!r} (config key loomweave.token_env; default {DEFAULT_LOOMWEAVE_TOKEN_ENV!r}) "
+            "is unset or empty, so every protected Loomweave call would be rejected with 401. "
+            f"Export the Loomweave bearer token in {token_env!r}, or switch this project to registry_backend='local'."
+        )
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth_token_missing")
 
 
 def _is_briefing_blocked_payload(raw: str | bytes | bytearray) -> bool:

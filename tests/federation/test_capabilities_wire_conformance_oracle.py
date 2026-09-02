@@ -86,6 +86,7 @@ import pytest
 # is driving the real consumer intake — the production call site adds only the
 # fallback-policy try/except around this same pair.
 from filigree.registry import (
+    DEFAULT_LOOMWEAVE_TOKEN_ENV,
     EXPECTED_LOOMWEAVE_API_VERSION,
     LEGACY_LOOMWEAVE_AUTHENTICATION,
     RegistryUnavailableError,
@@ -379,6 +380,36 @@ def test_real_validate_rejects_unimplemented_auth_mode(field: str, mode: str) ->
     assert excinfo.value.cause_kind == "auth_mode_unsupported"
     assert f"authentication.{field}" in str(excinfo.value)
     assert repr(mode) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("token_present", [False, True, None])
+def test_real_validate_bearer_routes_requires_a_resolved_token(token_present: bool | None) -> None:
+    """A bearer-mode Loomweave is usable ONLY when Filigree resolved a token.
+
+    Mutating ONLY ``protected_routes`` to ``bearer`` (a ``deepcopy``; the golden
+    file is never touched) — a mode Filigree DOES implement — the REAL probe
+    ACCEPTS and ``validate_loomweave_capabilities``:
+
+    - with ``token_present=False`` raises
+      ``RegistryUnavailableError(cause_kind='auth_token_missing')`` naming the
+      URL and the env var to export (one startup error, not N per-op 401s);
+    - with ``token_present=True`` accepts (the intended bearer posture);
+    - with ``token_present=None`` (caller does not know) accepts — the legacy
+      mode-only gate, byte-identical for callers that never learned the token.
+    """
+    bad = copy.deepcopy(_golden_body())
+    bad["authentication"]["protected_routes"] = "bearer"
+    with _CapabilitiesServer(bad) as url:
+        caps = probe_loomweave_capabilities(url, timeout_seconds=5)
+        assert caps["authentication"]["protected_routes"] == "bearer"
+        if token_present is False:
+            with pytest.raises(RegistryUnavailableError) as excinfo:
+                validate_loomweave_capabilities(caps, base_url=url, token_present=False)
+            assert excinfo.value.cause_kind == "auth_token_missing"
+            assert "authentication.protected_routes='bearer'" in str(excinfo.value)
+            assert DEFAULT_LOOMWEAVE_TOKEN_ENV in str(excinfo.value)
+        else:
+            validate_loomweave_capabilities(caps, base_url=url, token_present=token_present)
 
 
 def test_real_probe_degrades_when_authentication_block_absent() -> None:

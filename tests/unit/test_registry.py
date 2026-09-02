@@ -20,6 +20,7 @@ import pytest
 from filigree.core import VALID_REGISTRY_BACKENDS, FiligreeDB
 from filigree.models import FileRecord
 from filigree.registry import (
+    DEFAULT_LOOMWEAVE_TOKEN_ENV,
     EXPECTED_LOOMWEAVE_API_VERSION,
     EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
     LEGACY_LOOMWEAVE_AUTHENTICATION,
@@ -1312,6 +1313,85 @@ def test_validate_loomweave_capabilities_gates_authentication_modes(
     assert f"authentication.{rejected_field}={mode!r}" in str(exc)
     assert str(sorted(supported)) in str(exc)
     assert loomweave_capabilities_url(base_url) in str(exc)
+
+
+def _bearer_capabilities(*, registry_backend: bool = True) -> LoomweaveCapabilities:
+    return LoomweaveCapabilities(
+        registry_backend=registry_backend,
+        file_registry=True,
+        api_version=EXPECTED_LOOMWEAVE_API_VERSION,
+        instance_id="loomweave-test",
+        sei_supported=True,
+        sei_version=1,
+        authentication=LoomweaveAuthentication(protected_routes="bearer", capabilities_probe="none", contract_version=1),
+    )
+
+
+def test_validate_bearer_routes_with_no_resolved_token_fails_fast() -> None:
+    """A Loomweave advertising ``protected_routes='bearer'`` while Filigree resolved
+    NO token would 401 on every protected call; the gate refuses it once, at probe
+    time, with ``cause_kind='auth_token_missing'`` naming the URL and the env var."""
+    base_url = "http://127.0.0.1:8765"
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(_bearer_capabilities(), base_url=base_url, token_present=False)
+    exc = exc_info.value
+    assert exc.cause_kind == "auth_token_missing"
+    assert exc.url == loomweave_capabilities_url(base_url)
+    assert loomweave_capabilities_url(base_url) in str(exc)
+    assert "authentication.protected_routes='bearer'" in str(exc)
+    assert DEFAULT_LOOMWEAVE_TOKEN_ENV in str(exc)
+    assert "token_env" in str(exc)
+
+
+def test_validate_bearer_routes_missing_token_names_configured_token_env() -> None:
+    """When ``loomweave.token_env`` was overridden the message names THAT env var
+    (the one the operator must export), not just the default."""
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(
+            _bearer_capabilities(),
+            base_url="http://127.0.0.1:8765",
+            token_present=False,
+            token_env="MY_LOOM_TOKEN",  # noqa: S106 — an env-var NAME, not a credential
+        )
+    assert exc_info.value.cause_kind == "auth_token_missing"
+    assert "'MY_LOOM_TOKEN'" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("protected_routes", "token_present"),
+    [
+        ("bearer", True),  # bearer + token resolved: the happy path
+        ("none", False),  # unauthenticated routes: no token needed
+        ("none", True),  # a token nobody asked for is harmless
+        ("bearer", None),  # unknown: callers that do not know skip the check (byte-identical legacy behaviour)
+        ("none", None),
+    ],
+)
+def test_validate_token_presence_gate_only_trips_for_bearer_without_token(protected_routes: str, token_present: bool | None) -> None:
+    capabilities = _bearer_capabilities()
+    capabilities["authentication"]["protected_routes"] = protected_routes
+    validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765", token_present=token_present)
+
+
+def test_validate_auth_mode_unsupported_takes_precedence_over_missing_token() -> None:
+    """Gate order within the authentication block: an unknown/unimplemented mode is
+    the louder signal — an ``hmac`` Loomweave is refused as ``auth_mode_unsupported``
+    whether or not a token happens to be present."""
+    capabilities = _bearer_capabilities()
+    capabilities["authentication"]["protected_routes"] = "hmac"
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(capabilities, base_url="http://127.0.0.1:8765", token_present=False)
+    assert exc_info.value.cause_kind == "auth_mode_unsupported"
+
+
+def test_validate_role_declined_takes_precedence_over_missing_token() -> None:
+    with pytest.raises(RegistryUnavailableError) as exc_info:
+        validate_loomweave_capabilities(
+            _bearer_capabilities(registry_backend=False),
+            base_url="http://127.0.0.1:8765",
+            token_present=False,
+        )
+    assert exc_info.value.cause_kind == "role_declined"
 
 
 def test_validate_loomweave_capabilities_accepts_legacy_authentication_default() -> None:
