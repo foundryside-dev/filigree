@@ -37,6 +37,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreachable one, or a malformed body yields no hint and never changes the
   gate outcome; `loomweave_known_down` skips the lookup. (filigree-4e13d133f7)
 
+- **CI `federation-drift` lane** (weekly schedule plus the
+  `workflow_dispatch` input `require_federation_drift`) checks out
+  foundryside-dev/{loomweave,wardline,legis} under `.siblings/`, points
+  `LOOMWEAVE_REPO` / `WARDLINE_REPO` / `LEGIS_REPO` at them, arms all three
+  `FILIGREE_REQUIRE_<SIBLING>_REPO` envs and runs
+  `tests/federation/test_sibling_drift.py`, so the Layer-2 vendored-golden
+  byte-drift checks execute mechanically instead of skipping in every CI
+  job. Private siblings need the `FEDERATION_CHECKOUT_TOKEN` secret.
+  (filigree-df6d1d99e2)
+- **Bearer mode without a token fails fast.** When Loomweave advertises
+  `authentication.protected_routes='bearer'` but Filigree resolved no bearer
+  token (`WEFT_TOKEN` / the configured `loomweave.token_env` unset or empty),
+  the capability probe raises one
+  `RegistryUnavailableError(cause_kind='auth_token_missing')` naming the
+  probe URL and the env var to export, instead of N per-operation
+  `cause_kind='auth'` 401s later. `validate_loomweave_capabilities` gained
+  optional `token_present` / `token_env` keywords (default: check skipped);
+  the check runs after the api_version, role and auth-mode gates and honours
+  `allow_local_fallback` like `role_declined`. (filigree-cfcc7987a0)
+
 ### Changed
 
 - **Installation mode vocabulary: `ephemeral` is canonical** (hub
