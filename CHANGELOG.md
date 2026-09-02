@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Installation mode vocabulary: `ephemeral` is canonical** (hub
+  weft-096266aa27, owner ruling 2026-07-29). `filigree init` / `install` now
+  write `"mode": "ephemeral"` to `config.json` and `/api/health` answers
+  `mode == "ephemeral"`. The pre-3.3.0 spelling `ethereal` is still accepted
+  everywhere Filigree reads a mode (`config.json`, legacy `.filigree.conf`
+  carry-forward, `--mode`, the store-migration `/api/health` port probe), and
+  existing `config.json` files are not rewritten unless `--mode` is passed.
+  New `core.normalize_mode()` is the single normalisation point; `VALID_MODES`
+  is now `{ephemeral, server}`. Consumers comparing the literal `ethereal`
+  (wardline's doctor `_filigree_local_mode`) should accept both.
+- **Federation oracles: shared Layer-2 drift machinery.** The copy-pasted
+  sibling-authority helpers in `tests/federation/` (`_blob_sha`,
+  `_load_golden`, `/home/john/<sibling>` locators, per-module skip-clean drift
+  tests) collapse into `tests/federation/_oracle.py` (git-blob hasher,
+  bytes-cached golden loader returning a fresh object per call, portable
+  `sibling_source` locator with `LOOMWEAVE_REPO` / `WARDLINE_REPO` /
+  `LEGIS_REPO` overrides, legacy `CLARION_REPO` alias and a next-to-checkout
+  fallback) plus one registry-driven parametrised drift test
+  (`test_sibling_drift.py`, 9 vendored-copy <-> sibling pairs, byte-for-byte
+  in both directions). The arming env is now per-sibling
+  `FILIGREE_REQUIRE_{LOOMWEAVE,WARDLINE,LEGIS}_REPO` with one documented
+  parse (`1/true/yes/on` arm; `0/false/no/off`/empty do not; anything else
+  raises) — previously `FILIGREE_REQUIRE_LOOMWEAVE_REPO=0` armed via bare
+  truthiness. A registered `federation_contract` pytest marker replaces the
+  hand-enumerated file list in the `loomweave-contract` CI job, guarded by a
+  marker-completeness test.
+- **Loomweave scan-results oracle** re-reads the pristine golden before its
+  later comparison and pins the wire-representative subset explicitly,
+  naming the producer-owned `path="/repo/root"` fixture artefact that never
+  crosses the wire instead of asserting a whole-golden rejection.
+- **Secret-scan hygiene for Loomweave briefings.** The sha256 provenance pin
+  in the capabilities oracle now shares a line with its `sha256` keyword and
+  the `test_weft_auth.py` fixture token carries a `secret-scan:
+  allow-this-line` marker, so Loomweave's index of this repo no longer
+  briefing-blocks 67 test entities on false positives (68 -> 1; the remaining
+  block is the real, gitignored `.env`, deliberately not baselined).
+  `tests/test_secret_scan_hygiene.py` guards both sites.
+- **docs(federation): contracts.md §G10** ratifies server-mode project
+  scoping of `GET /api/entity-associations` (path-scoped via `/api/p/{key}`,
+  default-project fallback with `X-Filigree-Project` echo, `?project=` not
+  honoured on classic routes, per-SQLite-file isolation per ADR-029
+  Decision 4), pinned by tests in `tests/api/test_multi_project.py`.
+
+### Fixed
+
+- **Cascade batch bounds a down Loomweave to one probe.** The RED-1
+  current-code drift check added a Loomweave round-trip (with its own
+  deadline/retry budget) per governed close; `close_resolved_findings` now
+  threads `loomweave_known_down` into `evaluate_closure_gate` (parity with
+  `legis_known_down`) so a down or slow Loomweave costs one retry budget per
+  batch instead of one per governed issue. Enrich-only holds: later issues in
+  the batch get freshness UNKNOWN (logged, reason
+  `registry_unavailable_earlier_in_batch`) and still receive their own Legis
+  verdict; nothing is deferred or blocked on Loomweave's account.
+  `GateDecision` gains an advisory `loomweave_unavailable` flag that never
+  affects `allowed`. (hub weft-aee5769607 item 1)
+
 ## [3.2.0] - 2026-09-02
 
 ### Added
