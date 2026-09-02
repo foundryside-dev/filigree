@@ -12,6 +12,7 @@ import filigree.dashboard as dash_module
 from filigree.core import FiligreeDB
 from filigree.dashboard import ProjectStore, create_app
 from filigree.types.api import ErrorCode
+from filigree.types.core import make_content_hash, make_loomweave_entity_id
 from tests.api.conftest import _create_project
 
 
@@ -814,6 +815,96 @@ class TestServerModeClassicWriteScope:
         resp = await multi_client.get("/api/issues")
         assert resp.status_code == 200, resp.text
         assert resp.headers.get("X-Filigree-Project") == "alpha"
+
+
+_SHARED_ENTITY = "py:func:shared"
+
+
+def _seed_shared_entity_binding(project_store: ProjectStore) -> dict[str, str]:
+    """Bind the SAME Loomweave entity to one issue in each project so project
+    scoping of the reverse lookup is observable (a mis-scoped read would return
+    the other project's rows). Returns ``{project_key: issue_id}``."""
+    seeded: dict[str, str] = {}
+    for key in ("alpha", "bravo"):
+        db = project_store.get_db(key)
+        issue_id = db.list_issues()[0].id
+        db.add_entity_association(
+            issue_id,
+            make_loomweave_entity_id(_SHARED_ENTITY),
+            make_content_hash(f"sha256:{key}"),
+            actor="test",
+        )
+        seeded[key] = issue_id
+    return seeded
+
+
+class TestServerModeEntityAssociationReverseLookupScope:
+    """filigree-2bd6f0af35 / contracts.md §G10: server-mode project scoping of
+    the Loomweave reverse lookup ``GET /api/entity-associations?entity_id=…``.
+
+    Pins the documented contract, not new behaviour: the route is classic
+    generation, so it is path-scoped (``/api/p/{key}/…``), an unscoped read
+    lands in the daemon's default project and says so via
+    ``X-Filigree-Project``, and ``?project=`` is NOT honoured (it is a
+    weft-surface affordance). Isolation is per SQLite file (ADR-029 Decision 4).
+    """
+
+    async def test_unscoped_read_resolves_to_default_project_and_echoes_it(
+        self, multi_client: AsyncClient, project_store: ProjectStore
+    ) -> None:
+        seeded = _seed_shared_entity_binding(project_store)
+        resp = await multi_client.get("/api/entity-associations", params={"entity_id": _SHARED_ENTITY})
+        assert resp.status_code == 200, resp.text
+        # alpha is the first-loaded project => the resolved default.
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        ids = [row["issue_id"] for row in resp.json()["associations"]]
+        assert ids == [seeded["alpha"]]
+
+    async def test_path_scoped_read_returns_only_that_project(self, multi_client: AsyncClient, project_store: ProjectStore) -> None:
+        seeded = _seed_shared_entity_binding(project_store)
+        resp = await multi_client.get("/api/p/bravo/entity-associations", params={"entity_id": _SHARED_ENTITY})
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "bravo"
+        ids = [row["issue_id"] for row in resp.json()["associations"]]
+        assert ids == [seeded["bravo"]]
+        assert all(i.startswith("bravo-") for i in ids)
+
+    async def test_path_scoped_read_unknown_project_is_404(self, multi_client: AsyncClient) -> None:
+        resp = await multi_client.get("/api/p/nonexistent/entity-associations", params={"entity_id": _SHARED_ENTITY})
+        assert resp.status_code == 404, resp.text
+        body = resp.json()
+        assert body["code"] == ErrorCode.NOT_FOUND
+        assert "Unknown project" in body["error"]
+
+    async def test_project_query_param_is_ignored_on_classic_route(self, multi_client: AsyncClient, project_store: ProjectStore) -> None:
+        """The documented gotcha: ``?project=`` is honoured only on weft-scoped
+        paths (``/api/weft/*``, ``/mcp``, the scan-results/observations
+        aliases). On this classic route it is silently dropped and the read
+        lands in the default project — a consumer that generalises the
+        ``/api/v1/scan-results?project=`` pattern reads the WRONG project
+        without any error. The header is what makes the misroute detectable."""
+        seeded = _seed_shared_entity_binding(project_store)
+        resp = await multi_client.get("/api/entity-associations", params={"entity_id": _SHARED_ENTITY, "project": "bravo"})
+        assert resp.status_code == 200, resp.text
+        assert resp.headers.get("X-Filigree-Project") == "alpha"
+        ids = [row["issue_id"] for row in resp.json()["associations"]]
+        assert ids == [seeded["alpha"]]
+        assert seeded["bravo"] not in ids
+
+    async def test_scoped_reads_are_disjoint_per_db_file(self, multi_client: AsyncClient, project_store: ProjectStore) -> None:
+        """ADR-029 Decision 4: no tenant column, no cross-project fan-out — each
+        scoped read sees only its own SQLite file's rows."""
+        seeded = _seed_shared_entity_binding(project_store)
+        seen: dict[str, set[str]] = {}
+        for key in ("alpha", "bravo"):
+            resp = await multi_client.get(f"/api/p/{key}/entity-associations", params={"entity_id": _SHARED_ENTITY})
+            assert resp.status_code == 200, resp.text
+            seen[key] = {row["issue_id"] for row in resp.json()["associations"]}
+        assert seen["alpha"] == {seeded["alpha"]}
+        assert seen["bravo"] == {seeded["bravo"]}
+        assert seen["alpha"].isdisjoint(seen["bravo"])
+        assert all(i.startswith("alpha-") for i in seen["alpha"])
+        assert all(i.startswith("bravo-") for i in seen["bravo"])
 
 
 class TestServerModeCrossProjectReadBlocking:

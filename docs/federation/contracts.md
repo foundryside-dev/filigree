@@ -367,7 +367,8 @@ labels) — reconcile deletions on an *unfiltered* feed.
 
 `issue_delete` cascades the issue's `entity_associations` rows
 (`ON DELETE CASCADE`). Filigree's own reverse-lookup surfaces
-(`entity_association_list_by_entity`, `GET /api/entity-associations?entity_id=…`)
+(`entity_association_list_by_entity`, `GET /api/entity-associations?entity_id=…` —
+server-mode scoping: §G10)
 read that table, so post-delete they correctly return nothing. **The hazard is
 on the consumer side:** a consumer that mirrors those bindings (e.g. Loomweave's
 reverse lookup) and reconciles only the issue would keep the mirrored binding
@@ -487,6 +488,31 @@ The default-hide lives **only at the agent surfaces**. The core `list_findings_g
 **3. Reversal trigger.** The machine surface stays inclusive-by-default **until a real federation consumer emerges that genuinely wants default-hide on `/api/weft/findings`.** If one does, revisit this decision (and align it with the agent-surface default) rather than letting consumers each reinvent the filter. Until then, inclusive holds. No consumer has requested it as of 2026-06-10.
 
 Pinned by `tests/api/test_files_api.py::TestWeftFindingsKindSuppressionFilters::test_default_stays_inclusive_unlike_agent_surfaces` (machine surface stays inclusive) and the agent-surface default-hide tests in `tests/mcp/test_finding_triage_tools.py` / `tests/cli/test_files_commands.py`. The filter vocabulary itself is pinned by the Wardline-owned conformance vector `tests/fixtures/contracts/wardline-suppression-filter-contract.json`, loaded by `tests/contracts/test_wardline_suppression_filter_contract.py`.
+
+## G10 — Reverse entity-association lookup: project scoping in server mode (2026-09-02)
+
+`GET /api/entity-associations?entity_id=…` is the reverse lookup Loomweave's `issues_for` consumes (ADR-029). In **server mode** (one daemon, many projects) the route resolves to exactly one project's SQLite file per request, and *which* file is decided by the URL **path**, never by a query parameter. This section ratifies that behaviour as-is — zero behaviour change (filigree-2bd6f0af35; Loomweave counterpart clarion-c37e1714fd).
+
+**1. The route is classic generation and transport-open.** It is mounted by the classic `entities` router (`src/filigree/dashboard_routes/entities.py`), not under `/api/weft/`. Per the Authentication section above it is **not** bearer-gated — `WEFT_FEDERATION_TOKEN` and the per-project federation tokens apply only to weft-scoped paths. Loopback is the boundary (ADR-012).
+
+**2. Scoping is by path; an unscoped read lands in the default project and says so.**
+
+| Request (server mode) | Resolves to | Response |
+|---|---|---|
+| `GET /api/p/{key}/entity-associations?entity_id=…` | project `{key}` only | `200`, `X-Filigree-Project: {key}` |
+| `GET /api/p/{unknown}/entity-associations?entity_id=…` | — | `404` `{"error": "Unknown project: '…'", "code": "NOT_FOUND"}` |
+| `GET /api/entity-associations?entity_id=…` (unscoped) | the daemon's **default project** — the first project registered in `~/.config/filigree/server.json` (`ProjectStore.default_key`) | `200`, `X-Filigree-Project: <resolved key>` |
+| unscoped, no projects registered | — | `503` (`NOT_INITIALIZED`) |
+
+In ethereal (single-project) mode there is no `/api/p/` mount, `/api/entity-associations` is the only form, and no `X-Filigree-Project` header is sent. The default project is "whichever was registered first"; consumers in a multi-project deployment MUST NOT rely on an unscoped read landing in the project they mean, and SHOULD check `X-Filigree-Project` on every server-mode read (the C-10(a) honest-seams rule: a defaulted read is never silent about its destination).
+
+**3. `?project={key}` is NOT honoured on this route.** The query-parameter scope is a *weft-surface* affordance: `extract_federation_scope` (`src/filigree/dashboard_auth.py`) consults `?project=` only when `is_weft_scoped_path` is true — `/api/weft/*`, `/mcp`, and the federation aliases `scan-results`, `observations`, `v1/scan-results`, `v1/observations`. `/api/entity-associations` is none of these, so **`GET /api/entity-associations?entity_id=…&project=bravo` silently drops `project`, resolves to the default project, and returns `200` with `X-Filigree-Project: alpha`** — the wrong project's rows, with no error. Consumers MUST use the `/api/p/{key}/entity-associations` path form to target a non-default project. **Do not generalise the scan-results pattern:** `POST /api/v1/scan-results?project=…` legitimately scopes by query because that alias *is* weft-scoped; carrying that idiom over to the reverse lookup is a no-op that reads the wrong project (this is the trap the Loomweave counterpart's proposed "`?project=` when set" fix would fall into — the correct fix shape is the path form). Aside: the MCP counterpart `entity_association_list_by_entity` scopes via `/mcp?project={key}` because `/mcp` *is* weft-scoped; that does not transfer to the HTTP classic route.
+
+**4. Isolation is per SQLite file.** There is no tenant column, no cross-project query, and no fan-out: a scoped read sees only the rows of the one database it resolved to, and the union of every project's scoped reads is disjoint by issue prefix (ADR-029 **Decision 4** — note the originating ticket mis-cites this as Decision 3, which is the drift-detection decision). A consumer that wants "every project bound to this entity" iterates `/api/p/{key}/` over `GET /api/projects` itself.
+
+**5. Reversal trigger.** Query-parameter scoping is extended to this classic route only if a product decision expands `?project=` beyond the weft surface (which would also pull the route under bearer auth via `LIVING_FEDERATION_ALIASES`). Until then, path-scoped is the contract. No such decision exists as of 2026-09-02.
+
+Pinned by `tests/api/test_multi_project.py::TestServerModeEntityAssociationReverseLookupScope` (unscoped → default + header echo; path-scoped isolation; unknown key → 404; `?project=` ignored; per-DB disjointness).
 
 ## When a contract evolves
 
