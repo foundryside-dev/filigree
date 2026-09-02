@@ -14,6 +14,8 @@ from filigree.core import FiligreeDB
 from filigree.registry import DEFAULT_TEST_REGISTRY_BACKENDS, RegistryBackend, ResolvedFile
 from tests._fakes.clarion_http import ClarionStubState, clarion_stub
 
+pytestmark = pytest.mark.federation_contract
+
 
 class _DisplacedRegistry:
     def __init__(self) -> None:

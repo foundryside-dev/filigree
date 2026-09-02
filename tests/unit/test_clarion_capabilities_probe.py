@@ -17,7 +17,9 @@ import pytest
 
 from filigree.core import FiligreeDB
 from filigree.registry import (
+    DEFAULT_LOOMWEAVE_TOKEN_ENV,
     EXPECTED_LOOMWEAVE_API_VERSION,
+    LEGACY_LOOMWEAVE_AUTHENTICATION,
     RegistryUnavailableError,
     RegistryVersionMismatchError,
     probe_loomweave_capabilities,
@@ -36,6 +38,9 @@ def test_probe_returns_capabilities_payload_with_typed_shape() -> None:
     assert capabilities["api_version"] == EXPECTED_LOOMWEAVE_API_VERSION
     assert capabilities["registry_backend"] is True
     assert capabilities["file_registry"] is True
+    # The stub omits the ADR-056 ``authentication`` block by default (pre-ADR-056
+    # Loomweave) -> the consumer assumes the legacy ``none``/``none``/``1`` posture.
+    assert capabilities["authentication"] == LEGACY_LOOMWEAVE_AUTHENTICATION
 
 
 def test_probe_rejects_unreachable_url_with_unavailable_error() -> None:
@@ -81,6 +86,179 @@ def test_validate_raises_when_loomweave_declines_registry_backend_role() -> None
             validate_loomweave_capabilities(capabilities, base_url=base_url)
 
     assert exc.value.cause_kind == "role_declined"
+
+
+_HMAC_AUTHENTICATION = {"protected_routes": "hmac", "capabilities_probe": "none", "contract_version": 1}
+
+
+def test_validate_raises_when_loomweave_advertises_unimplemented_auth_mode() -> None:
+    """ADR-056: an ``hmac`` protected mode Filigree cannot satisfy (it only sends
+    ``Authorization: Bearer``) is refused by the gate with one named error."""
+    with clarion_stub(authentication=_HMAC_AUTHENTICATION) as (base_url, _state):
+        capabilities = probe_loomweave_capabilities(base_url, timeout_seconds=1)
+        assert capabilities["authentication"] == _HMAC_AUTHENTICATION
+        with pytest.raises(RegistryUnavailableError) as exc:
+            validate_loomweave_capabilities(capabilities, base_url=base_url)
+
+    assert exc.value.cause_kind == "auth_mode_unsupported"
+    assert "authentication.protected_routes='hmac'" in str(exc.value)
+
+
+def test_validate_accepts_bearer_protected_routes() -> None:
+    with clarion_stub(authentication={"protected_routes": "bearer", "capabilities_probe": "none", "contract_version": 1}) as (
+        base_url,
+        _state,
+    ):
+        capabilities = probe_loomweave_capabilities(base_url, timeout_seconds=1)
+        validate_loomweave_capabilities(capabilities, base_url=base_url)
+
+    assert capabilities["authentication"]["protected_routes"] == "bearer"
+
+
+def test_filigree_db_startup_raises_on_unsupported_auth_mode(tmp_path: Path) -> None:
+    """The ONE fail-fast startup error for an HMAC-mode Loomweave — instead of
+    per-operation ``cause_kind='auth'`` 401s later."""
+    with clarion_stub(authentication=_HMAC_AUTHENTICATION) as (base_url, _state), pytest.raises(RegistryUnavailableError) as exc:
+        FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1},
+        )
+    assert exc.value.cause_kind == "auth_mode_unsupported"
+
+
+def test_filigree_db_startup_unsupported_auth_mode_with_fallback_downgrades_to_warn(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Same fallback policy as ``role_declined``: with ``allow_local_fallback`` the
+    auth-mode refusal is a WARN naming the cause, and Loomweave is left unprobed."""
+    with clarion_stub(authentication=_HMAC_AUTHENTICATION) as (base_url, _state):
+        with caplog.at_level(logging.WARNING, logger="filigree.core"):
+            db = FiligreeDB(
+                tmp_path / "filigree.db",
+                prefix="test",
+                registry_backend="loomweave",
+                loomweave_config={"base_url": base_url, "timeout_seconds": 1, "allow_local_fallback": True},
+            )
+        try:
+            db.initialize()
+            assert db.loomweave_capabilities is None
+            assert db.loomweave_instance_id is None
+            assert "Loomweave capability probe failed at startup" in caplog.text
+            assert any(getattr(record, "cause_kind", None) == "auth_mode_unsupported" for record in caplog.records)
+        finally:
+            db.close()
+
+
+_BEARER_AUTHENTICATION = {"protected_routes": "bearer", "capabilities_probe": "none", "contract_version": 1}
+
+
+def test_filigree_db_startup_raises_when_bearer_routes_but_no_token_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ONE fail-fast startup error for a bearer-mode Loomweave when Filigree
+    resolved no token (``WEFT_TOKEN`` unset) — instead of N per-operation
+    ``cause_kind='auth'`` 401s later. The message names the env var to export."""
+    monkeypatch.delenv(DEFAULT_LOOMWEAVE_TOKEN_ENV, raising=False)
+    with clarion_stub(authentication=_BEARER_AUTHENTICATION) as (base_url, _state), pytest.raises(RegistryUnavailableError) as exc:
+        FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1},
+        )
+    assert exc.value.cause_kind == "auth_token_missing"
+    assert DEFAULT_LOOMWEAVE_TOKEN_ENV in str(exc.value)
+
+
+def test_filigree_db_startup_missing_token_error_names_configured_token_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CUSTOM_LOOM_TOKEN", raising=False)
+    monkeypatch.setenv(DEFAULT_LOOMWEAVE_TOKEN_ENV, "not-the-configured-one")
+    with clarion_stub(authentication=_BEARER_AUTHENTICATION) as (base_url, _state), pytest.raises(RegistryUnavailableError) as exc:
+        FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1, "token_env": "CUSTOM_LOOM_TOKEN"},
+        )
+    assert exc.value.cause_kind == "auth_token_missing"
+    assert "'CUSTOM_LOOM_TOKEN'" in str(exc.value)
+
+
+def test_filigree_db_startup_bearer_routes_with_token_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bearer mode + a resolved token is the intended posture: the probe captures
+    identity and the resolved token is what later protected calls will carry."""
+    monkeypatch.setenv(DEFAULT_LOOMWEAVE_TOKEN_ENV, "loom-secret")
+    with clarion_stub(authentication=_BEARER_AUTHENTICATION, instance_id="bearer-instance") as (base_url, _state):
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1},
+        )
+        try:
+            db.initialize()
+            assert db.loomweave_instance_id == "bearer-instance"
+            assert db.loomweave_capabilities is not None
+            assert db.loomweave_capabilities["authentication"]["protected_routes"] == "bearer"
+        finally:
+            db.close()
+
+
+def test_filigree_db_startup_missing_token_with_fallback_downgrades_to_warn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Same fallback policy as ``role_declined`` / ``auth_mode_unsupported``: with
+    ``allow_local_fallback`` the missing-token refusal is a WARN naming the cause,
+    and Loomweave is left unprobed."""
+    monkeypatch.delenv(DEFAULT_LOOMWEAVE_TOKEN_ENV, raising=False)
+    with clarion_stub(authentication=_BEARER_AUTHENTICATION) as (base_url, _state):
+        with caplog.at_level(logging.WARNING, logger="filigree.core"):
+            db = FiligreeDB(
+                tmp_path / "filigree.db",
+                prefix="test",
+                registry_backend="loomweave",
+                loomweave_config={"base_url": base_url, "timeout_seconds": 1, "allow_local_fallback": True},
+            )
+        try:
+            db.initialize()
+            assert db.loomweave_capabilities is None
+            assert db.loomweave_instance_id is None
+            assert "Loomweave capability probe failed at startup" in caplog.text
+            assert any(getattr(record, "cause_kind", None) == "auth_token_missing" for record in caplog.records)
+        finally:
+            db.close()
+
+
+def test_reprobe_refuses_bearer_routes_when_token_vanished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The mid-session re-probe threads the (re-resolved) token too: a Loomweave
+    that flipped to bearer mode while Filigree has no token is refused with the
+    same named cause, logged at WARN, and leaves the captured identity untouched."""
+    monkeypatch.delenv(DEFAULT_LOOMWEAVE_TOKEN_ENV, raising=False)
+    with clarion_stub(instance_id="instance-original") as (base_url, state):
+        db = FiligreeDB(
+            tmp_path / "filigree.db",
+            prefix="test",
+            registry_backend="loomweave",
+            loomweave_config={"base_url": base_url, "timeout_seconds": 1},
+        )
+        try:
+            db.initialize()
+            assert db.loomweave_instance_id == "instance-original"
+            state.authentication = dict(_BEARER_AUTHENTICATION)
+            with caplog.at_level(logging.WARNING, logger="filigree.core"):
+                result = db.reprobe_loomweave_capabilities()
+            assert result is None
+            assert db.loomweave_instance_id == "instance-original"
+            assert any(getattr(record, "cause_kind", None) == "auth_token_missing" for record in caplog.records)
+        finally:
+            db.close()
 
 
 def test_filigree_db_startup_probe_captures_instance_id_and_api_version(tmp_path: Path) -> None:

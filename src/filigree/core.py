@@ -790,8 +790,10 @@ def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
     as a dashboard false-refused real migrations when an unrelated daemon held
     the colliding port (filigree-d5aa3bfe3d). So the listener must positively
     identify itself: ``GET /api/health`` (ungated, see ``dashboard_auth``) must
-    answer ``mode == "ethereal"`` — the ephemeral dashboard's self-identification
-    since v1.3.0. ``mode == "server"`` is a server-mode daemon that happens to
+    answer ``mode == "ephemeral"`` — the ephemeral dashboard's self-identification
+    since 3.3.0 (``"ethereal"`` from 1.3.0 to 3.2.x, still accepted: an older
+    dashboard may still be running across an upgrade). ``mode == "server"`` is a
+    server-mode daemon that happens to
     sit in the window; whether it serves *this* project is the registry tier's
     decision (:func:`_live_filigree_daemon_for_project`), not the port probe's.
     A pre-1.3.0 dashboard (no ``mode``) reads as unidentified → proceed; the
@@ -812,7 +814,7 @@ def _ephemeral_dashboard_port_if_live(project_root: Path) -> int | None:
         # Non-HTTP listener, connection refused at HTTP level, timeout, or
         # garbage body: not identifiable as a filigree dashboard → proceed.
         return None
-    if isinstance(payload, dict) and payload.get("mode") == "ethereal":
+    if isinstance(payload, dict) and payload.get("mode") in (EPHEMERAL_MODE, LEGACY_EPHEMERAL_MODE):
         return port
     return None
 
@@ -827,7 +829,8 @@ def _live_filigree_daemon_for_project(project_root: Path) -> int | None:
       * server-mode (B1): the shared daemon is alive (PID-verified ``daemon_status``)
         AND ``server.json`` registers a store dir whose project root is *project_root*.
       * ephemeral (B2): the project's deterministic dashboard port is bound AND
-        the listener answers ``/api/health`` as a filigree ethereal dashboard.
+        the listener answers ``/api/health`` as a filigree ephemeral dashboard
+        (either mode spelling).
 
     A still-open in-session MCP/stdio connection (B3) cannot be detected from here;
     that residual is documented in the upgrade notes.
@@ -1397,7 +1400,29 @@ def _raw_config_prefix(config_path: Path) -> str | None:
     return None
 
 
-VALID_MODES: frozenset[str] = frozenset({"ethereal", "server"})
+EPHEMERAL_MODE = "ephemeral"
+SERVER_MODE = "server"
+LEGACY_EPHEMERAL_MODE = "ethereal"  # pre-3.3.0 wire/config spelling, accepted on every read path
+VALID_MODES: frozenset[str] = frozenset({EPHEMERAL_MODE, SERVER_MODE})
+ACCEPTED_MODE_SPELLINGS: frozenset[str] = VALID_MODES | {LEGACY_EPHEMERAL_MODE}
+
+
+def normalize_mode(value: object) -> str:
+    """Return the canonical installation mode for *value*.
+
+    ``ephemeral`` is canonical since 3.3.0 (hub weft-096266aa27); the pre-3.3.0
+    spelling ``ethereal`` is accepted wherever Filigree reads a mode (config.json,
+    legacy .filigree.conf, ``--mode``, the ``/api/health`` migration probe) and
+    maps to ``ephemeral``. Every writer emits the canonical spelling.
+
+    Raises ``ValueError`` for a non-string or an unknown value; the message lists
+    only the canonical modes.
+    """
+    if isinstance(value, str) and value in ACCEPTED_MODE_SPELLINGS:
+        return EPHEMERAL_MODE if value == LEGACY_EPHEMERAL_MODE else value
+    raise ValueError(f"Unknown mode {value!r} in config. Valid modes: {sorted(VALID_MODES)}")
+
+
 VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[RegistryBackend, ...]", get_args(RegistryBackend)))
 
 
@@ -1596,15 +1621,15 @@ def _validate_registry_settings(raw: dict[str, Any], *, source: Path, require_lo
 
 
 def get_mode(filigree_dir: Path) -> str:
-    """Return the installation mode for a project. Defaults to 'ethereal'.
+    """Return the installation mode for a project. Defaults to ``ephemeral``.
+
+    Accepts the legacy spelling ``ethereal`` on disk and returns the canonical
+    one (``read_config`` stays raw; only this reader normalizes).
 
     Raises ValueError if the config contains an explicit but invalid mode string.
     """
     config = read_config(filigree_dir)
-    mode: Any = config.get("mode", "ethereal")
-    if not isinstance(mode, str) or mode not in VALID_MODES:
-        raise ValueError(f"Unknown mode {mode!r} in config. Valid modes: {sorted(VALID_MODES)}")
-    return mode
+    return normalize_mode(config.get("mode", EPHEMERAL_MODE))
 
 
 # ---------------------------------------------------------------------------
@@ -1941,6 +1966,15 @@ class FiligreeDB(
         """Return the configured Loomweave HTTP timeout in seconds."""
         return float(self.loomweave_config.get("timeout_seconds", 5))
 
+    def _loomweave_token_env_name(self) -> str:
+        """Return the env var name Filigree reads the Loomweave Bearer token from.
+
+        ``LoomweaveConfig.token_env`` when configured, else ``WEFT_TOKEN``. Shared
+        by token resolution and the probe-time ``auth_token_missing`` gate so the
+        startup error names the same variable the operator must export.
+        """
+        return self.loomweave_config.get("token_env", DEFAULT_LOOMWEAVE_TOKEN_ENV)
+
     def _resolve_loomweave_auth_token(self) -> str | None:
         """Resolve the Bearer token for Loomweave calls from the configured env var.
 
@@ -1949,9 +1983,11 @@ class FiligreeDB(
         a non-empty value, send ``Authorization: Bearer <token>``; if it is
         unset or empty, send no auth header. When ``token_env`` was set
         explicitly in config but the env var is missing or empty, emit a WARN
-        so operators can notice silent loopback-only fallback.
+        so operators can notice silent loopback-only fallback. (A Loomweave
+        that advertises ``protected_routes='bearer'`` while no token resolved is
+        then refused at the probe gate — see ``validate_loomweave_capabilities``.)
         """
-        token_env_name = self.loomweave_config.get("token_env", DEFAULT_LOOMWEAVE_TOKEN_ENV)
+        token_env_name = self._loomweave_token_env_name()
         token_env_was_explicit = "token_env" in self.loomweave_config
         value = os.environ.get(token_env_name, "")
         if value:
@@ -1972,6 +2008,10 @@ class FiligreeDB(
         - api_version mismatch always raises (no fallback can save a wire-break).
         - reachable Loomweave that declines the registry-backend role raises
           ``RegistryUnavailableError`` (transient; respects ``allow_local_fallback``).
+        - reachable Loomweave whose ADR-056 auth posture Filigree cannot satisfy
+          (an unimplemented mode, or ``bearer`` routes while no token resolved)
+          raises ``RegistryUnavailableError`` (``auth_mode_unsupported`` /
+          ``auth_token_missing``; same fallback policy as role_declined).
         - probe-time HTTP/network failure raises ``RegistryUnavailableError``
           (caller's ``allow_local_fallback`` decides whether to downgrade).
 
@@ -1982,7 +2022,12 @@ class FiligreeDB(
         """
         try:
             capabilities = probe_loomweave_capabilities(base_url, timeout_seconds=timeout_seconds, auth_token=auth_token)
-            validate_loomweave_capabilities(capabilities, base_url=base_url)
+            validate_loomweave_capabilities(
+                capabilities,
+                base_url=base_url,
+                token_present=bool(auth_token),
+                token_env=self._loomweave_token_env_name(),
+            )
         except RegistryVersionMismatchError:
             raise
         except RegistryUnavailableError as exc:
@@ -2033,7 +2078,12 @@ class FiligreeDB(
         auth_token = self._resolve_loomweave_auth_token()
         try:
             capabilities = probe_loomweave_capabilities(base_url_value, timeout_seconds=timeout_seconds, auth_token=auth_token)
-            validate_loomweave_capabilities(capabilities, base_url=base_url_value)
+            validate_loomweave_capabilities(
+                capabilities,
+                base_url=base_url_value,
+                token_present=bool(auth_token),
+                token_env=self._loomweave_token_env_name(),
+            )
         except RegistryUnavailableError as exc:
             logger.warning(
                 "Loomweave capability re-probe unreachable",

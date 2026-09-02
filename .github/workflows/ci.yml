@@ -15,6 +15,11 @@ on:
         required: false
         default: false
         type: boolean
+      require_federation_drift:
+        description: "Check out the loomweave/wardline/legis siblings and run the Layer-2 federation drift checks (fail if a sibling is missing)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -90,29 +95,21 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - run: uv sync --group dev
-      - run: >
-          uv run pytest
-          tests/unit/test_registry.py
-          tests/api/test_registry_backend_integration.py
-          tests/core/test_registry_backend_matrix.py
-          tests/api/test_weft_auth.py
-          tests/federation/test_sei_conformance_oracle.py
-          tests/federation/test_suppression_filter_conformance_oracle.py
-          tests/federation/test_scan_results_wire_conformance_oracle.py
-          tests/federation/test_loomweave_scan_results_wire_conformance_oracle.py
-          tests/federation/test_finding_identity_wire_conformance_oracle.py
-          tests/federation/test_entity_associations_wire_conformance_oracle.py
-          tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
-          tests/federation/test_capabilities_wire_conformance_oracle.py
-          tests/federation/test_signoff_binding_wire_conformance_oracle.py
+      # Marker-selected (not a hand-enumerated file list): every cross-repo
+      # wire/contract oracle carries ``pytestmark = pytest.mark.federation_contract``
+      # and tests/federation/test_oracle_helpers.py guards that no federation
+      # module is silently left out. No sibling repo is checked out here, so the
+      # Layer-2 drift params in test_sibling_drift.py skip; do NOT set
+      # FILIGREE_REQUIRE_<SIBLING>_REPO in this job.
+      - run: uv run pytest -m federation_contract
 
   live-loomweave:
     name: Live Loomweave Integration
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_live_loomweave) }}
     runs-on: ubuntu-latest
     env:
-      CLARION_STAGING_BASE_URL: ${{ secrets.CLARION_STAGING_BASE_URL }}
-      FILIGREE_REQUIRE_LIVE_CLARION: "1"
+      LOOMWEAVE_STAGING_BASE_URL: ${{ secrets.LOOMWEAVE_STAGING_BASE_URL }}
+      FILIGREE_REQUIRE_LIVE_LOOMWEAVE: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -123,10 +120,79 @@ jobs:
       - name: Run live Loomweave checks
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            uv run pytest tests/integration/test_clarion_staging_smoke.py
+            uv run pytest tests/integration/test_loomweave_staging_smoke.py
           else
             uv run pytest \
-              tests/integration/test_clarion_staging_smoke.py \
-              tests/integration/test_clarion_phase_d_e2e.py \
-              tests/federation/test_sei_oracle_live_clarion.py
+              tests/integration/test_loomweave_staging_smoke.py \
+              tests/integration/test_loomweave_phase_d_e2e.py \
+              tests/federation/test_sei_oracle_live_loomweave.py
           fi
+
+  federation-drift:
+    name: Federation Sibling Drift
+    # Layer-2 of the federation oracles (tests/federation/test_sibling_drift.py):
+    # every vendored cross-repo golden must be byte-identical to the sibling
+    # repo's copy. `loomweave-contract` runs those params skip-clean because it
+    # checks out nothing but this repo; this lane is the one place in CI where
+    # they EXECUTE, so golden drift (e.g. the v5-vs-v6 capabilities case) is
+    # caught weekly rather than on a developer machine. Gated like
+    # `live-loomweave`: weekly schedule + opt-in workflow_dispatch input.
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.require_federation_drift) }}
+    runs-on: ubuntu-latest
+    env:
+      # Explicit per-sibling checkout overrides (tests/federation/_oracle.py
+      # SIBLING_REPO_ENV). actions/checkout cannot place a checkout outside
+      # GITHUB_WORKSPACE, so the portable "next to this checkout" fallback is
+      # unreachable here; the siblings live under .siblings/ and are named
+      # outright instead.
+      LOOMWEAVE_REPO: ${{ github.workspace }}/.siblings/loomweave
+      WARDLINE_REPO: ${{ github.workspace }}/.siblings/wardline
+      LEGIS_REPO: ${{ github.workspace }}/.siblings/legis
+      # Arm every sibling: an absent or mislocated checkout is a hard failure,
+      # never a silent skip (that is the whole point of this lane).
+      FILIGREE_REQUIRE_LOOMWEAVE_REPO: "1"
+      FILIGREE_REQUIRE_WARDLINE_REPO: "1"
+      FILIGREE_REQUIRE_LEGIS_REPO: "1"
+    steps:
+      - uses: actions/checkout@v7
+      # setup-uv + sync run BEFORE the sibling checkouts so the uv cache key
+      # (default cache-dependency-glob covers **/uv.lock) is derived from this
+      # repo's lockfile only, not from whatever the siblings carry.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv sync --group dev
+      # NOTE: a red run of this scheduled lane makes the whole weekly workflow
+      # run non-success, so release.yml's live-loomweave-release-check (which
+      # filters scheduled runs on status=success) will warn even when
+      # live-loomweave itself passed. Check this job before chasing staging.
+      # Sibling checkouts at their DEFAULT branch (no `ref:`), shallow. The
+      # default GITHUB_TOKEN is scoped to this repository and cannot read a
+      # sibling that is private: the repo owner must provision the
+      # FEDERATION_CHECKOUT_TOKEN secret (a fine-grained PAT with contents:read
+      # on foundryside-dev/{loomweave,wardline,legis}) in that case. While the
+      # siblings are public the github.token fallback is sufficient.
+      - name: Check out loomweave (sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: foundryside-dev/loomweave
+          path: .siblings/loomweave
+          token: ${{ secrets.FEDERATION_CHECKOUT_TOKEN || github.token }}
+      - name: Check out wardline (sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: foundryside-dev/wardline
+          path: .siblings/wardline
+          token: ${{ secrets.FEDERATION_CHECKOUT_TOKEN || github.token }}
+      - name: Check out legis (sibling)
+        uses: actions/checkout@v7
+        with:
+          repository: foundryside-dev/legis
+          path: .siblings/legis
+          token: ${{ secrets.FEDERATION_CHECKOUT_TOKEN || github.token }}
+      # Marker-selected AND scoped to the drift module: this lane exists to
+      # run the Layer-2 params for real, not to re-run the whole federation
+      # suite (loomweave-contract already does that on every PR).
+      - name: Run federation sibling drift checks
+        run: uv run pytest -m federation_contract tests/federation/test_sibling_drift.py -q

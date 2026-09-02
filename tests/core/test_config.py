@@ -13,12 +13,17 @@ import pytest
 
 from filigree import cli_common
 from filigree.core import (
+    ACCEPTED_MODE_SPELLINGS,
+    EPHEMERAL_MODE,
     FILIGREE_DIR_NAME,
+    LEGACY_EPHEMERAL_MODE,
+    VALID_MODES,
     FiligreeDB,
     Issue,
     find_filigree_command,
     find_filigree_root,
     get_mode,
+    normalize_mode,
     read_config,
     write_atomic,
     write_config,
@@ -405,11 +410,13 @@ class TestGetMode:
     @pytest.mark.parametrize(
         ("config", "expected"),
         [
-            ({"prefix": "test", "version": 1}, "ethereal"),
-            ({"prefix": "test", "version": 1, "mode": "ethereal"}, "ethereal"),
+            ({"prefix": "test", "version": 1}, "ephemeral"),
+            ({"prefix": "test", "version": 1, "mode": "ephemeral"}, "ephemeral"),
+            # PDR-0051 probe: the pre-3.3.0 spelling on disk must read as canonical.
+            ({"prefix": "test", "version": 1, "mode": "ethereal"}, "ephemeral"),
             ({"prefix": "test", "version": 1, "mode": "server"}, "server"),
         ],
-        ids=["no-mode-field", "explicit-ethereal", "explicit-server"],
+        ids=["no-mode-field", "explicit-ephemeral", "legacy-ethereal", "explicit-server"],
     )
     def test_mode_from_config(self, tmp_path: Path, config: dict[str, Any], expected: str) -> None:
         filigree_dir = tmp_path / ".filigree"
@@ -417,10 +424,22 @@ class TestGetMode:
         (filigree_dir / "config.json").write_text(json.dumps(config))
         assert get_mode(filigree_dir) == expected
 
-    def test_missing_config_defaults_to_ethereal(self, tmp_path: Path) -> None:
+    def test_missing_config_defaults_to_ephemeral(self, tmp_path: Path) -> None:
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
-        assert get_mode(filigree_dir) == "ethereal"
+        assert get_mode(filigree_dir) == "ephemeral"
+
+    def test_legacy_spelling_accepted_on_read_but_not_canonical(self, tmp_path: Path) -> None:
+        """``ethereal`` is not a valid *canonical* mode, but every read path accepts it."""
+        assert frozenset({"ephemeral", "server"}) == VALID_MODES
+        assert LEGACY_EPHEMERAL_MODE == "ethereal"
+        assert LEGACY_EPHEMERAL_MODE not in VALID_MODES
+        assert LEGACY_EPHEMERAL_MODE in ACCEPTED_MODE_SPELLINGS
+        assert VALID_MODES | {LEGACY_EPHEMERAL_MODE} == ACCEPTED_MODE_SPELLINGS
+        filigree_dir = tmp_path / ".filigree"
+        filigree_dir.mkdir()
+        (filigree_dir / "config.json").write_text(json.dumps({"prefix": "t", "version": 1, "mode": LEGACY_EPHEMERAL_MODE}))
+        assert get_mode(filigree_dir) == EPHEMERAL_MODE
 
     def test_unknown_mode_raises_value_error(self, tmp_path: Path) -> None:
         """Unknown mode values raise ValueError instead of silently falling back."""
@@ -443,6 +462,32 @@ class TestGetMode:
         (filigree_dir / "config.json").write_text(json.dumps(config))
         with pytest.raises(ValueError, match="mode"):
             get_mode(filigree_dir)
+
+
+class TestNormalizeMode:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("ephemeral", "ephemeral"),
+            ("ethereal", "ephemeral"),
+            ("server", "server"),
+        ],
+        ids=["canonical-ephemeral", "legacy-ethereal", "server"],
+    )
+    def test_normalizes_accepted_spellings(self, value: str, expected: str) -> None:
+        assert normalize_mode(value) == expected
+
+    @pytest.mark.parametrize("bad", ["bogus", "", "Ephemeral", [], {}, 1, True, None])
+    def test_rejects_unknown_values_with_value_error(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="Valid modes"):
+            normalize_mode(bad)
+
+    def test_error_lists_only_canonical_modes(self) -> None:
+        with pytest.raises(ValueError, match="bogus") as exc_info:
+            normalize_mode("bogus")
+        assert "ephemeral" in str(exc_info.value)
+        assert "server" in str(exc_info.value)
+        assert "ethereal" not in str(exc_info.value)
 
 
 class TestFindFiligreeCommand:

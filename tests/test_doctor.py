@@ -2134,8 +2134,9 @@ class TestDoctorFederationTokenChecks:
 
         return ServerConfig(port=8377, projects=projects or {})
 
-    def test_non_server_mode_returns_empty(self, tmp_path: Path) -> None:
-        assert _doctor_federation_token_checks(tmp_path, "ethereal") == []
+    @pytest.mark.parametrize("mode", ["ephemeral", "ethereal"])
+    def test_non_server_mode_returns_empty(self, tmp_path: Path, mode: str) -> None:
+        assert _doctor_federation_token_checks(tmp_path, mode) == []
 
     def test_mcp_json_embedding_home_token_is_reported_and_fixable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from filigree.cli_commands.admin import _fix_mcp_token_reference

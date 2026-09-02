@@ -19,7 +19,7 @@ Every filigree project has a `.filigree/` directory at its root, discovered by w
   filigree.db    # SQLite database (WAL mode)
   context.md     # Auto-generated project summary, refreshed on every mutation
   scanners/      # Scanner registry (*.toml), optional
-  ephemeral.pid  # Runtime PID metadata in ethereal mode, optional
+  ephemeral.pid  # Runtime PID metadata in ephemeral mode, optional
   templates/     # Project-local workflow template overrides (optional)
   packs/         # Installed workflow packs (optional)
 ```
@@ -30,14 +30,14 @@ Every filigree project has a `.filigree/` directory at its root, discovered by w
 {
   "prefix": "myproj",
   "version": 1,
-  "mode": "ethereal",
+  "mode": "ephemeral",
   "enabled_packs": ["core", "planning"]
 }
 ```
 
 - **prefix** — used in issue IDs (`{prefix}-{10hex}`, e.g., `myproj-a3f9b2e1c0`)
 - **version** — config format version
-- **mode** — installation mode (`ethereal` or `server`)
+- **mode** — installation mode (`ephemeral` or `server`; `ephemeral` is canonical since 3.3.0 and the pre-3.3.0 spelling `ethereal` is still accepted on read, but existing files are never rewritten)
 - **enabled_packs** — which workflow packs are active
 
 ## Source Layout
@@ -210,7 +210,7 @@ Filigree finds the project root by walking up the filesystem looking for `.filig
 
 - No environment variables to set
 - No config files to parse
-- No server URLs to resolve in default `ethereal` mode
+- No server URLs to resolve in default `ephemeral` mode
 - Works from any subdirectory of the project
 
 ### Template-Driven Validation

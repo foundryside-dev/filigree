@@ -28,7 +28,7 @@ Filigree is an issue tracker designed for AI coding agents. This roadmap outline
 
 ## Shipped (v1.3–v1.5)
 
-- **Server/ethereal operating modes** -- `filigree init --mode` and `filigree install --mode` for explicit setup; server daemon lifecycle, deterministic port selection, streamable HTTP MCP endpoint
+- **Server/ephemeral operating modes** -- `filigree init --mode` and `filigree install --mode` for explicit setup; server daemon lifecycle, deterministic port selection, streamable HTTP MCP endpoint
 - **Files, findings, and scanner platform** -- file records, scan findings workflow, scanner registry from TOML configs, scan ingest with issue promotion, Files and Code Health dashboard views
 - **Observations subsystem** -- fire-and-forget agent scratchpad with TTL expiry, promote-to-issue flow, file anchoring, dashboard integration
 - **Architecture refactor (v1.4)** -- `FiligreeDB` decomposed into domain mixins, CLI commands split into subpackage, MCP tools split into domain modules, `DBMixinProtocol` for type safety

@@ -82,3 +82,6 @@ READ_ONLY_CODEBASE_AUDIT_*.md
 findings.jsonl
 /.wardline/
 **/.wardline/
+
+# Sibling checkouts made by the federation-drift CI lane (or a local repro of it)
+.siblings/

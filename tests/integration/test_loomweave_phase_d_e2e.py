@@ -26,7 +26,6 @@ Project Setup".
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -43,6 +42,7 @@ from httpx import ASGITransport, AsyncClient
 import filigree.dashboard as dash_module
 from filigree.core import FiligreeDB
 from filigree.dashboard import create_app
+from tests.federation._oracle import live_loomweave_required
 
 pytestmark = [
     pytest.mark.integration,
@@ -50,19 +50,20 @@ pytestmark = [
 ]
 
 
-def _clarion_unavailable_action(*, require_live: bool | None = None) -> str:
+def _loomweave_unavailable_action(*, require_live: bool | None = None) -> str:
     """Return whether live-Loomweave unavailability should skip or fail.
 
     Normal contributor lanes may not have Loomweave installed. Release lanes can
-    set ``FILIGREE_REQUIRE_LIVE_CLARION=1`` so cross-product drift is fatal
-    instead of silently reported as a skip.
+    set ``FILIGREE_REQUIRE_LIVE_LOOMWEAVE=1`` (or ``true``/``yes``/``on`` — the
+    same parser as the ``FILIGREE_REQUIRE_<SIBLING>_REPO`` drift flags) so
+    cross-product drift is fatal instead of silently reported as a skip.
     """
-    required = os.environ.get("FILIGREE_REQUIRE_LIVE_CLARION") == "1" if require_live is None else require_live
+    required = live_loomweave_required() if require_live is None else require_live
     return "fail" if required else "skip"
 
 
 def _loomweave_unavailable(reason: str) -> None:
-    if _clarion_unavailable_action() == "fail":
+    if _loomweave_unavailable_action() == "fail":
         pytest.fail(reason)
     pytest.skip(reason)
 

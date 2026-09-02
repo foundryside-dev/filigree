@@ -22,6 +22,7 @@ from urllib.error import URLError
 import portalocker
 
 from filigree.core import (
+    EPHEMERAL_MODE,
     FiligreeDB,
     ForeignDatabaseError,
     find_filigree_anchor,
@@ -37,6 +38,8 @@ from filigree.install import (
     install_skills,
     is_agents_md_redirect,
 )
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry_errors import registry_startup_error_response, registry_startup_hint
 
 logger = logging.getLogger(__name__)
 
@@ -358,12 +361,28 @@ def generate_session_context() -> str | None:
 
     try:
         db = FiligreeDB.from_anchor(anchor)
+    except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+        # loomweave mode failing closed at the startup probe (or a wire break).
+        # Neither is sqlite3/ValueError/OSError, so without this arm the error
+        # escapes to the CLI wrapper's generic "hook failed" traceback and the
+        # remedy never reaches the agent. Render the same one-line error + hint
+        # the CLI's ``get_db`` path prints, inside the snapshot the hook emits.
+        response = registry_startup_error_response(exc, action="opening project database")
+        context = (
+            f"=== Filigree Project Snapshot ===\n\n"
+            f"WARNING: {response['error']}\n"
+            f"{registry_startup_hint(exc)}\n"
+            f"Project directory: {project_root}"
+        )
+        if freshness_messages:
+            context += "\n\n" + "\n".join(freshness_messages)
+        return context
     except (sqlite3.Error, ValueError, OSError):
         logger.warning("Database init failed for %s", filigree_dir, exc_info=True)
         context = (
             f"=== Filigree Project Snapshot ===\n\n"
             f"WARNING: Could not open project database. Run `filigree doctor` to diagnose.\n"
-            f"Project directory: {filigree_dir.parent}"
+            f"Project directory: {project_root}"
         )
         if freshness_messages:
             context += "\n\n" + "\n".join(freshness_messages)
@@ -375,14 +394,14 @@ def generate_session_context() -> str | None:
         context = (
             f"=== Filigree Project Snapshot ===\n\n"
             f"WARNING: Could not read project database. Run `filigree doctor` to diagnose.\n"
-            f"Project directory: {filigree_dir.parent}"
+            f"Project directory: {project_root}"
         )
     except Exception:
         logger.error("BUG: Unexpected error building session context for %s", filigree_dir, exc_info=True)
         context = (
             f"=== Filigree Project Snapshot ===\n\n"
             f"WARNING: Unexpected error building session context. Run `filigree doctor` to diagnose.\n"
-            f"Project directory: {filigree_dir.parent}"
+            f"Project directory: {project_root}"
         )
     finally:
         db.close()
@@ -429,7 +448,7 @@ def _find_agent_filigree_dir() -> Path:
 def ensure_dashboard_running(port: int | None = None) -> str:
     """Ensure the filigree dashboard is running.
 
-    In ethereal mode (default): spawns a single-project dashboard on a
+    In ephemeral mode (default): spawns a single-project dashboard on a
     deterministic port, with PID/port files in .filigree/.
     In server mode: just verifies the daemon is reachable.
     """
@@ -446,8 +465,8 @@ def ensure_dashboard_running(port: int | None = None) -> str:
     try:
         mode = get_mode(filigree_dir)
     except ValueError:
-        logger.warning("Invalid mode in config, falling back to ethereal", exc_info=True)
-        mode = "ethereal"
+        logger.warning("Invalid mode in config, falling back to ephemeral", exc_info=True)
+        mode = EPHEMERAL_MODE
 
     if mode == "server":
         return _ensure_dashboard_server_mode(filigree_dir, port)
@@ -525,7 +544,7 @@ def _terminate_orphan_dashboard(pid: int, *, sigterm_grace: float = 2.0) -> None
 
 
 def _ensure_dashboard_ethereal_mode(filigree_dir: Path) -> str:
-    """Ethereal mode: session-scoped dashboard on a deterministic port."""
+    """Ephemeral mode: session-scoped dashboard on a deterministic port (identifier predates the 3.3.0 rename)."""
     from filigree.ephemeral import (
         DASHBOARD_STARTUP_GRACE_SECONDS,
         cleanup_legacy_tmp_files,

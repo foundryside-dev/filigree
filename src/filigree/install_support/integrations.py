@@ -439,12 +439,12 @@ def _guard_mcp_json_gitignore(project_root: Path) -> str | None:
 def install_claude_code_mcp(
     project_root: Path,
     *,
-    mode: str = "ethereal",
+    mode: str = "ephemeral",
     server_port: int = 8377,
 ) -> tuple[bool, str]:
     """Install filigree MCP into Claude Code's config.
 
-    In ethereal mode: stdio transport (per-session process).
+    In ephemeral mode: stdio transport (per-session process).
     In server mode: streamable-http transport pointing to daemon.
     """
     if mode == "server":
@@ -460,7 +460,7 @@ def install_claude_code_mcp(
 def install_codex_mcp(
     project_root: Path,
     *,
-    mode: str = "ethereal",
+    mode: str = "ephemeral",
     server_port: int = 8377,
 ) -> tuple[bool, str]:
     """Install filigree-mcp into Codex's MCP config.

@@ -310,6 +310,32 @@ class TestGenerateSessionContext:
         assert result is not None
         assert "Filigree Project Snapshot" in result
 
+    def test_registry_unavailable_returns_remedy_not_traceback(self, db: FiligreeDB) -> None:
+        """A fail-closed Loomweave outage at DB open (``RegistryUnavailableError``
+        is a RuntimeError, not sqlite3/ValueError/OSError) must render the shared
+        REGISTRY_UNAVAILABLE line plus its remedy in the returned context — not
+        escape to the CLI wrapper's generic 'hook failed' traceback."""
+        from filigree.registry import RegistryUnavailableError
+
+        anchor = _anchor_for_db(db)
+        exc = RegistryUnavailableError(
+            "Loomweave capability probe unreachable at http://127.0.0.1:1/api/v1/_capabilities: refused",
+            url="http://127.0.0.1:1/api/v1/_capabilities",
+            cause_kind="network",
+        )
+        with (
+            patch("filigree.hooks.find_filigree_anchor", return_value=anchor),
+            patch("filigree.hooks.FiligreeDB.from_anchor", side_effect=exc),
+        ):
+            result = generate_session_context()
+        assert result is not None
+        assert "Filigree Project Snapshot" in result
+        assert "Registry unavailable" in result
+        assert "cause_kind=network" in result
+        assert "http://127.0.0.1:1" in result
+        assert "loomweave serve" in result
+        assert "allow_local_fallback" in result
+
 
 class TestIsPortListening:
     def test_unused_port_returns_false(self) -> None:
@@ -469,7 +495,7 @@ class TestEnsureDashboardStartupRace:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch(
                 "filigree.ephemeral.verify_pid_ownership",
@@ -556,7 +582,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -585,7 +611,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -615,7 +641,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -897,11 +923,12 @@ class TestEnsureDashboardEthereal:
 
         assert ensure_dashboard_running() == ""
 
-    def test_starts_dashboard_on_deterministic_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """In ethereal mode, dashboard starts on project-specific port."""
+    @pytest.mark.parametrize("mode", ["ephemeral", "ethereal"], ids=["canonical", "legacy-spelling"])
+    def test_starts_dashboard_on_deterministic_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+        """In ephemeral mode (either on-disk spelling), dashboard starts on project-specific port."""
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
-        config = {"prefix": "test", "version": 1, "mode": "ethereal"}
+        config = {"prefix": "test", "version": 1, "mode": mode}
         (filigree_dir / "config.json").write_text(json.dumps(config))
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()

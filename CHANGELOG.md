@@ -7,6 +7,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-09-02
+
+### Added
+
+- **Loomweave capabilities `authentication` posture (ADR-056, fixture v6).**
+  The capabilities probe now extracts `{protected_routes, capabilities_probe,
+  contract_version}` into `LoomweaveCapabilities.authentication` (new
+  `LoomweaveAuthentication` TypedDict), and `validate_loomweave_capabilities`
+  fails fast at startup/reprobe with
+  `RegistryUnavailableError(cause_kind='auth_mode_unsupported')` naming the
+  field, mode and URL when Loomweave advertises a `protected_routes` mode
+  outside `none`/`bearer` (for example `hmac`, which Filigree does not
+  implement) or a `capabilities_probe` mode other than `none`. A Loomweave
+  that omits the block (pre-ADR-056) is treated as `none`/`none`/`1` and keeps
+  working; a present-but-malformed block is an `invalid_response` wire-shape
+  break; a `contract_version` other than 1 logs a warning and is not
+  rejected. Gate order is api_version, then role, then authentication. An
+  HMAC-mode Loomweave that previously limped along with per-operation
+  `cause_kind='auth'` 401s is now refused once at the probe, or downgraded to
+  a warning plus local fallback when `allow_local_fallback` is set.
+
+- **Rename lineage on orphaned bindings.** The closure-gate drift check now
+  relays Loomweave's latest `sei_lineage` event for a governed SEI reported
+  `alive:false`, preferring the `lineage` list inlined on the by-SEI body and
+  falling back to `GET /api/v1/identity/lineage/:sei` only when the body
+  carries none. `GateDecision` gains an advisory `lineage_hints` field, a
+  non-PROCEED gate reason is suffixed with `rename lineage: <sei> ->
+  <new_locator> (<event>)`, and the `entity_unresolved` drift-gate log record
+  carries the hints. Enrich-only: an older Loomweave without the route, an
+  unreachable one, or a malformed body yields no hint and never changes the
+  gate outcome; `loomweave_known_down` skips the lookup. (filigree-4e13d133f7)
+
+- **CI `federation-drift` lane** (weekly schedule plus the
+  `workflow_dispatch` input `require_federation_drift`) checks out
+  foundryside-dev/{loomweave,wardline,legis} under `.siblings/`, points
+  `LOOMWEAVE_REPO` / `WARDLINE_REPO` / `LEGIS_REPO` at them, arms all three
+  `FILIGREE_REQUIRE_<SIBLING>_REPO` envs and runs
+  `tests/federation/test_sibling_drift.py`, so the Layer-2 vendored-golden
+  byte-drift checks execute mechanically instead of skipping in every CI
+  job. Private siblings need the `FEDERATION_CHECKOUT_TOKEN` secret.
+  (filigree-df6d1d99e2)
+- **Bearer mode without a token fails fast.** When Loomweave advertises
+  `authentication.protected_routes='bearer'` but Filigree resolved no bearer
+  token (`WEFT_TOKEN` / the configured `loomweave.token_env` unset or empty),
+  the capability probe raises one
+  `RegistryUnavailableError(cause_kind='auth_token_missing')` naming the
+  probe URL and the env var to export, instead of N per-operation
+  `cause_kind='auth'` 401s later. `validate_loomweave_capabilities` gained
+  optional `token_present` / `token_env` keywords (default: check skipped);
+  the check runs after the api_version, role and auth-mode gates and honours
+  `allow_local_fallback` like `role_declined`. (filigree-cfcc7987a0)
+
+### Changed
+
+- **Installation mode vocabulary: `ephemeral` is canonical** (hub
+  weft-096266aa27, owner ruling 2026-07-29). `filigree init` / `install` now
+  write `"mode": "ephemeral"` to `config.json` and `/api/health` answers
+  `mode == "ephemeral"`. The pre-3.3.0 spelling `ethereal` is still accepted
+  everywhere Filigree reads a mode (`config.json`, legacy `.filigree.conf`
+  carry-forward, `--mode`, the store-migration `/api/health` port probe), and
+  existing `config.json` files are not rewritten unless `--mode` is passed.
+  New `core.normalize_mode()` is the single normalisation point; `VALID_MODES`
+  is now `{ephemeral, server}`. Consumers comparing the literal `ethereal`
+  (wardline's doctor `_filigree_local_mode`) should accept both.
+- **Federation oracles: shared Layer-2 drift machinery.** The copy-pasted
+  sibling-authority helpers in `tests/federation/` (`_blob_sha`,
+  `_load_golden`, `/home/john/<sibling>` locators, per-module skip-clean drift
+  tests) collapse into `tests/federation/_oracle.py` (git-blob hasher,
+  bytes-cached golden loader returning a fresh object per call, portable
+  `sibling_source` locator with `LOOMWEAVE_REPO` / `WARDLINE_REPO` /
+  `LEGIS_REPO` overrides, legacy `CLARION_REPO` alias and a next-to-checkout
+  fallback) plus one registry-driven parametrised drift test
+  (`test_sibling_drift.py`, 9 vendored-copy <-> sibling pairs, byte-for-byte
+  in both directions). The arming env is now per-sibling
+  `FILIGREE_REQUIRE_{LOOMWEAVE,WARDLINE,LEGIS}_REPO` with one documented
+  parse (`1/true/yes/on` arm; `0/false/no/off`/empty do not; anything else
+  raises) — previously `FILIGREE_REQUIRE_LOOMWEAVE_REPO=0` armed via bare
+  truthiness. A registered `federation_contract` pytest marker replaces the
+  hand-enumerated file list in the `loomweave-contract` CI job, guarded by a
+  marker-completeness test.
+- **Loomweave scan-results oracle** re-reads the pristine golden before its
+  later comparison and pins the wire-representative subset explicitly,
+  naming the producer-owned `path="/repo/root"` fixture artefact that never
+  crosses the wire instead of asserting a whole-golden rejection.
+- **Secret-scan hygiene for Loomweave briefings.** The sha256 provenance pin
+  in the capabilities oracle now shares a line with its `sha256` keyword and
+  the `test_weft_auth.py` fixture token carries a `secret-scan:
+  allow-this-line` marker, so Loomweave's index of this repo no longer
+  briefing-blocks 67 test entities on false positives (68 -> 1; the remaining
+  block is the real, gitignored `.env`, deliberately not baselined).
+  `tests/test_secret_scan_hygiene.py` guards both sites.
+- **Live Loomweave integration lane renamed off its Clarion-era names.** The
+  repository secret is now `LOOMWEAVE_STAGING_BASE_URL` (was
+  `CLARION_STAGING_BASE_URL`), the required-mode flag is
+  `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` (was `FILIGREE_REQUIRE_LIVE_CLARION`), and
+  the lane's test modules moved to
+  `tests/integration/test_loomweave_staging_smoke.py`,
+  `tests/integration/test_loomweave_phase_d_e2e.py` and
+  `tests/federation/test_sei_oracle_live_loomweave.py` (git mv). No
+  compatibility alias: no secret was ever provisioned under the old name, so
+  the scheduled lane stays red until `LOOMWEAVE_STAGING_BASE_URL` is set.
+- **docs(federation): contracts.md §G10** ratifies server-mode project
+  scoping of `GET /api/entity-associations` (path-scoped via `/api/p/{key}`,
+  default-project fallback with `X-Filigree-Project` echo, `?project=` not
+  honoured on classic routes, per-SQLite-file isolation per ADR-029
+  Decision 4), pinned by tests in `tests/api/test_multi_project.py`.
+
+### Fixed
+
+- **PR #85 review fixes (Loomweave fail-closed paths).**
+  `filigree init` and the `filigree session-context` hook now render the
+  shared `REGISTRY_UNAVAILABLE` envelope and remedy when the project cannot
+  open in fail-closed loomweave mode, instead of a raw traceback (init) or a
+  generic "hook failed" warning (hook). The legacy `.filigree.conf`
+  carry-forward tolerates a non-canonical `mode` spelling and falls back to
+  `ephemeral` with a warning for an unknown value, so the conf still retires
+  instead of aborting. The stdio MCP server no longer latches a startup
+  registry failure for the process lifetime: `call_tool` re-attempts startup
+  at most once per 10 s and clears degraded mode once Loomweave is back
+  (`mcp_status_get.registry_retry` reports the schedule). The remedy hint is
+  now specific to `cause_kind` across CLI, MCP and dashboard (`auth` /
+  `auth_token_missing` name the token env; `role_declined` /
+  `auth_mode_unsupported` point at Loomweave's configuration;
+  `invalid_response` suggests no fallback; only reachability failures say
+  "start Loomweave"), and dashboard envelopes for a request-time registry
+  failure read "while handling request" rather than claiming the database
+  failed to open.
+- **Closure-gate batch bound only trips on real outages.** Only
+  connectivity-class failures (network, timeout, and a retried-out gateway
+  502/503/504) flip the cascade's `loomweave_known_down`; a deterministic
+  4xx or plain 500 degrades only that issue to UNKNOWN, so one issue's
+  oversize locator can no longer mask a later issue's drifted binding. The
+  orphan rename-hint fallback has its own advisory
+  `GateDecision.lineage_unavailable` flag, a single bounded attempt and a
+  per-instance memo of a missing lineage route, and is never folded into the
+  batch bound. `_resolve_locator_content_hashes` gets the same 413
+  halve-and-retry as the other batch paths, and the three 413 splitters
+  share one helper. New `LOOMWEAVE_GATEWAY_STATUS_CODES` /
+  `is_loomweave_backend_unreachable()` classifier in `filigree.registry`.
+- **A scan-results batch no longer fails on one over-cap path.**
+  `process_scan_results` reports a `BODY_TOO_LARGE` path on `warnings` and
+  ingests the rest of the batch instead of re-promoting it to a whole-batch
+  `RegistryResolutionError`; other structured error codes keep the
+  fail-closed rejection.
+- **Live-lane arming flag uses the shared parser.**
+  `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` accepts `1/true/yes/on` like the sibling
+  drift flags (junk raises) via `tests/federation/_oracle`; contracts.md §G10
+  uses the canonical `ephemeral` spelling.
+- **Loomweave batch POSTs are chunked by body bytes, not just count.**
+  Loomweave caps every `/api/v1/*` request body at 16 KiB (transport-level
+  HTTP 413), so a 256-row `/api/v1/files/batch` chunk of real paths (about
+  25 KiB) was rejected and `migrate-registry` marked every row unresolved;
+  `identity/resolve:batch` (sei-backfill, closure-gate drift reads) had the
+  same latent failure. `LoomweaveRegistry` now targets
+  `LOOMWEAVE_BATCH_MAX_BODY_BYTES` (16 KiB minus 1 KiB headroom, measured
+  with the exact httpx `json=` encoding) alongside the 256-query cap, halves
+  and retries a chunk Loomweave still answers 413 to, and reports a single
+  query that cannot fit on the `errors` channel with `code=BODY_TOO_LARGE`
+  instead of failing the batch. Small batches keep a byte-identical wire
+  shape. (filigree-b57d4eb7d9)
+- **Fail-closed Loomweave outage renders as an error envelope, not a
+  traceback.** With `registry_backend=loomweave`, `allow_local_fallback=false`
+  and Loomweave unreachable, every CLI verb died with a raw
+  `RegistryUnavailableError`. `cli_common.get_db` now emits the shared
+  `REGISTRY_UNAVAILABLE` envelope (exit 1): one stderr line naming backend,
+  `cause_kind` and probed URL plus a remedy line (`loomweave serve` or
+  `loomweave.allow_local_fallback=true`); `--json` carries the same envelope
+  with `details.backend` and `details.hint`. The MCP stdio server starts in
+  degraded mode (`mcp_status_get.status == "registry_unavailable"`), the HTTP
+  MCP resolver and dashboard server-mode project open answer the envelope,
+  and dashboard ephemeral startup exits 1 cleanly. (filigree-8fd300e2f7)
+- **Cascade batch bounds a down Loomweave to one probe.** The RED-1
+  current-code drift check added a Loomweave round-trip (with its own
+  deadline/retry budget) per governed close; `close_resolved_findings` now
+  threads `loomweave_known_down` into `evaluate_closure_gate` (parity with
+  `legis_known_down`) so a down or slow Loomweave costs one retry budget per
+  batch instead of one per governed issue. Enrich-only holds: later issues in
+  the batch get freshness UNKNOWN (logged, reason
+  `registry_unavailable_earlier_in_batch`) and still receive their own Legis
+  verdict; nothing is deferred or blocked on Loomweave's account.
+  `GateDecision` gains an advisory `loomweave_unavailable` flag that never
+  affects `allowed`. (hub weft-aee5769607 item 1)
+
 ## [3.2.0] - 2026-09-02
 
 ### Added

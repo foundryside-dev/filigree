@@ -40,12 +40,21 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
-from typing import Any, Literal, Protocol, TypeAlias, TypedDict
+from typing import Any, Literal, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
-from filigree.types.core import ContentHash, EntityId, FileId, RegistryBackend, make_content_hash, make_entity_id, make_file_id
+from filigree.types.core import (
+    ContentHash,
+    EntityId,
+    FileId,
+    LineageEvent,
+    RegistryBackend,
+    make_content_hash,
+    make_entity_id,
+    make_file_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,11 @@ DEFAULT_TEST_REGISTRY_BACKENDS: tuple[RegistryBackend, ...] = ("local", "loomwea
 REGISTRY_BACKEND_FEATURES: tuple[RegistryBackend, ...] = ("local", "loomweave")
 LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS = 3
 LOOMWEAVE_RESOLVE_FILE_RETRY_BACKOFF_SECONDS = 0.05
+# Deadline cap for the enrich-only orphan rename-hint fallback
+# (``GET /api/v1/identity/lineage/{sei}``): a single attempt under
+# ``min(timeout_seconds, this)`` per orphaned SEI, so a hanging lineage route
+# can never charge the closure gate a full retry budget per binding.
+LOOMWEAVE_LINEAGE_HINT_TIMEOUT_SECONDS = 1.0
 
 # The one sanctioned peek at Loomweave's otherwise-opaque entity-id grammar: the
 # frozen Stable Entity Identity prefix (ADR-038). An id carrying it is an SEI and
@@ -74,6 +88,28 @@ LOOMWEAVE_SEI_PREFIX = "loomweave:eid:"
 # breaking change to the resolver protocol (see ADR-014 §4 and the
 # Briefing-block masking section).
 EXPECTED_LOOMWEAVE_API_VERSION = 1
+
+# ADR-056 authentication discovery (Loomweave capabilities fixture v6). The
+# `_capabilities` body carries a normative ``authentication`` block
+# ``{protected_routes, capabilities_probe, contract_version}`` naming the serving
+# mode. Loomweave's producer vocabulary (``AuthenticationMode``) serialises exactly
+# ``none | bearer | hmac``; ``capabilities_probe`` is the literal ``"none"`` (the
+# probe itself is never authenticated) and ``contract_version`` is ``1``.
+#
+# Filigree implements ONLY bearer: ``_loomweave_headers`` attaches
+# ``Authorization: Bearer <token>`` and nothing else, and Filigree owns no HMAC
+# signing contract. ``hmac`` is therefore deliberately absent from the supported
+# set — a Loomweave advertising it is refused at the probe/validate pair with one
+# named ``RegistryUnavailableError(cause_kind='auth_mode_unsupported')`` rather
+# than being marked usable and failing per-operation with 401s. Unknown future
+# modes are refused by the same gate; widen the set in lockstep with the
+# re-vendored fixture when Filigree actually implements a mode. The one other
+# predictable per-operation-401 case — ``bearer`` routes while Filigree resolved
+# NO token — is refused by the same validate step (``cause_kind='auth_token_missing'``)
+# when the caller passes ``token_present``.
+EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION = 1
+SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES: frozenset[str] = frozenset({"none", "bearer"})
+SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES: frozenset[str] = frozenset({"none"})
 
 
 class LocalResolvedFile(TypedDict):
@@ -144,10 +180,12 @@ class BatchResolution(TypedDict):
     ``messages`` is an optional per-path sidecar carrying the original
     registry exception's ``str()`` for items in ``not_found`` /
     ``briefing_blocked``. Wire-protocol batch responses do not populate it
-    (those channels are bare path lists on the wire); the loop-fallback
-    adapter populates it from the single-item exception messages so call
-    sites can preserve the original context when promoting batch channels
-    back into per-item exceptions.
+    for those channels (they are bare path lists on the wire); the
+    loop-fallback adapter populates it from the single-item exception
+    messages, and the wire path populates it for ``BODY_TOO_LARGE``
+    ``errors`` entries (a single query that cannot fit under Loomweave's
+    16 KiB body cap), so call sites can preserve the original context when
+    promoting batch channels back into per-item exceptions.
     """
 
     resolved: dict[str, ResolvedFile]
@@ -194,6 +232,178 @@ class SeiResolution(TypedDict):
 # can size their inputs deliberately.
 LOOMWEAVE_BATCH_MAX_QUERIES = 256
 
+# Loomweave ALSO caps every ``/api/v1/*`` request body at 16 KiB at the
+# transport layer (``RequestBodyLimitLayer``; contracts.md §POST
+# /api/v1/files/batch "max 16 KiB", "413 n/a"). An over-cap body is answered
+# ``413 text/plain "length limit exceeded"`` before any JSON is parsed — no
+# error envelope, no ``code``. 256 real-world paths serialize to ~25 KiB, so
+# chunking by count alone trips it (filigree-b57d4eb7d9). Filigree therefore
+# sizes chunks by serialized body bytes as well: ``LOOMWEAVE_BATCH_MAX_BODY_BYTES``
+# is the client-side target — the contract cap minus headroom, so a
+# measurement discrepancy on the server side never surfaces as a 413 — and
+# ``LOOMWEAVE_BATCH_BODY_CAP_BYTES`` is the hard contract figure a single query
+# provably cannot exceed and still be accepted.
+LOOMWEAVE_BATCH_BODY_CAP_BYTES = 16 * 1024
+LOOMWEAVE_BATCH_BODY_HEADROOM_BYTES = 1024
+LOOMWEAVE_BATCH_MAX_BODY_BYTES = LOOMWEAVE_BATCH_BODY_CAP_BYTES - LOOMWEAVE_BATCH_BODY_HEADROOM_BYTES
+
+# ``errors[].code`` Filigree synthesizes (Loomweave never emits it) for a
+# single query whose body cannot fit under the transport cap: the item is
+# reported unresolved on its own channel instead of failing the whole batch.
+LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE = "BODY_TOO_LARGE"
+
+
+def loomweave_wire_body_size(payload: object) -> int:
+    """Byte length of ``payload`` exactly as httpx puts it on the wire for ``json=``.
+
+    httpx 0.28 encodes ``json=`` with ``ensure_ascii=False`` and compact
+    separators, then UTF-8 — so a non-ASCII path costs its UTF-8 width, not its
+    escaped ``\\uXXXX`` width. The chunker measures with the SAME settings so
+    its arithmetic is the request's Content-Length, not an estimate. Keep this
+    in lockstep with :func:`httpx._content.encode_json`.
+    """
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+_ChunkItem = TypeVar("_ChunkItem")
+
+
+def _chunk_by_wire_size(
+    items: list[_ChunkItem],
+    *,
+    envelope_key: str,
+    wire_item: Callable[[_ChunkItem], object],
+    max_items: int = LOOMWEAVE_BATCH_MAX_QUERIES,
+    max_body_bytes: int = LOOMWEAVE_BATCH_MAX_BODY_BYTES,
+) -> list[list[_ChunkItem]]:
+    """Greedily pack ``items`` into chunks bounded by BOTH count and body bytes.
+
+    The body shape is ``{"<envelope_key>":[<wire_item>, ...]}``; each item's
+    cost is its compact-JSON UTF-8 length plus the separating comma. Order is
+    preserved and nothing is dropped: an item that cannot fit under
+    ``max_body_bytes`` even alone becomes a single-item chunk (the caller
+    decides how to report it — see :meth:`LoomweaveRegistry.resolve_files_batch`).
+    """
+    envelope_overhead = loomweave_wire_body_size({envelope_key: []})
+    chunks: list[list[_ChunkItem]] = []
+    current: list[_ChunkItem] = []
+    current_bytes = envelope_overhead
+    for item in items:
+        item_bytes = loomweave_wire_body_size(wire_item(item))
+        added = item_bytes + (1 if current else 0)  # +1 for the "," separator
+        if current and (len(current) >= max_items or current_bytes + added > max_body_bytes):
+            chunks.append(current)
+            current = []
+            current_bytes = envelope_overhead
+            added = item_bytes
+        current.append(item)
+        current_bytes += added
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _batch_query_wire_item(query: BatchQuery) -> dict[str, str]:
+    """The exact per-query object ``POST /api/v1/files/batch`` carries."""
+    return {"path": query["path"], "language": query.get("language", "")}
+
+
+def chunk_batch_queries(queries: list[BatchQuery]) -> list[list[BatchQuery]]:
+    """Split ``queries`` for ``POST /api/v1/files/batch`` by count AND body bytes.
+
+    Every chunk holds at most ``LOOMWEAVE_BATCH_MAX_QUERIES`` queries and
+    serializes to at most ``LOOMWEAVE_BATCH_MAX_BODY_BYTES`` — except a single
+    query that is over the cap by itself, which is isolated into its own chunk
+    so the resolver can report it unresolved without losing its neighbours.
+    """
+    return _chunk_by_wire_size(queries, envelope_key="queries", wire_item=_batch_query_wire_item)
+
+
+def _chunk_locators(locators: list[str]) -> list[list[str]]:
+    """Split ``locators`` for ``POST /api/v1/identity/resolve:batch`` by count AND body bytes."""
+    return _chunk_by_wire_size(locators, envelope_key="locators", wire_item=lambda locator: locator)
+
+
+def _merge_batch_resolution(into: BatchResolution, part: BatchResolution) -> None:
+    into["resolved"].update(part["resolved"])
+    into["not_found"].extend(part["not_found"])
+    into["briefing_blocked"].extend(part["briefing_blocked"])
+    into["errors"].extend(part["errors"])
+    into["messages"].update(part.get("messages", {}))
+
+
+def _merge_content_hash_map(into: dict[str, str], part: dict[str, str]) -> None:
+    into.update(part)
+
+
+def _merge_sei_resolution(into: SeiResolution, part: SeiResolution) -> None:
+    into["resolved"].update(part["resolved"])
+    into["orphaned"].extend(part["orphaned"])
+    into["already_migrated"].extend(part["already_migrated"])
+
+
+class _BatchBodyTooLargeError(Exception):
+    """Internal: Loomweave answered HTTP 413 (transport body cap) for a chunk.
+
+    Never escapes ``LoomweaveRegistry`` — the batch resolvers catch it and
+    either split the chunk or report the lone item unresolved.
+    """
+
+    def __init__(self, *, url: str, body_bytes: int) -> None:
+        super().__init__(f"HTTP 413 from {url} for a {body_bytes}-byte body")
+        self.url = url
+        self.body_bytes = body_bytes
+
+
+_ChunkResult = TypeVar("_ChunkResult")
+
+
+def _resolve_chunk_splitting_on_413(
+    chunk: list[_ChunkItem],
+    *,
+    resolve_chunk: Callable[[list[_ChunkItem]], _ChunkResult],
+    merge: Callable[[_ChunkResult, _ChunkResult], None],
+    single_item_too_large: Callable[[_ChunkItem, _BatchBodyTooLargeError], _ChunkResult],
+    surface: str,
+) -> _ChunkResult:
+    """Resolve ``chunk`` via ``resolve_chunk``, halving on HTTP 413 until every item has an outcome.
+
+    The one splitter every ``/api/v1/*`` batch POST shares (files batch, SEI
+    resolve, drift content-hash read): a chunk Loomweave refuses with the
+    transport body cap is split in two and both halves retried (bounded: at
+    most log2(chunk) levels); a LONE item it still refuses is handed to
+    ``single_item_too_large`` so the caller decides how to report it (an error
+    entry, a ``RegistryResolutionError``, or a per-item UNKNOWN) — never a
+    whole-backend ``RegistryUnavailableError``. ``merge`` folds the right
+    half's result into the left's in place; ``surface`` names the endpoint in
+    the split log line.
+    """
+    try:
+        return resolve_chunk(chunk)
+    except _BatchBodyTooLargeError as exc:
+        if len(chunk) == 1:
+            return single_item_too_large(chunk[0], exc)
+        mid = len(chunk) // 2
+        logger.warning(
+            "%s at %s answered HTTP 413 for a %d-item, %d-byte chunk; splitting %d/%d",
+            surface,
+            exc.url,
+            len(chunk),
+            exc.body_bytes,
+            mid,
+            len(chunk) - mid,
+        )
+        result = _resolve_chunk_splitting_on_413(
+            chunk[:mid], resolve_chunk=resolve_chunk, merge=merge, single_item_too_large=single_item_too_large, surface=surface
+        )
+        merge(
+            result,
+            _resolve_chunk_splitting_on_413(
+                chunk[mid:], resolve_chunk=resolve_chunk, merge=merge, single_item_too_large=single_item_too_large, surface=surface
+            ),
+        )
+        return result
+
 
 class EntityHashResolution(TypedDict):
     """Outcome of resolving opaque entity ids to their CURRENT content_hash.
@@ -210,10 +420,29 @@ class EntityHashResolution(TypedDict):
       block (the enrich-only invariant). A whole-backend availability failure is
       NOT reported here; it raises :class:`RegistryUnavailableError` so the
       caller can degrade with a distinct, discriminated reason.
+    - ``lineage_hints`` — keyed by the *submitted* entity id: the LAST Loomweave
+      lineage event for an SEI-form id that resolved ``alive:false`` (orphaned)
+      AND for which a lineage list with >=1 well-formed event was available
+      (inline on the by-SEI body, else via ``GET .../identity/lineage/{sei}``).
+      Present ONLY when at least one hint exists — an absent key means "no
+      hints", so legacy producers / fakes that never set it need no change.
+      Enrich-only: a hint never changes ``resolved`` / ``unresolved``; any
+      failure of the hint lookup is swallowed inside the registry. Locator-form
+      ids never get a hint (``resolve:batch`` reports them in ``not_found``
+      without an SEI and Loomweave has no locator-keyed lineage surface).
+    - ``lineage_unavailable`` — present (``True``) ONLY when the lineage-route
+      fallback hit a connectivity-class failure (``cause_kind`` ``network`` /
+      ``timeout``: the request got no answer) for at least one orphaned SEI.
+      Advisory: the two primary channels are complete and authoritative
+      regardless; a batch caller may count it toward its Loomweave known-down
+      bound. A 404 (route unsupported), 5xx, or malformed body never sets it —
+      Loomweave answered.
     """
 
     resolved: dict[str, str]
     unresolved: list[str]
+    lineage_hints: NotRequired[dict[str, LineageEvent]]
+    lineage_unavailable: NotRequired[bool]
 
 
 def resolve_files_batch_via_loop(
@@ -282,14 +511,55 @@ class RegistryProtocol(Protocol):
     def is_displaced(self) -> bool: ...
 
 
-class RegistryUnavailableError(RuntimeError):
-    """Raised when the configured registry backend cannot resolve a file."""
+# ``RegistryUnavailableError.cause_kind`` values that prove the request got NO
+# answer from Loomweave — the backend (or the path to it) is down or hanging,
+# so a batch caller may bound the outage to one probe per batch. Every other
+# kind (``http_error`` incl. deterministic 4xx such as 413, ``auth``,
+# ``invalid_response``, the probe-time auth/role kinds) means Loomweave
+# ANSWERED and the failure may be specific to this request's input: degrade
+# only the request that failed, never the rest of the batch.
+LOOMWEAVE_CONNECTIVITY_CAUSE_KINDS = frozenset({"network", "timeout"})
 
-    def __init__(self, message: str, *, url: str = "", path: str = "", cause_kind: str = "unknown") -> None:
+
+class RegistryUnavailableError(RuntimeError):
+    """Raised when the configured registry backend cannot resolve a file.
+
+    ``cause_kind`` discriminates the failure (see
+    :data:`LOOMWEAVE_CONNECTIVITY_CAUSE_KINDS` for the connectivity class);
+    ``status_code`` is the HTTP status when Loomweave answered with a non-2xx,
+    ``None`` otherwise.
+    """
+
+    def __init__(self, message: str, *, url: str = "", path: str = "", cause_kind: str = "unknown", status_code: int | None = None) -> None:
         super().__init__(message)
         self.url = url
         self.path = path
         self.cause_kind = cause_kind
+        self.status_code = status_code
+
+
+# Gateway-class HTTP statuses: a reverse proxy / load balancer in front of a
+# dead, overloaded or unreachable Loomweave (502 Bad Gateway, 503 Service
+# Unavailable, 504 Gateway Timeout). They are input-independent — every request
+# would get the same answer — so once one has survived the retry budget it is
+# evidence the BACKEND is down, not that this request was bad. A plain 500 is
+# deliberately excluded: a specific input can trigger it.
+LOOMWEAVE_GATEWAY_STATUS_CODES = frozenset({502, 503, 504})
+
+
+def is_loomweave_backend_unreachable(exc: RegistryUnavailableError) -> bool:
+    """True when *exc* proves the Loomweave backend itself is down or hanging.
+
+    Connectivity-class failures (:data:`LOOMWEAVE_CONNECTIVITY_CAUSE_KINDS` —
+    the request got no answer) and a retried-out gateway 5xx
+    (:data:`LOOMWEAVE_GATEWAY_STATUS_CODES` — a proxy answered for a dead
+    upstream). Both are input-independent, so a batch caller may bound the
+    outage to one probe per batch. Everything else (a deterministic 4xx such as
+    413 for one oversize locator, a plain 500, an auth refusal, a malformed
+    body) means Loomweave answered THIS request and may be specific to it:
+    degrade only that request, never the rest of the batch.
+    """
+    return exc.cause_kind in LOOMWEAVE_CONNECTIVITY_CAUSE_KINDS or exc.status_code in LOOMWEAVE_GATEWAY_STATUS_CODES
 
 
 class RegistryResolutionError(ValueError):
@@ -336,6 +606,33 @@ class RegistryVersionMismatchError(RuntimeError):
         self.advertised = advertised
 
 
+class LoomweaveAuthentication(TypedDict):
+    """Loomweave's ADR-056 ``authentication`` discovery block, verbatim from the wire.
+
+    ``protected_routes`` names the mode Loomweave enforces on its protected
+    routes (producer vocabulary ``none | bearer | hmac``); ``capabilities_probe``
+    names the mode on ``_capabilities`` itself (always ``none``);
+    ``contract_version`` versions this descriptor (currently ``1``). The probe
+    only shape-checks these — the mode-vocabulary gate lives in
+    ``validate_loomweave_capabilities``.
+    """
+
+    protected_routes: str
+    capabilities_probe: str
+    contract_version: int
+
+
+# What a Loomweave that predates ADR-056 (capabilities fixture < v6) is taken to
+# mean when it omits the ``authentication`` block: unauthenticated routes and
+# probe, descriptor version 1. The consumer degrades to this assumption and keeps
+# working (mirrors the ``sei`` absent-object default) instead of crashing.
+LEGACY_LOOMWEAVE_AUTHENTICATION: LoomweaveAuthentication = {
+    "protected_routes": "none",
+    "capabilities_probe": "none",
+    "contract_version": EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+}
+
+
 class LoomweaveCapabilities(TypedDict):
     """Loomweave ``GET /api/v1/_capabilities`` response shape.
 
@@ -360,6 +657,12 @@ class LoomweaveCapabilities(TypedDict):
     # ``sei_supported``.
     sei_supported: bool
     sei_version: int
+    # ADR-056 ``authentication`` discovery block (fixture v6), extracted verbatim.
+    # A Loomweave that omits the block (pre-ADR-056) yields
+    # ``LEGACY_LOOMWEAVE_AUTHENTICATION`` (``none``/``none``/``1``) so the
+    # consumer keeps working on the legacy assumption; a present block is
+    # shape-checked by the probe and mode-gated by ``validate_loomweave_capabilities``.
+    authentication: LoomweaveAuthentication
 
 
 def loomweave_capabilities_url(base_url: str) -> str:
@@ -380,6 +683,43 @@ def loomweave_identity_sei_url(base_url: str, sei: str) -> str:
     current ``content_hash`` for an alive SEI — the by-SEI counterpart to the
     locator-keyed ``resolve:batch`` surface (ADR-038)."""
     return f"{base_url.rstrip('/')}/api/v1/identity/sei/{quote(sei, safe='')}"
+
+
+def loomweave_identity_lineage_url(base_url: str, sei: str) -> str:
+    """Build the Loomweave SEI lineage URL (``GET /api/v1/identity/lineage/{sei}``).
+
+    Same percent-encoding rationale as :func:`loomweave_identity_sei_url`. The
+    endpoint returns ``{sei, lineage:[{event, old_locator, new_locator, run_id,
+    recorded_at}, ...]}`` — an unknown SEI is an empty lineage, never a 404; a
+    404 here means an older Loomweave without the route (ADR-038)."""
+    return f"{base_url.rstrip('/')}/api/v1/identity/lineage/{quote(sei, safe='')}"
+
+
+def _last_lineage_event(lineage: object) -> LineageEvent | None:
+    """Validate a Loomweave ``lineage`` list and return its LAST event, or ``None``.
+
+    Field-by-field validation at the boundary: the list must be non-empty and
+    its last element a dict carrying ``event`` / ``run_id`` / ``recorded_at`` as
+    strings and ``old_locator`` / ``new_locator`` as ``str | None``. Anything
+    else (absent list, wrong element shape, wrong field types) is "no hint" —
+    the hint is enrich-only, so a malformed producer body must never raise.
+    Extra producer-side keys are dropped; the hint is the documented 5-key event.
+    """
+    if not isinstance(lineage, list) or not lineage:
+        return None
+    last = lineage[-1]
+    if not isinstance(last, dict):
+        return None
+    event = last.get("event")
+    run_id = last.get("run_id")
+    recorded_at = last.get("recorded_at")
+    old_locator = last.get("old_locator")
+    new_locator = last.get("new_locator")
+    if not isinstance(event, str) or not isinstance(run_id, str) or not isinstance(recorded_at, str):
+        return None
+    if not isinstance(old_locator, str | None) or not isinstance(new_locator, str | None):
+        return None
+    return LineageEvent(event=event, old_locator=old_locator, new_locator=new_locator, run_id=run_id, recorded_at=recorded_at)
 
 
 def _is_loopback_origin(url: str) -> bool:
@@ -428,9 +768,14 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
     On HTTP-level failure (network, timeout, non-200) raises
     ``RegistryUnavailableError`` so callers can treat probe-time and
     resolve-time outages with the same fallback policy.
-    On schema-level failure (missing field, wrong type) raises
-    ``RegistryUnavailableError`` with ``cause_kind='invalid_response'``.
-    Version-mismatch checks are layered on by ``validate_loomweave_capabilities``.
+    On schema-level failure (missing field, wrong type — including a malformed
+    ADR-056 ``authentication`` block) raises ``RegistryUnavailableError`` with
+    ``cause_kind='invalid_response'``. The nested ``sei`` and ``authentication``
+    objects are tolerated when ABSENT (older Loomweave; see
+    ``_parse_sei_capability`` / ``_parse_authentication_capability``).
+    Version-mismatch and auth-mode gates are layered on by
+    ``validate_loomweave_capabilities`` — the probe is shape only, never a value
+    gate.
     """
     url = loomweave_capabilities_url(base_url)
     _validate_loomweave_token_origin(url, auth_token=auth_token)
@@ -471,6 +816,7 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
 
     sei_supported, sei_version = _parse_sei_capability(payload, url=url)
+    authentication = _parse_authentication_capability(payload, url=url)
 
     return LoomweaveCapabilities(
         registry_backend=payload["registry_backend"],
@@ -479,6 +825,7 @@ def probe_loomweave_capabilities(base_url: str, *, timeout_seconds: float, auth_
         instance_id=payload["instance_id"],
         sei_supported=sei_supported,
         sei_version=sei_version,
+        authentication=authentication,
     )
 
 
@@ -508,13 +855,82 @@ def _parse_sei_capability(payload: dict[str, Any], *, url: str) -> tuple[bool, i
     return (supported, version)
 
 
-def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base_url: str) -> None:
+def _parse_authentication_capability(payload: dict[str, Any], *, url: str) -> LoomweaveAuthentication:
+    """Read Loomweave's ADR-056 ``authentication`` block, tolerating a pre-ADR-056 Loomweave.
+
+    A Loomweave older than capabilities fixture v6 omits the block entirely; that
+    is not an error — it means "legacy posture" and yields
+    ``LEGACY_LOOMWEAVE_AUTHENTICATION`` (``none``/``none``/``1``). When the block
+    IS present it must be well-formed: ``protected_routes`` and
+    ``capabilities_probe`` non-empty strings, ``contract_version`` an integer.
+    A malformed block is a wire-contract break and raises ``invalid_response``
+    like every other shape check.
+
+    Shape ONLY. The mode vocabulary (``none``/``bearer`` vs ``hmac``/unknown) is
+    a value gate and lives in ``validate_loomweave_capabilities`` — putting it
+    here would make an ``hmac`` Loomweave fail as a *shape* error instead of the
+    named ``auth_mode_unsupported`` error operators are meant to see.
+    """
+    authentication = payload.get("authentication")
+    if authentication is None:
+        return LEGACY_LOOMWEAVE_AUTHENTICATION.copy()
+    if not isinstance(authentication, dict):
+        msg = f"Loomweave capability probe from {url}: 'authentication' must be an object, got {type(authentication).__name__}"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    modes: dict[str, str] = {}
+    for field in ("protected_routes", "capabilities_probe"):
+        mode = authentication.get(field)
+        if not isinstance(mode, str) or not mode:
+            msg = f"Loomweave capability probe from {url}: 'authentication.{field}' must be a non-empty string"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        modes[field] = mode
+    contract_version = authentication.get("contract_version")
+    if not isinstance(contract_version, int) or isinstance(contract_version, bool):
+        msg = f"Loomweave capability probe from {url}: 'authentication.contract_version' must be an integer"
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+    return LoomweaveAuthentication(
+        protected_routes=modes["protected_routes"],
+        capabilities_probe=modes["capabilities_probe"],
+        contract_version=contract_version,
+    )
+
+
+def validate_loomweave_capabilities(
+    capabilities: LoomweaveCapabilities,
+    *,
+    base_url: str,
+    token_present: bool | None = None,
+    token_env: str = DEFAULT_LOOMWEAVE_TOKEN_ENV,
+) -> None:
     """Reject Loomweave advertisements that contradict ADR-014's contract.
 
     Raises ``RegistryVersionMismatchError`` on api_version mismatch (no fallback
     can fix a wire-protocol break). Raises ``RegistryUnavailableError`` when
-    Loomweave reports it is unwilling to serve registry-backend traffic — this is
-    a transient configuration issue, so fallback semantics apply.
+    Loomweave reports it is unwilling to serve registry-backend traffic
+    (``cause_kind='role_declined'``) — this is a transient configuration issue,
+    so fallback semantics apply. Raises ``RegistryUnavailableError`` with
+    ``cause_kind='auth_mode_unsupported'`` when the ADR-056 ``authentication``
+    block advertises a ``protected_routes`` mode outside
+    ``SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES`` (e.g. ``hmac``, which Filigree
+    does not implement) or a ``capabilities_probe`` mode outside
+    ``SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES`` — same fallback policy as
+    ``role_declined``. An ``authentication.contract_version`` other than
+    ``EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION`` is logged at WARN, never
+    rejected (the gate is on modes only).
+
+    ``token_present`` is whether the caller resolved a Bearer token for this
+    Loomweave (``None`` = unknown: the check is skipped, so callers that never
+    learned the token keep the mode-only gate byte-identically). When it is
+    ``False`` and ``protected_routes == 'bearer'`` every protected call would
+    fail with a 401, so the gate raises ONE ``RegistryUnavailableError`` with
+    ``cause_kind='auth_token_missing'`` at probe time naming the URL and the env
+    var Filigree reads (``token_env``, the ``loomweave.token_env`` config key,
+    default ``WEFT_TOKEN``) — same fallback policy as ``role_declined``. This is
+    an enrich-only/functional gate, not a security boundary.
+
+    Gate order is api_version → role → authentication mode → token presence,
+    so a wire-protocol break stays the loudest signal and an unimplemented mode
+    wins over a merely-missing token.
     """
     url = loomweave_capabilities_url(base_url)
     advertised = capabilities["api_version"]
@@ -538,6 +954,42 @@ def validate_loomweave_capabilities(capabilities: LoomweaveCapabilities, *, base
             "Reconfigure Loomweave or switch this project to registry_backend='local'."
         )
         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="role_declined")
+
+    authentication = capabilities["authentication"]
+    contract_version = authentication["contract_version"]
+    if contract_version != EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION:
+        logger.warning(
+            "Loomweave at %s advertised authentication.contract_version=%r; this Filigree was written against "
+            "contract_version=%r. Proceeding on the mode gate alone — verify the ADR-056 descriptor did not change shape.",
+            url,
+            contract_version,
+            EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+            extra={
+                "url": url,
+                "advertised_auth_contract_version": contract_version,
+                "expected_auth_contract_version": EXPECTED_LOOMWEAVE_AUTH_CONTRACT_VERSION,
+            },
+        )
+    mode_gates: tuple[tuple[str, str, frozenset[str]], ...] = (
+        ("protected_routes", authentication["protected_routes"], SUPPORTED_LOOMWEAVE_PROTECTED_ROUTES_MODES),
+        ("capabilities_probe", authentication["capabilities_probe"], SUPPORTED_LOOMWEAVE_CAPABILITIES_PROBE_MODES),
+    )
+    for field, mode, supported in mode_gates:
+        if mode not in supported:
+            msg = (
+                f"Loomweave at {url} advertised authentication.{field}={mode!r}, which this Filigree does not implement "
+                f"(supported: {sorted(supported)}; Filigree sends only 'Authorization: Bearer'). "
+                "Reconfigure Loomweave's serving mode or switch this project to registry_backend='local'."
+            )
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth_mode_unsupported")
+    if token_present is False and authentication["protected_routes"] == "bearer":
+        msg = (
+            f"Loomweave at {url} advertised authentication.protected_routes='bearer' but Filigree resolved no token: "
+            f"environment variable {token_env!r} (config key loomweave.token_env; default {DEFAULT_LOOMWEAVE_TOKEN_ENV!r}) "
+            "is unset or empty, so every protected Loomweave call would be rejected with 401. "
+            f"Export the Loomweave bearer token in {token_env!r}, or switch this project to registry_backend='local'."
+        )
+        raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth_token_missing")
 
 
 def _is_briefing_blocked_payload(raw: str | bytes | bytearray) -> bool:
@@ -624,6 +1076,10 @@ class LoomweaveRegistry:
     timeout_seconds: float = 5
     auth_token: str | None = None
     _http_client: httpx.Client = dataclass_field(init=False, repr=False, compare=False)
+    # Set once ``GET /api/v1/identity/lineage/{sei}`` answers 404 (an older
+    # Loomweave without the route): the route is deterministic-unsupported for
+    # this instance's lifetime, so no later orphaned SEI pays the round-trip.
+    _lineage_route_unsupported: bool = dataclass_field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_loomweave_base_url(self.base_url))
@@ -734,8 +1190,8 @@ class LoomweaveRegistry:
         msg = f"Loomweave registry unavailable at {url}: HTTP {response.status_code} {reason}"
         raise RegistryUnavailableError(msg, url=url, path=path, cause_kind="http_error")
 
-    def _should_retry_read(self, attempt: int, deadline: float) -> bool:
-        return attempt < LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS and deadline - time.monotonic() > LOOMWEAVE_RESOLVE_FILE_RETRY_BACKOFF_SECONDS
+    def _should_retry_read(self, attempt: int, deadline: float, *, max_attempts: int = LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS) -> bool:
+        return attempt < max_attempts and deadline - time.monotonic() > LOOMWEAVE_RESOLVE_FILE_RETRY_BACKOFF_SECONDS
 
     def _sleep_before_retry(self, deadline: float) -> None:
         remaining = deadline - time.monotonic()
@@ -763,32 +1219,71 @@ class LoomweaveRegistry:
     ) -> BatchResolution:
         """CONTRACT-1 batch resolution: POST /api/v1/files/batch.
 
-        Chunks ``queries`` into runs of ``LOOMWEAVE_BATCH_MAX_QUERIES`` (256)
-        and merges the per-chunk results into a single ``BatchResolution``.
-        Whole-batch availability failures (network, timeout, HTTP 5xx,
-        HTTP 401 auth) raise ``RegistryUnavailableError`` — fallback policy
-        applies. Malformed reachable responses use
-        ``cause_kind="invalid_response"`` so fallback wrappers can fail closed.
-        Per-item failures (not_found, briefing_blocked, structured errors)
-        populate the corresponding channel and the call still returns; callers
-        decide whether to raise per item.
+        Chunks ``queries`` by BOTH the 256-query count cap and the 16 KiB
+        transport body cap (:func:`chunk_batch_queries`) and merges the
+        per-chunk results into a single ``BatchResolution``. A chunk Loomweave
+        still refuses with HTTP 413 is halved and retried (bounded: at most
+        log2(256) levels); a single query that cannot fit is reported on the
+        ``errors`` channel with ``code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE``
+        rather than failing the batch. Whole-batch availability failures
+        (network, timeout, HTTP 5xx, HTTP 401 auth) raise
+        ``RegistryUnavailableError`` — fallback policy applies. Malformed
+        reachable responses use ``cause_kind="invalid_response"`` so fallback
+        wrappers can fail closed. Per-item failures (not_found,
+        briefing_blocked, structured errors) populate the corresponding channel
+        and the call still returns; callers decide whether to raise per item.
         """
         aggregate = BatchResolution(resolved={}, not_found=[], briefing_blocked=[], errors=[], messages={})
         if not queries:
             return aggregate
-        for start in range(0, len(queries), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = queries[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
-            chunk_result = self._resolve_files_batch_chunk(chunk)
-            aggregate["resolved"].update(chunk_result["resolved"])
-            aggregate["not_found"].extend(chunk_result["not_found"])
-            aggregate["briefing_blocked"].extend(chunk_result["briefing_blocked"])
-            aggregate["errors"].extend(chunk_result["errors"])
-            aggregate["messages"].update(chunk_result.get("messages", {}))
+        for chunk in chunk_batch_queries(queries):
+            _merge_batch_resolution(aggregate, self._resolve_files_batch_chunk_splitting(chunk))
         return aggregate
+
+    def _resolve_files_batch_chunk_splitting(self, chunk: list[BatchQuery]) -> BatchResolution:
+        """Resolve one chunk, splitting on HTTP 413 until every query has an outcome.
+
+        A lone query whose body provably exceeds the contract cap
+        (``LOOMWEAVE_BATCH_BODY_CAP_BYTES``) is never put on the wire; one
+        Loomweave refuses anyway (a tighter-than-documented deployment) lands in
+        the same ``BODY_TOO_LARGE`` error entry after the 413.
+        """
+        url = loomweave_files_batch_url(self.base_url)
+        if len(chunk) == 1:
+            body_bytes = loomweave_wire_body_size({"queries": [_batch_query_wire_item(chunk[0])]})
+            if body_bytes > LOOMWEAVE_BATCH_BODY_CAP_BYTES:
+                return self._body_too_large_resolution(chunk[0]["path"], url=url, body_bytes=body_bytes, status="pre-flight")
+        return _resolve_chunk_splitting_on_413(
+            chunk,
+            resolve_chunk=self._resolve_files_batch_chunk,
+            merge=_merge_batch_resolution,
+            single_item_too_large=lambda query, exc: self._body_too_large_resolution(
+                query["path"], url=url, body_bytes=exc.body_bytes, status="HTTP 413"
+            ),
+            surface="Loomweave batch resolve",
+        )
+
+    @staticmethod
+    def _body_too_large_resolution(path: str, *, url: str, body_bytes: int, status: str) -> BatchResolution:
+        # The offending path is by definition enormous; show enough to identify it.
+        shown = path if len(path) <= 200 else f"{path[:200]}…(+{len(path) - 200} chars)"
+        msg = (
+            f"Loomweave batch resolve at {url} cannot carry file {shown!r}: "
+            f"{body_bytes}-byte request body exceeds the {LOOMWEAVE_BATCH_BODY_CAP_BYTES // 1024} KiB "
+            f"transport cap ({status})"
+        )
+        logger.warning(msg)
+        return BatchResolution(
+            resolved={},
+            not_found=[],
+            briefing_blocked=[],
+            errors=[BatchResolutionError(requested_path=path, code=LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE, message=msg)],
+            messages={path: msg},
+        )
 
     def _resolve_files_batch_chunk(self, chunk: list[BatchQuery]) -> BatchResolution:
         url = loomweave_files_batch_url(self.base_url)
-        body = {"queries": [{"path": q["path"], "language": q.get("language", "")} for q in chunk]}
+        body = {"queries": [_batch_query_wire_item(q) for q in chunk]}
         # Batch resolve is an idempotent read, so it retries transient 5xx and
         # network failures on the same deadline/backoff budget as the
         # single-file ``resolve_file`` path (CONTRACT-1 retry parity). Auth and
@@ -821,6 +1316,10 @@ class LoomweaveRegistry:
                     if response.status_code == 403 and _is_briefing_blocked_payload(response.text):
                         msg = f"Loomweave batch resolve refuses briefing-blocked file(s) at {url}: HTTP 403 {reason}"
                         raise RegistryBriefingBlockedError(msg, status_code=response.status_code, url=url)
+                    if response.status_code == 413:
+                        # Transport body cap (text/plain, no envelope): the
+                        # caller splits the chunk rather than failing the batch.
+                        raise _BatchBodyTooLargeError(url=url, body_bytes=len(response.request.content))
                     if 400 <= response.status_code < 500:
                         msg = f"Loomweave batch resolve rejected request at {url}: HTTP {response.status_code} {reason}"
                         raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
@@ -946,9 +1445,10 @@ class LoomweaveRegistry:
     def resolve_locators_batch(self, locators: list[str]) -> SeiResolution:
         """Resolve a batch of locators to SEIs via ``POST /api/v1/identity/resolve:batch``.
 
-        Chunks ``locators`` into runs of ``LOOMWEAVE_BATCH_MAX_QUERIES`` (256 — the
-        per-batch cap Loomweave pins on the identity surface, same as files) and
-        merges the per-chunk channels. Whole-batch failures (network, timeout,
+        Chunks ``locators`` by the 256 per-batch count cap Loomweave pins on the
+        identity surface (same as files) AND the 16 KiB ``/api/v1/*`` transport
+        body cap, merging the per-chunk channels; a chunk refused with HTTP 413
+        is halved and retried. Whole-batch failures (network, timeout,
         HTTP 5xx, malformed body, 401 auth) raise ``RegistryUnavailableError``;
         per-locator outcomes (resolved / orphaned / already-migrated) populate
         the returned :class:`SeiResolution`. This is the resolve client the
@@ -958,13 +1458,29 @@ class LoomweaveRegistry:
         aggregate = SeiResolution(resolved={}, orphaned=[], already_migrated=[])
         if not locators:
             return aggregate
-        for start in range(0, len(locators), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = locators[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
-            chunk_result = self._resolve_locators_batch_chunk(chunk)
-            aggregate["resolved"].update(chunk_result["resolved"])
-            aggregate["orphaned"].extend(chunk_result["orphaned"])
-            aggregate["already_migrated"].extend(chunk_result["already_migrated"])
+        for chunk in _chunk_locators(locators):
+            _merge_sei_resolution(aggregate, self._resolve_locators_batch_chunk_splitting(chunk))
         return aggregate
+
+    def _resolve_locators_batch_chunk_splitting(self, chunk: list[str]) -> SeiResolution:
+        """Resolve one locator chunk, halving on HTTP 413 (bounded by the chunk size).
+
+        A single locator Loomweave still refuses surfaces as the same
+        ``RegistryResolutionError`` (HTTP 413) any other deterministic 4xx does —
+        a >16 KiB locator is malformed, not a batch-sizing problem.
+        """
+
+        def lone_locator_too_large(_locator: str, exc: _BatchBodyTooLargeError) -> SeiResolution:
+            msg = f"Loomweave identity resolve rejected request at {exc.url}: HTTP 413 ({exc.body_bytes}-byte body over the transport cap)"
+            raise RegistryResolutionError(msg, status_code=413, url=exc.url) from exc
+
+        return _resolve_chunk_splitting_on_413(
+            chunk,
+            resolve_chunk=self._resolve_locators_batch_chunk,
+            merge=_merge_sei_resolution,
+            single_item_too_large=lone_locator_too_large,
+            surface="Loomweave identity resolve",
+        )
 
     def _resolve_locators_batch_chunk(self, chunk: list[str]) -> SeiResolution:
         url = loomweave_identity_resolve_batch_url(self.base_url)
@@ -998,6 +1514,8 @@ class LoomweaveRegistry:
                     if response.status_code == 401:
                         msg = f"Loomweave identity resolve rejected auth at {url}: HTTP 401 {reason} (check token_env)"
                         raise RegistryUnavailableError(msg, url=url, path="", cause_kind="auth")
+                    if response.status_code == 413:
+                        raise _BatchBodyTooLargeError(url=url, body_bytes=len(response.request.content))
                     if 400 <= response.status_code < 500:
                         msg = f"Loomweave identity resolve rejected request at {url}: HTTP {response.status_code} {reason}"
                         raise RegistryResolutionError(msg, status_code=response.status_code, url=url)
@@ -1105,13 +1623,25 @@ class LoomweaveRegistry:
 
         Both endpoints carry ``content_hash`` only for an ALIVE entity; an
         orphaned / not_found / invalid id is omitted from ``resolved`` and listed
-        in ``unresolved`` (UNKNOWN to the caller, never silently fresh).
+        in ``unresolved`` (UNKNOWN to the caller, never silently fresh). An
+        orphaned SEI additionally gets a rename hint in ``lineage_hints`` when
+        Loomweave can name its latest lineage event (see
+        :meth:`_resolve_sei_state`) — enrich-only, never affecting the two
+        primary channels.
         Whole-backend availability failures (network / timeout / 5xx / auth /
         malformed body) raise :class:`RegistryUnavailableError`; the caller
-        degrades to UNKNOWN without hard-blocking (enrich-only).
+        degrades to UNKNOWN without hard-blocking (enrich-only) and inspects
+        ``cause_kind`` to tell a connectivity outage (``network`` / ``timeout``)
+        from a per-request refusal Loomweave answered with. A chunk refused
+        with HTTP 413 is halved and retried; a lone locator Loomweave still
+        refuses is simply ``unresolved`` (UNKNOWN), never a batch-level failure.
+        A connectivity-class failure of the enrich-only lineage fallback sets
+        ``lineage_unavailable`` (advisory) instead of raising.
         """
         resolved: dict[str, str] = {}
         unresolved: list[str] = []
+        lineage_hints: dict[str, LineageEvent] = {}
+        lineage_unavailable = False
         # Preserve first-seen order, drop duplicates, partition by id scheme.
         seen: set[str] = set()
         locators: list[str] = []
@@ -1131,12 +1661,22 @@ class LoomweaveRegistry:
                 else:
                     unresolved.append(loc)
         for sei in seis:
-            current = self._resolve_sei_content_hash(sei)
+            # Once the lineage route has failed to answer in THIS call, no later
+            # orphan re-asks it: one hint deadline per resolution, not per SEI.
+            current, hint, hint_unreachable = self._resolve_sei_state(sei, skip_lineage_route=lineage_unavailable)
             if current is not None:
                 resolved[sei] = current
             else:
                 unresolved.append(sei)
-        return EntityHashResolution(resolved=resolved, unresolved=unresolved)
+                if hint is not None:
+                    lineage_hints[sei] = hint
+                lineage_unavailable = lineage_unavailable or hint_unreachable
+        result = EntityHashResolution(resolved=resolved, unresolved=unresolved)
+        if lineage_hints:
+            result["lineage_hints"] = lineage_hints
+        if lineage_unavailable:
+            result["lineage_unavailable"] = True
+        return result
 
     def _resolve_locator_content_hashes(self, locators: list[str]) -> dict[str, str]:
         """Resolve locators → current ``content_hash`` via ``resolve:batch``.
@@ -1144,31 +1684,68 @@ class LoomweaveRegistry:
         Returns a map of submitted locator → current content_hash for ALIVE
         locators only; a locator Loomweave reports in ``not_found`` / ``invalid``
         (or as a non-alive resolved record) is simply absent from the map. Chunks
-        at the 256 per-batch cap like the sibling resolve paths.
+        at the 256 per-batch count cap AND the 16 KiB transport body cap like
+        the sibling resolve paths, and halves a chunk Loomweave still refuses
+        with HTTP 413 through the shared splitter. A LONE locator it refuses is
+        absent from the map (freshness UNKNOWN for that binding) — it is that
+        locator's problem, never a whole-backend failure that would poison a
+        batch caller's known-down bound.
         """
         out: dict[str, str] = {}
         url = loomweave_identity_resolve_batch_url(self.base_url)
-        for start in range(0, len(locators), LOOMWEAVE_BATCH_MAX_QUERIES):
-            chunk = locators[start : start + LOOMWEAVE_BATCH_MAX_QUERIES]
-            payload = self._request_identity_json("POST", url, body={"locators": chunk})
-            resolved = payload.get("resolved")
-            if not isinstance(resolved, dict):
-                msg = f"Loomweave identity resolve at {url}: 'resolved' must be an object"
-                raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
-            for locator, record in resolved.items():
-                if not isinstance(record, dict) or record.get("alive") is not True:
-                    continue
-                content_hash = record.get("content_hash")
-                if isinstance(content_hash, str) and content_hash:
-                    out[locator] = content_hash
+
+        def lone_locator_too_large(locator: str, exc: _BatchBodyTooLargeError) -> dict[str, str]:
+            shown = locator if len(locator) <= 200 else f"{locator[:200]}…(+{len(locator) - 200} chars)"
+            logger.warning(
+                "Loomweave identity resolve at %s cannot carry locator %r: %d-byte request body over the transport cap "
+                "(HTTP 413); entity freshness UNKNOWN for it",
+                url,
+                shown,
+                exc.body_bytes,
+                extra={"url": url, "body_bytes": exc.body_bytes},
+            )
+            return {}
+
+        for chunk in _chunk_locators(locators):
+            chunk_hashes: dict[str, str] = _resolve_chunk_splitting_on_413(
+                chunk,
+                resolve_chunk=self._resolve_locator_content_hashes_chunk,
+                merge=_merge_content_hash_map,
+                single_item_too_large=lone_locator_too_large,
+                surface="Loomweave identity resolve",
+            )
+            out.update(chunk_hashes)
         return out
 
-    def _resolve_sei_content_hash(self, sei: str) -> str | None:
-        """Resolve a single SEI → current ``content_hash`` via ``GET .../sei/{sei}``.
+    def _resolve_locator_content_hashes_chunk(self, chunk: list[str]) -> dict[str, str]:
+        url = loomweave_identity_resolve_batch_url(self.base_url)
+        payload = self._request_identity_json("POST", url, body={"locators": chunk})
+        resolved = payload.get("resolved")
+        if not isinstance(resolved, dict):
+            msg = f"Loomweave identity resolve at {url}: 'resolved' must be an object"
+            raise RegistryUnavailableError(msg, url=url, path="", cause_kind="invalid_response")
+        out: dict[str, str] = {}
+        for locator, record in resolved.items():
+            if not isinstance(record, dict) or record.get("alive") is not True:
+                continue
+            content_hash = record.get("content_hash")
+            if isinstance(content_hash, str) and content_hash:
+                out[locator] = content_hash
+        return out
 
-        Returns the content_hash for an alive SEI, or ``None`` when Loomweave
-        reports it ``alive:false`` (orphaned) — there is no batch by-SEI surface,
-        so this is a per-SEI read (governed bindings per issue are few).
+    def _resolve_sei_state(self, sei: str, *, skip_lineage_route: bool = False) -> tuple[str | None, LineageEvent | None, bool]:
+        """Resolve a single SEI via ``GET .../sei/{sei}`` → ``(content_hash, hint, hint_unreachable)``.
+
+        ``content_hash`` is set for an alive SEI. When Loomweave reports the SEI
+        ``alive:false`` (orphaned) it is ``None`` and ``hint`` is the SEI's latest
+        lineage event (or ``None`` when none is available) — see
+        :meth:`_resolve_sei_lineage_hint`, which also reports whether the
+        lineage fallback hit a connectivity-class failure (the third element;
+        always ``False`` for an alive SEI). ``skip_lineage_route`` suppresses
+        the route fallback (inline lineage is still used) once an earlier
+        orphan in the same resolution already found the route unreachable.
+        There is no batch by-SEI surface, so this is a per-SEI read (governed
+        bindings per issue are few).
 
         FEDERATION-CONTRACT GAP (flag for the hub): Loomweave's *implementation*
         (``http_read/identity.rs::get_identity_sei``) returns ``content_hash`` on
@@ -1186,20 +1763,104 @@ class LoomweaveRegistry:
         if payload.get("alive") is True:
             content_hash = payload.get("content_hash")
             if isinstance(content_hash, str) and content_hash:
-                return content_hash
-        return None
+                return content_hash, None, False
+            return None, None, False
+        hint, hint_unreachable = self._resolve_sei_lineage_hint(sei, payload, skip_route=skip_lineage_route)
+        return None, hint, hint_unreachable
 
-    def _request_identity_json(self, method: str, url: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _resolve_sei_lineage_hint(
+        self, sei: str, orphan_payload: dict[str, Any], *, skip_route: bool = False
+    ) -> tuple[LineageEvent | None, bool]:
+        """Latest lineage event for an SEI Loomweave just reported ``alive:false``.
+
+        Returns ``(hint, unreachable)``: ``hint`` is the event or ``None``;
+        ``unreachable`` is True only when the lineage-route fallback hit a
+        connectivity-class failure (``network`` / ``timeout`` — no answer at
+        all), the advisory the caller surfaces as ``lineage_unavailable``.
+
+        Source preference (filigree-4e13d133f7): the ``lineage`` list Loomweave
+        inlines on the ``alive:false`` by-SEI body (``get_identity_sei``) — no
+        second round-trip. Only a body that carries NO ``lineage`` list at all
+        falls back to ``GET /api/v1/identity/lineage/{sei}``; an inline empty
+        list is an authoritative "no lineage" and is NOT re-asked.
+
+        The fallback is enrich-only, so it does NOT get the read paths' retry
+        budget: ONE attempt under ``min(timeout_seconds,
+        LOOMWEAVE_LINEAGE_HINT_TIMEOUT_SECONDS)`` per orphaned SEI, a 404 (an
+        older Loomweave without the route) is memoized on this registry so it
+        is asked exactly once per instance, and ``skip_route`` (set by the
+        caller after a connectivity failure earlier in the same resolution)
+        skips the round-trip outright. Every failure — 404, 5xx,
+        network / timeout, malformed body — is swallowed HERE and yields no
+        hint. It must never leak as :class:`RegistryUnavailableError`, which
+        would degrade the caller's WHOLE resolution (every sibling binding) to
+        ``registry_unavailable`` and silently disable the drift check on a
+        Loomweave that merely lacks the lineage route.
+        """
+        inline = orphan_payload.get("lineage")
+        if isinstance(inline, list):
+            hint = _last_lineage_event(inline)
+            if hint is None and inline:
+                logger.info(
+                    "Loomweave by-SEI lineage for %s is malformed; no rename hint (enrich-only)",
+                    sei,
+                    extra={"sei": sei, "reason": "invalid_lineage"},
+                )
+            return hint, False
+        if self._lineage_route_unsupported or skip_route:
+            return None, False
+        url = loomweave_identity_lineage_url(self.base_url, sei)
+        try:
+            payload = self._request_identity_json(
+                "GET",
+                url,
+                max_attempts=1,
+                timeout_seconds=min(self.timeout_seconds, LOOMWEAVE_LINEAGE_HINT_TIMEOUT_SECONDS),
+            )
+        except RegistryUnavailableError as exc:
+            if exc.status_code == 404:
+                object.__setattr__(self, "_lineage_route_unsupported", True)
+            unreachable = exc.cause_kind in LOOMWEAVE_CONNECTIVITY_CAUSE_KINDS
+            logger.info(
+                "Loomweave lineage route unavailable for %s (%s); no rename hint (enrich-only)",
+                sei,
+                exc.cause_kind,
+                extra={"sei": sei, "cause_kind": exc.cause_kind, "url": url, "route_unsupported": exc.status_code == 404},
+            )
+            return None, unreachable
+        hint = _last_lineage_event(payload.get("lineage"))
+        if hint is None:
+            logger.info(
+                "Loomweave lineage route answered no usable event for %s; no rename hint (enrich-only)",
+                sei,
+                extra={"sei": sei, "reason": "no_lineage", "url": url},
+            )
+        return hint, False
+
+    def _request_identity_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: dict[str, Any] | None = None,
+        max_attempts: int = LOOMWEAVE_RESOLVE_FILE_MAX_ATTEMPTS,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Issue an identity-resolve request and return its parsed JSON object.
 
-        Shares the deadline / retry / backoff budget of the other read paths
-        (transient 5xx and network failures retry; auth and other non-2xx are
-        deterministic and raise immediately). Every failure mode — connectivity,
-        non-2xx, malformed body — raises :class:`RegistryUnavailableError` so the
-        single drift-resolution consumer has one exception to degrade on.
+        Shares the deadline / retry / backoff budget of the other read paths by
+        default (transient 5xx and network failures retry; auth and other
+        non-2xx are deterministic and raise immediately); ``max_attempts`` /
+        ``timeout_seconds`` let an enrich-only caller shrink that budget. Every
+        failure mode — connectivity, non-2xx, malformed body — raises
+        :class:`RegistryUnavailableError` (carrying ``cause_kind`` and, for a
+        non-2xx, ``status_code``) so the single drift-resolution consumer has
+        one exception to degrade on. The one exception: HTTP 413 on a request
+        WITH a body is the transport cap refusing this chunk, raised as the
+        internal :class:`_BatchBodyTooLargeError` for the shared splitter.
         """
         has_body = body is not None
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + (self.timeout_seconds if timeout_seconds is None else timeout_seconds)
         attempt = 1
         while True:
             remaining = deadline - time.monotonic()
@@ -1216,18 +1877,20 @@ class LoomweaveRegistry:
                 )
                 raw = response.text
                 if response.status_code >= 400:
-                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline):
+                    if response.status_code >= 500 and self._should_retry_read(attempt, deadline, max_attempts=max_attempts):
                         self._log_retry(url=url, attempt=attempt, cause_kind="http_error")
                         self._sleep_before_retry(deadline)
                         attempt += 1
                         continue
+                    if response.status_code == 413 and has_body:
+                        raise _BatchBodyTooLargeError(url=url, body_bytes=len(response.request.content))
                     reason = response.reason_phrase
                     cause_kind = "auth" if response.status_code == 401 else "http_error"
                     msg = f"Loomweave identity request rejected at {url}: HTTP {response.status_code} {reason}"
-                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind=cause_kind)
+                    raise RegistryUnavailableError(msg, url=url, path="", cause_kind=cause_kind, status_code=response.status_code)
                 break
             except (httpx.TimeoutException, httpx.TransportError) as exc:
-                if self._should_retry_read(attempt, deadline):
+                if self._should_retry_read(attempt, deadline, max_attempts=max_attempts):
                     self._log_retry(url=url, attempt=attempt, cause_kind="network")
                     self._sleep_before_retry(deadline)
                     attempt += 1

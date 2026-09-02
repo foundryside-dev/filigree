@@ -16,6 +16,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# The live-Loomweave lane modules: run by the `live-loomweave` CI job and watched
+# by release.yml's LAST_CONTRACT_SHA list. Pinned here so a rename cannot land in
+# one place without the other.
+_LIVE_LANE_TEST_MODULES = (
+    "tests/integration/test_loomweave_staging_smoke.py",
+    "tests/integration/test_loomweave_phase_d_e2e.py",
+    "tests/federation/test_sei_oracle_live_loomweave.py",
+)
+
+
 def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text()
 
@@ -72,12 +82,16 @@ def test_development_docs_list_node_as_pytest_prerequisite() -> None:
 def test_ci_has_required_loomweave_contract_lane() -> None:
     workflow = _read(".github/workflows/ci.yml")
 
+    contract_job = _workflow_job(workflow, "loomweave-contract")
+
     assert "loomweave-contract:" in workflow
-    assert "tests/unit/test_registry.py" in workflow
-    assert "tests/api/test_registry_backend_integration.py" in workflow
-    assert "tests/core/test_registry_backend_matrix.py" in workflow
-    assert "tests/api/test_weft_auth.py" in workflow
-    assert "tests/federation/test_sei_conformance_oracle.py" in workflow
+    # Marker-selected since 3.3.0 (filigree-4a4a10f93a): the job must not
+    # regress to a hand-enumerated file list, and it must not arm the Layer-2
+    # sibling drift checks (no sibling repo is checked out in CI).
+    code_lines = [line for line in contract_job.splitlines() if not line.lstrip().startswith("#")]
+    assert any("uv run pytest -m federation_contract" in line for line in code_lines)
+    assert not any("tests/federation/" in line for line in code_lines)
+    assert not any("FILIGREE_REQUIRE_" in line for line in code_lines)
 
 
 def test_ci_has_gated_live_loomweave_lane() -> None:
@@ -90,11 +104,61 @@ def test_ci_has_gated_live_loomweave_lane() -> None:
     assert "live-loomweave:" in workflow
     assert "github.event_name == 'schedule'" in live_job
     assert "github.event_name == 'workflow_dispatch' && inputs.require_live_loomweave" in live_job
-    assert "CLARION_STAGING_BASE_URL" in live_job
-    assert "FILIGREE_REQUIRE_LIVE_CLARION" in workflow
-    assert "tests/integration/test_clarion_staging_smoke.py" in workflow
-    assert "tests/integration/test_clarion_phase_d_e2e.py" in workflow
-    assert "tests/federation/test_sei_oracle_live_clarion.py" in workflow
+    assert "LOOMWEAVE_STAGING_BASE_URL: ${{ secrets.LOOMWEAVE_STAGING_BASE_URL }}" in live_job
+    assert 'FILIGREE_REQUIRE_LIVE_LOOMWEAVE: "1"' in live_job
+    for path in _LIVE_LANE_TEST_MODULES:
+        assert path in live_job, f"live lane no longer runs {path}"
+    # Clean rename (no compatibility alias): nothing was ever provisioned under
+    # the Clarion-era secret name, so no `|| secrets.CLARION_...` fallback and
+    # no old env flag may survive anywhere in the workflow.
+    assert "CLARION" not in workflow
+
+
+# The three sibling repos the scheduled federation-drift lane checks out, each
+# with the per-sibling override + arming env that tests/federation/_oracle.py
+# reads (SIBLING_REPO_ENV / arming_env_name). Pinned here so a sibling rename
+# cannot land in the workflow without the oracle (or vice versa).
+_FEDERATION_DRIFT_SIBLINGS = (
+    ("loomweave", "LOOMWEAVE_REPO", "FILIGREE_REQUIRE_LOOMWEAVE_REPO"),
+    ("wardline", "WARDLINE_REPO", "FILIGREE_REQUIRE_WARDLINE_REPO"),
+    ("legis", "LEGIS_REPO", "FILIGREE_REQUIRE_LEGIS_REPO"),
+)
+
+
+def test_ci_has_gated_federation_drift_lane() -> None:
+    """The Layer-2 sibling drift checks must EXECUTE somewhere in CI.
+
+    ``loomweave-contract`` runs them skip-clean (no sibling checked out); the
+    ``federation-drift`` lane is the one that checks the three siblings out,
+    arms ``FILIGREE_REQUIRE_<SIBLING>_REPO`` so an absent/mislocated sibling is
+    a hard failure, and runs the marker-selected drift module. Gated like the
+    live-Loomweave lane: weekly schedule + opt-in workflow_dispatch input.
+    """
+    workflow = _read(".github/workflows/ci.yml")
+    drift_job = _workflow_job(workflow, "federation-drift")
+    code_lines = [line for line in drift_job.splitlines() if not line.lstrip().startswith("#")]
+    code = "\n".join(code_lines)
+
+    assert "require_federation_drift:" in workflow
+    assert "github.event_name == 'schedule'" in code
+    assert "github.event_name == 'workflow_dispatch' && inputs.require_federation_drift" in code
+    for sibling, override_env, arming_env in _FEDERATION_DRIFT_SIBLINGS:
+        assert f"repository: foundryside-dev/{sibling}" in code, f"drift lane no longer checks out {sibling}"
+        # The override must name exactly where the checkout landed: an armed
+        # sibling whose override points elsewhere fails every param, and a
+        # checkout onto the workspace root would shadow this repo's tree.
+        assert f"path: .siblings/{sibling}" in code, f"{sibling} checkout is not under .siblings/"
+        assert f"{override_env}: ${{{{ github.workspace }}}}/.siblings/{sibling}" in code, (
+            f"drift lane does not point {override_env} at the {sibling} checkout"
+        )
+        assert f'{arming_env}: "1"' in code, f"drift lane does not arm {arming_env}"
+    # Sibling checkouts are private-capable: the default GITHUB_TOKEN cannot read
+    # a sibling private repo, so the lane must honour FEDERATION_CHECKOUT_TOKEN
+    # (falling back to github.token for public siblings) — no invented secret.
+    assert "secrets.FEDERATION_CHECKOUT_TOKEN || github.token" in code
+    # Marker-selected AND scoped to the drift module: the lane exists to run
+    # test_sibling_drift.py for real, not to re-run the whole federation suite.
+    assert any("uv run pytest -m federation_contract tests/federation/test_sibling_drift.py" in line for line in code_lines)
 
 
 def test_release_workflow_emits_live_loomweave_release_checklist_warning() -> None:
@@ -104,6 +168,26 @@ def test_release_workflow_emits_live_loomweave_release_checklist_warning() -> No
     assert "actions/workflows/ci.yml/runs" in workflow
     assert "::warning title=Live Loomweave release checklist::" in workflow
     assert "scheduled Live Loomweave Integration lane" in workflow
+    # The LAST_CONTRACT_SHA watch list must track the renamed live-lane modules,
+    # otherwise a contract-bearing test change stops moving the release checklist.
+    for path in _LIVE_LANE_TEST_MODULES:
+        assert path in workflow, f"release checklist no longer watches {path}"
+    assert "CLARION" not in workflow
+
+
+def test_live_lane_modules_exist_and_carry_no_clarion_names() -> None:
+    """The three live-lane modules are Loomweave-named end to end.
+
+    Filenames, the required-mode env flag, the staging-URL secret and the
+    failure messages all moved to ``LOOMWEAVE`` names; a stray ``CLARION`` token
+    means the deploy surface (secret name / env flag) silently drifted back.
+    """
+    for path in _LIVE_LANE_TEST_MODULES:
+        assert (ROOT / path).is_file(), f"missing live-lane module {path}"
+        source = _read(path)
+        assert "CLARION" not in source, f"{path} still carries a Clarion-era env/secret name"
+        assert "FILIGREE_REQUIRE_LIVE_LOOMWEAVE" in source
+    assert "LOOMWEAVE_STAGING_BASE_URL" in _read("tests/integration/test_loomweave_staging_smoke.py")
 
 
 def test_make_ci_runs_javascript_and_coverage_floor_gates() -> None:
@@ -194,7 +278,7 @@ def test_readme_documents_auth_route_classes() -> None:
 
 
 def test_live_loomweave_required_mode_turns_skips_into_failures() -> None:
-    from tests.integration.test_clarion_phase_d_e2e import _clarion_unavailable_action
+    from tests.integration.test_loomweave_phase_d_e2e import _loomweave_unavailable_action
 
-    assert _clarion_unavailable_action(require_live=False) == "skip"
-    assert _clarion_unavailable_action(require_live=True) == "fail"
+    assert _loomweave_unavailable_action(require_live=False) == "skip"
+    assert _loomweave_unavailable_action(require_live=True) == "fail"

@@ -53,9 +53,9 @@ jobs:
             src/filigree/core.py \
             src/filigree/registry.py \
             src/filigree/sei_backfill.py \
-            tests/integration/test_clarion_staging_smoke.py \
-            tests/integration/test_clarion_phase_d_e2e.py \
-            tests/federation/test_sei_oracle_live_clarion.py)
+            tests/integration/test_loomweave_staging_smoke.py \
+            tests/integration/test_loomweave_phase_d_e2e.py \
+            tests/federation/test_sei_oracle_live_loomweave.py)
 
           if ! RUNS=$(gh api \
             "repos/${{ github.repository }}/actions/workflows/ci.yml/runs" \

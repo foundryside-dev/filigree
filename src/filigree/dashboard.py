@@ -49,6 +49,7 @@ from filigree import __version__
 from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
+    EPHEMERAL_MODE,
     FiligreeDB,
     ProjectNotInitialisedError,
     find_filigree_anchor,
@@ -58,7 +59,9 @@ from filigree.core import (
 # Re-export so test imports continue to work.
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
-from filigree.types.api import SchemaVersionMismatchError
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry_errors import REGISTRY_REQUEST_ACTION, registry_startup_error_response, registry_startup_hint
+from filigree.types.api import SchemaVersionMismatchError, errorcode_to_http_status
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 8377
@@ -91,7 +94,7 @@ def _resolve_federation_api_token(store_dir: Path | None = None) -> tuple[str, s
 
     3-tier: ``$WEFT_FEDERATION_TOKEN`` (+ deprecated aliases) → the daemon's
     minted ``<store_dir>/federation_token`` → off. *store_dir* is the served
-    project's store dir (ethereal) or ``~/.config/filigree/`` (server mode); the
+    project's store dir (ephemeral) or ``~/.config/filigree/`` (server mode); the
     file is minted at daemon boot (see :func:`run`), never here, so this stays a
     pure read. Returns ``(token, source)`` where *source* is the env-var name,
     the file-source label, or ``None``.
@@ -247,7 +250,7 @@ def _get_allow_http_force_close(request: Request | None = None) -> bool:
     return _allow_http_force_close
 
 
-# Idle auto-shutdown for ethereal mode (seconds)
+# Idle auto-shutdown for ephemeral mode (seconds)
 IDLE_TIMEOUT_SECONDS = 3600  # 1 hour
 IDLE_CHECK_INTERVAL = 60  # check every minute
 _last_request_time: float = 0.0  # monotonic clock; set at startup
@@ -629,7 +632,7 @@ def _get_db(request: Request) -> FiligreeDB:
     from the app-local per-request ContextVar.  Falls back to ``default_key``
     when the var is empty (un-prefixed ``/api/`` route).
 
-    In ethereal mode: returns the app-local single-project DB captured by
+    In ephemeral mode: returns the app-local single-project DB captured by
     ``create_app``.
     """
     from fastapi import HTTPException
@@ -651,6 +654,12 @@ def _get_db(request: Request) -> FiligreeDB:
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Unknown project: {key!r}") from None
         except SchemaVersionMismatchError:
+            raise
+        except (RegistryVersionMismatchError, RegistryUnavailableError):
+            # Lazy per-project open failed on the registry: tag the request so
+            # the app-wide handler labels the envelope as a DB-open failure
+            # rather than a request-time resolve failure.
+            request.state.filigree_registry_action = "opening project database"
             raise
         except (ProjectNotInitialisedError, ValueError, TypeError) as exc:
             raise HTTPException(
@@ -690,7 +699,7 @@ def _create_project_router() -> APIRouter:
       contributes only the aliases it owns; only ``files`` participates
       in Phase C1.
 
-    Server-mode and ethereal-mode ``/api`` mounts (and the
+    Server-mode and ephemeral-mode ``/api`` mounts (and the
     ``/api/p/{project_key}`` server-mode mount) both include this
     router, so the generation split is inherited by every mount point
     automatically.
@@ -731,7 +740,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
 
     When *server_mode* is ``True`` the app serves multiple projects via
     ``_project_store`` and adds ``/api/p/{key}/…`` routing + management
-    endpoints.  Otherwise (ethereal mode) it behaves as a single-project
+    endpoints.  Otherwise (ephemeral mode) it behaves as a single-project
     dashboard backed by the module-level ``_db``.
     """
     import contextlib
@@ -752,7 +761,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
     # Resolve federation auth before MCP setup so the high-privilege
     # streamable-HTTP transport is only mounted when it can be protected. Tier-2
     # (the minted file) lives in the daemon's own store: the served project's
-    # store dir (ethereal) or the server config dir (server mode). Read-only here
+    # store dir (ephemeral) or the server config dir (server mode). Read-only here
     # — the file is minted at daemon boot (run()), so create_app (which tests
     # invoke directly) never writes.
     if server_mode:
@@ -830,6 +839,24 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
             status_code=409,
         )
 
+    @app.exception_handler(RegistryVersionMismatchError)
+    @app.exception_handler(RegistryUnavailableError)
+    async def _registry_startup_error_to_envelope(
+        request: Any, exc: RegistryVersionMismatchError | RegistryUnavailableError
+    ) -> JSONResponse:
+        # Two distinct paths land here (RuntimeError — no other handler catches
+        # either). Server mode opens each project's DB lazily on first request,
+        # so a fail-closed loomweave project raises out of ``_get_db``; that
+        # path tags the request so the envelope keeps its "opening project
+        # database" wording (filigree-8fd300e2f7). A registry failure raised
+        # while serving a request against an already-open DB (e.g.
+        # ``POST /api/observations`` -> ``register_file`` -> resolve) is NOT a
+        # DB-open failure and is labelled as request handling instead. 503 for
+        # this project only; other projects keep serving.
+        action = getattr(getattr(request, "state", None), "filigree_registry_action", None) or REGISTRY_REQUEST_ACTION
+        response = registry_startup_error_response(exc, action=action)
+        return JSONResponse(response, status_code=errorcode_to_http_status(response["code"]))
+
     @app.exception_handler(_StarletteHTTPException)
     async def _http_exception_to_envelope(_request: Any, exc: _StarletteHTTPException) -> JSONResponse:
         detail = exc.detail
@@ -901,7 +928,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
             _api_token_env,
         )
 
-    # Idle-tracking middleware (ethereal mode only — server mode runs indefinitely)
+    # Idle-tracking middleware (ephemeral mode only — server mode runs indefinitely)
     if not server_mode:
         from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -1006,7 +1033,7 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
                     "auth": app.state.auth_scope,
                 }
             )
-        return JSONResponse({"status": "ok", "mode": "ethereal", "version": __version__, "auth": app.state.auth_scope})
+        return JSONResponse({"status": "ok", "mode": EPHEMERAL_MODE, "version": __version__, "auth": app.state.auth_scope})
 
     @app.get("/api/projects")
     async def api_projects() -> JSONResponse:
@@ -1101,7 +1128,7 @@ def main(
     """Start the dashboard server.
 
     In server mode, reads ``server.json`` for multi-project routing.
-    In ethereal mode (default), serves the single local project.
+    In ephemeral mode (default), serves the single local project.
     Ethereal servers auto-shutdown after IDLE_TIMEOUT_SECONDS of inactivity.
 
     ``allow_http_force_close`` (2.1.0 §1.1) opts the dashboard into
@@ -1111,7 +1138,7 @@ def main(
     be used by the CLI or MCP, never by a passing HTTP client.
 
     ``allow_local_fallback`` is an ADR-014 recovery flag for single-project
-    ethereal mode: when the project is configured for Loomweave registry mode
+    ephemeral mode: when the project is configured for Loomweave registry mode
     but Loomweave is unavailable, auto-create paths use ``LocalRegistry``.
     """
     import uvicorn
@@ -1122,7 +1149,7 @@ def main(
 
     # Clear any leftover globals from a previous in-process run so ``_get_db``
     # routes to the intended mode (filigree-bff063de18). Without this, a
-    # server-mode run followed by an ethereal run (or vice versa) can serve
+    # server-mode run followed by an ephemeral run (or vice versa) can serve
     # the wrong database because ``_get_db`` keys off ``_project_store``.
     # ``_config`` is dict-mutable (so no ``global`` declaration); clearing it
     # here prevents stale keys (notably ``name``, which read_config does not
@@ -1175,6 +1202,23 @@ def main(
             sys.exit(3)
         except _EXPECTED_PROJECT_CONFIG_ERRORS as exc:
             _exit_dashboard_config_error(exc)
+        except (RegistryVersionMismatchError, RegistryUnavailableError) as exc:
+            # Loomweave mode, fail-closed: wire break or unreachable registry with
+            # allow_local_fallback=false. Same "no traceback at startup" promise
+            # as the branches around it; exit 1 with the public envelope text and
+            # the remedy line (`--allow-local-fallback` is the dashboard-side
+            # escape hatch). (filigree-8fd300e2f7)
+            response = registry_startup_error_response(exc, action="opening project database")
+            logger.warning(
+                "dashboard_registry_startup_error",
+                extra={
+                    "tool": "dashboard",
+                    "args_data": {"code": response["code"], "url": exc.url, "cause_kind": getattr(exc, "cause_kind", None)},
+                },
+            )
+            print(response["error"], file=sys.stderr)
+            print(registry_startup_hint(exc), file=sys.stderr)
+            sys.exit(1)
         except (OSError, sqlite3.Error) as exc:
             # Locked DB / permission denied / on-disk corruption etc. The
             # F2 fix only covered v+1; this sibling branch keeps the same
@@ -1192,7 +1236,7 @@ def main(
     # First-serve federation-token mint (tier 2). Auto-provision the daemon's own
     # token file so single-host federation auth works with zero operator toil; the
     # env var stays the cross-host override. Mints into the daemon's own subtree —
-    # the served project's store dir (ethereal) or the server config dir (server
+    # the served project's store dir (ephemeral) or the server config dir (server
     # mode). Done here at real serve only, never in create_app (tests call that
     # directly and must not write to a shared/real dir).
     _pinned_token_env = False
@@ -1207,7 +1251,7 @@ def main(
 
     app = create_app(server_mode=server_mode)
 
-    # Initialise idle timer and start watchdog (ethereal mode only)
+    # Initialise idle timer and start watchdog (ephemeral mode only)
     _last_request_time = time.monotonic()
     if not server_mode:
         watchdog = threading.Thread(
@@ -1239,14 +1283,14 @@ def main(
                 (filigree_dir / name).unlink(missing_ok=True)
         # Reset both globals so a later in-process ``main()`` call starts
         # from a clean slate (filigree-bff063de18). Also clear ``_config``
-        # so server-mode (or a subsequent ethereal run with a minimal config)
+        # so server-mode (or a subsequent ephemeral run with a minimal config)
         # cannot serve a stale ``name`` (filigree-154a23794c).
         _project_store = None
         _db = None
         _allow_http_force_close = False
         _config.clear()
         # Cleanup symmetry: if THIS run synthesised an in-memory federation-token
-        # env pin (ethereal persist-failure fallback), unset it so a later
+        # env pin (ephemeral persist-failure fallback), unset it so a later
         # in-process run() does not inherit a stale tier-1 token that masks a
         # since-recovered mount or a fresh file (matches the global reset above).
         if _pinned_token_env:

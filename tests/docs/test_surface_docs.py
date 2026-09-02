@@ -98,3 +98,31 @@ def test_event_seq_source_docs_describe_ordering_not_dedup_semantics() -> None:
     assert "rebuild dedup UNIQUE index" not in combined
     assert "extends the dedup tuple" not in combined
     assert "colliding on the dedup index" not in combined
+
+
+def test_surface_docs_describe_fail_closed_registry_and_lineage_hints() -> None:
+    """3.3.0: degraded registry mode, the REGISTRY_UNAVAILABLE remedy and the
+    closure-gate rename-lineage suffix are documented on every agent surface."""
+    mcp = _read_doc("docs/mcp.md")
+    assert '`status: "registry_unavailable"`' in mcp
+    assert "registry_retry: {interval_seconds, last_retry_at, next_retry_after}" in mcp
+    assert "rename lineage: <sei> -> <new_locator> (<event>)" in mcp
+    assert "lineage_hints" in mcp
+
+    agent = _read_doc("docs/agent-integration.md")
+    assert "details.backend" in agent
+    assert "details.hint" in agent
+    assert "auth_token_missing" in agent
+    assert "session-context" in agent
+    assert "registry_unavailable" in agent
+
+    cli = _read_doc("docs/cli.md")
+    assert "REGISTRY_UNAVAILABLE" in cli
+    assert "### `migrate-registry`" in cli
+    assert "`file migrate-registry`" in cli
+    assert "BODY_TOO_LARGE" in cli
+
+    skill = _read_doc("src/filigree/skills/filigree-workflow/references/error-codes.md")
+    assert "**`REGISTRY_UNAVAILABLE`**" in skill
+    assert "auth_mode_unsupported" in skill
+    assert "rename lineage:" in skill

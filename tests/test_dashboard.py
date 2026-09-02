@@ -679,12 +679,14 @@ class TestProjectStoreInit:
 
 
 class TestCreateApp:
-    async def test_ethereal_mode_health_returns_ethereal(self, ethereal_client: AsyncClient) -> None:
+    async def test_ephemeral_mode_health_returns_ephemeral(self, ethereal_client: AsyncClient) -> None:
         resp = await ethereal_client.get("/api/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert data["mode"] == "ethereal"
+        # 3.3.0 wire change (hub weft-096266aa27): the writer emits the canonical spelling.
+        assert data["mode"] == "ephemeral"
+        assert "ethereal" not in data.values()
         assert "version" in data
 
     async def test_server_mode_health_returns_server(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

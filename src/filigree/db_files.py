@@ -15,7 +15,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, get_args
 
 from filigree.db_base import (
     DBMixinProtocol,
@@ -32,8 +32,10 @@ from filigree.finding_issue_cascade import (
 )
 from filigree.models import FileRecord, Issue, ScanFinding
 from filigree.registry import (
+    LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE,
     BatchQuery,
     BatchResolution,
+    BatchResolutionError,
     RegistryBriefingBlockedError,
     RegistryFileNotFoundError,
     RegistryResolutionError,
@@ -264,6 +266,28 @@ def _infer_language_from_path(path: str) -> str:
     """Infer a conservative language name from a path extension."""
     _root, ext = os.path.splitext(path.casefold())
     return _LANGUAGE_BY_EXTENSION.get(ext, "")
+
+
+class _ScanFileResolutions(NamedTuple):
+    """Outcome of the pre-lock registry round-trip for one scan-results batch.
+
+    ``resolved`` is keyed by requested path; ``skipped_paths`` are paths the
+    registry reported ``BODY_TOO_LARGE`` for and that have no file record to
+    ingest against, so the write window drops their findings (their
+    neighbours are ingested as normal).
+    """
+
+    resolved: dict[str, ResolvedFile]
+    skipped_paths: frozenset[str]
+
+
+def _shown_scan_path(path: str) -> str:
+    """A path short enough to log — an over-cap path is by definition enormous."""
+    return path if len(path) <= 200 else f"{path[:200]}…(+{len(path) - 200} chars)"
+
+
+def _batch_error_message(err: BatchResolutionError) -> str:
+    return f"Loomweave registry rejected file {_shown_scan_path(err['requested_path'])!r}: {err['code']} {err['message']}"
 
 
 def scan_finding_observation_summary(scan_source: str, path: str, line_start: int | None, message: str) -> str:
@@ -1178,7 +1202,9 @@ class FilesMixin(DBMixinProtocol):
                         stats["files_created"] += 1
         return file_id
 
-    def _pre_resolve_scan_file_records(self, findings: list[dict[str, Any]], *, actor: str) -> dict[str, ResolvedFile]:
+    def _pre_resolve_scan_file_records(
+        self, findings: list[dict[str, Any]], *, actor: str, stats: ScanIngestResult
+    ) -> _ScanFileResolutions:
         """Resolve new scan file identities before the write transaction opens.
 
         CONTRACT-1 (Loomweave 1.0): unfamiliar paths are batched into a single
@@ -1187,9 +1213,20 @@ class FilesMixin(DBMixinProtocol):
         Briefing-blocked / not_found / structured-error per-item failures are
         promoted back to the existing per-finding raise behaviour so the
         scan-results POST keeps its fail-closed semantics.
+
+        The one per-item outcome that is NOT promoted is ``BODY_TOO_LARGE``: the
+        registry reports a single path that cannot fit under Loomweave's 16 KiB
+        transport cap on the ``errors`` channel precisely so its neighbours are
+        not lost (filigree-b57d4eb7d9). Such a path is reported on
+        ``stats["warnings"]`` and — when it has no file record to ingest
+        against — listed in ``skipped_paths`` so the write window drops its
+        findings and keeps the rest of the batch. A batch that would ingest
+        NOTHING (every row is over the cap) still raises, so a single-finding
+        report keeps its registry error envelope instead of a silent no-op.
         """
         # Deduplicate unfamiliar paths and capture the language to send.
         seen_paths: set[str] = set()
+        registered_paths: set[str] = set()
         queries: list[BatchQuery] = []
         refresh_existing = self.registry.is_displaced()
         for f in findings:
@@ -1197,16 +1234,18 @@ class FilesMixin(DBMixinProtocol):
             if path in seen_paths:
                 continue
             existing_file = self.conn.execute("SELECT 1 FROM file_records WHERE path = ?", (path,)).fetchone()
-            if existing_file is not None and not refresh_existing:
-                seen_paths.add(path)
-                continue
+            if existing_file is not None:
+                registered_paths.add(path)
+                if not refresh_existing:
+                    seen_paths.add(path)
+                    continue
             inferred_language = _infer_language_from_path(path) if "language" not in f else ""
             stored_language = f.get("language", "") or inferred_language
             queries.append(BatchQuery(path=path, language=stored_language))
             seen_paths.add(path)
 
         if not queries:
-            return {}
+            return _ScanFileResolutions(resolved={}, skipped_paths=frozenset())
 
         # Use the registry's native batch when available; fall back to
         # looping ``resolve_file`` for registries that only implement the
@@ -1231,11 +1270,31 @@ class FilesMixin(DBMixinProtocol):
             first = batch["not_found"][0]
             msg = messages.get(first) or f"Loomweave registry could not resolve file at {first!r} (batch resolve)"
             raise RegistryFileNotFoundError(msg, status_code=404, url="")
-        if batch["errors"]:
-            err = batch["errors"][0]
-            msg = f"Loomweave registry rejected file {err['requested_path']!r}: {err['code']} {err['message']}"
-            raise RegistryResolutionError(msg, status_code=400, url="")
-        return batch["resolved"]
+        body_too_large = [err for err in batch["errors"] if err["code"] == LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE]
+        other_errors = [err for err in batch["errors"] if err["code"] != LOOMWEAVE_BATCH_BODY_TOO_LARGE_CODE]
+        if other_errors:
+            raise RegistryResolutionError(_batch_error_message(other_errors[0]), status_code=400, url="")
+
+        # BODY_TOO_LARGE is per-row by contract: warn, drop the row (or keep it
+        # on its stored identity when the path is already registered), and let
+        # the neighbours through. Only a batch with nothing left to ingest is
+        # rejected outright.
+        skipped_paths: set[str] = set()
+        for err in body_too_large:
+            path = err["requested_path"]
+            if path in registered_paths:
+                warning = (
+                    f"Registry metadata for file {_shown_scan_path(path)!r} not refreshed "
+                    f"({err['code']}): {err['message']}; its findings were ingested against the stored identity"
+                )
+            else:
+                skipped_paths.add(path)
+                warning = f"Findings for file {_shown_scan_path(path)!r} not ingested ({err['code']}): {err['message']}"
+            logger.warning("scan ingest: %s", warning)
+            stats["warnings"].append(warning)
+        if skipped_paths and {f["path"] for f in findings} <= skipped_paths:
+            raise RegistryResolutionError(_batch_error_message(body_too_large[0]), status_code=400, url="")
+        return _ScanFileResolutions(resolved=batch["resolved"], skipped_paths=frozenset(skipped_paths))
 
     def _upsert_finding(
         self,
@@ -1672,7 +1731,7 @@ class FilesMixin(DBMixinProtocol):
         # window below then runs under its own BEGIN IMMEDIATE + busy-retry, the
         # same transaction discipline every other write surface uses; scan-run
         # completion afterwards is a separate transaction.
-        file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor)
+        file_resolutions = self._pre_resolve_scan_file_records(findings, actor=actor, stats=stats)
 
         self._ingest_resolved_findings(
             findings=findings,
@@ -1681,7 +1740,8 @@ class FilesMixin(DBMixinProtocol):
             mark_unseen=mark_unseen,
             create_observations=create_observations,
             observation_actor=observation_actor,
-            file_resolutions=file_resolutions,
+            file_resolutions=file_resolutions.resolved,
+            skipped_paths=file_resolutions.skipped_paths,
             now=now,
             actor=actor,
             stats=stats,
@@ -1785,6 +1845,7 @@ class FilesMixin(DBMixinProtocol):
         stats: ScanIngestResult,
         regressed_issue_ids: set[str],
         resolved: set[tuple[str, str]],
+        skipped_paths: frozenset[str] = frozenset(),
         scanned_paths: Sequence[str] = (),
     ) -> None:
         """Write window for :meth:`process_scan_results`.
@@ -1813,6 +1874,12 @@ class FilesMixin(DBMixinProtocol):
         counted_file_ids: set[str] = set()
 
         for f in findings:
+            if f["path"] in skipped_paths:
+                # Registry reported the path BODY_TOO_LARGE and it has no file
+                # record: there is nothing to ingest against, and the
+                # single-item ``resolve_file`` fallback would only re-trip the
+                # same transport cap inside the write window. Already warned.
+                continue
             file_id = self._upsert_file_record(
                 path=f["path"],
                 language=f.get("language", ""),

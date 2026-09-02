@@ -40,7 +40,7 @@ filigree init
 ```
 Initialized filigree store at .weft/filigree/ in /path/to/my-project
   Prefix: my-project
-  Mode: ethereal
+  Mode: ephemeral
   Database: /path/to/my-project/.weft/filigree/filigree.db
   Anchor: .weft/filigree/ (store-dir presence; confless — no .filigree.conf)
   Scanners: /path/to/my-project/.weft/filigree/scanners/ (add .toml files to register scanners)
@@ -86,7 +86,7 @@ filigree install --codex-skills   # Codex skills only
 To configure operating mode explicitly:
 
 ```bash
-filigree init --mode=ethereal     # Default mode (single-project local process)
+filigree init --mode=ephemeral    # Default mode (single-project local process; `ethereal` is the pre-3.3.0 alias)
 filigree install --mode=server    # Persistent daemon / multi-project mode
 ```
 

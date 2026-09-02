@@ -24,9 +24,9 @@ def resolve_scanner_api_url_with_source(filigree_dir: Path, *, explicit_api_url:
     """Return the dashboard URL scanners should use for result callbacks.
 
     Explicit caller input wins. Otherwise use the same port sources that start
-    and verify the dashboard: server mode reads ``server.json`` and ethereal
+    and verify the dashboard: server mode reads ``server.json`` and ephemeral
     mode reads the active ``.filigree/ephemeral.port`` file. If no active
-    ethereal port has been recorded yet, fall back to the legacy default.
+    ephemeral port has been recorded yet, fall back to the legacy default.
     """
     if explicit_api_url is not None:
         return ScannerApiUrlResolution(url=explicit_api_url.strip().rstrip("/"), source="explicit")

@@ -184,6 +184,21 @@ When an issue has active `critical=true` annotations linked with
 an `annotation_warnings` array. Each warning contains the `annotation_id`,
 file anchor, computed `anchor_state`, and suggested follow-up tools.
 
+Issues with signed Legis entity bindings pass through the closure gate first.
+A non-PROCEED verdict comes back as an error envelope whose `error` is the
+gate reason: `code: CONFLICT` for a blocked, stale, contract-violation or
+Legis-unavailable verdict, `INTERNAL` for a ledger integrity failure. The same
+mapping applies per item in `issue_batch_close` and to a closing status write
+through `issue_update`. When Loomweave reported a governed SEI orphaned
+(`alive:false`) and knows its latest lineage event, the reason is suffixed
+`rename lineage: <sei> -> <new_locator> (<event>)` so the agent can re-bind
+to the new locator instead of dead-ending. The `GateDecision` behind the
+envelope also carries advisory `loomweave_unavailable`, `lineage_unavailable`
+and `lineage_hints` fields; they are logged and used to bound a cascade batch
+to one Loomweave probe, but never change the verdict — Loomweave is enrich-only
+at the gate, and a binding it could not check is freshness UNKNOWN, not a
+block.
+
 #### `issue_reopen`
 
 | Parameter | Type | Required | Description |
@@ -598,6 +613,8 @@ Returns `ListResponse[TransitionDetail]` (`{items, has_more}`), with
 #### `mcp_status_get`
 
 No parameters. Returns connector health fields including `status`, `db_initialized`, `schema_compatible`, `installed_schema_version`, `database_schema_version`, `code`, `error`, `guidance`, `filigree_dir`, `runtime`, and `actor_verification`. The `runtime` object identifies the executing Python binary, resolved binary path, MCP entrypoint, module file, package root, detected venv root, and install context (`venv`, `uv_tool`, or `system_or_unknown`). The `actor_verification` object (`{verified, verified_actor, deferral, note}`) reports the ADR-012 actor-verification posture for this transport: MCP-stdio stamps the OS identity (`verified=true`); MCP-HTTP cannot vouch for the caller, so the `actor` argument is a self-asserted claim and `verified_actor`/`verified_author` are NULL (`verified=false`) — transport-bound identity is deferred to `filigree-81d3971467`. This tool is safe to call in warm-but-degraded `SCHEMA_MISMATCH` mode.
+
+**Degraded registry mode.** In fail-closed loomweave mode (`registry_backend=loomweave`, `loomweave.allow_local_fallback=false`) the stdio server does not exit when the startup capability probe fails; it stays up with `db_initialized=false`, `schema_compatible=true`, and `mcp_status_get` reports one of two statuses. `status: "registry_unavailable"` carries the `REGISTRY_UNAVAILABLE` envelope's `code` / `error` / `details` (`details.backend`, `details.cause`, `details.cause_kind`, `details.url`, `details.hint`); `guidance` is the same remedy line as `details.hint`, specific to `cause_kind`: only reachability failures (`network`, `timeout`, `http_error`) say start Loomweave (`loomweave serve`); `auth` / `auth_token_missing` name the bearer-token env var (`loomweave.token_env`, default `WEFT_TOKEN`); `role_declined` / `auth_mode_unsupported` point at Loomweave's serving configuration or `registry_backend='local'`; `invalid_response` says upgrade Filigree or Loomweave to a matching pair (starting Loomweave will not fix it); every hint except `invalid_response` also offers `loomweave.allow_local_fallback=true` as an interim fallback to local file ids. `status: "registry_version_mismatch"` (a wire-protocol break) instead carries the pinned `LOOMWEAVE_REGISTRY_VERSION_MISMATCH` envelope — `details` are `{cause, url, expected, advertised}` with no `backend` / `hint` — and `guidance` is "Upgrade Filigree or Loomweave so their registry API versions match." Both statuses carry `registry_retry: {interval_seconds, last_retry_at, next_retry_after}`: every other tool call re-attempts startup at most once per `interval_seconds` (10 s), returns the latched status's envelope while the failure persists, and clears the latch without an MCP restart once Loomweave answers. `registry_retry` is also present on a `db_open_error` status that came out of such a retry (`null` otherwise). The streamable-HTTP transport answers the same envelope from its per-request resolver.
 
 ### Analytics
 
@@ -1095,7 +1112,7 @@ create a linked triage observation; full responses then include
 
 **Rate limiting:** Repeated triggers for the same scanner+file are rejected within a 30s cooldown window.
 
-**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ethereal mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ethereal port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
+**Important:** Results are POSTed to the dashboard API at `/api/scan-results`, the living alias for the recommended Weft generation. Without an explicit `api_url`, scanners use the active local dashboard: ephemeral mode reads `.filigree/ephemeral.port`, server mode reads the configured daemon port, and the legacy `http://localhost:8377` default is only used when no active ephemeral port has been recorded. Ensure the target is reachable before triggering scans — if unreachable, results are silently lost.
 
 External scanner producers should include a globally unique, non-empty
 `scan_run_id` in scan-results POSTs when they want `GET /api/scan-runs`

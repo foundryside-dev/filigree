@@ -52,7 +52,7 @@ A primary-key collision — two locators on one issue resolving to the same SEI 
 Filigree participates in the shared §8 oracle (`fixtures/sei-conformance-oracle.json`, vendored from Clarion at `tests/federation/fixtures/`). The producer obligations are proven two ways:
 
 - **Fast lane** (`tests/federation/test_sei_conformance_oracle.py`): all six scenarios from the producer side, plus every backfill branch, against the Clarion HTTP stub. A drift-check test pins the vendored fixture to Clarion's canonical copy.
-- **Faithful lane** (`tests/federation/test_sei_oracle_live_clarion.py`, `@pytest.mark.integration`): round-trip + opacity + orphan against a live `clarion serve`. The Clarion-internal carry semantics (rename/move/ambiguous) are proven on the authority side by Clarion's own run of the same fixture (`cargo test -p clarion-storage --test sei_conformance_oracle`).
+- **Faithful lane** (`tests/federation/test_sei_oracle_live_loomweave.py`, `@pytest.mark.integration`): round-trip + opacity + orphan against a live `clarion serve` (now `loomweave serve` — the authority was renamed Clarion → Loomweave after this ADR was accepted; the module was renamed with it). The Clarion-internal carry semantics (rename/move/ambiguous) are proven on the authority side by Clarion's own run of the same fixture (`cargo test -p clarion-storage --test sei_conformance_oracle`).
 
 ## Consequences
 

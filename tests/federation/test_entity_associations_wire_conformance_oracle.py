@@ -37,14 +37,12 @@ Mirrors the federation oracle layout
 Filigree is the authority here, so — unlike the consumer oracles — there is NO
 external Layer-2 drift-check (nothing upstream to point at). The *reverse* check —
 that Loomweave's vendored copy is byte-identical to filigree's authority — lives
-as an optional skip-clean recheck so a drifted consumer copy is caught here too.
+in ``test_sibling_drift.py`` (registry entry ``entity_associations``,
+direction ``downstream``) so a drifted consumer copy is caught there.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -55,6 +53,9 @@ from httpx import ASGITransport, AsyncClient
 import filigree.dashboard as dash_module
 from filigree.core import FiligreeDB
 from filigree.dashboard import create_app
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored authoritative entity-associations reverse-lookup response. Filigree
 # is the producer/authority for this body; Loomweave vendors a byte-identical copy.
@@ -66,23 +67,8 @@ GOLDEN_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "cont
 UPSTREAM_BLOB_SHA = "387979a54c3d8020369d0f16d04a617e1b6749e1"
 
 
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_golden() -> dict[str, Any]:
-    golden: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
-    return golden
-
-
 def _golden_example_body(example_name: str) -> dict[str, Any]:
-    golden = _load_golden()
+    golden = load_golden(GOLDEN_PATH)
     for example in golden["examples"]:
         if example["name"] == example_name:
             body: dict[str, Any] = example["response"]["body"]
@@ -101,7 +87,7 @@ def test_vendored_golden_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(GOLDEN_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -222,35 +208,3 @@ async def test_real_handler_produces_golden_row_shape(producer_db: FiligreeDB) -
     #     the join-key freshness derives to ``unknown`` (the un-resolvable branch).
     assert produced_row["orphan_status"] == "unknown"
     assert produced_row["freshness_status"] == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Reverse drift recheck against Loomweave's vendored copy (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _loomweave_vendored_copy() -> Path | None:
-    """Locate Loomweave's vendored consumer copy, if the sibling repo is present.
-
-    Honors a ``LOOMWEAVE_REPO`` override; defaults to ``/home/john/loomweave``.
-    """
-    repo = Path(os.environ.get("LOOMWEAVE_REPO", "/home/john/loomweave"))
-    source = repo / "docs" / "federation" / "fixtures" / "filigree-entity-associations-response.json"
-    return source if source.exists() else None
-
-
-def test_loomweave_vendored_copy_matches_authority() -> None:
-    """Loomweave's vendored copy must be BYTE-identical to filigree's authority.
-
-    Filigree is the producer/authority for this body; the consumer copy is a sync,
-    not a second source of truth. This is the *reverse* drift check (authority →
-    consumer): fails closed on any divergence, skips cleanly when the sibling repo
-    is absent (e.g. CI), where Layer 1 + the producer oracle still gate the PR.
-    """
-    consumer = _loomweave_vendored_copy()
-    if consumer is None:
-        pytest.skip("Loomweave repo not found (set LOOMWEAVE_REPO to enable the reverse byte-drift check)")
-    assert GOLDEN_PATH.read_bytes() == consumer.read_bytes(), (
-        "Loomweave's vendored filigree-entity-associations-response.json has drifted from filigree's "
-        "authority copy; re-sync it byte-identical (filigree is the producer)."
-    )

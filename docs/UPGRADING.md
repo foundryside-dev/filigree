@@ -5,6 +5,213 @@ This guide covers version-to-version Filigree upgrades. For Beads import, see
 (MCP tool names, stats keys, the Loomweave/Weft rebrand surfaces), see the
 [3.0.0 consumer migration guide](MIGRATION-3.0.md).
 
+## Upgrading to 3.3.0
+
+Filigree 3.3.0 ships **no schema change** (database `user_version` stays 29)
+and no wire-break: nothing in the store, `config.json`, or the `/api/weft/*`
+surface needs a manual edit, and no MCP tool or CLI verb is renamed. What
+changes is how Filigree behaves at the Loomweave boundary, how an installation
+mode is spelled, and what the federation CI lanes are called. Read on if a
+project of yours uses `registry_backend = "loomweave"`, if a sibling tool reads
+Filigree's installation mode, or if you maintain a fork's CI.
+
+### Installation mode: `ephemeral` is the canonical spelling
+
+`filigree init` (for a new store) and `filigree install --mode` now write
+`"mode": "ephemeral"` to `config.json`, `/api/health` answers `mode == "ephemeral"`, and `VALID_MODES`
+is `{ephemeral, server}`. The pre-3.3.0 spelling `ethereal` is still accepted
+everywhere Filigree reads a mode — `config.json`, a legacy `.filigree.conf`
+during the init carry-forward, `--mode ethereal`, and the store-migration
+`/api/health` port probe — and maps to `ephemeral` through the single
+normalisation point, `core.normalize_mode()`. Every writer emits the canonical
+spelling; an init that imports a `.filigree.conf` with an unknown `mode` falls
+back to `ephemeral` with a warning instead of aborting the carry-forward.
+
+**No action for existing projects.** An existing `config.json` is not rewritten
+unless you pass `--mode` explicitly (`--mode ethereal` persists as
+`ephemeral`); a file that still says `ethereal` opens identically.
+
+**Caveat for Wardline users.** Wardline's `doctor` still compares the literal
+`ethereal` when deciding whether a configured-but-daemonless Filigree project
+explains an unreachable daemon (`_filigree_local_mode` in its
+`install/doctor.py`). A project initialised on 3.3.0 therefore gets Wardline's
+generic "configured but no daemon reachable" hint instead of the specific
+"put filigree in daemon mode" one until wardline-88a7c08286 lands. The check
+still passes; just do not read the generic hint as a broken install.
+
+### Loomweave authentication posture is checked once, at the probe
+
+The capabilities probe now reads Loomweave's ADR-056 `authentication` block
+(`{protected_routes, capabilities_probe, contract_version}`, capabilities
+fixture v6) and `validate_loomweave_capabilities` gates on it at startup and on
+every re-probe. Filigree implements bearer only — it attaches
+`Authorization: Bearer <token>` and nothing else, and owns no HMAC signing
+contract — so:
+
+- `protected_routes` must be `none` or `bearer` and `capabilities_probe` must
+  be `none`. Anything else — `hmac`, or a mode this Filigree does not know —
+  is refused with one
+  `RegistryUnavailableError(cause_kind='auth_mode_unsupported')` naming the
+  field, the mode and the probe URL. **Before 3.3.0 an HMAC-mode
+  Loomweave passed the probe and then failed every protected operation with a
+  per-call `cause_kind='auth'` 401**; it is now refused up front.
+- `protected_routes = 'bearer'` while Filigree resolved no token (the
+  environment variable named by `loomweave.token_env`, default `WEFT_TOKEN`,
+  unset or empty) is refused with `cause_kind='auth_token_missing'`, naming the
+  probe URL and the env var to export. This too used to surface only as N
+  per-operation 401s.
+- A Loomweave that omits the block (pre-ADR-056) is treated as
+  `none`/`none`/`1` and keeps working. A `contract_version` other than 1 logs
+  a warning and is not rejected. A present-but-malformed block is an
+  `invalid_response` wire-shape break.
+
+Gate order is `api_version`, then registry role, then authentication mode,
+then token presence. Both new refusals follow the `role_declined` fallback
+policy: with `loomweave.allow_local_fallback = true` the probe failure is
+logged as a warning and auto-creates route through the local registry until
+Loomweave recovers; with the default `false` the project fails closed, which
+now looks like the next section.
+
+#### What you must do
+
+- **Loomweave serving `protected_routes = "hmac"` (or any non-bearer mode):**
+  reconfigure Loomweave to `bearer` or `none`, switch the project to
+  `registry_backend = "local"`, or set `loomweave.allow_local_fallback = true`
+  to keep working on local file ids in the meantime.
+- **Loomweave serving `bearer`:** export the token in every process that
+  opens the project — each CLI invocation, the stdio MCP server, the
+  session-context hook and the dashboard — under `WEFT_TOKEN` (or the env you
+  named in `loomweave.token_env`). A missing token now fails at startup rather
+  than on the first protected call.
+
+### Fail-closed Loomweave outage renders as an envelope, not a traceback
+
+With `registry_backend = "loomweave"`, `loomweave.allow_local_fallback = false`
+and Loomweave unreachable (or refusing as above), every surface used to die
+with a raw `RegistryUnavailableError` traceback. Each now renders the shared
+`REGISTRY_UNAVAILABLE` envelope plus a remedy line:
+
+- **CLI** — every verb, and `filigree init`: one stderr line naming backend,
+  `cause_kind` and probed URL, one remedy line, exit 1. With `--json` the
+  envelope goes to stdout (`code == "REGISTRY_UNAVAILABLE"`) and carries
+  `details.backend`, `details.cause_kind`, `details.url` and `details.hint`.
+- **Session-context hook** — the snapshot carries a `WARNING:` line with the
+  envelope error and the remedy, instead of a generic "hook failed" warning.
+- **MCP stdio server** — starts in degraded mode:
+  `mcp_status_get.status == "registry_unavailable"`, `guidance` carries the
+  remedy, and `registry_retry` reports
+  `{interval_seconds, last_retry_at, next_retry_after}`. `call_tool`
+  re-attempts startup at most once per 10 s and clears degraded mode on the
+  next tool call once the interval has elapsed and Loomweave answers, so bringing Loomweave back no longer means restarting
+  the agent session.
+- **Dashboard** — server mode answers the envelope with HTTP 503 for the
+  affected project only (other projects keep serving); ephemeral startup
+  prints the envelope and exits 1. `--allow-local-fallback` remains the
+  dashboard-side escape hatch.
+
+The remedy line is specific to `cause_kind`: reachability failures (`network`,
+`timeout`, `http_error`, `unknown`) say start Loomweave or set the fallback;
+`auth` / `auth_token_missing` name the token env; `role_declined` /
+`auth_mode_unsupported` point at Loomweave's configuration; `invalid_response`
+says starting Loomweave will not fix it and offers no fallback.
+
+#### What you must do
+
+Nothing, unless you scripted around the old failure: anything that matched
+the `RegistryUnavailableError` traceback text should switch to the exit
+status or to the `--json` envelope's `code` / `details.cause_kind`.
+
+### Loomweave batch requests are chunked by body bytes
+
+Loomweave caps every `/api/v1/*` request body at 16 KiB and answers an
+over-cap body with a transport-level HTTP 413 before parsing any JSON.
+Filigree chunked its batch POSTs by count only (256 queries), so a chunk of
+real-world paths (about 25 KiB) was rejected outright and
+`filigree migrate-registry --to loomweave` marked every row unresolved;
+`identity/resolve:batch` (`sei-backfill`, the closure-gate drift reads) had
+the same latent failure. `LoomweaveRegistry` now sizes chunks to
+`LOOMWEAVE_BATCH_MAX_BODY_BYTES` (16 KiB minus 1 KiB headroom, measured with
+the exact httpx `json=` encoding) as well as 256 queries, halves and retries a
+chunk Loomweave still answers 413 to, and reports a single query that cannot
+fit on the `errors` channel with `code = "BODY_TOO_LARGE"` instead of failing
+the batch. Small batches keep a byte-identical wire shape.
+
+#### What this means for you
+
+- A store whose `migrate-registry` plan previously listed every file as
+  unresolved after a 413 now resolves. A lone path that cannot fit under the
+  cap still appears in the plan's `unresolved` list (`BODY_TOO_LARGE: …`) and
+  still blocks `--execute`; the rest of the plan resolves normally.
+- A scan-results batch containing such a path reports it on `warnings` and
+  ingests the rest of the batch instead of rejecting the whole POST. A batch
+  in which *every* path is over the cap is still rejected.
+
+### Closure gate: bounded outage cost and rename lineage
+
+Two enrich-only refinements to the RED-1 governed-close gate; neither needs
+configuration and neither changes whether a close is allowed.
+
+- **One Loomweave probe per cascade batch.** `close_resolved_findings` now
+  threads `loomweave_known_down` into `evaluate_closure_gate` (parity with
+  `legis_known_down`), so a down or slow Loomweave costs one retry budget per
+  batch instead of one per governed issue. Only connectivity-class failures
+  (network, timeout, or a retried-out gateway 502/503/504) flip the bound; a
+  deterministic 4xx or plain 500 degrades only that issue's freshness to
+  UNKNOWN. Later issues in a bounded batch get freshness UNKNOWN (logged with
+  reason `registry_unavailable_earlier_in_batch`) and still receive their own
+  Legis verdict. `GateDecision.loomweave_unavailable` is advisory and never
+  affects `allowed`.
+- **Rename lineage on orphaned bindings.** When a governed SEI comes back
+  `alive: false`, the gate relays Loomweave's latest `sei_lineage` event —
+  from the `lineage` list inlined on the by-SEI body, falling back to
+  `GET /api/v1/identity/lineage/:sei` in a single bounded attempt (a 404 is
+  memoised per instance). A non-PROCEED reason gains the suffix
+  `rename lineage: <sei> -> <new_locator> (<event>)`, `GateDecision` gains the
+  advisory `lineage_hints` and `lineage_unavailable` fields, and the
+  `entity_unresolved` drift-gate log record carries the hints. An older
+  Loomweave without the route, an unreachable one, or a malformed body yields
+  no hint and never changes the gate outcome.
+
+### CI and test-infrastructure renames (forks and downstream CI)
+
+None of these affect a running Filigree; they matter if you run this
+repository's CI or the federation oracles yourself.
+
+- **Live Loomweave lane.** The repository secret is `LOOMWEAVE_STAGING_BASE_URL`
+  (was `CLARION_STAGING_BASE_URL`) and the required-mode flag is
+  `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` (was `FILIGREE_REQUIRE_LIVE_CLARION`). The
+  lane's modules moved to `tests/integration/test_loomweave_staging_smoke.py`,
+  `tests/integration/test_loomweave_phase_d_e2e.py` and
+  `tests/federation/test_sei_oracle_live_loomweave.py`. There is no
+  compatibility alias: the scheduled lane stays red until the new secret is
+  set.
+- **Sibling-drift arming flags parse strictly.** The Layer-2 vendored-golden
+  drift checks are armed per sibling by
+  `FILIGREE_REQUIRE_LOOMWEAVE_REPO` / `FILIGREE_REQUIRE_WARDLINE_REPO` /
+  `FILIGREE_REQUIRE_LEGIS_REPO`, all sharing one parser
+  (`tests/federation/_oracle.arming_flag_requested`): `1` / `true` / `yes` /
+  `on` arm, unset / empty / `0` / `false` / `no` / `off` leave the checks
+  skip-clean, and any other value raises. **Previously
+  `FILIGREE_REQUIRE_LOOMWEAVE_REPO=0` armed the check via bare truthiness;
+  it now disarms it.** `FILIGREE_REQUIRE_LIVE_LOOMWEAVE` uses the same
+  parser. Sibling checkouts are located by `LOOMWEAVE_REPO` / `WARDLINE_REPO`
+  / `LEGIS_REPO` (the legacy `CLARION_REPO` alias still works for loomweave),
+  falling back to a checkout next to this one.
+- **New scheduled `federation-drift` lane.** Runs weekly (and on
+  `workflow_dispatch` with `require_federation_drift`), checks out
+  foundryside-dev/{loomweave,wardline,legis} under `.siblings/`, points the
+  `<SIBLING>_REPO` overrides at them, arms all three flags and runs
+  `tests/federation/test_sibling_drift.py`. Private siblings need the
+  `FEDERATION_CHECKOUT_TOKEN` secret (a fine-grained PAT with `contents:read`
+  on those repos); while they are public the default `github.token` suffices.
+  A red run of this lane makes the whole weekly workflow non-success, so
+  `release.yml`'s `live-loomweave-release-check` warns even when the live lane
+  passed — check this job before chasing staging.
+- **`federation_contract` marker.** The `loomweave-contract` CI job runs
+  `uv run pytest -m federation_contract` instead of a hand-enumerated file
+  list; `tests/federation/test_oracle_helpers.py` fails if a federation module
+  is left unmarked.
+
 ## Upgrading to 3.0.0 (store consolidation)
 
 Filigree 3.0.0 moves the machine-owned store from the legacy `.filigree/`

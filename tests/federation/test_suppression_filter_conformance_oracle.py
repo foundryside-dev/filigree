@@ -23,25 +23,25 @@ Three layers, mirroring the SEI oracle (``test_sei_conformance_oracle.py``):
   accepted, and an off-vocab value is rejected with ``ValueError``. If Filigree's
   grammar drifts from Wardline's vocab — a value added, dropped, or renamed — this
   reds. It reads the real grammar, not a restatement of the contract.
-- **Layer 2 — drift recheck (release-gate, skip-clean).** Byte-compares the
-  vendored copy against Wardline's authority source
-  (``$WARDLINE_REPO/tests/conformance/filigree_suppression_filter_contract.json``,
-  default ``/home/john/wardline``). Skips cleanly when the sibling repo is absent
-  (e.g. CI); fails closed on any byte divergence.
+- **Layer 2 — drift recheck (release-gate, skip-clean).** Lives in
+  ``test_sibling_drift.py`` (registry entry ``wardline_suppression_filter``):
+  byte-compares the vendored copy against Wardline's authority source
+  (``tests/conformance/filigree_suppression_filter_contract.json`` in the sibling
+  checkout located by ``_oracle.sibling_source``). Skips cleanly when the sibling
+  is absent unless ``FILIGREE_REQUIRE_WARDLINE_REPO`` arms it.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from filigree.core import FiligreeDB
 from filigree.db_files import VALID_SUPPRESSION_FILTERS, WARDLINE_SUPPRESSION_STATES
+from tests.federation._oracle import blob_sha, load_golden
+
+pytestmark = pytest.mark.federation_contract
 
 # The vendored consumer copy of Wardline's authoritative contract.
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "contracts" / "wardline-suppression-filter-contract.json"
@@ -50,21 +50,6 @@ CONTRACT_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "co
 # Recomputed from bytes by ``test_vendored_contract_byte_pin`` so any edit to the
 # fixture reds in the default suite, on every CI run.
 UPSTREAM_BLOB_SHA = "7bcb6993553e920438fe3854a8a62409362accb9"
-
-
-def _blob_sha(data: bytes) -> str:
-    """git's blob object id for ``data``: ``sha1(b"blob <len>\\0" + data)``.
-
-    ``usedforsecurity=False`` is honest — this is content addressing (git's own
-    object-id scheme), not a security primitive — and keeps ruff's S324 quiet
-    without a per-line suppression.
-    """
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
-
-
-def _load_contract() -> dict[str, Any]:
-    contract: dict[str, Any] = json.loads(CONTRACT_PATH.read_text())
-    return contract
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +63,7 @@ def test_vendored_contract_byte_pin() -> None:
     A single-byte edit to the fixture changes the sha and reds this test in the
     default suite — the cheapest possible drift tripwire, no sibling repo needed.
     """
-    assert _blob_sha(CONTRACT_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
+    assert blob_sha(CONTRACT_PATH.read_bytes()) == UPSTREAM_BLOB_SHA
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +78,7 @@ def test_filigree_owned_vocab_matches_contract() -> None:
     This ties the vocabulary Filigree's runtime carries to Wardline's owned set:
     if Filigree adds/drops/renames a suppression state, it diverges from the
     authoritative contract and reds here."""
-    contract = _load_contract()
+    contract = load_golden(CONTRACT_PATH)
     assert set(contract["suppression_states"]) == WARDLINE_SUPPRESSION_STATES
 
 
@@ -106,7 +91,7 @@ def test_filigree_filter_grammar_is_vocab_plus_only_the_sentinel() -> None:
     other accepted value must come from Wardline's vocabulary. If Filigree's grammar
     grows a value the contract doesn't sanction (or the sentinel name drifts), this
     reds."""
-    contract = _load_contract()
+    contract = load_golden(CONTRACT_PATH)
     expected = set(contract["suppression_states"]) | {contract["filigree_filter_sentinel"]}
     assert expected == VALID_SUPPRESSION_FILTERS
 
@@ -114,7 +99,7 @@ def test_filigree_filter_grammar_is_vocab_plus_only_the_sentinel() -> None:
 def test_contract_precomputed_filter_values_match_constructed_union() -> None:
     """The contract's own precomputed ``filigree_filter_values`` equals the union
     we construct — a guard against a typo in that convenience field."""
-    contract = _load_contract()
+    contract = load_golden(CONTRACT_PATH)
     constructed = set(contract["suppression_states"]) | {contract["filigree_filter_sentinel"]}
     assert set(contract["filigree_filter_values"]) == constructed
 
@@ -132,7 +117,7 @@ def test_real_validator_accepts_contract_values_and_rejects_off_vocab(tmp_path: 
     if the validator stopped accepting a contract value, or started accepting the
     bogus one, this test reds — the runtime consumer is tied to the contract.
     """
-    contract = _load_contract()
+    contract = load_golden(CONTRACT_PATH)
     accepted = set(contract["suppression_states"]) | {contract["filigree_filter_sentinel"]}
 
     db = FiligreeDB(tmp_path / "filigree.db", prefix="test")
@@ -147,30 +132,3 @@ def test_real_validator_accepts_contract_values_and_rejects_off_vocab(tmp_path: 
             db.list_findings_global(suppression="definitely-not-a-state", limit=1)
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 — drift recheck against Wardline's authority source (skip-clean)
-# ---------------------------------------------------------------------------
-
-
-def _wardline_authority_source() -> Path | None:
-    """Locate Wardline's canonical contract, if the sibling repo is present.
-
-    Honors a ``WARDLINE_REPO`` override; defaults to ``/home/john/wardline``.
-    """
-    repo = Path(os.environ.get("WARDLINE_REPO", "/home/john/wardline"))
-    source = repo / "tests" / "conformance" / "filigree_suppression_filter_contract.json"
-    return source if source.exists() else None
-
-
-def test_vendored_contract_matches_wardline_authority_source() -> None:
-    """The vendored consumer copy must be BYTE-identical to Wardline's authority
-    source. Fails closed on any divergence; skips cleanly when the sibling repo
-    is absent (e.g. CI), where Layer 1 + the consumer oracle still gate the PR."""
-    source = _wardline_authority_source()
-    if source is None:
-        pytest.skip("Wardline repo not found (set WARDLINE_REPO to enable the byte-drift check)")
-    assert CONTRACT_PATH.read_bytes() == source.read_bytes(), (
-        "Vendored wardline-suppression-filter-contract.json has drifted from Wardline's authority source; re-vendor it byte-identical."
-    )

@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 DEFAULT_INSTANCE_ID = "test-loomweave-instance"
 DEFAULT_API_VERSION = 1
@@ -66,6 +66,19 @@ class ClarionStubState:
     # Every POST /api/v1/files/batch request body (parsed). Tests assert the
     # number of entries (request count) and the queries-per-chunk shape.
     batch_requests: list[dict[str, list[dict[str, str]]]] = field(default_factory=list)
+    # Content-Length of every ACCEPTED ``POST /api/v1/files/batch`` body, in
+    # arrival order (parallel to ``batch_requests``). Tests assert the wire
+    # size directly rather than re-serialising ``batch_requests``.
+    batch_request_body_bytes: list[int] = field(default_factory=list)
+    # Loomweave pins a 16 KiB transport-level body cap on the whole
+    # ``/api/v1/*`` group (``RequestBodyLimitLayer``; contracts.md
+    # "max 16 KiB" / "413 n/a"). When set, any POST body longer than this is
+    # answered ``413 text/plain "length limit exceeded"`` — the framework's
+    # verbatim reply — BEFORE the JSON is parsed, and the rejected size is
+    # appended to ``rejected_body_bytes``. ``None`` (default) disables the
+    # cap so pre-existing tests keep their footing.
+    max_body_bytes: int | None = None
+    rejected_body_bytes: list[int] = field(default_factory=list)
     # ---- SEI (ADR-038) surface -------------------------------------------
     # ``include_sei_capability`` controls whether ``_capabilities`` carries the
     # nested ``sei`` object at all (a pre-SEI Clarion omits it); ``sei_supported``
@@ -74,6 +87,14 @@ class ClarionStubState:
     include_sei_capability: bool = True
     sei_supported: bool = False
     sei_version: int = 1
+    # ---- ADR-056 ``authentication`` discovery block (fixture v6) -----------
+    # ``None`` (default) omits the block entirely — the pre-ADR-056 Loomweave
+    # posture Filigree treats as ``none``/``none``/``contract_version 1`` — so
+    # every existing FiligreeDB-level test keeps its older-Loomweave footing.
+    # Set to a dict (e.g. ``{"protected_routes": "hmac", "capabilities_probe":
+    # "none", "contract_version": 1}``) to advertise a mode and exercise the
+    # consumer's ``auth_mode_unsupported`` gate.
+    authentication: dict[str, Any] | None = None
     # locator -> alive SEI. A submitted locator absent here resolves to the
     # ``not_found`` channel (orphaned); a submitted SEI-shaped string (reserved
     # ``loomweave:eid:`` prefix) is rejected into the ``invalid`` channel (REQ-F-02).
@@ -81,10 +102,24 @@ class ClarionStubState:
     # Locators to force into the ``invalid`` channel even though they are not
     # SEI-shaped — models a malformed locator Clarion's validate_locator rejects.
     invalid_locators: set[str] = field(default_factory=set)
-    # sei -> resolve_sei body (identity-axis ALIVE/ORPHANED). Absent → alive:false.
+    # sei -> resolve_sei body (identity-axis ALIVE/ORPHANED). Absent → alive:false
+    # with an empty inline ``lineage``. An orphan record whose ``lineage`` is
+    # ``None`` is served WITHOUT the ``lineage`` key (models a Loomweave that does
+    # not inline lineage, forcing the consumer's lineage-route fallback).
     sei_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # sei -> lineage events served by GET /api/v1/identity/lineage/{sei}
+    # (``{event, old_locator, new_locator, run_id, recorded_at}``). Unknown SEI →
+    # ``lineage: []`` (Loomweave's ``sei_lineage`` returns an empty vec, never 404).
+    lineage_records: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # When set, the lineage route answers this status with an error envelope —
+    # 404 models an older Loomweave without the route.
+    lineage_route_status: int | None = None
+    # Every SEI the lineage route was asked for (percent-decoded).
+    lineage_requests: list[str] = field(default_factory=list)
     # Every POST /api/v1/identity/resolve:batch request's ``locators`` list.
     identity_resolve_requests: list[list[str]] = field(default_factory=list)
+    # Content-Length of every ACCEPTED resolve:batch body (parallel list).
+    identity_resolve_request_body_bytes: list[int] = field(default_factory=list)
 
 
 def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
@@ -111,6 +146,26 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
             return False
 
+        def _read_body_or_reject(self) -> bytes | None:
+            """Read the POST body; answer 413 and return ``None`` when it exceeds the cap.
+
+            Mirrors tower-http's ``RequestBodyLimitLayer``: the body is drained
+            and the reply is ``413 Payload Too Large`` with a ``text/plain``
+            ``length limit exceeded`` body — NOT a JSON error envelope.
+            """
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length) if length else b""
+            if state.max_body_bytes is not None and length > state.max_body_bytes:
+                state.rejected_body_bytes.append(length)
+                body = b"length limit exceeded"
+                self.send_response(413)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return None
+            return raw
+
         def _write_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode()
             self.send_response(status)
@@ -126,8 +181,9 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
             SEI-shaped inputs (reserved ``loomweave:eid:`` prefix) are rejected into
             ``invalid`` (REQ-F-02); everything else falls to ``not_found``.
             """
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length) if length else b""
+            raw = self._read_body_or_reject()
+            if raw is None:
+                return
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -141,6 +197,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self._write_json(400, {"error": "batch too large", "code": "BATCH_TOO_LARGE"})
                 return
             state.identity_resolve_requests.append(list(locators))
+            state.identity_resolve_request_body_bytes.append(len(raw))
             resolved: dict[str, dict[str, Any]] = {}
             invalid: list[str] = []
             not_found: list[str] = []
@@ -162,13 +219,28 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
 
         def _handle_resolve_sei(self, path: str) -> None:
             """Mirror ``GET /api/v1/identity/sei/{sei}`` (identity axis)."""
-            sei = path[len("/api/v1/identity/sei/") :]
+            sei = unquote(path[len("/api/v1/identity/sei/") :])
             record = state.sei_records.get(sei)
             if record is not None and record.get("alive", False):
                 self._write_json(200, {"sei": sei, **record})
                 return
             lineage = record.get("lineage", []) if record is not None else []
+            if lineage is None:
+                self._write_json(200, {"sei": sei, "alive": False})
+                return
             self._write_json(200, {"sei": sei, "alive": False, "lineage": lineage})
+
+        def _handle_lineage(self, path: str) -> None:
+            """Mirror ``GET /api/v1/identity/lineage/{sei}`` (``get_identity_lineage``)."""
+            sei = unquote(path[len("/api/v1/identity/lineage/") :])
+            state.lineage_requests.append(sei)
+            if state.lineage_route_status is not None:
+                self._write_json(
+                    state.lineage_route_status,
+                    {"error": {"code": "not_found", "message": "no such route"}},
+                )
+                return
+            self._write_json(200, {"sei": sei, "lineage": list(state.lineage_records.get(sei, []))})
 
         def do_GET(self) -> None:
             if not self._check_auth():
@@ -187,12 +259,17 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 }
                 if state.include_sei_capability:
                     capabilities["sei"] = {"supported": state.sei_supported, "version": state.sei_version}
+                if state.authentication is not None:
+                    capabilities["authentication"] = dict(state.authentication)
                 body = json.dumps(capabilities).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if parsed.path.startswith("/api/v1/identity/lineage/"):
+                self._handle_lineage(parsed.path)
                 return
             if parsed.path.startswith("/api/v1/identity/sei/"):
                 self._handle_resolve_sei(parsed.path)
@@ -253,8 +330,9 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self.send_response(404)
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length) if length else b""
+            raw = self._read_body_or_reject()
+            if raw is None:
+                return
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -266,6 +344,7 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self.end_headers()
                 return
             state.batch_requests.append({"queries": payload["queries"]})
+            state.batch_request_body_bytes.append(len(raw))
             queries = payload["queries"]
             if len(queries) > 256:
                 body = json.dumps({"error": "batch too large", "code": "BATCH_TOO_LARGE"}).encode()
@@ -326,6 +405,8 @@ def clarion_stub(
     include_sei_capability: bool = True,
     sei_supported: bool = False,
     sei_by_locator: dict[str, str] | None = None,
+    authentication: dict[str, Any] | None = None,
+    max_body_bytes: int | None = None,
 ) -> Iterator[tuple[str, ClarionStubState]]:
     """Run a Clarion HTTP stub serving ``_capabilities``, ``files``, and the SEI surface.
 
@@ -335,7 +416,11 @@ def clarion_stub(
     against (``file_requests``, ``capability_requests``, ``identity_resolve_requests``).
 
     SEI options seed the state up front so the capability probe a FiligreeDB runs
-    at construction sees the intended ``sei`` advertisement.
+    at construction sees the intended ``sei`` advertisement. ``authentication``
+    (ADR-056 discovery block) is omitted from ``_capabilities`` when ``None``
+    (pre-ADR-056 Loomweave); pass a dict to advertise a mode. ``max_body_bytes``
+    enables Loomweave's transport-level POST body cap (``413 text/plain`` over
+    the limit); ``None`` leaves it off.
     """
     state = ClarionStubState(
         instance_id=instance_id,
@@ -345,6 +430,8 @@ def clarion_stub(
         include_sei_capability=include_sei_capability,
         sei_supported=sei_supported,
         sei_by_locator=dict(sei_by_locator) if sei_by_locator else {},
+        authentication=dict(authentication) if authentication is not None else None,
+        max_body_bytes=max_body_bytes,
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), _build_handler(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

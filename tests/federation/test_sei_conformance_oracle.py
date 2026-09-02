@@ -23,14 +23,15 @@ resume, the ``invalid`` (REQ-F-02) channel, PK-collision merge, and the
 historical ``deleted_issues.entity_ids`` rewrite (REQ-F-01).
 
 The faithful "no grandfathering" gate — the same scenarios against a live
-``loomweave serve`` — lives in ``test_sei_oracle_live_loomweave.py``.
+``loomweave serve`` — lives in ``test_sei_oracle_live_loomweave.py``. The vendored
+fixture's byte-drift check against Loomweave's canonical copy lives in
+``test_sibling_drift.py`` (registry entry ``sei_conformance_oracle``).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ from filigree import sei_backfill
 from filigree.core import FiligreeDB
 from filigree.sei_backfill import SeiBackfillError, run_sei_backfill
 from tests._fakes.clarion_http import clarion_stub
+
+pytestmark = pytest.mark.federation_contract
 
 ORACLE_PATH = Path(__file__).parent / "fixtures" / "sei-conformance-oracle.json"
 
@@ -80,29 +83,6 @@ def _insert_tombstone(db: FiligreeDB, issue_id: str, entity_ids: list[str]) -> N
 # ---------------------------------------------------------------------------
 # Fixture provenance / coverage
 # ---------------------------------------------------------------------------
-
-
-def _loomweave_oracle_source() -> Path | None:
-    """Locate Loomweave's canonical oracle fixture, if the repo is present."""
-    candidates = []
-    env = os.environ.get("CLARION_REPO")
-    if env:
-        candidates.append(Path(env) / "docs" / "federation" / "fixtures" / "sei-conformance-oracle.json")
-    # Sibling checkout: <home>/loomweave next to <home>/filigree.
-    candidates.append(
-        Path(__file__).resolve().parents[3] / "loomweave" / "docs" / "federation" / "fixtures" / "sei-conformance-oracle.json"
-    )
-    return next((c for c in candidates if c.exists()), None)
-
-
-def test_vendored_oracle_matches_loomweave_source() -> None:
-    """The vendored copy must not drift from Loomweave's canonical fixture."""
-    source = _loomweave_oracle_source()
-    if source is None:
-        pytest.skip("Loomweave repo not found (set CLARION_REPO to enable the drift check)")
-    assert json.loads(ORACLE_PATH.read_text()) == json.loads(source.read_text()), (
-        "Vendored sei-conformance-oracle.json has drifted from Loomweave's source; re-copy it."
-    )
 
 
 def test_every_oracle_scenario_is_covered() -> None:

@@ -2883,7 +2883,7 @@ class TestCheckResult:
         assert r.fix_hint == "Run: filigree init"
 
 
-def _setup_project(tmp_path: Path, mode: str = "ethereal") -> Path:
+def _setup_project(tmp_path: Path, mode: str = "ephemeral") -> Path:
     """Helper to create a minimal filigree project."""
     filigree_dir = tmp_path / ".filigree"
     filigree_dir.mkdir()
@@ -2898,9 +2898,10 @@ def _setup_project(tmp_path: Path, mode: str = "ethereal") -> Path:
 
 
 class TestDoctorModeChecks:
-    def test_ethereal_checks_pid_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor in ethereal mode should check ephemeral.pid."""
-        filigree_dir = _setup_project(tmp_path, mode="ethereal")
+    @pytest.mark.parametrize("mode", ["ephemeral", "ethereal"], ids=["canonical", "legacy-spelling"])
+    def test_ephemeral_checks_pid_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+        """Doctor in ephemeral mode (either on-disk spelling) should check ephemeral.pid."""
+        filigree_dir = _setup_project(tmp_path, mode=mode)
         # Write a stale PID (JSON format)
         (filigree_dir / "ephemeral.pid").write_text(json.dumps({"pid": 99999999, "cmd": "filigree"}))
         monkeypatch.chdir(tmp_path)

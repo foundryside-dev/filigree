@@ -99,7 +99,22 @@ Initialize `.filigree/` in the current directory.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--prefix` | string | directory name | ID prefix for issues |
-| `--mode` | `ethereal`/`server` | `ethereal` | Installation mode |
+| `--mode` | `ephemeral`/`server` | `ephemeral` | Installation mode (`ethereal` is the pre-3.3.0 alias, normalized to `ephemeral` on write) |
+
+In fail-closed loomweave mode (`registry_backend=loomweave` with
+`loomweave.allow_local_fallback=false`) an unreachable Loomweave makes `init`
+— and `list`, `show` and every other verb that opens the project database —
+exit 1 with the shared `REGISTRY_UNAVAILABLE` envelope instead of a traceback.
+Plain mode prints one stderr line naming the backend, `cause_kind` and probed
+URL, then one remedy line specific to the cause (start `loomweave serve` for a
+reachability failure; the token env var for `auth` / `auth_token_missing`;
+Loomweave's serving configuration for `role_declined` /
+`auth_mode_unsupported`; upgrade to a matching pair for
+`invalid_response`; every remedy except `invalid_response` also offers
+`loomweave.allow_local_fallback=true` as an interim fallback). `--json` prints
+the same envelope on stdout with `details.backend` and `details.hint`.
+`session-context` is the exception: it always exits 0 and prints the error
+and remedy inside the snapshot.
 
 ### `install`
 
@@ -115,7 +130,7 @@ Install filigree into the current project. With no flags, installs everything: M
 | `--hooks` | flag | Install Claude Code hooks only |
 | `--skills` | flag | Install Claude Code skills only |
 | `--codex-skills` | flag | Install Codex skills only |
-| `--mode` | `ethereal`/`server` | Installation mode (`preserve existing`, else `ethereal`) |
+| `--mode` | `ephemeral`/`server` | Installation mode (`preserve existing`, else `ephemeral`; `ethereal` is the pre-3.3.0 alias) |
 
 **CLAUDE.md → AGENTS.md redirect.** When a project's `CLAUDE.md` is only a
 pointer at `AGENTS.md` — a line that is solely `@AGENTS.md` (or `@./AGENTS.md`),
@@ -183,11 +198,11 @@ filigree server stop                        # Stop daemon
 
 ### `session-context`
 
-Output a session bootstrap snapshot (ready work, in-progress work, critical path, stats).
+Output a session bootstrap snapshot (ready work, in-progress work, critical path, stats). The command always exits 0; when the project database cannot open in fail-closed loomweave mode, the snapshot carries the `REGISTRY_UNAVAILABLE` error and its remedy line instead of the generic hook-failed warning (see `init`).
 
 ### `ensure-dashboard`
 
-Ensure the dashboard is running. In `ethereal` mode this starts/attaches to the project-local process; in `server` mode it checks daemon connectivity.
+Ensure the dashboard is running. In `ephemeral` mode this starts/attaches to the project-local process; in `server` mode it checks daemon connectivity.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1047,6 +1062,33 @@ Delete a tracked file record. By default, this refuses records that still have i
 
 JSON output echoes the global `--actor` that performed the deletion.
 
+### `migrate-registry`
+
+Rewrite `file_records` IDs to another registry backend (currently
+`loomweave`), or roll a migration back from its manifest (also reachable as
+`file migrate-registry`). With neither `--dry-run` nor `--execute`, the
+command plans only.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `--to` | `loomweave` | Target registry backend (required unless `--rollback`) |
+| `--dry-run` | flag | Plan the migration without changing the database (default) |
+| `--execute` | flag | Apply the migration and write a rollback manifest |
+| `--manifest` | path | Manifest path for `--execute` (default: `<project-root>/registry-migration-<UTC timestamp>.json`) |
+| `--rollback` | path | Roll back using a manifest (cannot combine with `--to`/`--dry-run`/`--execute`) |
+| `--json` | flag | Output the plan / result (`planned`, `unresolved`, …) as JSON |
+
+Rows are resolved through Loomweave's `/api/v1/files/batch` in chunks bounded
+by both query count (256) and serialized body bytes (Loomweave caps every
+`/api/v1/*` request body at 16 KiB; Filigree targets 15 KiB and
+halves-and-retries a chunk Loomweave still answers 413 to), so a store of
+long paths no longer has
+every row marked unresolved by a transport 413. A single path that cannot fit
+under the cap on its own is listed in `unresolved` with a
+`BODY_TOO_LARGE: …` error while the other rows are still `planned`;
+`--execute` refuses while `unresolved` is non-empty, so resolve or remove
+that row first.
+
 ### `list-findings`
 
 List code-health findings. Output: `ListResponse[T]` (`{items, has_more}`).
@@ -1182,10 +1224,10 @@ unrelated issue.
 
 Trigger and monitor automated code scanners.
 
-By default, scan callbacks target the active local dashboard: ethereal mode
+By default, scan callbacks target the active local dashboard: ephemeral mode
 uses `.filigree/ephemeral.port`, server mode uses the configured daemon port,
 and Filigree falls back to `http://localhost:8377` only when no active
-ethereal port has been recorded. Use `--api-url` on trigger commands to
+ephemeral port has been recorded. Use `--api-url` on trigger commands to
 override that target explicitly.
 
 ```bash
@@ -1300,7 +1342,7 @@ Runners execute with the project as their current working directory and post
 results to the living scan-results endpoint, `/api/scan-results`, which aliases
 the recommended Loom generation. When `--api-url` is omitted during a direct
 runner invocation, the runner resolves the same active local dashboard target
-used by `trigger-scan`: `.filigree/ephemeral.port` in ethereal mode, the
+used by `trigger-scan`: `.filigree/ephemeral.port` in ephemeral mode, the
 configured daemon port in server mode, and `http://localhost:8377` only as a
 legacy fallback outside an initialized Filigree project. If a future runner flag
 changes, refresh managed project registrations with `filigree scanner enable
@@ -1514,4 +1556,4 @@ Launch an interactive web dashboard at `http://localhost:8377`. Features:
 | `--no-browser` | flag | false | Don't auto-open browser |
 | `--server-mode` | flag | false | Start dashboard in multi-project daemon mode |
 
-Default dashboard mode connects to `.filigree/` in the current directory (`ethereal` mode). In `--server-mode`, the dashboard serves registered projects through the daemon. All write operations record `"dashboard"` as the actor for audit trail.
+Default dashboard mode connects to `.filigree/` in the current directory (`ephemeral` mode). In `--server-mode`, the dashboard serves registered projects through the daemon. All write operations record `"dashboard"` as the actor for audit trail.

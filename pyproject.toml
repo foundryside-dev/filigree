@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "filigree"
-version = "3.2.0"
+version = "3.3.0"
 description = "Agent-native issue tracker with convention-based project discovery"
 requires-python = ">=3.11"
 license = "MIT"
@@ -170,6 +170,7 @@ asyncio_mode = "auto"
 markers = [
     "slow: tests that take >0.3s (subprocess, file locks, large data)",
     "integration: tests spanning multiple modules",
+    "federation_contract: cross-repo wire/contract oracles run by the loomweave-contract CI job (select with -m federation_contract)",
 ]
 filterwarnings = [
     "error::ResourceWarning",
