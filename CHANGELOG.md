@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-09-02
+
 ### Added
 
 - **Loomweave capabilities `authentication` posture (ADR-056, fixture v6).**
