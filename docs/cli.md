@@ -99,7 +99,7 @@ Initialize `.filigree/` in the current directory.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--prefix` | string | directory name | ID prefix for issues |
-| `--mode` | `ethereal`/`server` | `ethereal` | Installation mode |
+| `--mode` | `ephemeral`/`server` | `ephemeral` | Installation mode (`ethereal` is the pre-3.3.0 alias, normalized to `ephemeral` on write) |
 
 ### `install`
 
@@ -115,7 +115,7 @@ Install filigree into the current project. With no flags, installs everything: M
 | `--hooks` | flag | Install Claude Code hooks only |
 | `--skills` | flag | Install Claude Code skills only |
 | `--codex-skills` | flag | Install Codex skills only |
-| `--mode` | `ethereal`/`server` | Installation mode (`preserve existing`, else `ethereal`) |
+| `--mode` | `ephemeral`/`server` | Installation mode (`preserve existing`, else `ephemeral`; `ethereal` is the pre-3.3.0 alias) |
 
 **CLAUDE.md → AGENTS.md redirect.** When a project's `CLAUDE.md` is only a
 pointer at `AGENTS.md` — a line that is solely `@AGENTS.md` (or `@./AGENTS.md`),
@@ -187,7 +187,7 @@ Output a session bootstrap snapshot (ready work, in-progress work, critical path
 
 ### `ensure-dashboard`
 
-Ensure the dashboard is running. In `ethereal` mode this starts/attaches to the project-local process; in `server` mode it checks daemon connectivity.
+Ensure the dashboard is running. In `ephemeral` mode this starts/attaches to the project-local process; in `server` mode it checks daemon connectivity.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1182,10 +1182,10 @@ unrelated issue.
 
 Trigger and monitor automated code scanners.
 
-By default, scan callbacks target the active local dashboard: ethereal mode
+By default, scan callbacks target the active local dashboard: ephemeral mode
 uses `.filigree/ephemeral.port`, server mode uses the configured daemon port,
 and Filigree falls back to `http://localhost:8377` only when no active
-ethereal port has been recorded. Use `--api-url` on trigger commands to
+ephemeral port has been recorded. Use `--api-url` on trigger commands to
 override that target explicitly.
 
 ```bash
@@ -1300,7 +1300,7 @@ Runners execute with the project as their current working directory and post
 results to the living scan-results endpoint, `/api/scan-results`, which aliases
 the recommended Loom generation. When `--api-url` is omitted during a direct
 runner invocation, the runner resolves the same active local dashboard target
-used by `trigger-scan`: `.filigree/ephemeral.port` in ethereal mode, the
+used by `trigger-scan`: `.filigree/ephemeral.port` in ephemeral mode, the
 configured daemon port in server mode, and `http://localhost:8377` only as a
 legacy fallback outside an initialized Filigree project. If a future runner flag
 changes, refresh managed project registrations with `filigree scanner enable
@@ -1514,4 +1514,4 @@ Launch an interactive web dashboard at `http://localhost:8377`. Features:
 | `--no-browser` | flag | false | Don't auto-open browser |
 | `--server-mode` | flag | false | Start dashboard in multi-project daemon mode |
 
-Default dashboard mode connects to `.filigree/` in the current directory (`ethereal` mode). In `--server-mode`, the dashboard serves registered projects through the daemon. All write operations record `"dashboard"` as the actor for audit trail.
+Default dashboard mode connects to `.filigree/` in the current directory (`ephemeral` mode). In `--server-mode`, the dashboard serves registered projects through the daemon. All write operations record `"dashboard"` as the actor for audit trail.

@@ -81,7 +81,7 @@ def _check_read_prefix_in_server_mode(db: FiligreeDB, issue_id: str) -> JSONResp
     when the dashboard is running in multi-project server mode
     (``filigree.dashboard._project_store`` is set) AND the requested
     *issue_id* has a foreign prefix. Returns ``None`` in every other
-    case — including ethereal (single-project) mode, where the
+    case — including ephemeral (single-project) mode, where the
     documented read-tolerance of ``db.get_issue`` for foreign IDs is
     preserved so CLI / MCP / migration tooling round-tripping through
     the data layer keeps working.

@@ -1305,8 +1305,11 @@ class TestEphemeralProbeIdentity:
         finally:
             sock.close()
 
-    def test_ethereal_dashboard_is_detected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        body = b'{"status": "ok", "mode": "ethereal", "version": "3.0.0", "auth": "off"}'
+    @pytest.mark.parametrize("mode", ["ephemeral", "ethereal"], ids=["canonical-3.3.0", "legacy-pre-3.3.0"])
+    def test_ephemeral_dashboard_is_detected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+        # PDR-0051 probe: a pre-3.3.0 dashboard still running across an upgrade
+        # answers ``ethereal``; a 3.3.0+ one answers ``ephemeral``. Both are ours.
+        body = f'{{"status": "ok", "mode": "{mode}", "version": "3.0.0", "auth": "off"}}'.encode()
         with self._health_server(body) as port:
             monkeypatch.setattr("filigree.ephemeral.compute_port", lambda _d: port)
             assert _ephemeral_dashboard_port_if_live(tmp_path) == port

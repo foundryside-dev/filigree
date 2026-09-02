@@ -22,7 +22,7 @@ WEFT_IGNORE_RULES: frozenset[str] = frozenset({".weft", ".weft/", "/.weft", "/.w
 # The project-root ``.mcp.json``. Server-mode installs embed a LITERAL per-machine
 # federation token in it (see ``_install_mcp_server_mode``); the guard keeps that
 # literal out of git history. ``.mcp.json`` matches at any depth; the ``/``-anchored
-# variant is root-scoped. Server mode only — ethereal writes a token-less stdio entry.
+# variant is root-scoped. Server mode only — ephemeral writes a token-less stdio entry.
 MCP_JSON_IGNORE_RULES: frozenset[str] = frozenset({".mcp.json", "/.mcp.json"})
 
 

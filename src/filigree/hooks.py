@@ -22,6 +22,7 @@ from urllib.error import URLError
 import portalocker
 
 from filigree.core import (
+    EPHEMERAL_MODE,
     FiligreeDB,
     ForeignDatabaseError,
     find_filigree_anchor,
@@ -429,7 +430,7 @@ def _find_agent_filigree_dir() -> Path:
 def ensure_dashboard_running(port: int | None = None) -> str:
     """Ensure the filigree dashboard is running.
 
-    In ethereal mode (default): spawns a single-project dashboard on a
+    In ephemeral mode (default): spawns a single-project dashboard on a
     deterministic port, with PID/port files in .filigree/.
     In server mode: just verifies the daemon is reachable.
     """
@@ -446,8 +447,8 @@ def ensure_dashboard_running(port: int | None = None) -> str:
     try:
         mode = get_mode(filigree_dir)
     except ValueError:
-        logger.warning("Invalid mode in config, falling back to ethereal", exc_info=True)
-        mode = "ethereal"
+        logger.warning("Invalid mode in config, falling back to ephemeral", exc_info=True)
+        mode = EPHEMERAL_MODE
 
     if mode == "server":
         return _ensure_dashboard_server_mode(filigree_dir, port)
@@ -525,7 +526,7 @@ def _terminate_orphan_dashboard(pid: int, *, sigterm_grace: float = 2.0) -> None
 
 
 def _ensure_dashboard_ethereal_mode(filigree_dir: Path) -> str:
-    """Ethereal mode: session-scoped dashboard on a deterministic port."""
+    """Ephemeral mode: session-scoped dashboard on a deterministic port (identifier predates the 3.3.0 rename)."""
     from filigree.ephemeral import (
         DASHBOARD_STARTUP_GRACE_SECONDS,
         cleanup_legacy_tmp_files,

@@ -23,6 +23,7 @@ from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
     DB_FILENAME,
+    EPHEMERAL_MODE,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     ForeignDatabaseError,
@@ -558,7 +559,7 @@ def _doctor_dashboard_contract_checks(project_root: Path | None = None) -> list[
 
 
 def _doctor_ethereal_checks(filigree_dir: Path) -> list[CheckResult]:
-    """Ethereal mode health checks."""
+    """Ephemeral mode health checks (identifier predates the 3.3.0 rename)."""
     from filigree.ephemeral import read_pid_file, read_port_file, verify_pid_ownership
 
     results: list[CheckResult] = []
@@ -1381,9 +1382,9 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
     try:
         mode = get_mode(filigree_dir)
     except (AttributeError, ValueError, json.JSONDecodeError, OSError):
-        mode = "ethereal"  # Fall back to default if config is unreadable
+        mode = EPHEMERAL_MODE  # Fall back to default if config is unreadable
 
-    if mode == "ethereal":
+    if mode == EPHEMERAL_MODE:  # get_mode() already normalized the legacy spelling
         results.extend(_doctor_ethereal_checks(filigree_dir))
     elif mode == "server":
         results.extend(_doctor_server_checks(filigree_dir))

@@ -124,7 +124,7 @@ def build_auth_middleware(
     presenting its own token got 401).
 
     - *token* — the daemon's resolved token (env pin or home-store file). Used for
-      **unscoped** requests and for the single-project (ethereal) case, where
+      **unscoped** requests and for the single-project (ephemeral) case, where
       ``project_token_resolver`` is ``None`` and behaviour is unchanged.
     - *env_pin* — the tier-1 ``WEFT_FEDERATION_TOKEN`` value when it came from the
       environment (``""`` when the daemon token is a home-store file). Accepted
@@ -158,7 +158,7 @@ def build_auth_middleware(
                 # not acceptable here.
                 acceptable = [t for t in (env_pin, project_token_resolver(key)) if t]
             else:
-                # Unscoped (or ethereal single-project): the daemon token.
+                # Unscoped (or ephemeral single-project): the daemon token.
                 acceptable = [token]
             if any(_token_matches(provided, candidate) for candidate in acceptable):
                 return await call_next(request)

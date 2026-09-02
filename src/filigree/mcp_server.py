@@ -1084,7 +1084,7 @@ def create_mcp_app(
             if "not initialized" not in str(exc) and "Task group" not in str(exc):
                 raise
             # Session manager not started (e.g. lifespan not triggered in
-            # test or ethereal mode).  Return 503 so the route is visible
+            # test or ephemeral mode).  Return 503 so the route is visible
             # but clearly not ready.
             from starlette.responses import JSONResponse
 

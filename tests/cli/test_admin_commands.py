@@ -1172,12 +1172,45 @@ class TestUpdateEdgeCases:
 
 
 class TestInitMode:
-    def test_init_default_mode_is_ethereal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+    def test_init_default_mode_is_ephemeral(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init"])
         assert result.exit_code == 0
         config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
-        assert config["mode"] == "ethereal"
+        assert config["mode"] == "ephemeral"
+
+    def test_init_with_explicit_ephemeral(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = cli_runner.invoke(cli, ["init", "--mode", "ephemeral"])
+        assert result.exit_code == 0
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
+        assert config["mode"] == "ephemeral"
+
+    def test_init_rerun_without_mode_leaves_legacy_spelling_on_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """Wardline-compat guarantee: an existing config.json carrying the pre-3.3.0
+        spelling is NOT rewritten by a no-op ``init`` (wardline's doctor exact-matches it)."""
+        monkeypatch.chdir(tmp_path)
+        assert cli_runner.invoke(cli, ["init"]).exit_code == 0
+        config_path = tmp_path / ".weft" / "filigree" / "config.json"
+        config = json.loads(config_path.read_text())
+        config["mode"] = "ethereal"
+        config_path.write_text(json.dumps(config))
+
+        result = cli_runner.invoke(cli, ["init"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(config_path.read_text())["mode"] == "ethereal"
+
+    def test_init_rerun_with_legacy_mode_normalizes_on_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert cli_runner.invoke(cli, ["init", "--mode", "server"]).exit_code == 0
+        result = cli_runner.invoke(cli, ["init", "--mode", "ethereal"])
+        assert result.exit_code == 0, result.output
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
+        assert config["mode"] == "ephemeral"
 
     def test_init_with_server_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
@@ -1187,11 +1220,12 @@ class TestInitMode:
         assert config["mode"] == "server"
 
     def test_init_with_explicit_ethereal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
+        """The pre-3.3.0 spelling is still accepted as a ``--mode`` alias and normalized on write."""
         monkeypatch.chdir(tmp_path)
         result = cli_runner.invoke(cli, ["init", "--mode", "ethereal"])
         assert result.exit_code == 0
         config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
-        assert config["mode"] == "ethereal"
+        assert config["mode"] == "ephemeral"
 
     def test_init_invalid_mode_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
         monkeypatch.chdir(tmp_path)
@@ -1695,6 +1729,9 @@ class TestInstallModeIntegration:
 
         result = cli_runner.invoke(cli, ["install", "--mode", "ethereal"])
         assert result.exit_code == 0
+        # Legacy alias accepted on the CLI, canonical spelling persisted.
+        config = json.loads((tmp_path / ".weft" / "filigree" / "config.json").read_text())
+        assert config["mode"] == "ephemeral"
 
         from filigree.server import read_server_config
 

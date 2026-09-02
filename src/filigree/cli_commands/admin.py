@@ -18,6 +18,7 @@ from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
     DB_FILENAME,
+    EPHEMERAL_MODE,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
     WEFT_DIR_NAME,
@@ -33,6 +34,7 @@ from filigree.core import (
     find_filigree_anchor,
     get_mode,
     migrate_store_to_weft,
+    normalize_mode,
     read_conf,
     read_config,
     read_schema_version,
@@ -67,9 +69,9 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
 @click.option("--name", default=None, help="Human-readable project name (default: directory name)")
 @click.option(
     "--mode",
-    type=click.Choice(["ethereal", "server"], case_sensitive=False),
+    type=click.Choice(["ephemeral", "ethereal", "server"], case_sensitive=False),
     default=None,
-    help="Installation mode (default: ethereal)",
+    help="Installation mode (default: ephemeral; ethereal is the pre-3.3.0 alias)",
 )
 def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     """Initialize filigree in the current directory (store at .weft/filigree/)."""
@@ -144,7 +146,8 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             # ``mode`` is config.json-authoritative at runtime (``get_mode``); only
             # carry the conf's value forward when config.json has none.
             if "mode" not in config and "mode" in existing_conf:
-                config["mode"] = existing_conf["mode"]
+                # A new store is being created: persist the canonical spelling.
+                config["mode"] = normalize_mode(existing_conf["mode"])
             config.pop("db", None)  # type: ignore[typeddict-item]  # strip a hand-edited db key; never stored in config.json
             write_config(store_dir, config)
             imported_path = cwd / (CONF_FILENAME + ".imported")
@@ -217,6 +220,10 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             updated = True
             click.echo(f"  Name: {name}")
         if mode is not None:
+            # Only an explicit --mode rewrites config.json (``--mode ethereal``
+            # lands as ``ephemeral``); a no-op init never touches an existing
+            # file's spelling, which wardline's doctor exact-matches today.
+            mode = normalize_mode(mode)
             config["mode"] = mode
             updated = True
             click.echo(f"  Mode: {mode}")
@@ -255,7 +262,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
 
     prefix = prefix or cwd.name
     name = name or cwd.name
-    mode = mode or "ethereal"
+    mode = normalize_mode(mode) if mode else EPHEMERAL_MODE
     # Honour an operator weft.toml [filigree].store_dir override at creation time
     # (it is the canonical relocation key) so the store, config, and the conf's
     # db field all land in the SAME place. resolve_store_dir already narrowed it
@@ -318,9 +325,9 @@ def _run_install_step(name: str, installer: Callable[[], tuple[bool, str]]) -> t
 @click.option("--codex-skills", "codex_skills_only", is_flag=True, help="Install Codex skills only")
 @click.option(
     "--mode",
-    type=click.Choice(["ethereal", "server"], case_sensitive=False),
+    type=click.Choice(["ephemeral", "ethereal", "server"], case_sensitive=False),
     default=None,
-    help="Installation mode (default: preserve existing or ethereal)",
+    help="Installation mode (default: preserve existing or ephemeral; ethereal is the pre-3.3.0 alias)",
 )
 def install(
     claude_code: bool,
@@ -365,6 +372,7 @@ def install(
 
     # Update mode in config if explicitly provided
     if mode is not None:
+        mode = normalize_mode(mode)  # ``--mode ethereal`` persists as ``ephemeral``
         config = _read_project_config_or_exit(filigree_dir)
         config["mode"] = mode
         write_config(filigree_dir, config)
@@ -374,10 +382,10 @@ def install(
         try:
             mode = get_mode(filigree_dir)
         except ValueError as exc:
-            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
-            mode = "ethereal"
+            click.echo(f"⚠ {exc}. Falling back to 'ephemeral'.", err=True)
+            mode = EPHEMERAL_MODE
     if mode is None:
-        mode = "ethereal"
+        mode = EPHEMERAL_MODE
 
     project_root = anchor.project_root
     # Pre-seed the federation token so a single-host daemon enforces auth with
@@ -582,8 +590,8 @@ def _apply_doctor_fixes(
         mode = get_mode(filigree_dir)
     except ValueError as exc:
         if emit is not None:
-            click.echo(f"⚠ {exc}. Falling back to 'ethereal'.", err=True)
-        mode = "ethereal"
+            click.echo(f"⚠ {exc}. Falling back to 'ephemeral'.", err=True)
+        mode = EPHEMERAL_MODE
     server_port = 8377
     if mode == "server":
         try:
@@ -963,7 +971,7 @@ def rotate_federation_token(as_json: bool) -> None:
     token_path = store_dir / FEDERATION_TOKEN_FILENAME
     env_tok, env_name = read_env_token()
 
-    # Always advise a restart rather than keying off daemon liveness: an ethereal
+    # Always advise a restart rather than keying off daemon liveness: an ephemeral
     # single-project daemon bakes its token at boot (so it needs a restart) but is
     # tracked by a different PID file than the server daemon, so a liveness probe
     # would under-warn it (a false "no restart needed"). A server-mode daemon
@@ -971,7 +979,7 @@ def rotate_federation_token(as_json: bool) -> None:
     # also baked — so "restart to be sure" is never wrong, only sometimes
     # unnecessary. The token rotated here is the PROJECT store's.
     restart_hint = (
-        "restart any running daemon (`filigree server restart`, or close the ethereal dashboard) "
+        "restart any running daemon (`filigree server restart`, or close the ephemeral dashboard) "
         "and any sibling tools so they re-read the token"
     )
 

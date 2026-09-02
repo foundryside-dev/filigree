@@ -469,7 +469,7 @@ class TestEnsureDashboardStartupRace:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch(
                 "filigree.ephemeral.verify_pid_ownership",
@@ -556,7 +556,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -585,7 +585,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -615,7 +615,7 @@ class TestEnsureDashboardMetadataWriteFailure:
 
         with (
             patch("filigree.hooks._find_agent_filigree_dir", return_value=tmp_path),
-            patch("filigree.hooks.get_mode", return_value="ethereal"),
+            patch("filigree.hooks.get_mode", return_value="ephemeral"),
             patch("filigree.hooks._is_port_listening", return_value=False),
             patch("filigree.hooks.subprocess.Popen", return_value=mock_proc),
             patch("filigree.hooks.find_filigree_command", return_value=["/usr/bin/filigree"]),
@@ -897,11 +897,12 @@ class TestEnsureDashboardEthereal:
 
         assert ensure_dashboard_running() == ""
 
-    def test_starts_dashboard_on_deterministic_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """In ethereal mode, dashboard starts on project-specific port."""
+    @pytest.mark.parametrize("mode", ["ephemeral", "ethereal"], ids=["canonical", "legacy-spelling"])
+    def test_starts_dashboard_on_deterministic_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+        """In ephemeral mode (either on-disk spelling), dashboard starts on project-specific port."""
         filigree_dir = tmp_path / ".filigree"
         filigree_dir.mkdir()
-        config = {"prefix": "test", "version": 1, "mode": "ethereal"}
+        config = {"prefix": "test", "version": 1, "mode": mode}
         (filigree_dir / "config.json").write_text(json.dumps(config))
         db = FiligreeDB(filigree_dir / DB_FILENAME, prefix="test")
         db.initialize()
