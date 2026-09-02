@@ -27,14 +27,14 @@ DECISIONS (see the B5 design notes):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Protocol
 
 from filigree import legis_client
 from filigree.legis_client import LegisGateResult, LegisGateStatus
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
-from filigree.types.core import make_issue_id
+from filigree.types.core import LineageEvent, make_issue_id
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,14 @@ class GateDecision:
     # caller thread ``loomweave_known_down`` and bound a down Loomweave to one
     # probe per batch. Never affects ``allowed`` — Loomweave is enrich-only.
     loomweave_unavailable: bool = False
+    # Rename hints for governed bindings whose SEI Loomweave reported orphaned
+    # (``alive:false``) during the RED-1 drift check, keyed by the bound entity
+    # id: the SEI's latest lineage event, so an agent can re-bind to
+    # ``new_locator`` instead of hitting a dead end (filigree-4e13d133f7). On a
+    # non-PROCEED verdict the same hint is also appended to ``reason`` (the only
+    # channel every close surface renders). Advisory only: never affects
+    # ``allowed`` or the outcome — an orphaned binding stays freshness UNKNOWN.
+    lineage_hints: dict[str, LineageEvent] = field(default_factory=dict)
 
     @property
     def allowed(self) -> bool:
@@ -131,11 +139,46 @@ class _DriftCheck:
     only when the check could not consult Loomweave at all because of a
     whole-backend failure or a caller-supplied known-down; it is False on the
     no-resolver path (local mode — no network happened) and on per-entity
-    ``unresolved`` degrades (Loomweave answered).
+    ``unresolved`` degrades (Loomweave answered). ``lineage_hints`` carries the
+    registry's rename hint for each UNKNOWN (orphaned) binding that has one —
+    see :attr:`GateDecision.lineage_hints`; empty when Loomweave was not
+    consulted or reported no lineage.
     """
 
     decision: GateDecision | None
     loomweave_unavailable: bool
+    lineage_hints: dict[str, LineageEvent] = field(default_factory=dict)
+
+
+def _format_lineage_hints(hints: dict[str, LineageEvent]) -> str:
+    """Render rename hints for a human/agent-readable message suffix.
+
+    ``<entity> -> <new_locator> (<event>)`` when the latest event names a new
+    locator, else ``<entity>: <event>`` (e.g. a ``died`` event with no target).
+    """
+    parts: list[str] = []
+    for entity_id, hint in hints.items():
+        new_locator = hint.get("new_locator")
+        event = hint.get("event", "")
+        parts.append(f"{entity_id} -> {new_locator} ({event})" if new_locator else f"{entity_id}: {event}")
+    return "rename lineage: " + ", ".join(parts)
+
+
+def _with_lineage_hints(decision: GateDecision, hints: dict[str, LineageEvent]) -> GateDecision:
+    """Stamp *hints* on a copy of *decision* (``_PROCEED`` is a shared singleton).
+
+    A non-PROCEED reason gains the rendered suffix so the re-bind target reaches
+    the agent through the one channel every close surface prints; a PROCEED
+    keeps ``reason`` empty (it is the "why not allowed" channel) and carries the
+    hint as data only. The outcome is never changed.
+    """
+    if not hints:
+        return decision
+    reason = decision.reason
+    if decision.outcome is not GateOutcome.PROCEED:
+        suffix = _format_lineage_hints(hints)
+        reason = f"{reason}; {suffix}" if reason else suffix
+    return replace(decision, reason=reason, lineage_hints=dict(hints))
 
 
 def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, loomweave_known_down: bool = False) -> _DriftCheck:
@@ -160,6 +203,13 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
     not_found / invalid), the binding's freshness is a discriminated UNKNOWN —
     logged, never silently treated as fresh, and never a hard block. The core
     close must not become load-bearing on Loomweave.
+
+    An orphaned SEI is still UNKNOWN, but when the resolver carries a
+    ``lineage_hints`` entry for it (the SEI's latest Loomweave lineage event —
+    a ``NotRequired`` key, absent from legacy producers) the hint is relayed:
+    on the ``entity_unresolved`` log record (``lineage_hints`` extra + a
+    ``rename lineage: <sei> -> <new_locator>`` suffix) and on the returned
+    check's ``lineage_hints`` for the decision (filigree-4e13d133f7).
 
     ``loomweave_known_down`` (batch callers): skip the resolver call because an
     earlier issue in the same sweep already proved Loomweave down — freshness is
@@ -200,6 +250,7 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
         return _DriftCheck(None, True)
 
     resolved: dict[str, str] = dict(resolution.get("resolved", {}))
+    all_hints: dict[str, LineageEvent] = dict(resolution.get("lineage_hints") or {})
     drifted: list[str] = []
     unknown: list[str] = []
     for row in signed_rows:
@@ -212,10 +263,20 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
             unknown.append(entity_id)
         elif attach is not None and current != attach:
             drifted.append(entity_id)
+    lineage_hints = {eid: all_hints[eid] for eid in unknown if eid in all_hints}
     if unknown:
+        message = "closure-gate drift check: entity content unresolvable; freshness UNKNOWN (enrich-only, close not blocked on this axis)"
+        if lineage_hints:
+            message = f"{message}; {_format_lineage_hints(lineage_hints)}"
         logger.warning(
-            "closure-gate drift check: entity content unresolvable; freshness UNKNOWN (enrich-only, close not blocked on this axis)",
-            extra={"issue_id": issue_id, "freshness": "unknown", "reason": "entity_unresolved", "entity_ids": unknown},
+            message,
+            extra={
+                "issue_id": issue_id,
+                "freshness": "unknown",
+                "reason": "entity_unresolved",
+                "entity_ids": unknown,
+                "lineage_hints": lineage_hints,
+            },
         )
     if drifted:
         return _DriftCheck(
@@ -224,8 +285,9 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
                 "entity content drifted since attach (current code no longer matches content at attach); awaiting re-attest",
             ),
             False,
+            lineage_hints,
         )
-    return _DriftCheck(None, False)
+    return _DriftCheck(None, False, lineage_hints)
 
 
 def evaluate_closure_gate(
@@ -288,7 +350,7 @@ def evaluate_closure_gate(
         # loomweave_known_down is likewise applied INSIDE the helper, at the
         # resolver call — after the ungoverned and snapshot-STALE short-circuits,
         # before the legis_known_down short-circuit.
-        return check.decision
+        return _with_lineage_hints(check.decision, check.lineage_hints)
     if legis_known_down:
         # A governed, non-stale issue needs a Legis round-trip, but a prior issue
         # in this batch already proved Legis unreachable — fail closed without
@@ -296,8 +358,11 @@ def evaluate_closure_gate(
         decision = GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
     else:
         decision = _map_result(check_closure_gate(str(issue_id)))
-    # Stamp the advisory flag on a copy — ``_PROCEED`` is a shared singleton.
-    return replace(decision, loomweave_unavailable=True) if check.loomweave_unavailable else decision
+    # Stamp the advisory flag / rename hints on a copy — ``_PROCEED`` is a
+    # shared singleton.
+    if check.loomweave_unavailable:
+        decision = replace(decision, loomweave_unavailable=True)
+    return _with_lineage_hints(decision, check.lineage_hints)
 
 
 def evaluate_status_change_gate(db: _StatusGateReader, issue_id: str, requested_status: str | None) -> GateDecision:

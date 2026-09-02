@@ -88,6 +88,23 @@ AnnotationProvenanceTrustLevel = Literal["complete", "partial", "minimal"]
 RegistryBackend = Literal["local", "loomweave"]
 
 
+class LineageEvent(TypedDict):
+    """One Loomweave ``sei_lineage`` event, relayed verbatim (ADR-038).
+
+    The wire shape of ``GET /api/v1/identity/lineage/{sei}`` entries and of the
+    ``lineage`` list inlined on an ``alive:false`` by-SEI body:
+    ``{event, old_locator, new_locator, run_id, recorded_at}``. Filigree only
+    relays the latest event as a rename hint on an orphaned binding so an agent
+    can re-bind to ``new_locator``; the identity axis stays Loomweave's.
+    """
+
+    event: str
+    old_locator: str | None
+    new_locator: str | None
+    run_id: str
+    recorded_at: str
+
+
 class _ProjectConfigRequired(TypedDict):
     """Required keys for ProjectConfig (needed for ID generation and migrations)."""
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 import pytest
@@ -405,9 +406,18 @@ class _FakeRegistry:
     not_found / invalid degrade), or raises ``RegistryUnavailableError`` to
     simulate a whole-backend Loomweave outage."""
 
-    def __init__(self, hashes: dict[str, str], *, raise_unavailable: bool = False) -> None:
+    def __init__(
+        self,
+        hashes: dict[str, str],
+        *,
+        raise_unavailable: bool = False,
+        lineage_hints: dict[str, dict[str, object]] | None = None,
+    ) -> None:
         self._hashes = hashes
         self._raise_unavailable = raise_unavailable
+        # ``lineage_hints`` is a NotRequired key on EntityHashResolution: a
+        # legacy producer (None here) omits it entirely rather than sending {}.
+        self._lineage_hints = lineage_hints
         self.calls: list[list[str]] = []
 
     def resolve_entity_content_hashes(self, entity_ids: list[str]) -> dict[str, object]:
@@ -418,7 +428,10 @@ class _FakeRegistry:
             raise RegistryUnavailableError("loomweave down", url="http://legis.test", cause_kind="network")
         resolved = {eid: self._hashes[eid] for eid in entity_ids if eid in self._hashes}
         unresolved = [eid for eid in entity_ids if eid not in self._hashes]
-        return {"resolved": resolved, "unresolved": unresolved}
+        result: dict[str, object] = {"resolved": resolved, "unresolved": unresolved}
+        if self._lineage_hints is not None:
+            result["lineage_hints"] = {eid: self._lineage_hints[eid] for eid in unresolved if eid in self._lineage_hints}
+        return result
 
 
 class _FakeDBWithRegistry(_FakeDB):
@@ -534,6 +547,124 @@ def test_no_registry_attribute_degrades_to_unknown(monkeypatch: pytest.MonkeyPat
     db = _FakeDB(_governed_rows_attached_at("py:func:mod::f", "h1"))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
+
+
+# --- rename-lineage hint on orphaned bindings (filigree-4e13d133f7) -----------
+# An orphaned (alive:false) SEI degrades to UNKNOWN above — a dead end for the
+# agent. When the registry can name the SEI's latest lineage event, the gate
+# relays it: on the decision (``lineage_hints`` + a reason suffix naming the
+# re-bind target on any non-PROCEED verdict) and on the ``entity_unresolved``
+# log record. Enrich-only: the outcome never changes because of a hint.
+
+_ORPHAN_SEI = "loomweave:eid:0000000000000000000000000000dead"
+_RENAMED_EVENT: dict[str, object] = {
+    "event": "locator_changed",
+    "old_locator": "py:func:mod::f",
+    "new_locator": "py:func:mod::g",
+    "run_id": "run-2",
+    "recorded_at": "2026-02-01T00:00:00Z",
+}
+
+
+def _unresolved_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "filigree.governance" and getattr(r, "reason", None) == "entity_unresolved"]
+
+
+def test_orphaned_sei_hint_surfaces_on_decision_and_log_without_blocking(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    with caplog.at_level(logging.WARNING, logger="filigree.governance"):
+        decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.PROCEED  # still not a block
+    assert decision.allowed
+    assert decision.lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
+    assert decision.loomweave_unavailable is False  # Loomweave answered
+    records = _unresolved_records(caplog)
+    assert len(records) == 1
+    assert records[0].lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
+    assert "py:func:mod::g" in records[0].getMessage()
+    assert _ORPHAN_SEI in records[0].getMessage()
+
+
+def test_legacy_resolution_without_lineage_key_has_no_hint(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    registry = _FakeRegistry({})  # no lineage_hints key at all (pre-hint producer)
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    with caplog.at_level(logging.WARNING, logger="filigree.governance"):
+        decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.lineage_hints == {}
+    records = _unresolved_records(caplog)
+    assert len(records) == 1
+    assert records[0].lineage_hints == {}
+    assert "rename lineage" not in records[0].getMessage()
+
+
+def test_hint_names_rebind_target_on_stale_reason_when_sibling_drifted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drifted sibling + orphaned SEI -> STALE (drift wins, unchanged) and the
+    agent-visible reason names the orphan's re-bind target."""
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    rows = _governed_rows_attached_at("py:func:mod::x", "h1") + _governed_rows_attached_at(_ORPHAN_SEI, "h1")
+    registry = _FakeRegistry({"py:func:mod::x": "h2"}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
+    db = _FakeDBWithRegistry(rows, registry)
+    spy: list[str] = []
+    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.STALE
+    assert "drifted since attach" in decision.reason
+    assert f"rename lineage: {_ORPHAN_SEI} -> py:func:mod::g (locator_changed)" in decision.reason
+    assert decision.lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
+    assert spy == []
+
+
+def test_hint_suffixes_legis_block_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Legis BLOCKED verdict on an issue with an orphaned binding carries the
+    hint on the reason the agent sees, without altering the outcome."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="policy says no"))
+    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.BLOCKED
+    assert decision.reason.startswith("policy says no")
+    assert f"rename lineage: {_ORPHAN_SEI} -> py:func:mod::g (locator_changed)" in decision.reason
+    assert decision.lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
+
+
+def test_hint_without_new_locator_names_the_event_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    died = {"event": "died", "old_locator": "py:func:mod::f", "new_locator": None, "run_id": "r", "recorded_at": "t"}
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="policy says no"))
+    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: died})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.BLOCKED
+    assert f"rename lineage: {_ORPHAN_SEI}: died" in decision.reason
+    assert "->" not in decision.reason
+
+
+def test_proceed_reason_stays_empty_with_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    # PROCEED carries the hint as data only; ``reason`` is the "why not allowed"
+    # channel and must stay empty so close surfaces do not print a phantom error.
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.reason == ""
+
+
+def test_loomweave_known_down_skips_lineage_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """known-down short-circuits the resolver entirely: no lineage lookup, no hint."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
+    assert decision.outcome is GateOutcome.PROCEED
+    assert registry.calls == []
+    assert decision.lineage_hints == {}
+    assert decision.loomweave_unavailable is True
 
 
 # --- loomweave_known_down batch short-circuit (hub weft-aee5769607 item 1) ----

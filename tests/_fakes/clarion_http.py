@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 DEFAULT_INSTANCE_ID = "test-loomweave-instance"
 DEFAULT_API_VERSION = 1
@@ -102,8 +102,20 @@ class ClarionStubState:
     # Locators to force into the ``invalid`` channel even though they are not
     # SEI-shaped — models a malformed locator Clarion's validate_locator rejects.
     invalid_locators: set[str] = field(default_factory=set)
-    # sei -> resolve_sei body (identity-axis ALIVE/ORPHANED). Absent → alive:false.
+    # sei -> resolve_sei body (identity-axis ALIVE/ORPHANED). Absent → alive:false
+    # with an empty inline ``lineage``. An orphan record whose ``lineage`` is
+    # ``None`` is served WITHOUT the ``lineage`` key (models a Loomweave that does
+    # not inline lineage, forcing the consumer's lineage-route fallback).
     sei_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # sei -> lineage events served by GET /api/v1/identity/lineage/{sei}
+    # (``{event, old_locator, new_locator, run_id, recorded_at}``). Unknown SEI →
+    # ``lineage: []`` (Loomweave's ``sei_lineage`` returns an empty vec, never 404).
+    lineage_records: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # When set, the lineage route answers this status with an error envelope —
+    # 404 models an older Loomweave without the route.
+    lineage_route_status: int | None = None
+    # Every SEI the lineage route was asked for (percent-decoded).
+    lineage_requests: list[str] = field(default_factory=list)
     # Every POST /api/v1/identity/resolve:batch request's ``locators`` list.
     identity_resolve_requests: list[list[str]] = field(default_factory=list)
     # Content-Length of every ACCEPTED resolve:batch body (parallel list).
@@ -207,13 +219,28 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
 
         def _handle_resolve_sei(self, path: str) -> None:
             """Mirror ``GET /api/v1/identity/sei/{sei}`` (identity axis)."""
-            sei = path[len("/api/v1/identity/sei/") :]
+            sei = unquote(path[len("/api/v1/identity/sei/") :])
             record = state.sei_records.get(sei)
             if record is not None and record.get("alive", False):
                 self._write_json(200, {"sei": sei, **record})
                 return
             lineage = record.get("lineage", []) if record is not None else []
+            if lineage is None:
+                self._write_json(200, {"sei": sei, "alive": False})
+                return
             self._write_json(200, {"sei": sei, "alive": False, "lineage": lineage})
+
+        def _handle_lineage(self, path: str) -> None:
+            """Mirror ``GET /api/v1/identity/lineage/{sei}`` (``get_identity_lineage``)."""
+            sei = unquote(path[len("/api/v1/identity/lineage/") :])
+            state.lineage_requests.append(sei)
+            if state.lineage_route_status is not None:
+                self._write_json(
+                    state.lineage_route_status,
+                    {"error": {"code": "not_found", "message": "no such route"}},
+                )
+                return
+            self._write_json(200, {"sei": sei, "lineage": list(state.lineage_records.get(sei, []))})
 
         def do_GET(self) -> None:
             if not self._check_auth():
@@ -240,6 +267,9 @@ def _build_handler(state: ClarionStubState) -> type[BaseHTTPRequestHandler]:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if parsed.path.startswith("/api/v1/identity/lineage/"):
+                self._handle_lineage(parsed.path)
                 return
             if parsed.path.startswith("/api/v1/identity/sei/"):
                 self._handle_resolve_sei(parsed.path)

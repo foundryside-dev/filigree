@@ -40,12 +40,21 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass
 from dataclasses import field as dataclass_field
-from typing import Any, Literal, Protocol, TypeAlias, TypedDict, TypeVar
+from typing import Any, Literal, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
-from filigree.types.core import ContentHash, EntityId, FileId, RegistryBackend, make_content_hash, make_entity_id, make_file_id
+from filigree.types.core import (
+    ContentHash,
+    EntityId,
+    FileId,
+    LineageEvent,
+    RegistryBackend,
+    make_content_hash,
+    make_entity_id,
+    make_file_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -343,10 +352,21 @@ class EntityHashResolution(TypedDict):
       block (the enrich-only invariant). A whole-backend availability failure is
       NOT reported here; it raises :class:`RegistryUnavailableError` so the
       caller can degrade with a distinct, discriminated reason.
+    - ``lineage_hints`` — keyed by the *submitted* entity id: the LAST Loomweave
+      lineage event for an SEI-form id that resolved ``alive:false`` (orphaned)
+      AND for which a lineage list with >=1 well-formed event was available
+      (inline on the by-SEI body, else via ``GET .../identity/lineage/{sei}``).
+      Present ONLY when at least one hint exists — an absent key means "no
+      hints", so legacy producers / fakes that never set it need no change.
+      Enrich-only: a hint never changes ``resolved`` / ``unresolved``; any
+      failure of the hint lookup is swallowed inside the registry. Locator-form
+      ids never get a hint (``resolve:batch`` reports them in ``not_found``
+      without an SEI and Loomweave has no locator-keyed lineage surface).
     """
 
     resolved: dict[str, str]
     unresolved: list[str]
+    lineage_hints: NotRequired[dict[str, LineageEvent]]
 
 
 def resolve_files_batch_via_loop(
@@ -546,6 +566,43 @@ def loomweave_identity_sei_url(base_url: str, sei: str) -> str:
     current ``content_hash`` for an alive SEI — the by-SEI counterpart to the
     locator-keyed ``resolve:batch`` surface (ADR-038)."""
     return f"{base_url.rstrip('/')}/api/v1/identity/sei/{quote(sei, safe='')}"
+
+
+def loomweave_identity_lineage_url(base_url: str, sei: str) -> str:
+    """Build the Loomweave SEI lineage URL (``GET /api/v1/identity/lineage/{sei}``).
+
+    Same percent-encoding rationale as :func:`loomweave_identity_sei_url`. The
+    endpoint returns ``{sei, lineage:[{event, old_locator, new_locator, run_id,
+    recorded_at}, ...]}`` — an unknown SEI is an empty lineage, never a 404; a
+    404 here means an older Loomweave without the route (ADR-038)."""
+    return f"{base_url.rstrip('/')}/api/v1/identity/lineage/{quote(sei, safe='')}"
+
+
+def _last_lineage_event(lineage: object) -> LineageEvent | None:
+    """Validate a Loomweave ``lineage`` list and return its LAST event, or ``None``.
+
+    Field-by-field validation at the boundary: the list must be non-empty and
+    its last element a dict carrying ``event`` / ``run_id`` / ``recorded_at`` as
+    strings and ``old_locator`` / ``new_locator`` as ``str | None``. Anything
+    else (absent list, wrong element shape, wrong field types) is "no hint" —
+    the hint is enrich-only, so a malformed producer body must never raise.
+    Extra producer-side keys are dropped; the hint is the documented 5-key event.
+    """
+    if not isinstance(lineage, list) or not lineage:
+        return None
+    last = lineage[-1]
+    if not isinstance(last, dict):
+        return None
+    event = last.get("event")
+    run_id = last.get("run_id")
+    recorded_at = last.get("recorded_at")
+    old_locator = last.get("old_locator")
+    new_locator = last.get("new_locator")
+    if not isinstance(event, str) or not isinstance(run_id, str) or not isinstance(recorded_at, str):
+        return None
+    if not isinstance(old_locator, str | None) or not isinstance(new_locator, str | None):
+        return None
+    return LineageEvent(event=event, old_locator=old_locator, new_locator=new_locator, run_id=run_id, recorded_at=recorded_at)
 
 
 def _is_loopback_origin(url: str) -> bool:
@@ -1443,13 +1500,18 @@ class LoomweaveRegistry:
 
         Both endpoints carry ``content_hash`` only for an ALIVE entity; an
         orphaned / not_found / invalid id is omitted from ``resolved`` and listed
-        in ``unresolved`` (UNKNOWN to the caller, never silently fresh).
+        in ``unresolved`` (UNKNOWN to the caller, never silently fresh). An
+        orphaned SEI additionally gets a rename hint in ``lineage_hints`` when
+        Loomweave can name its latest lineage event (see
+        :meth:`_resolve_sei_state`) — enrich-only, never affecting the two
+        primary channels.
         Whole-backend availability failures (network / timeout / 5xx / auth /
         malformed body) raise :class:`RegistryUnavailableError`; the caller
         degrades to UNKNOWN without hard-blocking (enrich-only).
         """
         resolved: dict[str, str] = {}
         unresolved: list[str] = []
+        lineage_hints: dict[str, LineageEvent] = {}
         # Preserve first-seen order, drop duplicates, partition by id scheme.
         seen: set[str] = set()
         locators: list[str] = []
@@ -1469,12 +1531,17 @@ class LoomweaveRegistry:
                 else:
                     unresolved.append(loc)
         for sei in seis:
-            current = self._resolve_sei_content_hash(sei)
+            current, hint = self._resolve_sei_state(sei)
             if current is not None:
                 resolved[sei] = current
             else:
                 unresolved.append(sei)
-        return EntityHashResolution(resolved=resolved, unresolved=unresolved)
+                if hint is not None:
+                    lineage_hints[sei] = hint
+        result = EntityHashResolution(resolved=resolved, unresolved=unresolved)
+        if lineage_hints:
+            result["lineage_hints"] = lineage_hints
+        return result
 
     def _resolve_locator_content_hashes(self, locators: list[str]) -> dict[str, str]:
         """Resolve locators → current ``content_hash`` via ``resolve:batch``.
@@ -1501,12 +1568,14 @@ class LoomweaveRegistry:
                     out[locator] = content_hash
         return out
 
-    def _resolve_sei_content_hash(self, sei: str) -> str | None:
-        """Resolve a single SEI → current ``content_hash`` via ``GET .../sei/{sei}``.
+    def _resolve_sei_state(self, sei: str) -> tuple[str | None, LineageEvent | None]:
+        """Resolve a single SEI via ``GET .../sei/{sei}`` → ``(content_hash, hint)``.
 
-        Returns the content_hash for an alive SEI, or ``None`` when Loomweave
-        reports it ``alive:false`` (orphaned) — there is no batch by-SEI surface,
-        so this is a per-SEI read (governed bindings per issue are few).
+        ``content_hash`` is set for an alive SEI. When Loomweave reports the SEI
+        ``alive:false`` (orphaned) it is ``None`` and ``hint`` is the SEI's latest
+        lineage event (or ``None`` when none is available) — see
+        :meth:`_resolve_sei_lineage_hint`. There is no batch by-SEI surface, so
+        this is a per-SEI read (governed bindings per issue are few).
 
         FEDERATION-CONTRACT GAP (flag for the hub): Loomweave's *implementation*
         (``http_read/identity.rs::get_identity_sei``) returns ``content_hash`` on
@@ -1524,8 +1593,57 @@ class LoomweaveRegistry:
         if payload.get("alive") is True:
             content_hash = payload.get("content_hash")
             if isinstance(content_hash, str) and content_hash:
-                return content_hash
-        return None
+                return content_hash, None
+            return None, None
+        return None, self._resolve_sei_lineage_hint(sei, payload)
+
+    def _resolve_sei_lineage_hint(self, sei: str, orphan_payload: dict[str, Any]) -> LineageEvent | None:
+        """Latest lineage event for an SEI Loomweave just reported ``alive:false``.
+
+        Source preference (filigree-4e13d133f7): the ``lineage`` list Loomweave
+        inlines on the ``alive:false`` by-SEI body (``get_identity_sei``) — no
+        second round-trip. Only a body that carries NO ``lineage`` list at all
+        falls back to ``GET /api/v1/identity/lineage/{sei}``; an inline empty
+        list is an authoritative "no lineage" and is NOT re-asked.
+
+        Enrich-only: every failure of the fallback — a 404 from an older
+        Loomweave without the route (one round-trip, non-5xx never retries), a
+        5xx / network failure (retried inside the deadline budget, then raised),
+        or a malformed body — is swallowed HERE and yields no hint. It must
+        never leak as :class:`RegistryUnavailableError`, which would degrade the
+        caller's WHOLE resolution (every sibling binding) to
+        ``registry_unavailable`` and silently disable the drift check on a
+        Loomweave that merely lacks the lineage route.
+        """
+        inline = orphan_payload.get("lineage")
+        if isinstance(inline, list):
+            hint = _last_lineage_event(inline)
+            if hint is None and inline:
+                logger.info(
+                    "Loomweave by-SEI lineage for %s is malformed; no rename hint (enrich-only)",
+                    sei,
+                    extra={"sei": sei, "reason": "invalid_lineage"},
+                )
+            return hint
+        url = loomweave_identity_lineage_url(self.base_url, sei)
+        try:
+            payload = self._request_identity_json("GET", url)
+        except RegistryUnavailableError as exc:
+            logger.info(
+                "Loomweave lineage route unavailable for %s (%s); no rename hint (enrich-only)",
+                sei,
+                exc.cause_kind,
+                extra={"sei": sei, "cause_kind": exc.cause_kind, "url": url},
+            )
+            return None
+        hint = _last_lineage_event(payload.get("lineage"))
+        if hint is None:
+            logger.info(
+                "Loomweave lineage route answered no usable event for %s; no rename hint (enrich-only)",
+                sei,
+                extra={"sei": sei, "reason": "no_lineage", "url": url},
+            )
+        return hint
 
     def _request_identity_json(self, method: str, url: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Issue an identity-resolve request and return its parsed JSON object.
