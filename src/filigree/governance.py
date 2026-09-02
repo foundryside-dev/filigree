@@ -33,7 +33,7 @@ from typing import Any, Protocol
 
 from filigree import legis_client
 from filigree.legis_client import LegisGateResult, LegisGateStatus
-from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
+from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError, is_loomweave_backend_unreachable
 from filigree.types.core import LineageEvent, make_issue_id
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,15 @@ class GateDecision:
     # caller thread ``loomweave_known_down`` and bound a down Loomweave to one
     # probe per batch. Never affects ``allowed`` — Loomweave is enrich-only.
     loomweave_unavailable: bool = False
+    # The orphan rename-hint fallback (``GET /identity/lineage/{sei}``) hit a
+    # connectivity-class failure AFTER the primary by-SEI channel answered, so
+    # ``lineage_hints`` may be incomplete. Kept SEPARATE from
+    # ``loomweave_unavailable`` on purpose: the primary answer milliseconds
+    # earlier is direct evidence Loomweave is up, and a batch caller reads
+    # ``loomweave_unavailable`` as known-down — folding this in would skip every
+    # later issue's drift probe and let a drifted binding auto-close. Purely
+    # informational; never affects ``allowed``.
+    lineage_unavailable: bool = False
     # Rename hints for governed bindings whose SEI Loomweave reported orphaned
     # (``alive:false``) during the RED-1 drift check, keyed by the bound entity
     # id: the SEI's latest lineage event, so an agent can re-bind to
@@ -136,10 +145,17 @@ class _DriftCheck:
 
     ``decision`` is a ``STALE`` verdict (current code drifted) or ``None`` (no
     known drift — proceed to the Legis gate). ``loomweave_unavailable`` is True
-    only when the check could not consult Loomweave at all because of a
-    whole-backend failure or a caller-supplied known-down; it is False on the
-    no-resolver path (local mode — no network happened) and on per-entity
-    ``unresolved`` degrades (Loomweave answered). ``lineage_hints`` carries the
+    only when the PRIMARY probe proved the backend down: a connectivity-class
+    or retried-out gateway-5xx ``RegistryUnavailableError``
+    (:func:`is_loomweave_backend_unreachable`), a version mismatch, or a
+    caller-supplied known-down; it is False on the no-resolver path (local
+    mode — no network happened), on per-entity ``unresolved`` degrades, and on
+    a ``RegistryUnavailableError`` Loomweave answered with (a deterministic
+    4xx / plain 500 / auth / malformed body — per-issue UNKNOWN only).
+    ``lineage_unavailable`` relays the resolver's advisory of the same name
+    (the enrich-only rename-hint fallback failed after the primary channel
+    answered) and is deliberately NOT folded into ``loomweave_unavailable`` —
+    see :attr:`GateDecision.lineage_unavailable`. ``lineage_hints`` carries the
     registry's rename hint for each UNKNOWN (orphaned) binding that has one —
     see :attr:`GateDecision.lineage_hints`; empty when Loomweave was not
     consulted or reported no lineage.
@@ -148,6 +164,7 @@ class _DriftCheck:
     decision: GateDecision | None
     loomweave_unavailable: bool
     lineage_hints: dict[str, LineageEvent] = field(default_factory=dict)
+    lineage_unavailable: bool = False
 
 
 def _format_lineage_hints(hints: dict[str, LineageEvent]) -> str:
@@ -216,7 +233,20 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
     UNKNOWN for this issue without re-incurring the resolver's retry budget. The
     check's ``loomweave_unavailable`` reports True for that case and for a
     whole-backend failure raised by the resolver, so the caller can set the flag
-    for the rest of its batch.
+    for the rest of its batch. Whole-backend means input-independent: a
+    ``RegistryUnavailableError`` that proves the backend down
+    (:func:`is_loomweave_backend_unreachable` — connectivity-class, the request
+    got no answer; or a retried-out gateway 502/503/504, a proxy answering for
+    a dead upstream) or a version mismatch. A ``RegistryUnavailableError``
+    Loomweave ANSWERED with (a deterministic 4xx such as 413 for THIS issue's
+    oversize locator, a plain 500, an auth refusal, a malformed body) degrades
+    only this issue to UNKNOWN and leaves the flag False — otherwise one
+    issue's bad input would skip every later issue's probe and let a drifted
+    binding auto-close. The resolver's advisory ``lineage_unavailable`` (the
+    enrich-only rename-hint fallback failed AFTER the primary channel answered)
+    is relayed on the check's own ``lineage_unavailable`` and never counted
+    toward the batch bound — a successful primary read is direct evidence
+    Loomweave is up.
     """
     resolver = getattr(getattr(db, "registry", None), "resolve_entity_content_hashes", None)
     if resolver is None:
@@ -242,13 +272,51 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
     entity_ids = [_row_entity_id(row) for row in signed_rows if _row_entity_id(row)]
     try:
         resolution = resolver(entity_ids)
-    except (RegistryUnavailableError, RegistryVersionMismatchError) as exc:
+    except RegistryVersionMismatchError as exc:
         logger.warning(
             "closure-gate drift check: Loomweave unavailable; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
             extra={"issue_id": issue_id, "freshness": "unknown", "reason": "registry_unavailable", "detail": str(exc)},
         )
         return _DriftCheck(None, True)
+    except RegistryUnavailableError as exc:
+        backend_down = is_loomweave_backend_unreachable(exc)
+        if backend_down:
+            logger.warning(
+                "closure-gate drift check: Loomweave unavailable; entity freshness UNKNOWN (enrich-only, close not blocked on this axis)",
+                extra={
+                    "issue_id": issue_id,
+                    "freshness": "unknown",
+                    "reason": "registry_unavailable",
+                    "cause_kind": exc.cause_kind,
+                    "status_code": exc.status_code,
+                    "detail": str(exc),
+                },
+            )
+        else:
+            logger.warning(
+                "closure-gate drift check: Loomweave rejected this issue's resolve request; entity freshness UNKNOWN "
+                "(enrich-only, close not blocked on this axis; Loomweave answered, so later issues in a batch are still probed)",
+                extra={
+                    "issue_id": issue_id,
+                    "freshness": "unknown",
+                    "reason": "registry_request_rejected",
+                    "cause_kind": exc.cause_kind,
+                    "status_code": exc.status_code,
+                    "detail": str(exc),
+                },
+            )
+        return _DriftCheck(None, backend_down)
 
+    # The orphan rename-hint fallback hit a connectivity-class failure (advisory
+    # key; absent from legacy producers). The primary channels answered, so the
+    # comparison below stands and — crucially — this is NOT a known-down signal
+    # for the batch: it rides on the check's separate ``lineage_unavailable``.
+    lineage_unavailable = resolution.get("lineage_unavailable") is True
+    if lineage_unavailable:
+        logger.info(
+            "closure-gate drift check: Loomweave lineage route unreachable (rename hints unavailable; advisory only)",
+            extra={"issue_id": issue_id, "reason": "lineage_unavailable"},
+        )
     resolved: dict[str, str] = dict(resolution.get("resolved", {}))
     all_hints: dict[str, LineageEvent] = dict(resolution.get("lineage_hints") or {})
     drifted: list[str] = []
@@ -286,8 +354,9 @@ def _evaluate_current_drift(db: Any, issue_id: str, signed_rows: list[Any], *, l
             ),
             False,
             lineage_hints,
+            lineage_unavailable=lineage_unavailable,
         )
-    return _DriftCheck(None, False, lineage_hints)
+    return _DriftCheck(None, False, lineage_hints, lineage_unavailable=lineage_unavailable)
 
 
 def evaluate_closure_gate(
@@ -349,8 +418,13 @@ def evaluate_closure_gate(
         # block — it degrades to UNKNOWN inside the helper (enrich-only).
         # loomweave_known_down is likewise applied INSIDE the helper, at the
         # resolver call — after the ungoverned and snapshot-STALE short-circuits,
-        # before the legis_known_down short-circuit.
-        return _with_lineage_hints(check.decision, check.lineage_hints)
+        # before the legis_known_down short-circuit. The advisory
+        # ``lineage_unavailable`` still rides on a STALE verdict (the lineage
+        # fallback can be unreachable while the drift comparison succeeded).
+        stale = check.decision
+        if check.lineage_unavailable:
+            stale = replace(stale, lineage_unavailable=True)
+        return _with_lineage_hints(stale, check.lineage_hints)
     if legis_known_down:
         # A governed, non-stale issue needs a Legis round-trip, but a prior issue
         # in this batch already proved Legis unreachable — fail closed without
@@ -358,10 +432,14 @@ def evaluate_closure_gate(
         decision = GateDecision(GateOutcome.UNAVAILABLE, "Legis unreachable earlier in this batch")
     else:
         decision = _map_result(check_closure_gate(str(issue_id)))
-    # Stamp the advisory flag / rename hints on a copy — ``_PROCEED`` is a
+    # Stamp the advisory flags / rename hints on a copy — ``_PROCEED`` is a
     # shared singleton.
-    if check.loomweave_unavailable:
-        decision = replace(decision, loomweave_unavailable=True)
+    if check.loomweave_unavailable or check.lineage_unavailable:
+        decision = replace(
+            decision,
+            loomweave_unavailable=decision.loomweave_unavailable or check.loomweave_unavailable,
+            lineage_unavailable=decision.lineage_unavailable or check.lineage_unavailable,
+        )
     return _with_lineage_hints(decision, check.lineage_hints)
 
 

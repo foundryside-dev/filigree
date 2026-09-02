@@ -412,9 +412,13 @@ class _FakeRegistry:
         *,
         raise_unavailable: bool = False,
         lineage_hints: dict[str, dict[str, object]] | None = None,
+        lineage_unavailable: bool = False,
     ) -> None:
         self._hashes = hashes
         self._raise_unavailable = raise_unavailable
+        # ``lineage_unavailable`` is the registry's NotRequired advisory flag: the
+        # orphan rename-hint fallback hit a connectivity-class failure.
+        self._lineage_unavailable = lineage_unavailable
         # ``lineage_hints`` is a NotRequired key on EntityHashResolution: a
         # legacy producer (None here) omits it entirely rather than sending {}.
         self._lineage_hints = lineage_hints
@@ -431,6 +435,8 @@ class _FakeRegistry:
         result: dict[str, object] = {"resolved": resolved, "unresolved": unresolved}
         if self._lineage_hints is not None:
             result["lineage_hints"] = {eid: self._lineage_hints[eid] for eid in unresolved if eid in self._lineage_hints}
+        if self._lineage_unavailable:
+            result["lineage_unavailable"] = True
         return result
 
 
@@ -695,15 +701,18 @@ def _loomweave_outage_exceptions() -> list[Exception]:
 
     return [
         RegistryUnavailableError("loomweave down", url="http://loomweave.invalid", cause_kind="network"),
+        RegistryUnavailableError("loomweave hung", url="http://loomweave.invalid", cause_kind="timeout"),
         RegistryVersionMismatchError("api_version 99", url="http://loomweave.invalid", expected=1, advertised=99),
     ]
 
 
-@pytest.mark.parametrize("exc", _loomweave_outage_exceptions(), ids=["unavailable", "version_mismatch"])
+@pytest.mark.parametrize("exc", _loomweave_outage_exceptions(), ids=["network", "timeout", "version_mismatch"])
 def test_loomweave_outage_flags_decision_loomweave_unavailable(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
-    """(a) A whole-backend Loomweave failure during the drift probe still
-    PROCEEDs (enrich-only) but stamps ``loomweave_unavailable=True`` so a batch
-    caller can bound the outage to one probe."""
+    """(a) A whole-backend Loomweave failure during the drift probe — a
+    connectivity-class ``RegistryUnavailableError`` (the request got no answer)
+    or a version mismatch (input-independent) — still PROCEEDs (enrich-only) but
+    stamps ``loomweave_unavailable=True`` so a batch caller can bound the outage
+    to one probe."""
     _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
     entity_id = "py:func:mod::f"
     registry = _FakeRegistryRaising(exc)
@@ -712,6 +721,86 @@ def test_loomweave_outage_flags_decision_loomweave_unavailable(monkeypatch: pyte
     assert decision.outcome is GateOutcome.PROCEED
     assert decision.loomweave_unavailable is True
     assert registry.calls == [[entity_id]]  # the probe was attempted exactly once
+
+
+@pytest.mark.parametrize("cause_kind", ["http_error", "auth", "invalid_response", "unknown"])
+def test_non_connectivity_registry_failure_degrades_only_this_issue(monkeypatch: pytest.MonkeyPatch, cause_kind: str) -> None:
+    """A ``RegistryUnavailableError`` Loomweave ANSWERED with — a deterministic
+    4xx such as 413 for one issue's oversize locator, a 5xx, an auth refusal, a
+    malformed body — is per-issue: freshness UNKNOWN for THIS issue (still
+    PROCEEDs, enrich-only) but ``loomweave_unavailable`` stays False so a batch
+    caller keeps probing its later issues instead of auto-closing a drifted one."""
+    from filigree.registry import RegistryUnavailableError
+
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    registry = _FakeRegistryRaising(RegistryUnavailableError("HTTP 413", url="http://loomweave.invalid", cause_kind=cause_kind))
+    db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
+    decision = governance.evaluate_closure_gate(db, "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is False
+    assert registry.calls == [[entity_id]]
+
+
+@pytest.mark.parametrize("status_code", [502, 503, 504])
+def test_retried_out_gateway_5xx_flags_decision_loomweave_unavailable(monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
+    """A gateway-class 5xx (502/503/504 — a proxy in front of a dead or
+    overloaded Loomweave) that survived the resolver's retry budget is
+    input-independent, so it counts toward the batch known-down bound like a
+    network failure: every later governed issue would otherwise re-burn the full
+    retry budget against the same dead upstream. Still PROCEEDs (enrich-only)."""
+    from filigree.registry import RegistryUnavailableError
+
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    exc = RegistryUnavailableError(f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code)
+    registry = _FakeRegistryRaising(exc)
+    decision = governance.evaluate_closure_gate(_FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry), "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is True
+    assert registry.calls == [[entity_id]]
+
+
+@pytest.mark.parametrize("status_code", [413, 422, 500])
+def test_non_gateway_http_error_with_status_degrades_only_this_issue(monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
+    """A deterministic 4xx, or a plain 500 (which a specific input can trigger),
+    stays per-issue even though the exception now carries its status code."""
+    from filigree.registry import RegistryUnavailableError
+
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    entity_id = "py:func:mod::f"
+    exc = RegistryUnavailableError(f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code)
+    registry = _FakeRegistryRaising(exc)
+    decision = governance.evaluate_closure_gate(_FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry), "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.loomweave_unavailable is False
+
+
+def test_lineage_connectivity_failure_is_advisory_and_never_flips_loomweave_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry's ``lineage_unavailable`` advisory (the orphan rename-hint
+    fallback hit a connectivity-class failure) is surfaced on its own
+    ``GateDecision.lineage_unavailable`` field and NEVER folded into
+    ``loomweave_unavailable``: the primary by-SEI channel answered milliseconds
+    earlier, which is direct evidence Loomweave is up, and a batch caller reads
+    ``loomweave_unavailable`` as known-down — feeding it here would skip every
+    later issue's drift probe and let a drifted binding auto-close. The outcome
+    is untouched, whether PROCEED (fresh sibling) or STALE (drifted sibling)."""
+    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    orphan = "loomweave:eid:0000000000000000000000000000beef"
+    fresh = "py:func:mod::f"
+    rows = _governed_rows_attached_at(fresh, "h1") + _governed_rows_attached_at(orphan, "h1")
+    decision = governance.evaluate_closure_gate(_FakeDBWithRegistry(rows, _FakeRegistry({fresh: "h1"}, lineage_unavailable=True)), "test-1")
+    assert decision.outcome is GateOutcome.PROCEED
+    assert decision.lineage_unavailable is True
+    assert decision.loomweave_unavailable is False
+    stale = governance.evaluate_closure_gate(_FakeDBWithRegistry(rows, _FakeRegistry({fresh: "h2"}, lineage_unavailable=True)), "test-1")
+    assert stale.outcome is GateOutcome.STALE
+    assert stale.lineage_unavailable is True
+    assert stale.loomweave_unavailable is False
+    # A legacy producer without the key, or one that answered False, is unflagged on both.
+    plain = governance.evaluate_closure_gate(_FakeDBWithRegistry(rows, _FakeRegistry({fresh: "h1"})), "test-1")
+    assert plain.lineage_unavailable is False
+    assert plain.loomweave_unavailable is False
 
 
 def test_loomweave_known_down_skips_resolver_and_still_proceeds_to_legis(monkeypatch: pytest.MonkeyPatch) -> None:

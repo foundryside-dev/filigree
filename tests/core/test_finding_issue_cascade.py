@@ -314,19 +314,43 @@ class _FakeDriftRegistry:
     every probe; either raises a whole-backend outage or answers from
     ``hashes``."""
 
-    def __init__(self, hashes: dict[str, str] | None = None, *, raise_unavailable: bool = False) -> None:
+    def __init__(
+        self,
+        hashes: dict[str, str] | None = None,
+        *,
+        raise_unavailable: bool = False,
+        outage: Exception | None = None,
+        raise_for_entity: dict[str, Exception] | None = None,
+        lineage_unavailable_for: set[str] | None = None,
+    ) -> None:
         self._hashes = hashes or {}
         self._raise_unavailable = raise_unavailable
+        # A specific whole-backend exception to raise on every probe (default:
+        # a connectivity-class network failure).
+        self._outage = outage
+        # entity id -> exception raised when that id is in the probe (a per-issue
+        # deterministic failure such as HTTP 413 for one oversize locator).
+        self._raise_for_entity = raise_for_entity or {}
+        # entity ids whose probe answers normally but reports the registry's
+        # advisory ``lineage_unavailable`` (the orphan rename-hint GET failed
+        # AFTER the primary by-SEI channel answered).
+        self._lineage_unavailable_for = lineage_unavailable_for or set()
         self.calls: list[list[str]] = []
 
     def resolve_entity_content_hashes(self, entity_ids: list[str]) -> dict[str, object]:
         self.calls.append(list(entity_ids))
-        if self._raise_unavailable:
+        if self._raise_unavailable or self._outage is not None:
             from filigree.registry import RegistryUnavailableError
 
-            raise RegistryUnavailableError("loomweave down", url="http://loomweave.invalid", cause_kind="network")
+            raise self._outage or RegistryUnavailableError("loomweave down", url="http://loomweave.invalid", cause_kind="network")
+        for eid in entity_ids:
+            if eid in self._raise_for_entity:
+                raise self._raise_for_entity[eid]
         resolved = {eid: self._hashes[eid] for eid in entity_ids if eid in self._hashes}
-        return {"resolved": resolved, "unresolved": [eid for eid in entity_ids if eid not in self._hashes]}
+        out: dict[str, object] = {"resolved": resolved, "unresolved": [eid for eid in entity_ids if eid not in self._hashes]}
+        if any(eid in self._lineage_unavailable_for for eid in entity_ids):
+            out["lineage_unavailable"] = True
+        return out
 
 
 class TestBatchLoomweaveShortCircuit:
@@ -370,6 +394,79 @@ class TestBatchLoomweaveShortCircuit:
         for _finding_id, issue_id in candidates:
             assert _is_done(db, issue_id)
             assert _debt_count(db, issue_id) == 0  # Loomweave-down never becomes debt
+
+    def test_batch_deterministic_4xx_on_one_issue_does_not_skip_later_probes(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Issue 0's probe fails with a ``RegistryUnavailableError`` Loomweave
+        ANSWERED with (HTTP 413 for its oversize locator — ``cause_kind=
+        http_error``). That is per-issue, not a backend outage: issue 0 closes
+        with freshness UNKNOWN, but issues 1 and 2 are STILL probed, so issue 1's
+        drifted binding is caught as STALE instead of being auto-closed."""
+        from filigree.registry import RegistryUnavailableError
+
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        candidates = self._governed_batch(db, "lw413")
+        oversize = RegistryUnavailableError("HTTP 413 Payload Too Large", url="http://loomweave.invalid", cause_kind="http_error")
+        fake = _FakeDriftRegistry({"ent-lw413-1": "h2", "ent-lw413-2": "h"}, raise_for_entity={"ent-lw413-0": oversize})
+        monkeypatch.setattr(db, "registry", fake)
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
+
+        assert len(fake.calls) == 3  # issue 0's 413 did NOT flip the batch known-down flag
+        (_f0, id0), (_f1, id1), (_f2, id2) = candidates
+        assert closed == [id0, id2]
+        assert _is_done(db, id0)  # its own probe failed -> UNKNOWN, enrich-only
+        assert not _is_done(db, id1)  # drifted -> STALE, never masked by issue 0's failure
+        assert _debt_count(db, id1) == 1
+        assert _is_done(db, id2)
+
+    def test_batch_lineage_only_failure_does_not_skip_later_probes(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Issue 0's binding is orphaned and its enrich-only rename-hint GET
+        (``/identity/lineage/{sei}``) timed out AFTER the primary by-SEI channel
+        answered — the registry reports ``lineage_unavailable``. That is direct
+        evidence Loomweave is up, so it must NOT feed the batch known-down
+        bound: issues 1 and 2 are still probed and issue 1's drifted binding is
+        caught as STALE instead of auto-closing."""
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        candidates = self._governed_batch(db, "lwlin")
+        fake = _FakeDriftRegistry({"ent-lwlin-1": "h2", "ent-lwlin-2": "h"}, lineage_unavailable_for={"ent-lwlin-0"})
+        monkeypatch.setattr(db, "registry", fake)
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
+
+        assert len(fake.calls) == 3  # the lineage-only advisory did NOT flip the batch known-down flag
+        (_f0, id0), (_f1, id1), (_f2, id2) = candidates
+        assert closed == [id0, id2]
+        assert _is_done(db, id0)  # orphaned -> UNKNOWN, enrich-only
+        assert not _is_done(db, id1)  # drifted -> STALE, never masked by issue 0's lineage hint failing
+        assert _debt_count(db, id1) == 1
+        assert _is_done(db, id2)
+
+    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    def test_batch_gateway_5xx_probes_loomweave_once(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
+        """A reverse proxy answering 502/503/504 for a dead Loomweave is
+        input-independent: after issue 0's probe retried out on it, later issues
+        must not each re-burn the full retry budget — one probe per batch, like
+        a network failure. Enrich-only: every issue still closes on its own
+        Legis verdict."""
+        from filigree.registry import RegistryUnavailableError
+
+        monkeypatch.setenv("LEGIS_URL", "http://legis.invalid")
+        monkeypatch.setattr(governance, "check_closure_gate", lambda _iid: LegisGateResult(LegisGateStatus.ALLOWED))
+        candidates = self._governed_batch(db, f"lwgw{status_code}")
+        gateway = RegistryUnavailableError(
+            f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code
+        )
+        fake = _FakeDriftRegistry(outage=gateway)
+        monkeypatch.setattr(db, "registry", fake)
+
+        closed = db._finding_issue_cascade_service().close_resolved_findings(candidates, warnings=[])
+
+        assert len(fake.calls) == 1
+        assert closed == [issue_id for _f, issue_id in candidates]
+        for _finding_id, issue_id in candidates:
+            assert _debt_count(db, issue_id) == 0
 
     def test_batch_loomweave_down_and_legis_down_each_probed_once(self, db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """Both backends down: one Loomweave probe AND one Legis call for the

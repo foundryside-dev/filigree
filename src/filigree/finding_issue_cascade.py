@@ -131,6 +131,14 @@ class FindingIssueCascadeService:
         (logged) while still receiving their own Legis verdict. It never
         converts into a deferral or reconciliation debt — the gate reports it on
         ``GateDecision.loomweave_unavailable`` rather than through an outcome.
+        The gate sets that flag only for a failure that proves the backend
+        down (no answer from Loomweave, or a retried-out gateway 502/503/504
+        from a proxy in front of a dead upstream); a request Loomweave rejected
+        for ONE issue (a deterministic 4xx such as 413 for its oversize
+        locator) degrades that issue alone, and the enrich-only lineage-hint
+        fallback failing after the primary probe answered (the gate's separate
+        ``lineage_unavailable``) is never known-down — so a later issue's
+        drifted binding is still caught.
         """
         from filigree import governance
         from filigree.governance import GateOutcome
