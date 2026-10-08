@@ -484,7 +484,8 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
             name="list_reconciliation_debt",
             description=(
                 "List issues carrying reconciliation debt — governed finding→issue auto-closes that the "
-                "Legis closure gate deferred (blocked, or could not confirm). Each row is one issue with "
+                "closure gate deferred (a bound entity's content drifted since it was attached or signed) or "
+                "that failed. Each row is one issue with "
                 "its debt_count and latest debt timestamp. Use to find and action deferred cascade closes."
             ),
             inputSchema={

@@ -135,7 +135,9 @@ def create_classic_router() -> APIRouter:
         is the sole verifier. Their semantic effect is functional, not a security
         gate: a *present* (non-null) ``signature`` flips the binding to
         ``governed``, which makes it non-removable via the delete route and makes
-        a governed close fail closed when Legis is unreachable. A fabricated
+        a governed close carry the ``governance_provider_archived`` warning
+        (Legis is retired and never consulted; a drifted sign-off still fails
+        closed as STALE). A fabricated
         sign-off therefore grants no privilege — it only makes the binding
         stickier and closes stricter; deconfliction (cooperating callers) is the
         boundary, which a route-level check could not improve.

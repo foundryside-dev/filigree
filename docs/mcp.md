@@ -656,7 +656,7 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 | `db_checkpoint` | Run `PRAGMA wal_checkpoint(TRUNCATE)` on the project store |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
-| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the closure gate deferred) |
+| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the closure gate deferred because a bound entity drifted, or that failed) |
 
 #### `reconciliation_debt_list`
 
