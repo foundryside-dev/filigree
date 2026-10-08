@@ -351,6 +351,7 @@ class TestStartNextWork:
             target_path: list[str],
             actor: str,
             client_request_id: str | None = None,
+            return_held: bool = False,
         ):
             if issue_id == doomed.id and not deleted["done"]:
                 db.conn.execute("DELETE FROM events WHERE issue_id = ?", (doomed.id,))
@@ -363,6 +364,7 @@ class TestStartNextWork:
                 target_path=target_path,
                 actor=actor,
                 client_request_id=client_request_id,
+                return_held=return_held,
             )
 
         monkeypatch.setattr(db, "get_ready", lambda: ready_snapshot)

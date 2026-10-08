@@ -559,8 +559,6 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "Atomically claim an open-category issue, or an unassigned wip-category issue released for handoff, "
                 "by setting assignee (optimistic locking). "
                 "Does NOT change status — use issue_update to advance through workflow after claiming. "
-                "Retry-safe: if the assignee already holds a live claim, that issue is returned with "
-                "already_holding=true instead of claiming a second one. "
                 "Identity: provide assignee or actor — whichever is omitted defaults from the other."
             ),
             inputSchema={
@@ -595,8 +593,9 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "predecessor of the current wip status (e.g. in_progress→open for task, fixing→confirmed "
                 "for bug); types with no open predecessor fall back to initial_state. Pass "
                 "revert_status=false to keep the legacy behaviour and leave the status unchanged. "
-                "Holder-checked: the issue must be held by expected_assignee or, if omitted, actor — a claim held "
-                "by anyone else returns CONFLICT and is left alone. To free a peer's stale claim use work_reclaim "
+                "Holder-checked: actor must be the current holder — a claim held by anyone else returns CONFLICT "
+                "and is left alone. expected_assignee is an extra compare-and-swap guard, never authorization: "
+                "naming the holder does not let a non-holder release. To free a peer's stale claim use work_reclaim "
                 "(holder-checked transfer); override=true is the coordinator release and is recorded as a "
                 "released_by_override event. Releasing an issue nobody holds is an idempotent "
                 '{"result": "no_op", "reason": "not_claimed"}.'
@@ -605,10 +604,13 @@ def register() -> tuple[list[Tool], dict[str, Callable[..., Any]]]:
                 "type": "object",
                 "properties": {
                     "issue_id": {"type": "string", "description": "Issue ID to release"},
-                    "actor": {"type": "string", "description": "Agent/user identity for audit trail; the expected holder by default"},
+                    "actor": {"type": "string", "description": "Agent/user identity; must be the current holder unless override=true"},
                     "expected_assignee": {
                         "type": "string",
-                        "description": "Expected current holder; defaults to actor. A mismatch returns CONFLICT, even with override.",
+                        "description": (
+                            "Optional extra CAS guard: the current holder must also equal this value (mismatch is "
+                            "CONFLICT, even with override). Does not authorize releasing someone else's claim."
+                        ),
                     },
                     "override": {
                         "type": "boolean",

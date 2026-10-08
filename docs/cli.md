@@ -512,9 +512,9 @@ Claim the highest-priority ready issue.
 
 ### `release`
 
-Release a claim you hold by clearing its assignee. Holder-checked: the claim must be held by `--expected-assignee`,
-or by the global `--actor` when no expected assignee is provided; if another actor holds it the command returns
-`CONFLICT` and leaves the claim alone. Releasing an issue nobody holds is an idempotent no-op (exit 0;
+Release a claim you hold by clearing its assignee. Holder-checked: the global `--actor` must hold the claim; if
+another actor holds it the command returns `CONFLICT` and leaves the claim alone. `--expected-assignee` is an extra
+compare-and-swap guard, never authorization. Releasing an issue nobody holds is an idempotent no-op (exit 0;
 `--json` prints `{"result": "no_op", "reason": "not_claimed"}`). To take over a peer's stale claim use `reclaim`;
 `--override` is the coordinator release, recorded as `released_by_override`. (`--if-held` was removed in 3.4.0:
 its behaviour is now the default.)
@@ -523,7 +523,7 @@ its behaviour is now the default.)
 |-----------|------|-------------|
 | `id` | string | Issue ID (positional) |
 | `--override` | flag | Coordinator release of a claim `--actor` does not hold |
-| `--expected-assignee` | string | Expected current holder; defaults to the global `--actor` |
+| `--expected-assignee` | string | Extra CAS guard on the current holder; never authorizes a non-holder |
 | `--reason` | string | Audit reason recorded on the release event |
 
 ### `release-my-claims`

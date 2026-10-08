@@ -1566,7 +1566,7 @@ class IssuesMixin(DBMixinProtocol):
         Uses a single atomic UPDATE with WHERE guard to prevent race conditions
         where two agents try to claim the same issue concurrently.
 
-        Composed callers (``start_work``, ``_claim_next_with_prior``) pass the
+        Composed callers (``start_work``, ``_claim_next_candidate_locked``) pass the
         decorator's ``_skip_begin=True`` so this method runs inside the outer
         IMMEDIATE transaction.
 
@@ -1657,13 +1657,16 @@ class IssuesMixin(DBMixinProtocol):
     ) -> Issue | None:
         """Release a claimed issue by clearing its assignee.
 
-        Holder-checked by default (MCP F3): the live assignee must equal
-        ``expected_assignee`` when given, else ``actor``; a mismatch raises
-        ``ClaimConflictError`` and leaves the claim alone. ``override=True``
-        is the coordinator path: it drops the implicit ``actor`` holder check
-        (an explicit ``expected_assignee`` is still enforced — it is the
-        coordinator's own precondition) and the release is recorded as a
-        ``released_by_override`` event instead of ``released``.
+        Holder-checked (MCP F3): without ``override``, ``actor`` must be the
+        live assignee — a mismatch raises ``ClaimConflictError`` and leaves
+        the claim alone. ``expected_assignee`` is a compare-and-swap guard,
+        never authorization: when given it is an *additional* precondition
+        (the live assignee must also equal it), so naming the holder does not
+        let a non-holder release. ``override=True`` is the only way to
+        release a claim ``actor`` does not hold (coordinator); it drops the
+        actor check (``expected_assignee`` is still enforced) and the release
+        is recorded as a ``released_by_override`` event instead of
+        ``released``.
 
         Idempotent: an issue nobody holds — already unassigned, or released
         concurrently between read and write — returns ``None`` (the surfaces
@@ -1690,10 +1693,11 @@ class IssuesMixin(DBMixinProtocol):
         Args:
             issue_id: Claimed issue to release. The id prefix must belong to
                 this project for write operations.
-            actor: Audit identity, and the expected holder when
-                ``expected_assignee`` is omitted.
-            expected_assignee: Explicit expected holder. A mismatch raises
-                ``ClaimConflictError`` (with or without ``override``).
+            actor: Audit identity; must be the live assignee unless
+                ``override`` is true.
+            expected_assignee: Additional CAS guard on the live assignee. A
+                mismatch raises ``ClaimConflictError`` (with or without
+                ``override``). Never authorizes a non-holder.
             override: Coordinator release of a claim the actor does not hold.
             reason: Audit comment recorded on the release event.
             revert_status: When true, move wip-category issues back through the
@@ -1706,11 +1710,12 @@ class IssuesMixin(DBMixinProtocol):
         Raises:
             KeyError: The issue does not exist.
             WrongProjectError: The write targets an id from another project.
-            ValueError: ``override``/``revert_status`` is not boolean, no
-                expected holder is known (blank actor, no override), or the
-                issue is in a done-category status.
-            ClaimConflictError: The issue is held by someone other than the
-                expected holder, or it is reassigned between read and write.
+            ValueError: ``override``/``revert_status`` is not boolean, the
+                actor is blank without ``override``, or the issue is in a
+                done-category status.
+            ClaimConflictError: The issue is held by someone other than
+                ``actor`` (without ``override``) or ``expected_assignee``, or
+                it is reassigned between read and write.
             InvalidTransitionError: The reverse status transition selected by
                 ``revert_status`` is not declared or is blocked by field gates.
                 ``valid_transitions`` is attached when template context is
@@ -1727,9 +1732,8 @@ class IssuesMixin(DBMixinProtocol):
             msg = "expected_assignee must be a non-empty string"
             raise ValueError(msg)
         actor_holder = _normalize_assignee(actor)
-        expected_holder = explicit_holder if explicit_holder is not None else actor_holder
-        if not override and not expected_holder:
-            msg = "actor (or expected_assignee) is required to release a claim"
+        if not override and not actor_holder:
+            msg = "actor is required to release a claim (or pass override=True as coordinator)"
             raise ValueError(msg)
         self._check_id_prefix(issue_id)
         row = self.conn.execute("SELECT type, status, assignee, fields FROM issues WHERE id = ?", (issue_id,)).fetchone()
@@ -1742,12 +1746,16 @@ class IssuesMixin(DBMixinProtocol):
         if self._resolve_status_category(row["type"], row["status"]) == "done":
             msg = f"Cannot release {issue_id}: status '{row['status']}' is done-category; assignee is closure audit trail"
             raise ValueError(msg)
-        if (explicit_holder is not None or not override) and observed != expected_holder:
-            msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
-            raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
-        # Only a release that actually needed the coordinator bypass is recorded
-        # as one; an override by the holder itself is an ordinary release.
-        released_by_override = override and observed != actor_holder
+        # expected_assignee is a CAS guard checked first; the actor-is-holder
+        # check is the authorization and only override bypasses it.
+        for expected_holder in (explicit_holder, None if override else actor_holder):
+            if expected_holder is not None and observed != expected_holder:
+                msg = f"Cannot release {issue_id}: assigned to '{observed}' (expected '{expected_holder}')"
+                raise ClaimConflictError(issue_id, observed=observed, expected=expected_holder, message=msg)
+        # Every release that bypassed the holder went through override (the
+        # actor check above is unconditional otherwise); an override by the
+        # holder itself is an ordinary release.
+        released_by_override = observed != actor_holder
 
         target: str | None = None
         if revert_status:
@@ -2198,6 +2206,35 @@ class IssuesMixin(DBMixinProtocol):
         )
         return result[0] if result is not None else None
 
+    @_retry_busy()
+    @_in_immediate_tx("claim_next")
+    def _claim_next_candidate_locked(
+        self,
+        issue_id: str,
+        *,
+        assignee: str,
+        actor: str,
+        client_request_id: str | None,
+        _skip_begin: bool = False,
+    ) -> Issue:
+        """Claim one ``claim_next`` candidate under the writer lock.
+
+        Re-runs the held-claim check after ``BEGIN IMMEDIATE``: a concurrent
+        call by the same assignee may have claimed something between this
+        call's unlocked check and now. If so, that claim is handed back
+        (``already_holding``) instead of claiming a second issue.
+        """
+        held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=False)
+        if held is not None:
+            return held
+        return self.claim_issue(
+            issue_id,
+            assignee=assignee,
+            actor=actor,
+            client_request_id=client_request_id,
+            _skip_begin=True,
+        )
+
     def _find_held_claim(self, assignee: str, *, client_request_id: str | None, wip_only: bool) -> Issue | None:
         """Return the claim a retried claim-next/start-next call is handed back.
 
@@ -2283,7 +2320,7 @@ class IssuesMixin(DBMixinProtocol):
                     raise _ClaimCandidateVanishedError(issue.id)
                 prior_assignee = row["assignee"] or ""
                 try:
-                    claimed = self.claim_issue(
+                    claimed = self._claim_next_candidate_locked(
                         issue.id,
                         assignee=assignee,
                         actor=actor or assignee,
@@ -2462,6 +2499,7 @@ class IssuesMixin(DBMixinProtocol):
                     target_path=this_path,
                     actor=actor,
                     client_request_id=client_request_id,
+                    return_held=True,
                 )
             except _StartCandidateUnclaimableError as exc:
                 # Race / status mismatch / deleted — try next candidate.
@@ -2532,8 +2570,15 @@ class IssuesMixin(DBMixinProtocol):
         actor: str,
         commit: str | None = None,
         client_request_id: str | None = None,
+        return_held: bool = False,
     ) -> Issue:
         """Private critical section for ``start_work`` / ``start_next_work``.
+
+        ``return_held`` (``start_next_work`` only) re-runs the held-claim check
+        after ``BEGIN IMMEDIATE``: a concurrent call by the same assignee may
+        have started work between this call's unlocked check and now, and that
+        claim is handed back (``already_holding``) instead of starting a
+        second issue (MCP F4).
 
         The ``@_in_immediate_tx`` decorator wraps a tight claim+update
         composite with no template lookups or candidate discovery, so the
@@ -2560,6 +2605,10 @@ class IssuesMixin(DBMixinProtocol):
         only the final hop's warnings would survive, hiding e.g. the missing
         ``severity`` warning from the ``triage -> confirmed`` hop (filigree-406e6b7ee0).
         """
+        if return_held:
+            held = self._find_held_claim(_normalize_assignee(assignee), client_request_id=client_request_id, wip_only=True)
+            if held is not None:
+                return held
         try:
             result = self.claim_issue(
                 issue_id,

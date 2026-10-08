@@ -1081,7 +1081,11 @@ def _release_impl(
     is_flag=True,
     help="Coordinator release of a claim the --actor does not hold (recorded as released_by_override).",
 )
-@click.option("--expected-assignee", default=None, help="Expected current holder; defaults to the global --actor.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra CAS guard on the current holder (never authorizes a non-holder; --actor must hold the claim unless --override).",
+)
 @click.option("--reason", default="", help="Audit reason for releasing the claim.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context
@@ -1104,7 +1108,11 @@ def release(
     is_flag=True,
     help="Coordinator release of a claim the --actor does not hold (recorded as released_by_override).",
 )
-@click.option("--expected-assignee", default=None, help="Expected current holder; defaults to the global --actor.")
+@click.option(
+    "--expected-assignee",
+    default=None,
+    help="Extra CAS guard on the current holder (never authorizes a non-holder; --actor must hold the claim unless --override).",
+)
 @click.option("--reason", default="", help="Audit reason for releasing the claim.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.pass_context

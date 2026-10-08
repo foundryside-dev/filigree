@@ -364,15 +364,16 @@ def release_claim(
 ```
 
 Releases a claimed issue by clearing its assignee (and, by default, reverting a
-wip-category status to its open predecessor). Holder-checked: the live assignee
-must equal `expected_assignee`, or `actor` when that is omitted. `override=True`
-is the coordinator release of a claim `actor` does not hold; it is recorded as a
-`released_by_override` event (an explicit `expected_assignee` is still
-enforced). An issue nobody holds returns `None` — the idempotent no-op.
+wip-category status to its open predecessor). Holder-checked: without
+`override`, `actor` must be the live assignee. `expected_assignee` is an extra
+compare-and-swap guard (the live assignee must also equal it), never
+authorization. `override=True` is the only way to release a claim `actor` does
+not hold (coordinator); it is recorded as a `released_by_override` event
+(`expected_assignee` is still enforced). An issue nobody holds returns `None` — the idempotent no-op.
 
 **Raises:** `ClaimConflictError` when the issue is held by someone other than
-the expected holder (without `override`), or is reassigned between read and
-write; `ValueError` for a blank actor without `override`, or a done-category
+`actor` (without `override`) or `expected_assignee`, or is reassigned between
+read and write; `ValueError` for a blank actor without `override`, or a done-category
 issue.
 
 #### `heartbeat_work`

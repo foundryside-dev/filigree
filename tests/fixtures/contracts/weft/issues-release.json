@@ -15,7 +15,7 @@
   "shape_decl": {
     "request_type": "{actor?: str, if_held?: bool, expected_assignee?: str, reason?: str, override?: bool}",
     "response_type": "IssueWeft",
-    "rationale": "Releases a claim. Holder-checked: the live assignee must equal expected_assignee, else actor; any other holder is 409 CONFLICT and the claim is left alone. override: true is the coordinator release (recorded as a released_by_override event; an explicit expected_assignee is still enforced). An issue nobody holds is idempotent: 200 with the unchanged issue. if_held is still accepted for wire compatibility but no longer changes behaviour (holder-checked release is the only mode). 404 NOT_FOUND when the issue id does not exist."
+    "rationale": "Releases a claim. Holder-checked: actor must be the live assignee; any other holder is 409 CONFLICT and the claim is left alone. expected_assignee is an extra compare-and-swap guard (the holder must also equal it), never authorization. override: true is the only coordinator bypass (recorded as a released_by_override event; expected_assignee is still enforced). An issue nobody holds is idempotent: 200 with the unchanged issue. if_held is still accepted for wire compatibility but no longer changes behaviour (holder-checked release is the only mode). 404 NOT_FOUND when the issue id does not exist."
   },
   "examples": [
     {

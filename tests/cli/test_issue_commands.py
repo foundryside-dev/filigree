@@ -1120,15 +1120,20 @@ class TestReleaseCli:
         assert json.loads(result.stdout) == {"result": "no_op", "reason": "not_claimed"}
 
     def test_release_expected_assignee_json(self, cli_in_project: tuple[CliRunner, Path]) -> None:
+        """Review ruling (a): naming the holder does not authorize a non-holder;
+        only --override does."""
         runner, _ = cli_in_project
         r = runner.invoke(cli, ["create", "JSON release expected holder"])
         issue_id = _extract_id(r.output)
         runner.invoke(cli, ["claim", issue_id, "--assignee", "agent-1"])
+        argv = ["--actor", "coordinator", "release", issue_id, "--expected-assignee", "agent-1", "--json"]
 
-        result = runner.invoke(
-            cli,
-            ["--actor", "coordinator", "release", issue_id, "--expected-assignee", "agent-1", "--json"],
-        )
+        refused = runner.invoke(cli, argv)
+
+        assert refused.exit_code == 1, refused.output
+        assert json.loads(refused.stdout)["code"] == "CONFLICT"
+
+        result = runner.invoke(cli, [*argv, "--override"])
 
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout)

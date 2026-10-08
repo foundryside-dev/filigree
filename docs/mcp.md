@@ -441,9 +441,10 @@ of claiming a second issue. Every success response carries `already_holding`.
 
 #### `work_release`
 
-Holder-checked: the issue must be held by `expected_assignee`, or by `actor`
-when that is omitted; a claim held by anyone else returns `CONFLICT` and is
-left alone. To free a peer's stale claim use `work_reclaim`; `override=true`
+Holder-checked: `actor` must be the current holder; a claim held by anyone
+else returns `CONFLICT` and is left alone. `expected_assignee` is an extra
+compare-and-swap guard, never authorization — naming the holder does not let a
+non-holder release. To free a peer's stale claim use `work_reclaim`; `override=true`
 is the coordinator release, recorded as a `released_by_override` event.
 Releasing an issue nobody holds returns `{"result": "no_op", "reason":
 "not_claimed"}`. The former `if_held` parameter was removed (3.4.0); passing
@@ -452,8 +453,8 @@ it returns `VALIDATION` with `details.migration`.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_id` | string | yes | Issue ID |
-| `actor` | string | no | Agent identity for audit trail; the expected holder by default |
-| `expected_assignee` | string | no | Expected current holder; defaults to `actor`. A mismatch is `CONFLICT`, even with `override` |
+| `actor` | string | no | Agent identity; must be the current holder unless `override` |
+| `expected_assignee` | string | no | Extra CAS guard: the current holder must also equal it (mismatch is `CONFLICT`, even with `override`); never authorizes a non-holder |
 | `override` | boolean | no | Coordinator release of a claim `actor` does not hold |
 | `reason` | string | no | Audit reason recorded on the release event |
 

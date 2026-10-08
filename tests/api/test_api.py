@@ -762,16 +762,38 @@ class TestClaimAPI:
         assert resp.json()["assignee"] == ""
 
     async def test_release_if_held_expected_assignee_weft(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
+        """Review ruling (a): a non-holder naming the holder is refused; only
+        override releases (and is audited as released_by_override)."""
+        ids = dashboard_db.ids
+        dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
+        body = {"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"}
+
+        refused = await client.post(f"/api/weft/issues/{ids['a']}/release", json=body)
+
+        assert refused.status_code == 409
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
+
+        resp = await client.post(f"/api/weft/issues/{ids['a']}/release", json={**body, "override": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["assignee"] == ""
+        events = dashboard_db.db.get_issue_events(ids["a"])
+        assert [e["actor"] for e in events if e["event_type"] == "released_by_override"] == ["coordinator"]
+
+    async def test_release_non_holder_naming_holder_is_conflict_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids
         dashboard_db.db.claim_issue(ids["a"], assignee="agent-1")
 
         resp = await client.post(
-            f"/api/weft/issues/{ids['a']}/release",
-            json={"actor": "coordinator", "if_held": True, "expected_assignee": "agent-1"},
+            f"/api/issue/{ids['a']}/release",
+            json={"actor": "mallory", "expected_assignee": "agent-1"},
         )
 
-        assert resp.status_code == 200
-        assert resp.json()["assignee"] == ""
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["code"] == "CONFLICT"
+        assert body["details"] == {"issue_id": ids["a"], "observed": "agent-1", "expected": "mallory"}
+        assert dashboard_db.db.get_issue(ids["a"]).assignee == "agent-1"
 
     async def test_release_if_held_rejects_other_assignee_classic(self, client: AsyncClient, dashboard_db: PopulatedDB) -> None:
         ids = dashboard_db.ids

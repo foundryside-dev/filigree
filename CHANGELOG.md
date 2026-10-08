@@ -28,10 +28,12 @@ policy (ADR-030) records this as its one pre-4.0 exception.
   `undo_last(issue_id, *, actor, expected_event_id, override=False)`, plus
   `undo_candidate_event_id(issue_id)`.
 - **`work_release` is holder-checked by default; `if_held` is removed (MCP
-  F3).** The issue must be held by `expected_assignee`, or by `actor` when that
-  is omitted. A claim held by anyone else returns `CONFLICT` and is left alone.
-  `override: true` is the coordinator release and is recorded as a new
-  `released_by_override` event (not undoable). Releasing an issue nobody holds
+  F3).** `actor` must be the current holder; a claim held by anyone else
+  returns `CONFLICT` and is left alone. `expected_assignee` is only an extra
+  compare-and-swap guard (the holder must also equal it), never authorization —
+  naming the holder does not let a non-holder release. `override: true` is the
+  only coordinator bypass and is recorded as a new `released_by_override` event
+  (not undoable). Releasing an issue nobody holds
   returns `{"result": "no_op", "reason": "not_claimed"}`, never `CONFLICT`.
   Passing `if_held` now returns `VALIDATION` with `details` `{parameter:
   "if_held", renamed_to: null, migration: "holder check is now the default; use

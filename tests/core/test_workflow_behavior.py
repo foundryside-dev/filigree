@@ -1074,14 +1074,47 @@ class TestReleaseClaim:
         assert len(released_events) == 1
         assert released_events[0]["old_value"] == "agent-1"
 
-    def test_release_honors_expected_assignee(self, db: FiligreeDB) -> None:
+    def test_release_naming_the_holder_does_not_authorize_a_non_holder(self, db: FiligreeDB) -> None:
+        """Review ruling (a): expected_assignee is a CAS guard, never authorization."""
         issue = db.create_issue("Task", type="task")
         db.claim_issue(issue.id, assignee="agent-1")
 
-        released = db.release_claim(issue.id, actor="coordinator", expected_assignee="agent-1")
+        with pytest.raises(ClaimConflictError) as excinfo:
+            db.release_claim(issue.id, actor="coordinator", expected_assignee="agent-1")
+
+        assert (excinfo.value.observed, excinfo.value.expected) == ("agent-1", "coordinator")
+        assert db.get_issue(issue.id).assignee == "agent-1"
+        assert not [e for e in db.get_issue_events(issue.id) if e["event_type"].startswith("released")]
+
+    def test_release_expected_assignee_with_override_records_override(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-1")
+
+        released = db.release_claim(issue.id, actor="coordinator", expected_assignee="agent-1", override=True)
 
         assert released is not None
         assert released.assignee == ""
+        types = [e["event_type"] for e in db.get_issue_events(issue.id)]
+        assert "released_by_override" in types
+        assert "released" not in types
+
+    def test_release_by_holder_with_matching_expected_assignee(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-1")
+
+        released = db.release_claim(issue.id, actor="agent-1", expected_assignee="agent-1")
+
+        assert released is not None
+        assert "released" in [e["event_type"] for e in db.get_issue_events(issue.id)]
+
+    def test_release_by_holder_with_mismatched_expected_assignee_is_conflict(self, db: FiligreeDB) -> None:
+        issue = db.create_issue("Task", type="task")
+        db.claim_issue(issue.id, assignee="agent-1")
+
+        with pytest.raises(ClaimConflictError):
+            db.release_claim(issue.id, actor="agent-1", expected_assignee="agent-9")
+
+        assert db.get_issue(issue.id).assignee == "agent-1"
 
     def test_release_by_non_holder_is_conflict_by_default(self, db: FiligreeDB) -> None:
         """MCP F3: no opt-in flag — a peer's claim is never released by default."""

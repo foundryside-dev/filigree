@@ -2073,6 +2073,14 @@ class TestClaimLeaseTools:
         }
         assert mcp_db.get_issue(issue.id).assignee == "agent-1"
 
+    async def test_only_claim_next_verbs_advertise_already_holding(self, mcp_db: FiligreeDB) -> None:
+        """work_claim does not hand back held claims (it re-claims; the call-twice
+        harness classes it dup), so its description must not promise it."""
+        tools = {tool.name: tool for tool in await list_tools()}
+        assert "already_holding" not in (tools["work_claim"].description or "")
+        assert "already_holding" in (tools["work_claim_next"].description or "")
+        assert "already_holding" in (tools["work_start_next"].description or "")
+
 
 class TestUndoTool:
     """MCP F1: admin_undo_last is a CAS on expected_event_id and holder-checked."""
@@ -4765,14 +4773,24 @@ class TestMCPReleaseClaim:
         data = _parse(result)
         assert data == {"result": "no_op", "reason": "not_claimed"}
 
-    async def test_release_honors_expected_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
+    async def test_release_naming_holder_is_conflict_without_override_via_mcp(self, mcp_db: FiligreeDB) -> None:
+        """Review ruling (a): expected_assignee never authorizes a non-holder."""
         issue = mcp_db.create_issue("Named holder")
         mcp_db.claim_issue(issue.id, assignee="agent-2")
 
-        result = await call_tool("work_release", {"issue_id": issue.id, "actor": "coordinator", "expected_assignee": "agent-2"})
+        args = {"issue_id": issue.id, "actor": "coordinator", "expected_assignee": "agent-2"}
+        data = _parse(await call_tool("work_release", args))
 
-        data = _parse(result)
+        assert data["code"] == ErrorCode.CONFLICT
+        assert data["details"] == {"issue_id": issue.id, "observed": "agent-2", "expected": "coordinator"}
+        assert mcp_db.get_issue(issue.id).assignee == "agent-2"
+
+        data = _parse(await call_tool("work_release", {**args, "override": True}))
+
         assert data["assignee"] == ""
+        types = [e["event_type"] for e in mcp_db.get_issue_events(issue.id)]
+        assert "released_by_override" in types
+        assert "released" not in types
 
     async def test_release_rejects_other_assignee_via_mcp(self, mcp_db: FiligreeDB) -> None:
         issue = mcp_db.create_issue("Other claim")
