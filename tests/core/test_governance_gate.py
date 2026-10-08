@@ -1,12 +1,13 @@
-"""Tests for the transport-neutral closure-gate policy (B5, DECISION 1/2).
+"""Tests for the transport-neutral closure-gate policy (B5, DECISION 1; DECISION 2 superseded).
 
 ``evaluate_closure_gate`` decides whether a close may proceed:
 
 - governance OFF (LEGIS_URL unset) → PROCEED, no DB read, no network.
 - governed = the issue has >=1 entity-association with a non-null
-  ``signature`` (DECISION 1A). Only governed issues consult Legis.
-- governed + Legis disabled/unreachable → UNAVAILABLE (fail closed,
-  DECISION 2). Integrity failure → INTEGRITY_FAILURE. 200 → PROCEED.
+  ``signature`` (DECISION 1A). Ungoverned issues always PROCEED.
+- governed + drifted sign-off or drifted code → STALE (fail closed, local).
+- governed + fresh → PROCEED with a ``governance_provider_archived`` warning:
+  Legis is retired, so it is never consulted (no network call; M-7, HTTP F1).
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ import pytest
 
 from filigree import governance, legis_client
 from filigree.governance import GateOutcome
-from filigree.legis_client import LegisGateResult, LegisGateStatus
+from tests._fakes.legis_retired import ARCHIVED_WARNING as _ARCHIVED_WARNING
+from tests._fakes.legis_retired import governance_on as _governance_on
 
 
 class _FakeDB:
@@ -87,155 +89,56 @@ def _legacy_governed_rows() -> list[dict[str, object]]:
 def test_governance_off_proceeds_without_reading_db(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(legis_client.LEGIS_URL_ENV, raising=False)
     db = _FakeDB(_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
     assert db.calls == []  # no DB read when governance is off
-    assert spy == []  # no network call
 
 
 def test_ungoverned_proceeds_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _FakeDB(_ungoverned_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
     assert db.calls == ["test-1"]  # governed-ness was checked
-    assert spy == []  # but no network call
 
 
-def _patch_gate(monkeypatch: pytest.MonkeyPatch, result: LegisGateResult) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: result)
-
-
-def test_governed_allowed_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+def test_governed_fresh_proceeds_with_archived_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _governance_on(monkeypatch)
     decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
     assert decision.outcome is GateOutcome.PROCEED
-
-
-def test_governed_blocked_blocks_with_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
-    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
-    assert decision.outcome is GateOutcome.BLOCKED
-    assert "no verified binding" in decision.reason
-
-
-def test_governed_not_enabled_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.NOT_ENABLED))
-    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
-    assert decision.outcome is GateOutcome.UNAVAILABLE
-
-
-def test_governed_unreachable_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.UNREACHABLE))
-    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
-    assert decision.outcome is GateOutcome.UNAVAILABLE
-
-
-def test_governed_integrity_failure_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
-    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
-    assert decision.outcome is GateOutcome.INTEGRITY_FAILURE
-
-
-def test_governed_invalid_response_is_contract_violation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A contract-violating 2xx (Legis answered, but the body broke the wire
-    contract) maps to CONTRACT_VIOLATION, not UNAVAILABLE: it fails closed for
-    this issue but — unlike UNAVAILABLE — never trips the batch short-circuit."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INVALID_RESPONSE, reason="2xx no allowed=true"))
-    decision = governance.evaluate_closure_gate(_FakeDB(_governed_rows()), "test-1")
-    assert decision.outcome is GateOutcome.CONTRACT_VIOLATION
-    assert not decision.allowed
-    assert "2xx no allowed=true" in decision.reason
+    assert decision.warnings == [_ARCHIVED_WARNING]
+    assert decision.reason == ""  # PROCEED keeps the "why not allowed" channel empty
 
 
 # --- v27 drift: a governed sign-off whose bound content has moved on ----------
 # The Legis signature is an HMAC over the content snapshot recorded in
 # signed_content_hash. When it no longer matches content_hash_at_attach the
-# sign-off has drifted; the gate fails closed as STALE with NO network call
-# (the issue-id-only gate call cannot convey the drift to Legis).
+# sign-off has drifted; the gate fails closed as STALE, locally.
 
 
 def test_governed_stale_fails_closed_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _FakeDB(_stale_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.STALE
     assert db.calls == ["test-1"]  # governed-ness + freshness were read
-    assert spy == []  # but Legis was NOT consulted — fail closed locally
 
 
 def test_governed_legacy_null_snapshot_reads_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
     """A governed row with no recorded snapshot (pre-v27 / backfill-absent) is
-    treated as fresh and consults Legis — the compatibility shim."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    treated as fresh — the compatibility shim."""
+    _governance_on(monkeypatch)
     decision = governance.evaluate_closure_gate(_FakeDB(_legacy_governed_rows()), "test-1")
     assert decision.outcome is GateOutcome.PROCEED
-
-
-# --- legis_known_down batch short-circuit ordering (I4c) ----------------------
-# ``legis_known_down`` suppresses the per-issue Legis round-trip once an earlier
-# issue in a batch proved Legis unreachable. It must apply ONLY where a network
-# call would otherwise happen — AFTER the governance-off, ungoverned, and STALE
-# short-circuits. The STALE-before-known_down ordering is load-bearing: hoisting
-# the known_down short-circuit above the stale check would mask tamper (a drifted
-# sign-off) as a transient retry, turning a fail-closed STALE into a recoverable
-# UNAVAILABLE. These pin that ordering against such a refactor.
-
-
-def test_governed_stale_with_legis_known_down_still_reports_stale(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    db = _FakeDB(_stale_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
-    # Even with Legis already known down in this batch, a drifted sign-off must
-    # fail closed as STALE — NOT be downgraded to a transient UNAVAILABLE.
-    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
-    assert decision.outcome is GateOutcome.STALE
-    assert spy == []  # no network call either way
-
-
-def test_governed_nonstale_with_legis_known_down_is_unavailable_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The complement: a fresh governed issue with Legis known down fails closed as
-    # UNAVAILABLE and skips the round-trip. Proves known_down is honoured at all,
-    # so the STALE test above isn't passing merely because known_down is ignored.
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    db = _FakeDB(_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
-    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
-    assert decision.outcome is GateOutcome.UNAVAILABLE
-    assert spy == []  # round-trip suppressed by the batch-level known-down flag
-
-
-def test_ungoverned_with_legis_known_down_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An ungoverned issue never touches Legis, so the known-down flag must not
-    # defer it (gate-level analogue of the batch cascade regression test).
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    db = _FakeDB(_ungoverned_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
-    decision = governance.evaluate_closure_gate(db, "test-1", legis_known_down=True)
-    assert decision.outcome is GateOutcome.PROCEED
-    assert spy == []
 
 
 def test_any_stale_signed_association_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """An issue with one fresh + one stale signed association fails closed:
     a drifted sign-off on any governed binding compromises the close."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     rows = _governed_rows() + _stale_governed_rows()
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(_FakeDB(rows), "test-1")
     assert decision.outcome is GateOutcome.STALE
-    assert spy == []
 
 
 # --- C1: evaluate_status_change_gate ------------------------------------
@@ -273,14 +176,11 @@ class _StatusFakeDB(_FakeDB):
 
 
 def test_status_change_none_proceeds_without_any_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _StatusFakeDB(_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_status_change_gate(db, "test-1", None)
     assert decision.outcome is GateOutcome.PROCEED
     assert db.issue_reads == 0  # not a status write → no read
-    assert spy == []
 
 
 def test_status_change_governance_off_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,58 +192,37 @@ def test_status_change_governance_off_proceeds(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_status_change_to_non_done_proceeds_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _StatusFakeDB(_governed_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_status_change_gate(db, "test-1", "in_progress")
     assert decision.outcome is GateOutcome.PROCEED
-    assert spy == []  # target is not done → no gate consultation
 
 
 def test_status_change_already_done_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _StatusFakeDB(_governed_rows(), status="closed")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_status_change_gate(db, "test-1", "closed")
     assert decision.outcome is GateOutcome.PROCEED
-    assert spy == []  # done→done shuffle is not a close → no gate
 
 
 def test_ungoverned_close_via_status_change_proceeds_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     db = _StatusFakeDB(_ungoverned_rows())
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_status_change_gate(db, "test-1", "closed")
     assert decision.outcome is GateOutcome.PROCEED
-    assert spy == []  # governed-ness checked, but no network for ungoverned
 
 
-def test_governed_close_via_status_change_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
-    decision = governance.evaluate_status_change_gate(_StatusFakeDB(_governed_rows()), "test-1", "closed")
-    assert decision.outcome is GateOutcome.BLOCKED
-    assert "no verified binding" in decision.reason
-
-
-def test_governed_close_via_status_change_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+def test_governed_close_via_status_change_proceeds_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    _governance_on(monkeypatch)
     decision = governance.evaluate_status_change_gate(_StatusFakeDB(_governed_rows()), "test-1", "closed")
     assert decision.outcome is GateOutcome.PROCEED
-
-
-def test_governed_close_via_status_change_unavailable_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.UNREACHABLE))
-    decision = governance.evaluate_status_change_gate(_StatusFakeDB(_governed_rows()), "test-1", "closed")
-    assert decision.outcome is GateOutcome.UNAVAILABLE
+    assert decision.warnings == [_ARCHIVED_WARNING]
 
 
 def test_status_change_unknown_status_proceeds_for_validator(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unresolvable target status is not gated — update_issue's transition
     validator rejects it with INVALID_TRANSITION; the gate must not mask that."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+    _governance_on(monkeypatch)
     db = _StatusFakeDB(_governed_rows())
     decision = governance.evaluate_status_change_gate(db, "test-1", "bogus-status")
     assert decision.outcome is GateOutcome.PROCEED
@@ -360,33 +239,26 @@ def test_real_db_signatureless_reattach_drifts_to_stale(db: object, monkeypatch:
     from filigree.core import FiligreeDB
 
     assert isinstance(db, FiligreeDB)
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-
-    def _record(issue_id: str) -> LegisGateResult:
-        spy.append(issue_id)
-        return LegisGateResult(LegisGateStatus.ALLOWED)
-
-    monkeypatch.setattr(governance, "check_closure_gate", _record)
+    _governance_on(monkeypatch)
 
     issue = db.create_issue("Governed then drifted", priority=1)
-    # Legis-signed binding at content h1 -> fresh, consults Legis.
+    # Legis-signed binding at content h1 -> fresh, proceeds with the archived-provider warning.
     db.add_entity_association(issue.id, "sei:x", content_hash="h1", actor="legis", signature="sig1", signoff_seq=1)
-    assert governance.evaluate_closure_gate(db, issue.id).outcome is GateOutcome.PROCEED
-    assert spy == [issue.id]
+    fresh = governance.evaluate_closure_gate(db, issue.id)
+    assert fresh.outcome is GateOutcome.PROCEED
+    assert fresh.warnings == [_ARCHIVED_WARNING]
 
     # Agent drift refresh (no signature) advances content to h2; the preserved
     # sign-off now covers stale content.
-    spy.clear()
     db.add_entity_association(issue.id, "sei:x", content_hash="h2", actor="agent")
     decision = governance.evaluate_closure_gate(db, issue.id)
     assert decision.outcome is GateOutcome.STALE
-    assert spy == []  # fail closed locally, no Legis call
 
-    # Legis re-signs over the new content -> fresh again, consults Legis.
+    assert decision.warnings == []  # STALE is a block, not a warned proceed
+
+    # Legis re-signs over the new content -> fresh again.
     db.add_entity_association(issue.id, "sei:x", content_hash="h2", actor="legis", signature="sig2", signoff_seq=2)
     assert governance.evaluate_closure_gate(db, issue.id).outcome is GateOutcome.PROCEED
-    assert spy == [issue.id]
 
 
 # --- RED-1: current-code-vs-attach drift (Filigree owns the comparison) --------
@@ -466,23 +338,20 @@ def test_current_code_drift_fails_closed_as_stale_without_legis(monkeypatch: pyt
     """(a) Current code moved on (h1 at attach, registry reports h2) -> STALE,
     no Legis call. Uses an SEI-form entity id to prove SEI bindings ARE checked
     (not silently degraded)."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     entity_id = "loomweave:eid:00000000000000000000000000000001"
     registry = _FakeRegistry({entity_id: "h2"})
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.STALE
     assert "drifted since attach" in decision.reason
     assert registry.calls == [[entity_id]]  # current hash was resolved
-    assert spy == []  # fail closed locally, no Legis consultation
 
 
 def test_current_code_match_proceeds_to_legis(monkeypatch: pytest.MonkeyPatch) -> None:
     """(b) Current content still matches the attach snapshot -> no drift block;
-    the close proceeds through the normal Legis gate (ALLOWED -> PROCEED)."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    the close PROCEEDs (with the archived-provider warning)."""
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     registry = _FakeRegistry({entity_id: "h1"})
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -493,9 +362,9 @@ def test_current_code_match_proceeds_to_legis(monkeypatch: pytest.MonkeyPatch) -
 
 def test_loomweave_unavailable_degrades_to_unknown_not_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """(c) Loomweave unreachable -> discriminated UNKNOWN, the drift check does
-    NOT hard-block: the close still proceeds through the Legis gate (enrich-only,
+    NOT hard-block: the close still proceeds (enrich-only,
     core close not load-bearing on Loomweave)."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     registry = _FakeRegistry({entity_id: "h2"}, raise_unavailable=True)
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -506,9 +375,9 @@ def test_loomweave_unavailable_degrades_to_unknown_not_blocked(monkeypatch: pyte
 
 def test_entity_unresolved_degrades_to_unknown_not_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Loomweave reachable but the entity is orphaned/not_found (absent from
-    ``resolved``) -> UNKNOWN, not a block: proceeds to the Legis gate. Distinct
+    ``resolved``) -> UNKNOWN, not a block: the close proceeds. Distinct
     from a drift (which we DO know about) and from an outage."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::gone"
     registry = _FakeRegistry({})  # entity not in resolved -> unresolved
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -520,36 +389,30 @@ def test_entity_unresolved_degrades_to_unknown_not_blocked(monkeypatch: pytest.M
 def test_ungoverned_close_never_resolves_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     """(d) Ungoverned close is unchanged: no signature -> PROCEED before any
     drift resolution; the registry is never consulted."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({"py:func:mod::f": "h2"})
     db = _FakeDBWithRegistry(_ungoverned_rows(), registry)
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
     assert registry.calls == []  # ungoverned short-circuit precedes drift resolution
-    assert spy == []
 
 
 def test_drift_wins_over_unknown_when_mixed(monkeypatch: pytest.MonkeyPatch) -> None:
     """One binding drifted + one unresolvable -> STALE: a known drift on any
     governed binding fails the close closed regardless of an UNKNOWN sibling."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     rows = _governed_rows_attached_at("py:func:mod::f", "h1") + _governed_rows_attached_at("py:func:mod::g", "h1")
     registry = _FakeRegistry({"py:func:mod::f": "h2"})  # f drifted, g unresolved
     db = _FakeDBWithRegistry(rows, registry)
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.STALE
-    assert spy == []
 
 
 def test_no_registry_attribute_degrades_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """A db with no ``.registry`` (local mode / bare fake) cannot resolve drift ->
-    UNKNOWN, proceeds to Legis. Pins that the new check is a no-op for the
+    UNKNOWN, proceeds. Pins that the new check is a no-op for the
     registry-less _FakeDB the rest of this module relies on."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     db = _FakeDB(_governed_rows_attached_at("py:func:mod::f", "h1"))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.PROCEED
@@ -579,7 +442,7 @@ def _unresolved_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRec
 def test_orphaned_sei_hint_surfaces_on_decision_and_log_without_blocking(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
     db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
     with caplog.at_level(logging.WARNING, logger="filigree.governance"):
@@ -596,7 +459,7 @@ def test_orphaned_sei_hint_surfaces_on_decision_and_log_without_blocking(
 
 
 def test_legacy_resolution_without_lineage_key_has_no_hint(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({})  # no lineage_hints key at all (pre-hint producer)
     db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
     with caplog.at_level(logging.WARNING, logger="filigree.governance"):
@@ -612,40 +475,26 @@ def test_legacy_resolution_without_lineage_key_has_no_hint(monkeypatch: pytest.M
 def test_hint_names_rebind_target_on_stale_reason_when_sibling_drifted(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drifted sibling + orphaned SEI -> STALE (drift wins, unchanged) and the
     agent-visible reason names the orphan's re-bind target."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
+    _governance_on(monkeypatch)
     rows = _governed_rows_attached_at("py:func:mod::x", "h1") + _governed_rows_attached_at(_ORPHAN_SEI, "h1")
     registry = _FakeRegistry({"py:func:mod::x": "h2"}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
     db = _FakeDBWithRegistry(rows, registry)
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
     decision = governance.evaluate_closure_gate(db, "test-1")
     assert decision.outcome is GateOutcome.STALE
     assert "drifted since attach" in decision.reason
-    assert f"rename lineage: {_ORPHAN_SEI} -> py:func:mod::g (locator_changed)" in decision.reason
-    assert decision.lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
-    assert spy == []
-
-
-def test_hint_suffixes_legis_block_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Legis BLOCKED verdict on an issue with an orphaned binding carries the
-    hint on the reason the agent sees, without altering the outcome."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="policy says no"))
-    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
-    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
-    decision = governance.evaluate_closure_gate(db, "test-1")
-    assert decision.outcome is GateOutcome.BLOCKED
-    assert decision.reason.startswith("policy says no")
     assert f"rename lineage: {_ORPHAN_SEI} -> py:func:mod::g (locator_changed)" in decision.reason
     assert decision.lineage_hints == {_ORPHAN_SEI: _RENAMED_EVENT}
 
 
 def test_hint_without_new_locator_names_the_event_only(monkeypatch: pytest.MonkeyPatch) -> None:
     died = {"event": "died", "old_locator": "py:func:mod::f", "new_locator": None, "run_id": "r", "recorded_at": "t"}
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="policy says no"))
-    registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: died})
-    db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
+    _governance_on(monkeypatch)
+    # A drifted sibling makes the verdict STALE (a non-PROCEED reason carries the hint).
+    rows = _governed_rows_attached_at("py:func:mod::x", "h1") + _governed_rows_attached_at(_ORPHAN_SEI, "h1")
+    registry = _FakeRegistry({"py:func:mod::x": "h2"}, lineage_hints={_ORPHAN_SEI: died})
+    db = _FakeDBWithRegistry(rows, registry)
     decision = governance.evaluate_closure_gate(db, "test-1")
-    assert decision.outcome is GateOutcome.BLOCKED
+    assert decision.outcome is GateOutcome.STALE
     assert f"rename lineage: {_ORPHAN_SEI}: died" in decision.reason
     assert "->" not in decision.reason
 
@@ -653,7 +502,7 @@ def test_hint_without_new_locator_names_the_event_only(monkeypatch: pytest.Monke
 def test_proceed_reason_stays_empty_with_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     # PROCEED carries the hint as data only; ``reason`` is the "why not allowed"
     # channel and must stay empty so close surfaces do not print a phantom error.
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
     db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
     decision = governance.evaluate_closure_gate(db, "test-1")
@@ -663,7 +512,7 @@ def test_proceed_reason_stays_empty_with_hint(monkeypatch: pytest.MonkeyPatch) -
 
 def test_loomweave_known_down_skips_lineage_too(monkeypatch: pytest.MonkeyPatch) -> None:
     """known-down short-circuits the resolver entirely: no lineage lookup, no hint."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({}, lineage_hints={_ORPHAN_SEI: _RENAMED_EVENT})
     db = _FakeDBWithRegistry(_governed_rows_attached_at(_ORPHAN_SEI, "h1"), registry)
     decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
@@ -678,10 +527,9 @@ def test_loomweave_known_down_skips_lineage_too(monkeypatch: pytest.MonkeyPatch)
 # retry budget) per governed, non-stale issue. ``loomweave_known_down`` lets a
 # batch caller skip that probe once an earlier issue already proved Loomweave
 # down, and ``GateDecision.loomweave_unavailable`` is how the gate tells the
-# caller that happened. Unlike ``legis_known_down`` this is ENRICH-ONLY: the
-# issue still proceeds to its own Legis verdict — freshness is UNKNOWN, never a
-# block. Ordering mirrors the Legis analogue: applied at the resolver call,
-# after the ungoverned / snapshot-STALE short-circuits.
+# caller that happened. It is ENRICH-ONLY: freshness is UNKNOWN, never a block.
+# Applied at the resolver call, after the ungoverned / snapshot-STALE
+# short-circuits.
 
 
 class _FakeRegistryRaising(_FakeRegistry):
@@ -713,7 +561,7 @@ def test_loomweave_outage_flags_decision_loomweave_unavailable(monkeypatch: pyte
     or a version mismatch (input-independent) — still PROCEEDs (enrich-only) but
     stamps ``loomweave_unavailable=True`` so a batch caller can bound the outage
     to one probe."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     registry = _FakeRegistryRaising(exc)
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -732,7 +580,7 @@ def test_non_connectivity_registry_failure_degrades_only_this_issue(monkeypatch:
     caller keeps probing its later issues instead of auto-closing a drifted one."""
     from filigree.registry import RegistryUnavailableError
 
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     registry = _FakeRegistryRaising(RegistryUnavailableError("HTTP 413", url="http://loomweave.invalid", cause_kind=cause_kind))
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -751,7 +599,7 @@ def test_retried_out_gateway_5xx_flags_decision_loomweave_unavailable(monkeypatc
     retry budget against the same dead upstream. Still PROCEEDs (enrich-only)."""
     from filigree.registry import RegistryUnavailableError
 
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     exc = RegistryUnavailableError(f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code)
     registry = _FakeRegistryRaising(exc)
@@ -767,7 +615,7 @@ def test_non_gateway_http_error_with_status_degrades_only_this_issue(monkeypatch
     stays per-issue even though the exception now carries its status code."""
     from filigree.registry import RegistryUnavailableError
 
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     exc = RegistryUnavailableError(f"HTTP {status_code}", url="http://loomweave.invalid", cause_kind="http_error", status_code=status_code)
     registry = _FakeRegistryRaising(exc)
@@ -785,7 +633,7 @@ def test_lineage_connectivity_failure_is_advisory_and_never_flips_loomweave_unav
     ``loomweave_unavailable`` as known-down — feeding it here would skip every
     later issue's drift probe and let a drifted binding auto-close. The outcome
     is untouched, whether PROCEED (fresh sibling) or STALE (drifted sibling)."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     orphan = "loomweave:eid:0000000000000000000000000000beef"
     fresh = "py:func:mod::f"
     rows = _governed_rows_attached_at(fresh, "h1") + _governed_rows_attached_at(orphan, "h1")
@@ -803,13 +651,11 @@ def test_lineage_connectivity_failure_is_advisory_and_never_flips_loomweave_unav
     assert plain.loomweave_unavailable is False
 
 
-def test_loomweave_known_down_skips_resolver_and_still_proceeds_to_legis(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loomweave_known_down_skips_resolver_and_still_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """(b) With Loomweave already known down in this batch, the resolver is NOT
     called, the decision reports ``loomweave_unavailable``, and the issue still
-    gets its own Legis verdict (enrich-only: Loomweave-down never blocks)."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid) or LegisGateResult(LegisGateStatus.ALLOWED))
+    proceeds (enrich-only: Loomweave-down never blocks)."""
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     registry = _FakeRegistry({entity_id: "h2"})  # would report drift if consulted
     db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
@@ -817,14 +663,14 @@ def test_loomweave_known_down_skips_resolver_and_still_proceeds_to_legis(monkeyp
     assert registry.calls == []  # probe suppressed by the batch-level known-down flag
     assert decision.outcome is GateOutcome.PROCEED
     assert decision.loomweave_unavailable is True
-    assert spy == ["test-1"]  # Legis was still consulted
+    assert decision.warnings == [_ARCHIVED_WARNING]
 
 
 def test_healthy_loomweave_decision_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """(c) Normal resolution, a per-entity unresolved degrade, and a db with no
     ``.registry`` all leave ``loomweave_unavailable`` False — no whole-backend
     outage happened, so there is nothing for a batch caller to bound."""
-    _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+    _governance_on(monkeypatch)
     entity_id = "py:func:mod::f"
     healthy = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), _FakeRegistry({entity_id: "h1"}))
     assert governance.evaluate_closure_gate(healthy, "test-1").loomweave_unavailable is False
@@ -843,67 +689,83 @@ def test_loomweave_known_down_does_not_mask_snapshot_stale(monkeypatch: pytest.M
     """(d) Ordering pin: the snapshot-STALE short-circuit runs BEFORE the
     known-down flag is consulted — a drifted sign-off still reports STALE with
     no resolver call and no Legis call."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({"sei:a": "h2"})
     db = _FakeDBWithRegistry(_stale_governed_rows(), registry)
     decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
     assert decision.outcome is GateOutcome.STALE
     assert decision.loomweave_unavailable is False  # never reached the resolver
     assert registry.calls == []
-    assert spy == []
 
 
 def test_ungoverned_with_loomweave_known_down_proceeds_unflagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ungoverned short-circuit precedes the flag: PROCEED, not flagged, no calls."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
+    _governance_on(monkeypatch)
     registry = _FakeRegistry({"sei:a": "h2"})
     db = _FakeDBWithRegistry(_ungoverned_rows(), registry)
     decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True)
     assert decision.outcome is GateOutcome.PROCEED
     assert decision.loomweave_unavailable is False
     assert registry.calls == []
-    assert spy == []
 
 
-def test_both_known_down_is_unavailable_with_zero_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """(e) Loomweave AND Legis both known down: the Legis short-circuit still
-    fails closed as UNAVAILABLE (DECISION 2), no probe of either backend, and
-    the decision carries the Loomweave flag."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
-    entity_id = "py:func:mod::f"
-    registry = _FakeRegistry({entity_id: "h1"})
-    db = _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), registry)
-    decision = governance.evaluate_closure_gate(db, "test-1", loomweave_known_down=True, legis_known_down=True)
-    assert decision.outcome is GateOutcome.UNAVAILABLE
-    assert decision.loomweave_unavailable is True
-    assert registry.calls == []
-    assert spy == []
+# --- Task 0.2 (M-7, HTTP F1): archived Legis never wedges a close -----------
+# Legis is retired. With LEGIS_URL set, a governed close/transition PROCEEDs with
+# a ``governance_provider_archived`` warning (decision + ``governance_warning``
+# event) and makes NO network call. Local checks (snapshot STALE, Loomweave
+# drift) are unchanged.
 
 
-def test_legis_known_down_semantics_unchanged_by_loomweave_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``legis_known_down`` alone (Loomweave healthy) still runs the drift probe
-    first and then fails closed as UNAVAILABLE — the drift-before-Legis ordering
-    is untouched, and a drifted binding is reported STALE, not UNAVAILABLE."""
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    spy: list[str] = []
-    monkeypatch.setattr(governance, "check_closure_gate", lambda iid: spy.append(iid))
-    entity_id = "py:func:mod::f"
-    fresh = _FakeRegistry({entity_id: "h1"})
-    decision = governance.evaluate_closure_gate(
-        _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), fresh), "test-1", legis_known_down=True
-    )
-    assert decision.outcome is GateOutcome.UNAVAILABLE
-    assert decision.loomweave_unavailable is False
-    assert fresh.calls == [[entity_id]]  # drift probe still ran
-    drifted = _FakeRegistry({entity_id: "h2"})
-    decision = governance.evaluate_closure_gate(
-        _FakeDBWithRegistry(_governed_rows_attached_at(entity_id, "h1"), drifted), "test-1", legis_known_down=True
-    )
-    assert decision.outcome is GateOutcome.STALE
-    assert spy == []
+def _governed_real_issue(db: object) -> str:
+    from filigree.core import FiligreeDB
+
+    assert isinstance(db, FiligreeDB)
+    issue = db.create_issue("Governed", priority=1)
+    db.add_entity_association(issue.id, "sei:x", content_hash="h1", actor="legis", signature="sig", signoff_seq=1)
+    return issue.id
+
+
+def test_legis_url_set_unreachable_proceeds_with_warning(db: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    from filigree.core import FiligreeDB
+
+    assert isinstance(db, FiligreeDB)
+    # An unroutable Legis that would previously fail closed as UNAVAILABLE.
+    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://127.0.0.1:9")
+    issue_id = _governed_real_issue(db)
+    decision = governance.evaluate_closure_gate(db, issue_id)
+    assert decision.allowed
+    assert decision.warnings[0] == _ARCHIVED_WARNING
+    assert "governance_provider_archived" in decision.warnings[0]
+    events = [e for e in db.get_issue_events(issue_id) if e["event_type"] == "governance_warning"]
+    assert len(events) == 1
+    assert events[0]["new_value"] == _ARCHIVED_WARNING
+
+
+def test_no_network_call_when_legis_url_set(db: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    _governance_on(monkeypatch)
+    issue_id = _governed_real_issue(db)
+    assert governance.evaluate_closure_gate(db, issue_id).allowed  # would raise AssertionError on any HTTP attempt
+
+
+def test_repeated_gate_evaluation_does_not_duplicate_warning_event(db: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    from filigree.core import FiligreeDB
+
+    assert isinstance(db, FiligreeDB)
+    _governance_on(monkeypatch)
+    issue_id = _governed_real_issue(db)
+    governance.evaluate_closure_gate(db, issue_id)
+    governance.evaluate_closure_gate(db, issue_id)
+    events = [e for e in db.get_issue_events(issue_id) if e["event_type"] == "governance_warning"]
+    assert len(events) == 1
+
+
+def test_ungoverned_issue_gets_no_warning(db: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    from filigree.core import FiligreeDB
+
+    assert isinstance(db, FiligreeDB)
+    _governance_on(monkeypatch)
+    issue = db.create_issue("Plain", priority=2)
+    decision = governance.evaluate_closure_gate(db, issue.id)
+    assert decision.allowed
+    assert decision.warnings == []
+    assert not [e for e in db.get_issue_events(issue.id) if e["event_type"] == "governance_warning"]

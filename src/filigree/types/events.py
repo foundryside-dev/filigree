@@ -28,6 +28,7 @@ EventType = Literal[
     "dependency_removed",
     "transition_warning",
     "transition_forced",
+    "governance_warning",
     "entity_association_added",
     "entity_association_refreshed",
     "entity_association_removed",
@@ -89,6 +90,7 @@ def is_reversible_event_type(event_type: EventType) -> bool:
             | "reopened"
             | "transition_warning"
             | "transition_forced"
+            | "governance_warning"
             | "entity_association_added"
             | "entity_association_refreshed"
             | "entity_association_removed"

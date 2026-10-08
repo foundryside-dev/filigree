@@ -211,12 +211,13 @@ async def test_real_handler_parses_and_persists_the_golden_signoff(consumer_db: 
 
 async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monkeypatch: pytest.MonkeyPatch) -> None:
     """The governed SEMANTIC EFFECT: a non-null parsed ``signature`` flips the binding
-    to *governed* (DECISION 1A), so a governed close consults Legis instead of
-    proceeding — the observable consequence of filigree having actually parsed the
-    sign-off, NOT of verifying it.
+    to *governed* (DECISION 1A), so a governed close carries the
+    ``governance_provider_archived`` warning (Legis is retired and never consulted)
+    — the observable consequence of filigree having actually parsed the sign-off,
+    NOT of verifying it.
 
     Contrast: an identical binding WITHOUT the sign-off (ungoverned) PROCEEDs with no
-    Legis call. Driving both off the same real gate proves it is the parsed signature,
+    warning. Driving both off the same real gate proves it is the parsed signature,
     not some unrelated default, that does the flipping.
     """
     from filigree import governance, legis_client
@@ -226,25 +227,23 @@ async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monk
     body = golden["request_body"]
     raw_body = _weft_body_bytes(body)
 
-    # Legis is configured (so governed issues are gated) but every gate verdict is
-    # stubbed to "unreachable" — filigree never actually calls a network Legis here.
+    # Legis is configured (so governed issues are classified) but is retired: any
+    # attempt to reach it fails the test.
     monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    from filigree.legis_client import LegisGateResult, LegisGateStatus
 
-    monkeypatch.setattr(
-        governance,
-        "check_closure_gate",
-        lambda iid: LegisGateResult(LegisGateStatus.UNREACHABLE),
-    )
+    def _no_network(*_a: object, **_k: object) -> None:
+        raise AssertionError("network call attempted although Legis is archived")
+
+    monkeypatch.setattr(legis_client._OPENER, "open", _no_network)
 
     # Governed issue: seed it and POST the golden sign-off binding.
     governed = consumer_db.create_issue("governed", priority=2)
     await _post_raw_golden(consumer_db, governed.id, raw_body)
 
     governed_decision = governance.evaluate_closure_gate(consumer_db, governed.id)
-    # A non-null signature → governed → DECISION 2 fail-closed when Legis is down.
-    assert governed_decision.outcome is GateOutcome.UNAVAILABLE
-    assert not governed_decision.allowed
+    # A non-null signature → governed → proceeds, flagged with the archived-provider warning.
+    assert governed_decision.outcome is GateOutcome.PROCEED
+    assert governed_decision.warnings == [governance.GOVERNANCE_PROVIDER_ARCHIVED_WARNING]
 
     # Ungoverned twin: the SAME binding minus the sign-off fields proceeds freely.
     ungoverned = consumer_db.create_issue("ungoverned", priority=2)
@@ -255,6 +254,7 @@ async def test_parsed_signoff_flips_governed_state(consumer_db: FiligreeDB, monk
     assert ungoverned_decision.outcome is GateOutcome.PROCEED, (
         "an ungoverned binding (no signature) must proceed — proves it is the parsed signature that governs, not a blanket default"
     )
+    assert ungoverned_decision.warnings == []
 
 
 async def test_governed_binding_is_non_removable(consumer_db: FiligreeDB) -> None:

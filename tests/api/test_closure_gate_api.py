@@ -1,10 +1,12 @@
 """HTTP route tests for the Legis closure-gate (B5).
 
 Covers all four HTTP close surfaces — classic single, weft single, classic
-batch, weft batch. The Legis client is faked via
-``filigree.governance.check_closure_gate``; no live Legis is contacted. An
-issue is made *governed* by attaching an entity-association with a non-null
-signature (the B1 column).
+batch, weft batch. Legis is retired (M-7): a governed close with fresh bindings
+PROCEEDs with a ``governance_provider_archived`` warning and a
+``governance_warning`` event, and the network is never touched (``governance_on``
+makes any Legis access fail the test). A governed issue whose sign-off has
+drifted still fails closed as STALE (409). An issue is made *governed* by
+attaching an entity-association with a non-null signature (the B1 column).
 """
 
 from __future__ import annotations
@@ -13,8 +15,8 @@ import pytest
 from httpx import AsyncClient
 
 from filigree import governance, legis_client
-from filigree.legis_client import LegisGateResult, LegisGateStatus
 from filigree.types.api import ErrorCode
+from tests._fakes.legis_retired import ARCHIVED_WARNING, governance_on
 from tests.conftest import PopulatedDB
 
 
@@ -22,84 +24,68 @@ def _make_governed(dashboard_db: PopulatedDB, issue_id: str) -> None:
     dashboard_db.db.add_entity_association(issue_id, "sei:gov", content_hash="h", actor="legis", signature="sig", signoff_seq=1)
 
 
-def _patch_gate(monkeypatch: pytest.MonkeyPatch, result: LegisGateResult) -> list[str]:
-    monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://legis.test")
-    calls: list[str] = []
+def _make_stale(dashboard_db: PopulatedDB, issue_id: str) -> None:
+    """Drift the sign-off: a signatureless re-attach advances content past the signed snapshot."""
+    dashboard_db.db.add_entity_association(issue_id, "sei:gov", content_hash="h-drifted", actor="agent")
 
-    def _fake(issue_id: str) -> LegisGateResult:
-        calls.append(issue_id)
-        return result
 
-    monkeypatch.setattr(governance, "check_closure_gate", _fake)
-    return calls
+def _warning_events(dashboard_db: PopulatedDB, issue_id: str) -> list[str]:
+    return [e["new_value"] or "" for e in dashboard_db.db.get_issue_events(issue_id) if e["event_type"] == "governance_warning"]
 
 
 class TestClosureGateSingleClose:
-    async def test_governed_blocked_returns_409(
+    async def test_governed_stale_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
+        _make_stale(dashboard_db, issue_id)
+        governance_on(monkeypatch)
         resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 409, resp.text
         body = resp.json()
         assert body["code"] == ErrorCode.CONFLICT
-        assert "no verified binding" in body["error"]
+        assert "drifted" in body["error"]
 
-    async def test_governed_allowed_closes(self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_governed_closes_with_archived_warning_event(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch)
         resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 200, resp.text
+        assert _warning_events(dashboard_db, issue_id) == [ARCHIVED_WARNING]
 
     async def test_ungoverned_closes_without_calling_gate(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]  # no signature attached → ungoverned
-        calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+        governance_on(monkeypatch)
         resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 200, resp.text
-        assert calls == []  # no network call on the ungoverned path
+        assert _warning_events(dashboard_db, issue_id) == []  # ungoverned → no warning
 
-    async def test_governed_not_enabled_fails_closed(
+    async def test_weft_single_close_governed_stale_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.NOT_ENABLED))
-        resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
-        assert resp.status_code == 409, resp.text
-
-    async def test_governed_integrity_failure_returns_502(
-        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        issue_id = dashboard_db.ids["a"]
-        _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
-        resp = await client.post(f"/api/issue/{issue_id}/close", json={"actor": "x"})
-        assert resp.status_code == 502, resp.text
-        assert resp.json()["code"] == ErrorCode.INTERNAL
-
-    async def test_weft_single_close_governed_blocked_returns_409(
-        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        issue_id = dashboard_db.ids["a"]
-        _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, issue_id)
+        governance_on(monkeypatch)
         resp = await client.post(f"/api/weft/issues/{issue_id}/close", json={"actor": "x"})
         assert resp.status_code == 409, resp.text
 
 
 class TestClosureGateBatchClose:
-    async def test_classic_batch_reports_blocked_and_closes_rest(
+    async def test_classic_batch_reports_stale_and_closes_rest(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]
         ungov = dashboard_db.ids["b"]
         _make_governed(dashboard_db, gov)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, gov)
+        governance_on(monkeypatch)
         resp = await client.post("/api/batch/close", json={"issue_ids": [gov, ungov], "actor": "x"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -109,13 +95,14 @@ class TestClosureGateBatchClose:
         assert gov in error_ids
         assert next(e for e in body["errors"] if e["id"] == gov)["code"] == ErrorCode.CONFLICT
 
-    async def test_weft_batch_reports_blocked_in_failed(
+    async def test_weft_batch_reports_stale_in_failed(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]
         ungov = dashboard_db.ids["b"]
         _make_governed(dashboard_db, gov)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, gov)
+        governance_on(monkeypatch)
         resp = await client.post("/api/weft/batch/close", json={"issue_ids": [gov, ungov], "actor": "x"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -161,7 +148,7 @@ class TestClosureGateBatchClose:
         foreign-prefix id still triggers the §0.4 envelope-level 400 abort —
         the gate's WrongProjectError flows through to batch_close, not a 500."""
         valid = dashboard_db.ids["a"]
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch)
         resp = await client.post("/api/batch/close", json={"issue_ids": ["other-1234567890", valid], "actor": "x"})
         assert resp.status_code == 400, resp.text
         assert resp.json()["code"] == ErrorCode.VALIDATION
@@ -172,73 +159,67 @@ class TestStatusChangeGate:
     ``close_issue`` (open→closed is a valid task transition), so the update
     surfaces must consult the same gate. Covers classic + weft, single + batch."""
 
-    async def test_classic_update_to_done_governed_blocked_returns_409(
+    async def test_classic_update_to_done_governed_stale_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="no verified binding"))
+        _make_stale(dashboard_db, issue_id)
+        governance_on(monkeypatch)
         resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
         assert resp.status_code == 409, resp.text
         assert resp.json()["code"] == ErrorCode.CONFLICT
         assert dashboard_db.db.get_issue(issue_id).status != "closed"
 
-    async def test_classic_update_to_done_governed_allowed_closes(
+    async def test_classic_update_to_done_governed_closes_with_warning(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.ALLOWED))
+        governance_on(monkeypatch)
         resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
         assert resp.status_code == 200, resp.text
         assert dashboard_db.db.get_issue(issue_id).status == "closed"
+        assert _warning_events(dashboard_db, issue_id) == [ARCHIVED_WARNING]
 
     async def test_classic_update_to_non_done_does_not_call_gate(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+        governance_on(monkeypatch)
         resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "in_progress", "actor": "x"})
         assert resp.status_code == 200, resp.text
-        assert calls == []  # non-closing status change is never gated
+        assert _warning_events(dashboard_db, issue_id) == []  # non-closing status change is never gated
 
     async def test_classic_update_to_done_ungoverned_does_not_call_gate(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]  # no signature → ungoverned
-        calls = _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED))
+        governance_on(monkeypatch)
         resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
         assert resp.status_code == 200, resp.text
-        assert calls == []
+        assert _warning_events(dashboard_db, issue_id) == []
 
-    async def test_classic_update_integrity_failure_returns_502(
+    async def test_weft_update_to_done_governed_stale_returns_409(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue_id = dashboard_db.ids["a"]
         _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.INTEGRITY_FAILURE, reason="tampered"))
-        resp = await client.patch(f"/api/issue/{issue_id}", json={"status": "closed", "actor": "x"})
-        assert resp.status_code == 502, resp.text
-        assert resp.json()["code"] == ErrorCode.INTERNAL
-
-    async def test_weft_update_to_done_governed_blocked_returns_409(
-        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        issue_id = dashboard_db.ids["a"]
-        _make_governed(dashboard_db, issue_id)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, issue_id)
+        governance_on(monkeypatch)
         resp = await client.patch(f"/api/weft/issues/{issue_id}", json={"status": "closed", "actor": "x"})
         assert resp.status_code == 409, resp.text
         assert dashboard_db.db.get_issue(issue_id).status != "closed"
 
-    async def test_classic_batch_update_to_done_reports_blocked_in_errors(
+    async def test_classic_batch_update_to_done_reports_stale_in_errors(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]
         ungov = dashboard_db.ids["b"]
         _make_governed(dashboard_db, gov)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, gov)
+        governance_on(monkeypatch)
         resp = await client.post("/api/batch/update", json={"issue_ids": [gov, ungov], "status": "closed", "actor": "x"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -248,16 +229,42 @@ class TestStatusChangeGate:
         assert gov in error_ids
         assert dashboard_db.db.get_issue(gov).status != "closed"
 
-    async def test_weft_batch_update_to_done_reports_blocked_in_failed(
+    async def test_weft_batch_update_to_done_reports_stale_in_failed(
         self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         gov = dashboard_db.ids["a"]
         ungov = dashboard_db.ids["b"]
         _make_governed(dashboard_db, gov)
-        _patch_gate(monkeypatch, LegisGateResult(LegisGateStatus.BLOCKED, reason="blocked"))
+        _make_stale(dashboard_db, gov)
+        governance_on(monkeypatch)
         resp = await client.post("/api/weft/batch/update", json={"issue_ids": [gov, ungov], "status": "closed", "actor": "x"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         failed_ids = {e["id"] for e in body["failed"]}
         assert gov in failed_ids
         assert dashboard_db.db.get_issue(gov).status != "closed"
+
+
+class TestBatchCloseDoesNotWedge:
+    """M-7 / HTTP F1: the gate used to make a synchronous 5 s Legis probe per
+    governed issue from inside the async handler. Legis is archived: no probe."""
+
+    async def test_batch_close_of_governed_issues_completes_under_one_second(
+        self, client: AsyncClient, dashboard_db: PopulatedDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        # An unroutable LEGIS_URL: under the old gate each governed issue cost a
+        # network attempt (5 s timeout when blackholed) on the event loop.
+        monkeypatch.setenv(legis_client.LEGIS_URL_ENV, "http://10.255.255.1")
+        ids = [dashboard_db.db.create_issue(f"Governed {i}", priority=2).id for i in range(10)]
+        for issue_id in ids:
+            _make_governed(dashboard_db, issue_id)
+        started = time.monotonic()
+        resp = await client.post("/api/batch/close", json={"issue_ids": ids, "actor": "x"})
+        elapsed = time.monotonic() - started
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert {i["id"] for i in body["closed"]} == set(ids)
+        assert body["errors"] == []
+        assert elapsed < 1.0, f"batch close of 10 governed issues took {elapsed:.2f}s"

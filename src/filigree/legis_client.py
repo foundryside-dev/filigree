@@ -1,5 +1,10 @@
 """Outbound client to the Legis governance service (B5).
 
+RETIRED (3.4.0, M-7 / HTTP F1): Legis is archived and :mod:`filigree.governance`
+no longer calls :func:`check_closure_gate`; only :func:`is_configured` is still
+consulted (``LEGIS_URL`` set -> governed closes carry a warning). The rest of
+this module is kept until it is deleted in 4.0.
+
 Legis governs sign-offs; Filigree owns issue state. Before closing a
 *governed* issue, Filigree calls Legis's read-only, fail-closed
 closure-gate and refuses the close if Legis does not allow it. Filigree

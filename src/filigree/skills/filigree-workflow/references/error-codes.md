@@ -42,9 +42,9 @@ at exit 1 needs operator intervention.
   user; do not retry.
 - **`CONFLICT`** — someone else holds the claim, or the record changed under
   you. Safe to retry against different work; never force-overwrite. A close
-  of a Legis-governed issue also returns `CONFLICT` when the closure gate
-  does not PROCEED (a tampered-ledger integrity failure is `INTERNAL`
-  instead); `error` is the gate reason and may end in
+  of an issue whose signed entity binding has drifted (the bound content
+  changed since it was attached or signed) also returns `CONFLICT`; `error`
+  is the gate reason and may end in
   `rename lineage: <sei> -> <new_locator> (<event>)` — Loomweave reports the
   bound SEI orphaned, so re-bind to the new locator rather than retrying.
 - **`REGISTRY_UNAVAILABLE`** — Loomweave could not be reached or negotiated

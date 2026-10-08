@@ -22,6 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   otherwise) or `filigree config set population <value>`, shown as
   `POPULATION:` in the session-context banner. No schema change.
 
+### Changed
+
+- **Archived Legis can no longer wedge a close (M-7, HTTP F1).** The closure
+  gate used to call Legis synchronously (urllib, 5 s timeout) from inside async
+  handlers and fail closed when it was unreachable, so a single set `LEGIS_URL`
+  pointing at a retired Legis blocked every governed close and stalled the event
+  loop on each one. Legis is archived, so the gate no longer consults it: with
+  `LEGIS_URL` set, a governed close or closing transition now PROCEEDs with a
+  `governance_provider_archived` warning on the `GateDecision` and a
+  `governance_warning` event on the issue, and makes **no network call**.
+  Unchanged: governance stays off when `LEGIS_URL` is unset, and the local
+  checks still fail closed as `STALE` (a drifted sign-off snapshot, and the
+  Loomweave current-code drift check on signed bindings). Removed the
+  `legis_known_down` parameter of `evaluate_closure_gate` (no Legis probe left
+  to bound) and the Legis closure-gate text from the `filigree-workflow` skill's
+  `error-codes.md`. The Legis client module stays until 4.0. No schema change.
+
 ## [3.3.0] - 2026-09-02
 
 ### Added

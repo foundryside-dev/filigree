@@ -103,6 +103,25 @@ class EventsMixin(DBMixinProtocol):
             (issue_id, event_type, actor, self._verified_actor, old_value, new_value, comment, _now_iso(), issue_id),
         )
 
+    @_in_immediate_tx("record_governance_warning")
+    def record_governance_warning(self, issue_id: str, warning: str, *, actor: str = "filigree:governance") -> bool:
+        """Record a ``governance_warning`` event unless the issue's latest event already is it.
+
+        The closure gate calls this when it lets a governed close proceed with a
+        warning (the retired Legis provider). Skipping an identical latest event
+        keeps repeated gate evaluations of the same issue (a retried or failed
+        close, a re-run sweep) from stacking duplicate audit rows. Returns True
+        when an event was written.
+        """
+        latest = self.conn.execute(
+            "SELECT event_type, new_value FROM events WHERE issue_id = ? ORDER BY event_seq DESC, id DESC LIMIT 1",
+            (issue_id,),
+        ).fetchone()
+        if latest is not None and latest["event_type"] == "governance_warning" and latest["new_value"] == warning:
+            return False
+        self._record_event(issue_id, "governance_warning", actor=actor, new_value=warning)
+        return True
+
     def get_recent_events(self, limit: int = 20) -> list[EventRecordWithTitle]:
         rows = self.conn.execute(
             "SELECT e.*, i.title as issue_title FROM events e "

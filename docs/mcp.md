@@ -184,10 +184,13 @@ When an issue has active `critical=true` annotations linked with
 an `annotation_warnings` array. Each warning contains the `annotation_id`,
 file anchor, computed `anchor_state`, and suggested follow-up tools.
 
-Issues with signed Legis entity bindings pass through the closure gate first.
-A non-PROCEED verdict comes back as an error envelope whose `error` is the
-gate reason: `code: CONFLICT` for a blocked, stale, contract-violation or
-Legis-unavailable verdict, `INTERNAL` for a ledger integrity failure. The same
+Issues with signed entity bindings pass through the closure gate first.
+Legis is retired and is never consulted: when `LEGIS_URL` is set, a governed
+close with fresh bindings proceeds, a `governance_warning` event
+(`governance_provider_archived: ...`) is recorded on the issue, and the server
+logs a warning; the response envelope itself is unchanged. A drifted binding (the bound content changed since it
+was signed or attached) is a non-PROCEED verdict and comes back as an error
+envelope whose `error` is the gate reason, `code: CONFLICT`. The same
 mapping applies per item in `issue_batch_close` and to a closing status write
 through `issue_update`. When Loomweave reported a governed SEI orphaned
 (`alive:false`) and knows its latest lineage event, the reason is suffixed
@@ -653,7 +656,7 @@ No parameters. Returns connector health fields including `status`, `db_initializ
 | `db_checkpoint` | Run `PRAGMA wal_checkpoint(TRUNCATE)` on the project store |
 | `admin_archive_closed` | Archive old closed issues |
 | `admin_compact_events` | Compact event history |
-| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the Legis gate deferred) |
+| `reconciliation_debt_list` | List issues carrying reconciliation debt (governed cascade closes the closure gate deferred) |
 
 #### `reconciliation_debt_list`
 
