@@ -97,3 +97,43 @@ def test_banner_reports_unset_population(initialized_project: Path) -> None:
     context = generate_session_context()
     assert context is not None
     assert "POPULATION: unset" in context
+
+
+def _strip_population(root: Path) -> None:
+    store = find_filigree_anchor(root).store_dir
+    config = _config(root)
+    del config["population"]
+    write_config(store, config)
+
+
+def test_reinit_in_tty_prompts_when_existing_project_has_no_population(
+    initialized_project: Path, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import filigree.cli_commands.admin as admin_mod
+
+    _strip_population(initialized_project)
+    monkeypatch.setattr(admin_mod, "_stdin_is_tty", lambda: True)
+    os.chdir(initialized_project)
+    result = cli_runner.invoke(cli, ["init"], input="suite-construction\n")
+    assert result.exit_code == 0, result.output
+    assert _config(initialized_project)["population"] == "suite-construction"
+
+
+def test_reinit_non_tty_defaults_existing_project_without_population(initialized_project: Path, cli_runner: CliRunner) -> None:
+    _strip_population(initialized_project)
+    os.chdir(initialized_project)
+    result = cli_runner.invoke(cli, ["init"])
+    assert result.exit_code == 0, result.output
+    assert _config(initialized_project)["population"] == "product-use"
+
+
+def test_reinit_in_tty_does_not_prompt_when_population_already_set(
+    initialized_project: Path, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import filigree.cli_commands.admin as admin_mod
+
+    monkeypatch.setattr(admin_mod, "_stdin_is_tty", lambda: True)
+    os.chdir(initialized_project)
+    result = cli_runner.invoke(cli, ["init"])  # no input: a prompt would abort
+    assert result.exit_code == 0, result.output
+    assert _config(initialized_project)["population"] == "product-use"

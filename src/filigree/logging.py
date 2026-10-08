@@ -107,7 +107,7 @@ def setup_logging(filigree_dir: Path) -> logging.Logger:
 def classify_body(body: Any) -> tuple[CallOutcome, str | None]:
     """Classify a decoded response/envelope body into ``(outcome, code)``.
 
-    * ``"error"`` key or truthy ``isError`` -> ``error`` (``validation`` when the
+    * non-null ``"error"`` value or truthy ``isError`` -> ``error`` (``validation`` when the
       envelope's ``code`` is ``VALIDATION``), with ``code`` taken from the body;
     * ``{"result": "no_op"}`` / ``{"undone": false}`` / ``{"status": "empty"}``
       -> ``no_op``;
@@ -115,7 +115,9 @@ def classify_body(body: Any) -> tuple[CallOutcome, str | None]:
     """
     if not isinstance(body, dict):
         return "ok", None
-    if "error" in body or body.get("isError"):
+    # ``error: null`` is a healthy envelope (e.g. mcp_status_get carries
+    # ``error``/``code`` keys as None), so test the value, not key presence.
+    if body.get("error") is not None or body.get("isError"):
         raw_code = body.get("code")
         code = raw_code if isinstance(raw_code, str) else None
         return ("validation" if code == "VALIDATION" else "error"), code

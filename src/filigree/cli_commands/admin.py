@@ -112,8 +112,8 @@ def _resolve_new_project_population(population: str | None) -> str:
     type=click.Choice(list(VALID_POPULATIONS)),
     default=None,
     help="Which population this project's call log describes. Asked for at a TTY when absent; "
-    "defaults to product-use (with a logged warning) otherwise. Only written for a new project "
-    "or when given explicitly on re-init.",
+    "defaults to product-use (with a logged warning) otherwise. Re-init of a project without a "
+    "tag asks/defaults the same way; an existing tag is only changed by an explicit flag.",
 )
 def init(prefix: str | None, name: str | None, mode: str | None, population: str | None) -> None:
     """Initialize filigree in the current directory (store at .weft/filigree/)."""
@@ -287,7 +287,10 @@ def init(prefix: str | None, name: str | None, mode: str | None, population: str
             config["mode"] = mode
             updated = True
             click.echo(f"  Mode: {mode}")
-        if population is not None:
+        # Explicit --population always wins; otherwise a project with no tag yet
+        # gets one now (TTY: ask; non-TTY: product-use default + warning).
+        if population is not None or "population" not in config:
+            population = _resolve_new_project_population(population)
             config["population"] = population
             updated = True
             click.echo(f"  Population: {population}")

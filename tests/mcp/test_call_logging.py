@@ -110,3 +110,12 @@ async def test_population_read_from_project_config(mcp_db: FiligreeDB, caplog_js
     write_config(mcp_db.meta_dir, config)
     await call_tool("work_ready", {})
     assert caplog_json.last(event="call")["population"] == "suite-construction"
+
+
+async def test_healthy_mcp_status_get_logged_ok(mcp_db: FiligreeDB, caplog_json: JsonLogCapture) -> None:
+    # Healthy status carries ``error: null`` / ``code: null`` keys; that is not a dead-end.
+    await call_tool("mcp_status_get", {})
+    rec = caplog_json.last(event="call", surface="mcp")
+    assert rec["name"] == "mcp_status_get"
+    assert rec["outcome"] == "ok"
+    assert rec["code"] is None
