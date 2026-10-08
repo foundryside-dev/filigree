@@ -2242,3 +2242,63 @@ class TestDoctorFederationTokenChecks:
 
         results = _doctor_federation_token_checks(tmp_path, "server")
         assert not any(r.code == "federation_token_divergence" for r in results), results
+
+
+# ---------------------------------------------------------------------------
+# run_doctor — empty legacy "Future" release (init no longer seeds one)
+# ---------------------------------------------------------------------------
+
+
+class TestDoctorEmptyFutureRelease:
+    @staticmethod
+    def _add_future(project: Path, *, with_child: bool = False) -> str:
+        db = FiligreeDB(project / FILIGREE_DIR_NAME / DB_FILENAME, prefix="tst")
+        db.initialize()
+        try:
+            release = db.create_issue("Future", type="release", fields={"version": "Future"})
+            if with_child:
+                db.create_issue("Planned item", parent_id=release.id)
+            return release.id
+        finally:
+            db.close()
+
+    @staticmethod
+    def _future_results(results: list[CheckResult]) -> list[CheckResult]:
+        return [r for r in results if r.code == "empty_future_release"]
+
+    def test_no_future_release_no_result(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        assert self._future_results(run_doctor(tmp_path)) == []
+
+    def test_childless_future_release_is_reported(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        release_id = self._add_future(tmp_path)
+        (result,) = self._future_results(run_doctor(tmp_path))
+        assert result.passed is False
+        assert result.fix_target == release_id
+        assert "doctor --fix" in result.fix_hint
+
+    def test_future_release_with_children_is_left_alone(self, tmp_path: Path) -> None:
+        _make_project(tmp_path)
+        self._add_future(tmp_path, with_child=True)
+        assert self._future_results(run_doctor(tmp_path)) == []
+
+    def test_doctor_fix_deletes_childless_future_release(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from filigree.cli_commands.admin import _apply_doctor_fixes
+
+        _make_project(tmp_path)
+        release_id = self._add_future(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        results = self._future_results(run_doctor(tmp_path))
+
+        fixed, fixed_ids, _ = _apply_doctor_fixes(results, emit=None)
+
+        assert fixed == 1
+        assert fixed_ids
+        db = FiligreeDB(tmp_path / FILIGREE_DIR_NAME / DB_FILENAME, prefix="tst")
+        try:
+            with pytest.raises(KeyError):
+                db.get_issue(release_id)
+        finally:
+            db.close()
+        assert self._future_results(run_doctor(tmp_path)) == []

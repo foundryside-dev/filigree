@@ -695,11 +695,12 @@ _WEFT_ISSUE_FIXTURE_SLUGS: list[str] = [
 # Fixture replay runs against an UNSEEDED dashboard. A populated-success golden
 # whose id cannot exist here is excluded BY NAME (the fixture is a normative
 # cross-repo contract byte-mirrored by Loomweave, so it carries no harness
-# control flags); its producer oracle under tests/federation/ seeds a real row
-# and pins that shape instead.
+# control flags); its producer oracle under tests/federation/ (or the seeded
+# lifecycle test in this module) seeds real rows and pins that shape instead.
 _SEEDED_ONLY_EXAMPLES: frozenset[tuple[str, str]] = frozenset(
     {
         ("issues-get", "live_v_issue_detail_200"),  # tests/federation/test_weft_issue_detail_wire_conformance_oracle.py
+        ("issues-claim-next", "success_default_ready_release"),  # test_full_lifecycle_pins_issue_weft_shape
     }
 )
 
@@ -1044,7 +1045,7 @@ class TestWeftGenerationParityLists:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         _assert_list_response_shape(body, path="blocked")
-        # Find B in the items (auto-seeded "Future" release won't be blocked).
+        # Find B in the items (only B is blocked).
         blocked_ids = [item["issue_id"] for item in body["items"]]
         assert b_id in blocked_ids, f"expected {b_id} in blocked items, got {blocked_ids}"
         b_item = next(item for item in body["items"] if item["issue_id"] == b_id)

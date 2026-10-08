@@ -113,7 +113,7 @@ class TestIssuesAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
-        assert len(data) == 5  # epic + A + B + C + auto-seeded Future release
+        assert len(data) == 4  # epic + A + B + C
 
     async def test_list_all_issues_paginates_beyond_single_page(
         self,

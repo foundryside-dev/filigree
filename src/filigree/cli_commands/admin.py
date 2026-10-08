@@ -808,6 +808,39 @@ def _apply_doctor_fixes(
                 if emit is not None:
                     emit(f"  OK {r.name}: Unregistered stale project {r.fix_target}")
 
+    # Empty legacy "Future" releases (the retired init seed): routed by stable
+    # code, deleted by exact issue id. Re-verified as childless/link-free by the
+    # check that produced them; ``force`` is needed only because the release is
+    # not in a terminal state.
+    futures = [r for r in results if not r.passed and r.code == "empty_future_release" and r.fix_target is not None]
+    if futures:
+        conf_path = project_root / CONF_FILENAME
+        try:
+            db = (
+                FiligreeDB.from_conf(conf_path, store_dir=filigree_dir)
+                if conf_path.is_file()
+                else FiligreeDB.from_store_dir(filigree_dir, project_root=project_root)
+            )
+        except Exception as e:
+            if emit is not None:
+                click.echo(f"  !!  Cannot fix {futures[0].name}: {e}", err=True)
+        else:
+            try:
+                for r in futures:
+                    try:
+                        db.delete_issue(str(r.fix_target), force=True, actor="doctor")
+                    except Exception as e:
+                        if emit is not None:
+                            click.echo(f"  !!  Cannot fix {r.name}: {e}", err=True)
+                        continue
+                    fixed += 1
+                    fixed_check_ids.add(doctor_check_id(r))
+                    fixed_check_names.add(r.name)
+                    if emit is not None:
+                        emit(f"  OK {r.name}: Deleted empty Future release {r.fix_target}")
+            finally:
+                db.close()
+
     return fixed, fixed_check_ids, fixed_check_names
 
 
@@ -975,12 +1008,18 @@ def dashboard(
 
 
 @click.command("session-context")
-def session_context() -> None:
-    """Output project snapshot for Claude Code session context."""
+@click.pass_context
+def session_context(ctx: click.Context) -> None:
+    """Output project snapshot for Claude Code session context.
+
+    Pass the group-level ``--actor`` (or set ``FILIGREE_ACTOR``) to scope the
+    in-progress section to that agent's own claims.
+    """
     try:
         from filigree.hooks import generate_session_context
 
-        context = generate_session_context()
+        actor = ctx.obj["actor"] if ctx.obj and ctx.obj.get("actor_explicit") else None
+        context = generate_session_context(actor)
         if context:
             click.echo(context)
     except Exception:

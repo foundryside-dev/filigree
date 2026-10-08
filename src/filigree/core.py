@@ -18,7 +18,6 @@ import sqlite3
 import sys
 import tempfile
 import tomllib
-import uuid as _uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 
@@ -29,7 +28,6 @@ from filigree.db_annotations import (
     VALID_ANNOTATION_TARGET_TYPES,
     AnnotationsMixin,
 )
-from filigree.db_base import _now_iso
 from filigree.db_entity_associations import EntityAssociationsMixin
 from filigree.db_events import EventsMixin
 from filigree.db_files import (
@@ -2432,7 +2430,6 @@ class FiligreeDB(
         # "current" — nothing to do.
 
         self._seed_templates()
-        self._seed_future_release()
         self.conn.commit()
         self._warn_if_registry_backend_hybrid_state()
 
@@ -2470,41 +2467,6 @@ class FiligreeDB(
                     "db_path": str(self.db_path),
                 },
             )
-
-    def _seed_future_release(self) -> None:
-        """Create the "Future" release singleton if it doesn't exist.
-
-        Only runs when the ``release`` pack is enabled. Uses raw SQL to
-        avoid circular validation during init. Idempotent — skips if a
-        release with ``version == "Future"`` already exists.
-        """
-        if "release" not in self.enabled_packs:
-            return
-
-        if self.templates.get_type("release") is None:
-            logger.warning("Release pack enabled but 'release' type not registered — skipping Future release seed")
-            return
-
-        # Guard json_extract with json_valid: a single corrupt fields row would
-        # otherwise raise ``OperationalError: malformed JSON`` and abort init.
-        # Migrations already tolerate corrupt fields elsewhere; the
-        # Future-singleton check must do the same.
-        existing = self.conn.execute(
-            "SELECT id FROM issues WHERE type = 'release' AND json_valid(fields) AND json_extract(fields, '$.version') = 'Future'"
-        ).fetchone()
-        if existing is not None:
-            return
-
-        initial_state = self.templates.get_initial_state("release")
-        issue_id = f"{self.prefix}-{_uuid.uuid4().hex[:10]}"
-        now = _now_iso()
-        self.conn.execute(
-            "INSERT INTO issues (id, title, status, priority, type, assignee, "
-            "created_at, updated_at, description, notes, fields) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (issue_id, "Future", initial_state, 4, "release", "", now, now, "", "", '{"version": "Future"}'),
-        )
-        logger.info("Seeded Future release singleton: %s", issue_id)
 
     def get_schema_version(self) -> int:
         """Return the current schema version from PRAGMA user_version."""

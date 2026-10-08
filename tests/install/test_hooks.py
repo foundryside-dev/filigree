@@ -68,10 +68,11 @@ class TestBuildContext:
         result = _build_context(db)
         assert "=== Filigree Project Snapshot ===" in result
         assert "STATS:" in result
-        # The auto-seeded "Future" release singleton counts as 1 ready issue
-        assert "1 ready" in result
+        # init no longer seeds a "Future" release: a fresh project has nothing ready.
+        assert "0 ready" in result
         assert "0 blocked" in result
-        assert "Future" in result
+        assert "Future" not in result
+        assert "READY TO WORK" not in result
 
     def test_ready_issues_shown(self, db: FiligreeDB) -> None:
         db.create_issue("Fix the bug", priority=1)
@@ -83,13 +84,19 @@ class TestBuildContext:
 
     def test_in_progress_shown(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Working on this", priority=1)
-        db.update_issue(issue.id, status="in_progress")
-        result = _build_context(db)
-        assert "IN PROGRESS" in result
+        db.update_issue(issue.id, status="in_progress", assignee="alice")
+        # Actor known: only that actor's own claims are listed.
+        result = _build_context(db, actor="alice")
+        assert "YOUR CLAIMS (actor=alice):" in result
         assert "Working on this" in result
+        # Actor unknown: count only, no titles (see tests/core/test_session_context.py).
+        result = _build_context(db)
+        assert "IN PROGRESS (1, actor unknown — pass --actor)" in result
+        assert "Working on this" not in result
 
     def test_stale_claims_shown_separately(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Abandoned claim", priority=1)
+        db.create_issue("Genuinely open task", priority=2)
         db.conn.execute(
             "UPDATE issues SET assignee = 'old-agent', updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
             (issue.id,),
@@ -186,13 +193,13 @@ class TestBuildContext:
 
     def test_no_findings_no_analyzer_mention(self, db: FiligreeDB) -> None:
         """Honest-empty (C-6): a project with no findings shows no ANALYZER line."""
-        assert "ANALYZER FINDINGS" not in _build_context(db)
+        assert "ANALYZER" not in _build_context(db)
 
-    def test_unbridged_findings_shown_with_split(self, db: FiligreeDB) -> None:
-        """F2 + FIL-1: un-bridged findings surface, split so a baselined defect
-        does not read as actionable work and engine telemetry (kind:metric)
-        does not read as defect-signal. A promoted (bridged) finding is
-        excluded; kind-less findings count as defect-signal."""
+    def test_unbridged_findings_shown_as_defect_signal_with_telemetry_split(self, db: FiligreeDB) -> None:
+        """F2 + FIL-1 + LX-03: only defect-side findings read as signal. A baselined
+        defect is already-accepted (not counted), engine telemetry (kind:metric)
+        is counted separately as "not work", kind-less findings count as
+        defect-signal, and a promoted (bridged) finding is excluded."""
         db.process_scan_results(
             scan_source="wardline",
             findings=[
@@ -208,23 +215,14 @@ class TestBuildContext:
         db.promote_finding_to_issue(bridged["id"], actor="t")
 
         result = _build_context(db)
-        # 4 un-bridged (3 actionable: 2 kind-less → defect-signal, 1 metric →
-        # telemetry; 1 suppressed); fp4 bridged → excluded.
-        assert (
-            "ANALYZER FINDINGS: 4 not yet bridged to the tracker "
-            "(3 actionable: 2 defect-signal, 1 telemetry/info; 1 baselined/suppressed)" in result
-        )
-        # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs
-        # are named alongside. The split form steers triage to the defect view.
-        assert "`filigree finding list --kind defect`" in result
+        assert "ANALYZER SIGNAL: 2 defect-signal finding(s) open (+1 telemetry rows, not work — see Task 0.5)" in result
+        # N-4 (weft-993c1077e1): runnable hints are CLI commands; MCP verbs named alongside.
+        assert "`filigree finding list --kind defect --status open`" in result
+        assert "finding_list kind=defect status=open limit=25" in result
         assert "`filigree finding promote`" in result
-        assert "finding_list" in result
-        assert "finding_promote" in result
+        assert "actionable" not in result
 
-    def test_unbridged_findings_simple_form_when_no_telemetry(self, db: FiligreeDB) -> None:
-        """FIL-1: when there is no telemetry to filter out, the simple form is
-        kept verbatim — steering to ``--kind defect`` would hide exactly the
-        kind-less third-party findings the defect-side rule protects."""
+    def test_unbridged_findings_without_telemetry_omit_the_telemetry_note(self, db: FiligreeDB) -> None:
         db.process_scan_results(
             scan_source="wardline",
             findings=[
@@ -234,9 +232,8 @@ class TestBuildContext:
             ],
         )
         result = _build_context(db)
-        assert "ANALYZER FINDINGS: 3 not yet bridged to the tracker (2 actionable, 1 baselined/suppressed)" in result
-        assert "defect-signal" not in result
-        assert "`filigree finding list`" in result
+        assert "ANALYZER SIGNAL: 2 defect-signal finding(s) open — review with" in result
+        assert "telemetry" not in result
 
     def test_all_bridged_no_analyzer_line(self, db: FiligreeDB) -> None:
         """Honest-empty: when every finding is bridged, no misleading absence — the
@@ -246,7 +243,7 @@ class TestBuildContext:
         assert f is not None
         db.promote_finding_to_issue(f["id"], actor="t")
         result = _build_context(db)
-        assert "ANALYZER FINDINGS" not in result
+        assert "ANALYZER" not in result
 
     def test_backticked_commands_are_runnable_cli(self, db: FiligreeDB) -> None:
         """N-4 (weft-993c1077e1): every backtick'd command in the banner must be
@@ -276,7 +273,7 @@ class TestBuildContext:
         with patch.object(db, "unbridged_finding_stats", side_effect=sqlite3.OperationalError("no such table")):
             result = _build_context(db)
         assert "Filigree Project Snapshot" in result
-        assert "ANALYZER FINDINGS" not in result
+        assert "ANALYZER" not in result
 
 
 class TestGenerateSessionContext:

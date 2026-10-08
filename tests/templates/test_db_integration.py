@@ -23,18 +23,16 @@ class TestFiligreeDBTemplatesProperty:
         db.close()
 
     def test_templates_property_lazy(self, tmp_path: Path) -> None:
-        """Registry is loaded during initialize() (needed by _seed_future_release),
-        but the cached instance is reused on subsequent accesses."""
+        """The registry is built on first access to ``.templates`` and the cached
+        instance is reused on subsequent accesses."""
         db = make_db(tmp_path)
 
-        # After initialize(), _template_registry is populated because
-        # _seed_future_release() accesses self.templates during init.
-        reg = db._template_registry
+        # Accessing .templates populates and returns the cached instance
+        reg = db.templates
         assert reg is not None
-
-        # Accessing .templates returns the same cached instance
-        assert db.templates is reg
-        assert db.templates is reg  # still the same on third access
+        assert db._template_registry is reg
+        assert db.templates is reg  # still the same on second access
+        assert db.templates is reg  # and on third access
 
         db.close()
 

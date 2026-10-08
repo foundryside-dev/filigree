@@ -19,13 +19,13 @@ def _sqlite_operational_error(message: str, code: int | None = None) -> sqlite3.
 
 class TestListAndSearch:
     def test_list_all(self, db: FiligreeDB) -> None:
-        baseline = len(db.list_issues())  # Future release singleton
+        baseline = len(db.list_issues())  # empty on a fresh project
         db.create_issue("A")
         db.create_issue("B")
         assert len(db.list_issues()) == baseline + 2
 
     def test_list_filter_status(self, db: FiligreeDB) -> None:
-        open_before = len(db.list_issues(status="open"))  # Future release (planning = open category)
+        open_before = len(db.list_issues(status="open"))  # empty on a fresh project
         a = db.create_issue("Open one")
         b = db.create_issue("Close one")
         db.close_issue(b.id)
@@ -499,7 +499,7 @@ class TestGetStatsByCategory:
 
     def test_get_stats_by_category(self, db: FiligreeDB) -> None:
         """by_category sums issues across open/wip/done."""
-        baseline_open = db.get_stats()["by_category"]["open"]  # Future release in open category
+        baseline_open = db.get_stats()["by_category"]["open"]  # empty on a fresh project
         db.create_issue("A")  # open → open category
         b = db.create_issue("B")
         db.update_issue(b.id, status="in_progress")  # wip category

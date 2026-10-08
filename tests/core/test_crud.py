@@ -172,9 +172,7 @@ class TestStartNextWorkRollbackPreservesPriorClaim:
     def test_failed_target_status_preserves_prior_claim(self, db: FiligreeDB) -> None:
         issue = db.create_issue("Pre-owned ready", priority=1)
         db.claim_issue(issue.id, assignee="alice")
-        # A startable leaf candidate the picker will actually attempt (the
-        # auto-seeded release is a non-startable container post-F3, so it can no
-        # longer be the candidate that surfaces the invalid-target error).
+        # A startable leaf candidate the picker will actually attempt.
         db.create_issue("Other startable ready", type="task", priority=2)
 
         with pytest.raises(ValueError, match="Invalid status"):
@@ -200,8 +198,7 @@ class TestStartableVsReady:
     """
 
     def test_start_next_work_skips_triage_only_ready_set(self, db: FiligreeDB) -> None:
-        # type_filter="bug" makes the ready set effectively triage-only (the
-        # auto-seeded "Future" release singleton is filtered out).
+        # type_filter="bug" makes the ready set effectively triage-only.
         bug = db.create_issue("Triage bug", type="bug", priority=1)
 
         result = db.start_next_work(assignee="alice", type_filter="bug")
@@ -241,18 +238,19 @@ class TestContainerNotStartable:
     their children, it never hands out the container itself.
     """
 
-    def test_work_ready_marks_seeded_release_not_startable(self, db: FiligreeDB) -> None:
-        # A fresh project auto-seeds a "Future" [release] in `planning`. It is
-        # ready (open, unassigned, unblocked) but must NOT be startable.
+    def test_work_ready_marks_release_not_startable(self, db: FiligreeDB) -> None:
+        # A release is ready (open, unassigned, unblocked) but must NOT be startable.
+        db.create_issue("v9.9.9", type="release", fields={"version": "v9.9.9"})
         ready = db.get_ready()
         releases = [i for i in ready if i.type == "release"]
-        assert releases, "expected the auto-seeded Future release in the ready set"
+        assert releases, "expected the release in the ready set"
         startable, next_action = db.issue_startability(releases[0])
         assert startable is False
         assert next_action == "complete child issues"
 
     def test_start_next_work_skips_container_only_ready_set(self, db: FiligreeDB) -> None:
-        # The only ready item is the seeded release container → no startable work.
+        # The only ready item is a release container → no startable work.
+        db.create_issue("v9.9.9", type="release", fields={"version": "v9.9.9"})
         result = db.start_next_work(assignee="alice")
         assert result is None
         # The container is never claimed.
@@ -1128,7 +1126,7 @@ class TestClaimNextExhaustion:
 
     def test_claim_next_no_warning_when_no_candidates(self, db: FiligreeDB) -> None:
         """When no ready issues exist, claim_next returns None without warning."""
-        # Claim all pre-existing ready issues (e.g. the Future release singleton)
+        # Claim any pre-existing ready issues
         for existing in db.get_ready():
             db.claim_issue(existing.id, assignee="agent1")
         issue = db.create_issue("Target")
@@ -1364,18 +1362,17 @@ class TestExportJsonl:
             record = json.loads(line)
             if record["_type"] == "issue":
                 issues.append(record)
-        assert len(issues) == 5  # Future release + epic + A + B + C
+        assert len(issues) == 4  # epic + A + B + C
         assert any(i["title"] == "Issue A" for i in issues)
 
     def test_export_empty_db(self, db: FiligreeDB, tmp_path: Path) -> None:
         out = tmp_path / "export.jsonl"
         count = db.export_jsonl(out)
-        # DB has the auto-seeded Future release singleton + its created event
-        assert count >= 1
+        # A fresh DB seeds nothing (no Future release), so the export is empty.
+        assert count == 0
         lines = [line for line in out.read_text().strip().split("\n") if line]
         issues = [json.loads(line) for line in lines if json.loads(line).get("_type") == "issue"]
-        assert len(issues) == 1
-        assert issues[0]["title"] == "Future"
+        assert issues == []
 
 
 class TestImportJsonl:
@@ -1440,7 +1437,7 @@ class TestImportJsonl:
         fresh.initialize()
         fresh.import_jsonl(out)
         issues = fresh.list_issues(limit=100)
-        assert len(issues) == 5
+        assert len(issues) == 4
         titles = {i.title for i in issues}
         assert "Issue A" in titles
         assert "Epic E" in titles
@@ -1645,19 +1642,28 @@ class TestImportJsonl:
         ).fetchone()
         assert dict(row) == {"content_hash": "", "registry_backend": "local"}
 
-    def test_import_roundtrip_reconciles_seeded_future_singleton(self, db: FiligreeDB, tmp_path: Path) -> None:
+    @staticmethod
+    def _insert_legacy_future(db: FiligreeDB, issue_id: str) -> None:
+        """Insert the row the retired ``init`` seed used to create (pre-3.4 stores still carry it)."""
+        db.conn.execute(
+            "INSERT INTO issues (id, title, status, priority, type, assignee, created_at, updated_at, description, notes, fields) "
+            "VALUES (?, 'Future', 'planning', 4, 'release', '', '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00', '', '', "
+            '\'{"version": "Future"}\')',
+            (issue_id,),
+        )
+        db.conn.commit()
+
+    def test_import_roundtrip_reconciles_legacy_seeded_future_singleton(self, db: FiligreeDB, tmp_path: Path) -> None:
+        # Stores created before 3.4 still hold a seeded Future release; importing
+        # an export that carries a different one must replace it, not collide.
+        source_future = "test-legacyfut1"
+        self._insert_legacy_future(db, source_future)
         out = tmp_path / "future-roundtrip.jsonl"
-        source_future = db.conn.execute(
-            "SELECT id FROM issues WHERE type = 'release' AND json_extract(fields, '$.version') = 'Future'"
-        ).fetchone()["id"]
         db.export_jsonl(out)
 
         fresh = FiligreeDB(tmp_path / "fresh-future.db", prefix="test")
         fresh.initialize()
-        seeded_future = fresh.conn.execute(
-            "SELECT id FROM issues WHERE type = 'release' AND json_extract(fields, '$.version') = 'Future'"
-        ).fetchone()["id"]
-        assert seeded_future != source_future
+        self._insert_legacy_future(fresh, "test-legacyfut2")
 
         fresh.import_jsonl(out)
         future_rows = fresh.conn.execute(
@@ -1888,8 +1894,7 @@ class TestImportJsonl:
         with pytest.raises(WrongProjectError, match=r"src|dst"):
             fresh.import_jsonl(out, merge=True)
         # No foreign-prefixed rows should have been inserted — the import
-        # aborted before touching destination data. (The auto-seeded
-        # ``Future`` release singleton uses the dst prefix and is ignored.)
+        # aborted before touching destination data.
         foreign_rows = fresh.conn.execute("SELECT COUNT(*) FROM issues WHERE id NOT LIKE ?", (f"{fresh.prefix}-%",)).fetchone()[0]
         assert foreign_rows == 0
         fresh.close()

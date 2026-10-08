@@ -20,8 +20,7 @@ class TestReadyAndBlocked:
         runner.invoke(cli, ["create", "Ready task"])
         result = runner.invoke(cli, ["ready"])
         assert result.exit_code == 0
-        # 1 created task + auto-seeded "Future" release = 2 ready
-        assert "2 ready" in result.output
+        assert "1 ready" in result.output
 
     def test_ready_excludes_claimed_issue(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         runner, _ = cli_in_project
@@ -152,15 +151,15 @@ class TestJsonOutput:
         result = runner.invoke(cli, ["list", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        # 2 created + auto-seeded "Future" release = 3
-        assert len(data["items"]) == 3
+        assert len(data["items"]) == 2
 
     def test_list_json_has_more_no_false_positive(self, cli_in_project: tuple[CliRunner, Path]) -> None:
         """Overfetch-by-1: when DB has exactly limit rows, has_more must be False."""
         runner, _ = cli_in_project
-        # The project has 1 auto-seeded "Future" release.  Add 2 more → 3 total.
+        # A fresh project is empty.  Add 3 → 3 total.
         runner.invoke(cli, ["create", "Boundary A"])
         runner.invoke(cli, ["create", "Boundary B"])
+        runner.invoke(cli, ["create", "Boundary C"])
         # Query with limit=3: DB has exactly 3 rows.  Old code returns has_more=True;
         # correct overfetch-by-1 returns has_more=False.
         result = runner.invoke(cli, ["list", "--limit", "3", "--json"])
@@ -296,12 +295,10 @@ class TestJsonOutput:
         result = runner.invoke(cli, ["ready", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        # 1 created + auto-seeded "Future" release = 2 ready
-        assert len(data["items"]) == 2
+        assert len(data["items"]) == 1
         # Items are the slim shape plus the startability flag — no full
-        # IssueDict (filigree-406e6b7ee0). The P2 task sorts ahead of the P4
-        # release singleton and is single-hop startable, so next_action is
-        # omitted to keep the shape slim.
+        # IssueDict (filigree-406e6b7ee0). The task is single-hop startable, so
+        # next_action is omitted to keep the shape slim.
         item = data["items"][0]
         assert set(item.keys()) == {"issue_id", "title", "status", "priority", "type", "startable"}
         assert item["startable"] is True

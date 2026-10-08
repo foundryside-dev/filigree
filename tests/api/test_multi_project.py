@@ -581,14 +581,14 @@ class TestMultiProjectRouting:
         resp = await multi_client.get("/api/issues")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 2  # alpha has 1 issue + auto-seeded Future release
+        assert len(data) == 1  # alpha has 1 issue
 
     async def test_scoped_project_issues(self, multi_client: AsyncClient) -> None:
-        """GET /api/p/bravo/issues returns bravo's 2 issues + auto-seeded Future release."""
+        """GET /api/p/bravo/issues returns bravo's 2 issues."""
         resp = await multi_client.get("/api/p/bravo/issues")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 3  # 2 issues + auto-seeded Future release
+        assert len(data) == 2  # 2 issues
 
     async def test_unknown_project_404(self, multi_client: AsyncClient) -> None:
         """GET /api/p/nonexistent/issues returns 2.0 envelope 404, not raw stack trace."""

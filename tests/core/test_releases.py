@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -42,8 +40,8 @@ class TestGetReleasesSummary:
         db.update_issue(r3.id, status="released")
 
         result = db.get_releases_summary()
-        # R1 + R2 + auto-seeded Future = 3 active releases (R3 is released/done)
-        assert len(result) == 3
+        # R1 + R2 = 2 active releases (R3 is released/done)
+        assert len(result) == 2
 
     def test_include_released_flag_returns_all(self, release_db: FiligreeDB) -> None:
         db = release_db
@@ -57,8 +55,8 @@ class TestGetReleasesSummary:
         db.update_issue(r3.id, status="released")
 
         result = db.get_releases_summary(include_released=True)
-        # R1 + R2 + R3 + auto-seeded Future = 4 total
-        assert len(result) == 4
+        # R1 + R2 + R3 = 3 total
+        assert len(result) == 3
 
     def test_include_released_returns_more_than_default_page(self, release_db: FiligreeDB) -> None:
         db = release_db
@@ -99,8 +97,7 @@ class TestGetReleasesSummary:
         r = db.create_issue("Empty", type="release")
 
         result = db.get_releases_summary()
-        # Auto-seeded Future + the "Empty" release = 2
-        assert len(result) == 2
+        assert len(result) == 1
         entry = next(e for e in result if e["id"] == r.id)
         assert entry["progress"] == {"total": 0, "completed": 0, "in_progress": 0, "open": 0, "pct": 0}
         assert entry["child_summary"] == {"epics": 0, "milestones": 0, "tasks": 0, "bugs": 0, "other": 0, "total": 0}
@@ -484,13 +481,8 @@ class TestVersionValidation:
             release_db.create_issue("Bad", type="release", fields={"version": "1.2.3"})
 
     def test_future_accepted(self, release_db: FiligreeDB) -> None:
-        # "Future" is already seeded, so creating another should fail (uniqueness)
-        # But the pattern itself accepts "Future"
-        r = release_db.get_issue(
-            release_db.conn.execute(
-                "SELECT id FROM issues WHERE type='release' AND json_extract(fields, '$.version') = 'Future'"
-            ).fetchone()["id"]
-        )
+        # The version pattern accepts the literal "Future" (init no longer seeds one).
+        r = release_db.create_issue("Future", type="release", fields={"version": "Future"})
         assert r.fields["version"] == "Future"
 
     def test_lowercase_future_rejected(self, release_db: FiligreeDB) -> None:
@@ -526,30 +518,14 @@ class TestVersionValidation:
         with pytest.raises(ValueError, match="Duplicate value"):
             release_db.create_issue("R2", type="release", fields={"version": "v1.0.0"})
 
-    def test_auto_seed_future_exists_after_init(self, release_db: FiligreeDB) -> None:
+    def test_no_future_release_seeded_after_init(self, release_db: FiligreeDB) -> None:
         row = release_db.conn.execute(
             "SELECT id FROM issues WHERE type='release' AND json_extract(fields, '$.version') = 'Future'"
         ).fetchone()
-        assert row is not None
-
-    def test_auto_seed_idempotent(self, release_db: FiligreeDB) -> None:
-        # Call _seed_future_release again — should not create a duplicate
-        release_db._seed_future_release()
-        release_db.conn.commit()
-        rows = release_db.conn.execute(
-            "SELECT id FROM issues WHERE type='release' AND json_extract(fields, '$.version') = 'Future'"
-        ).fetchall()
-        assert len(rows) == 1
-
-    def test_auto_seed_not_created_without_release_pack(self, tmp_path: Path) -> None:
-        from tests._db_factory import make_db
-
-        db = make_db(tmp_path, packs=["core", "planning"])
-        row = db.conn.execute("SELECT id FROM issues WHERE type='release' AND json_extract(fields, '$.version') = 'Future'").fetchone()
         assert row is None
-        db.close()
 
     def test_cannot_create_second_future(self, release_db: FiligreeDB) -> None:
+        release_db.create_issue("Future", type="release", fields={"version": "Future"})
         with pytest.raises(ValueError, match="Duplicate value"):
             release_db.create_issue("Another Future", type="release", fields={"version": "Future"})
 
@@ -609,29 +585,17 @@ class TestBuildTree:
         assert titles == ["High", "Med", "Low"]
 
 
-# ── M6: _seed_future_release and _seed_builtin_packs edge cases ────────
+# ── M6: _seed_builtin_packs and corrupt-row edge cases ────────────────
 
 
-class TestSeedFutureReleaseEdgeCases:
-    """Cover untested _seed_future_release paths (M6)."""
-
-    def test_missing_release_type_template_logs_warning(self, release_db: FiligreeDB, caplog: pytest.LogCaptureFixture) -> None:
-        """When release type template is missing, _seed_future_release logs warning and skips."""
-        # Remove the release type template so get_type("release") returns None
-        with (
-            patch.object(release_db.templates, "get_type", return_value=None),
-            caplog.at_level(logging.WARNING, logger="filigree.core"),
-        ):
-            release_db._seed_future_release()
-
-        assert any("Release pack enabled but 'release' type not registered" in r.message for r in caplog.records)
+class TestSeedEdgeCases:
+    """Init edge cases around release rows and pack seeding (M6)."""
 
     def test_corrupt_release_fields_does_not_abort_init(self, tmp_path: Path) -> None:
         """Bug filigree-20ea5411e1: a release row with malformed JSON in ``fields``
         used to make ``json_extract`` raise ``OperationalError: malformed JSON``,
-        aborting the entire DB ``initialize()``. The Future-singleton check must
-        be tolerant of pre-existing corruption (it's an idempotent maintenance
-        step, not a place to enforce schema integrity).
+        aborting the entire DB ``initialize()``. Opening a store must be tolerant of
+        pre-existing corruption (it's not a place to enforce schema integrity).
         """
         # Set up a v2.0 project so FiligreeDB.from_filigree_dir works.
         filigree_dir = tmp_path / FILIGREE_DIR_NAME
@@ -639,7 +603,7 @@ class TestSeedFutureReleaseEdgeCases:
         write_config(filigree_dir, {"prefix": "rel", "version": 1, "enabled_packs": ["core", "planning", "release"]})
         db_path = filigree_dir / DB_FILENAME
 
-        # First open: normal init seeds the Future release.
+        # First open: normal init.
         db = FiligreeDB.from_filigree_dir(filigree_dir)
         db.close()
 
@@ -669,18 +633,11 @@ class TestSeedFutureReleaseEdgeCases:
         finally:
             conn.close()
 
-        # Re-opening must not raise: _seed_future_release should skip the bad row.
+        # Re-opening must not raise on the bad row, and the row is left untouched.
         reopened = FiligreeDB.from_filigree_dir(filigree_dir)
         try:
-            # Future singleton should still resolve to the original good row.
-            futures = [
-                row
-                for row in reopened.conn.execute("SELECT id, fields FROM issues WHERE type = 'release'").fetchall()
-                if row[0] != "rel-corrupt"
-            ]
-            assert any(r[1] and '"Future"' in r[1] for r in futures), (
-                "Future release singleton must still exist after corrupt-row tolerance"
-            )
+            ids = [row[0] for row in reopened.conn.execute("SELECT id FROM issues WHERE type = 'release'").fetchall()]
+            assert ids == ["rel-corrupt"]
         finally:
             reopened.close()
 

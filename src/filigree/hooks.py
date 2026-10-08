@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import URLError
 
@@ -64,8 +65,47 @@ def _sanitize_context_title(raw: str) -> str:
     return text or "(untitled)"
 
 
-def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
-    """Assemble the project snapshot string from a live DB handle."""
+STALLED_AFTER_DAYS = 14
+ACTOR_ENV_VAR = "FILIGREE_ACTOR"
+
+
+def resolve_session_actor(explicit: str | None = None) -> str | None:
+    """Actor identity for the banner: an explicit ``--actor``, else ``FILIGREE_ACTOR``, else unknown."""
+    for candidate in (explicit, os.environ.get(ACTOR_ENV_VAR)):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _parse_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _lease_remaining(claim_expires_at: str | None, now: datetime) -> str:
+    expires = _parse_ts(claim_expires_at)
+    if expires is None:
+        return "no lease"
+    remaining = expires - now
+    if remaining <= timedelta(0):
+        return "lease expired"
+    minutes = int(remaining.total_seconds() // 60)
+    if minutes >= 60:
+        return f"lease {minutes // 60}h left"
+    return f"lease {max(minutes, 1)}m left"
+
+
+def _build_context(db: FiligreeDB, filigree_dir: Path | None = None, actor: str | None = None) -> str:
+    """Assemble the project snapshot string from a live DB handle.
+
+    *actor* scopes the in-progress section: with it, only that actor's claims
+    are listed (others are a count); without it, only a count is printed.
+    """
     lines: list[str] = []
     lines.append("=== Filigree Project Snapshot ===")
     lines.append("")
@@ -105,14 +145,28 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
         lines.append(f"POPULATION: {read_population(filigree_dir) or 'unset'}")
         lines.append("")
 
-    # In-progress work
+    # In-progress work, split by who holds it so an agent resumes its OWN claims
+    # instead of wading through every other agent's.
     in_progress = db.list_issues(status="in_progress")
     if in_progress:
-        lines.append("IN PROGRESS (resume these):")
-        for issue in in_progress:
-            title = _sanitize_context_title(issue.title)
-            lines.append(f'P{issue.priority} {issue.id} [{issue.type}] "{title}"')
-        lines.append("")
+        if actor is None:
+            lines.append(f"IN PROGRESS ({len(in_progress)}, actor unknown — pass --actor)")
+            lines.append("")
+        else:
+            mine = [issue for issue in in_progress if issue.assignee == actor]
+            now = datetime.now(UTC)
+            if mine:
+                lines.append(f"YOUR CLAIMS (actor={actor}):")
+                for issue in mine:
+                    title = _sanitize_context_title(issue.title)
+                    lease = _lease_remaining(issue.claim_expires_at, now)
+                    lines.append(f'P{issue.priority} {issue.id} [{issue.type}] "{title}" — {lease}')
+            else:
+                lines.append(f"YOUR CLAIMS (actor={actor}): none")
+            others = len(in_progress) - len(mine)
+            if others:
+                lines.append(f"OTHERS ACTIVE: {others}")
+            lines.append("")
 
     try:
         stale_claims = db.get_stale_claims()
@@ -127,22 +181,34 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
     except (sqlite3.OperationalError, AttributeError):
         logger.debug("stale claim stats unavailable in session context", exc_info=True)
 
-    # Ready to work
+    # Ready to work: only leaves an agent can actually start are advertised.
+    # Containers are dropped and startable items sort first, so READY_CAP is
+    # spent on real work; unstartable leaves (e.g. triage bugs) are marked.
     ready = db.get_ready()
-    if ready:
-        shown = ready[:READY_CAP]
-        lines.append(f"READY TO WORK ({len(ready)} tasks with no blockers):")
-        for issue in shown:
+    entries, startable_count = db.ready_for_orientation(ready)
+    if entries:
+        lines.append(f"READY TO WORK ({startable_count} startable of {len(ready)} ready):")
+        for issue, startable, next_action in entries[:READY_CAP]:
             title = _sanitize_context_title(issue.title)
-            lines.append(f'P{issue.priority} {issue.id} [{issue.type}] "{title}"')
-        if len(ready) > READY_CAP:
+            hint = ""
+            if not startable:
+                hint = f" — not startable: move to '{next_action}' first" if next_action else " — not startable"
+            lines.append(f'P{issue.priority} {issue.id} [{issue.type}] "{title}"{hint}')
+        if len(entries) > READY_CAP:
             lines.append("  ... (truncated, run 'filigree ready' for full list)")
         lines.append("")
 
     # Critical path
     crit = db.get_critical_path()
     if crit:
-        lines.append("CRITICAL PATH (unblocks the most downstream work):")
+        heading = "CRITICAL PATH (unblocks the most downstream work)"
+        # The head is the root blocker everything else waits on; if nobody has
+        # touched it in weeks the path is stalled, not progressing.
+        head_updated = _parse_ts(db.get_issue(crit[0]["id"]).updated_at)
+        idle = datetime.now(UTC) - head_updated if head_updated is not None else timedelta(0)
+        if idle > timedelta(days=STALLED_AFTER_DAYS):
+            heading += f" (stalled {idle.days}d)"
+        lines.append(f"{heading}:")
         lines.append(f"Critical path ({len(crit)} issues):")
         for i, item in enumerate(crit):
             prefix = "  -> " if i > 0 else "  "
@@ -156,37 +222,23 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
     blocked_count = stats.get("blocked_count", 0)
     lines.append(f"STATS: {ready_count} ready, {blocked_count} blocked")
 
-    # Analyzer findings awareness (F2): surface un-bridged findings so orientation
-    # never silently reads "nothing to do" while un-promoted findings sit in
-    # scan_findings. The baselined/suppressed split keeps an already-accepted
-    # defect from reading as actionable work. Honest-empty: omit when 0 unbridged.
-    # Guarded for pre-findings DBs where scan_findings may not exist.
+    # Analyzer signal: only defect-side findings are work. Engine telemetry
+    # (kind:metric etc.) is counted but explicitly labelled as not work, and the
+    # parenthetical is dropped when there is none. Kind-less third-party rows
+    # stay on the defect side (see ``unbridged_finding_stats``). Guarded for
+    # pre-findings DBs where scan_findings may not exist.
     try:
         fstats = db.unbridged_finding_stats()
-        if fstats["total"] > 0:
+        defect = fstats["actionable_defect"]
+        telemetry = fstats["actionable_other"]
+        if defect > 0 or telemetry > 0:
             lines.append("")
-            if fstats["actionable_other"] > 0:
-                # FIL-1: split the actionable bucket so engine telemetry
-                # (kind:metric etc.) does not read as defect-signal; steer
-                # triage to the defect view.
-                lines.append(
-                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
-                    f"({fstats['actionable']} actionable: {fstats['actionable_defect']} defect-signal, "
-                    f"{fstats['actionable_other']} telemetry/info; {fstats['suppressed']} baselined/suppressed) "
-                    f"— review with `filigree finding list --kind defect`, bridge with `filigree finding promote` "
-                    f"(MCP: finding_list / finding_promote)"
-                )
-            else:
-                # No telemetry to filter out — keep the simple form. Steering
-                # to `--kind defect` here would hide exactly the kind-less
-                # third-party findings the defect-side rule protects (the
-                # filter is strict kind == 'defect'; the count is inclusive).
-                lines.append(
-                    f"ANALYZER FINDINGS: {fstats['total']} not yet bridged to the tracker "
-                    f"({fstats['actionable']} actionable, {fstats['suppressed']} baselined/suppressed) "
-                    f"— review with `filigree finding list`, bridge with `filigree finding promote` "
-                    f"(MCP: finding_list / finding_promote)"
-                )
+            telemetry_note = f" (+{telemetry} telemetry rows, not work — see Task 0.5)" if telemetry > 0 else ""
+            lines.append(
+                f"ANALYZER SIGNAL: {defect} defect-signal finding(s) open{telemetry_note} "
+                f"— review with `filigree finding list --kind defect --status open` "
+                f"(MCP: finding_list kind=defect status=open limit=25), bridge with `filigree finding promote`"
+            )
     except sqlite3.OperationalError:
         logger.debug("finding stats unavailable in session context", exc_info=True)
 
@@ -337,11 +389,14 @@ def _skill_tree_fingerprint(root: Path) -> str:
     return digest.hexdigest()[:8]
 
 
-def generate_session_context() -> str | None:
+def generate_session_context(actor: str | None = None) -> str | None:
     """Generate a project snapshot for Claude Code session context.
 
     Also checks whether filigree instructions in CLAUDE.md/AGENTS.md
     and the skill pack are up-to-date with the installed package version.
+
+    *actor* (else ``FILIGREE_ACTOR``) scopes the in-progress section to that
+    agent's own claims.
 
     Returns ``None`` when there is no filigree project (silent exit).
     """
@@ -393,7 +448,7 @@ def generate_session_context() -> str | None:
             context += "\n\n" + "\n".join(freshness_messages)
         return context
     try:
-        context = _build_context(db, filigree_dir)
+        context = _build_context(db, filigree_dir, resolve_session_actor(actor))
     except sqlite3.Error:
         logger.warning("Database error building session context for %s", filigree_dir, exc_info=True)
         context = (

@@ -225,8 +225,7 @@ class TestListAndSearch:
         mcp_db.create_issue("List B")
         result = await call_tool("issue_list", {})
         data = _parse(result)
-        # +1 for the auto-seeded "Future" release singleton
-        assert len(data["items"]) == 3
+        assert len(data["items"]) == 2
         assert data["has_more"] is False
 
     async def test_list_issues_filter(self, mcp_db: FiligreeDB) -> None:
@@ -235,9 +234,7 @@ class TestListAndSearch:
         mcp_db.close_issue(b.id)
         result = await call_tool("issue_list", {"status": "open"})
         data = _parse(result)
-        # +1 for the auto-seeded "Future" release (status "planning" is in
-        # the "open" category, so it matches the status="open" filter)
-        assert len(data["items"]) == 2
+        assert len(data["items"]) == 1
 
     async def test_list_issues_sort_by_updated_at_desc(self, mcp_db: FiligreeDB) -> None:
         older = mcp_db.create_issue("Older task", type="task", priority=2)
@@ -391,8 +388,7 @@ class TestListPagination:
             mcp_db.create_issue(f"Issue {i}")
         result = await call_tool("issue_list", {"no_limit": True})
         data = _parse(result)
-        # +1 for the auto-seeded "Future" release singleton
-        assert len(data["items"]) == _MAX_LIST_RESULTS + 5 + 1
+        assert len(data["items"]) == _MAX_LIST_RESULTS + 5
         assert data["has_more"] is False
 
     async def test_list_issues_no_limit_with_explicit_limit_has_more(self, mcp_db: FiligreeDB) -> None:
@@ -411,8 +407,7 @@ class TestListPagination:
             mcp_db.create_issue(f"Issue {i}")
         result = await call_tool("issue_list", {"offset": _MAX_LIST_RESULTS})
         data = _parse(result)
-        # +1 for the auto-seeded "Future" release singleton
-        assert len(data["items"]) == 11
+        assert len(data["items"]) == 10
         assert data["has_more"] is False
         assert "next_offset" not in data
 
@@ -642,9 +637,7 @@ class TestReadyAndBlocked:
         mcp_db.create_issue("Ready one")
         result = await call_tool("work_ready", {})
         data = _parse(result)
-        # +1 for the auto-seeded "Future" release singleton (status "planning"
-        # is in the "open" category, so it counts as ready)
-        assert len(data["items"]) == 2
+        assert len(data["items"]) == 1
         titles = {d["title"] for d in data["items"]}
         assert "Ready one" in titles
 
@@ -2646,12 +2639,7 @@ class TestMCPMutationEnhancements:
         assert isinstance(data["selection_reason"], str)
 
     async def test_claim_next_empty(self, mcp_db: FiligreeDB) -> None:
-        # The auto-seeded "Future" release is the only ready issue, so
-        # claim it first, then the next claim_next should be empty.
-        first = await call_tool("work_claim_next", {"assignee": "agent-0"})
-        first_data = _parse(first)
-        assert first_data["title"] == "Future"
-
+        # A fresh project has nothing ready, so claim_next is empty.
         result = await call_tool("work_claim_next", {"assignee": "agent-1"})
         data = _parse(result)
         assert data["status"] == "empty"

@@ -36,8 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks still fail closed as `STALE` (a drifted sign-off snapshot, and the
   Loomweave current-code drift check on signed bindings). Removed the
   `legis_known_down` parameter of `evaluate_closure_gate` (no Legis probe left
-  to bound) and the Legis closure-gate text from the `filigree-workflow` skill's
   `error-codes.md`. The Legis client module stays until 4.0. No schema change.
+- **The session banner and READY list no longer overstate available work.**
+  `READY TO WORK (n startable of m ready)` now drops container types (release,
+  epic, milestone, phase) entirely, lists startable leaves first (so
+  `READY_CAP` is not spent on items `start-work` would reject), and marks the
+  rest `— not startable: move to '<next>' first`; the `context.md` summary's
+  "Ready to Work" section follows the same rule. In-progress work is split by
+  actor: `YOUR CLAIMS (actor=<a>)` lists only that actor's items with lease
+  remaining and `OTHERS ACTIVE: n` is a bare count; with no actor known
+  (`--actor` / `FILIGREE_ACTOR`) only `IN PROGRESS (n, actor unknown — pass
+  --actor)` is printed. The critical-path heading gains `(stalled Nd)` when its
+  head item has not been updated for more than 14 days. The `ANALYZER FINDINGS
+  … actionable` line is replaced by `ANALYZER SIGNAL: d defect-signal
+  finding(s) open`, with telemetry rows counted separately as `(+t telemetry
+  rows, not work)` (omitted when 0) and hints pointing at `finding list --kind
+  defect --status open`. `session-context` now accepts the global `--actor`.
+  No schema change.
+
+### Removed
+
+- **`filigree init` no longer seeds a "Future" release.** The seeded release
+  showed up as ready work in every new tracker. Existing trackers keep theirs;
+  `filigree doctor` now reports a childless, link-free `Future` release and
+  `doctor --fix` deletes it. A `Future` release with children or dependencies
+  is left alone, and a release the user creates themselves is unaffected.
 
 ## [3.3.0] - 2026-09-02
 

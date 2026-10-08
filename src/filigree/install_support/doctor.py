@@ -276,6 +276,34 @@ def _doctor_mcp_token_result(entry: dict[str, object]) -> CheckResult | None:
     )
 
 
+def _doctor_empty_future_release(conn: sqlite3.Connection) -> list[CheckResult]:
+    """Flag childless legacy "Future" release rows left behind by the old init seed.
+
+    ``filigree init`` used to seed a ``Future`` release into every tracker, where
+    it surfaced as ready work. A release with ``version == "Future"`` that has no
+    parent/child or dependency links is that seed (or equally empty) and is safe
+    to delete; one with links is real planning and is left alone.
+    """
+    rows = conn.execute(
+        "SELECT i.id FROM issues i "
+        "WHERE i.type = 'release' AND json_valid(i.fields) AND json_extract(i.fields, '$.version') = 'Future' "
+        "AND NOT EXISTS (SELECT 1 FROM issues c WHERE c.parent_id = i.id) "
+        "AND NOT EXISTS (SELECT 1 FROM dependencies d WHERE d.issue_id = i.id OR d.depends_on_id = i.id) "
+        "ORDER BY i.id"
+    ).fetchall()
+    return [
+        CheckResult(
+            "Future release",
+            False,
+            f"Empty legacy 'Future' release {row[0]} (no children or dependencies) shows up as ready work",
+            fix_hint="Run: filigree doctor --fix (deletes the empty Future release)",
+            code="empty_future_release",
+            fix_target=row[0],
+        )
+        for row in rows
+    ]
+
+
 def _doctor_file_registry_backend_state(
     conn: sqlite3.Connection,
     *,
@@ -1007,6 +1035,7 @@ def run_doctor(project_root: Path | None = None) -> list[CheckResult]:
                     )
                 else:
                     results.append(CheckResult("Schema version", True, f"v{schema_version}"))
+                    results.extend(_doctor_empty_future_release(conn))
                     registry_state = _doctor_file_registry_backend_state(
                         conn,
                         registry_settings=conf_data if conf_data is not None else config_data,

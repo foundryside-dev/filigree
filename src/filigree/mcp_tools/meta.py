@@ -890,10 +890,10 @@ async def _handle_get_summary(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_session_context(arguments: dict[str, Any]) -> list[TextContent]:
-    from filigree.hooks import _build_context
+    from filigree.hooks import _build_context, resolve_session_actor
 
     tracker = get_db()
-    return _text(_build_context(tracker, resolve_request_filigree_dir(tracker)))
+    return _text(_build_context(tracker, resolve_request_filigree_dir(tracker), resolve_session_actor()))
 
 
 async def _handle_get_stats(arguments: dict[str, Any]) -> list[TextContent]:
