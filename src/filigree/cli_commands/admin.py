@@ -18,9 +18,11 @@ from filigree.core import (
     CONF_FILENAME,
     CONFIG_FILENAME,
     DB_FILENAME,
+    DEFAULT_POPULATION,
     EPHEMERAL_MODE,
     FILIGREE_DIR_NAME,
     SUMMARY_FILENAME,
+    VALID_POPULATIONS,
     WEFT_DIR_NAME,
     WEFT_MEMBER_SUBDIR,
     FiligreeDB,
@@ -65,6 +67,37 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
         sys.exit(1)
 
 
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _resolve_new_project_population(population: str | None) -> str:
+    """Pick the population tag for a freshly created project.
+
+    Explicit ``--population`` wins. Without it a human at a TTY must choose
+    (prompted until valid); anywhere else (agents, CI, ``--json`` pipelines)
+    there is nobody to ask, so default to ``product-use`` and log a warning so
+    the silent default is visible.
+    """
+    if population is not None:
+        return population
+    if _stdin_is_tty():
+        return str(
+            click.prompt(
+                "Population this project's call log describes",
+                type=click.Choice(list(VALID_POPULATIONS)),
+            )
+        )
+    logging.getLogger(__name__).warning(
+        "init: --population not given and no TTY to ask; defaulting to %r. Change it with `filigree config set population <value>`.",
+        DEFAULT_POPULATION,
+    )
+    return DEFAULT_POPULATION
+
+
 @click.command()
 @click.option("--prefix", default=None, help="ID prefix for issues (default: directory name)")
 @click.option("--name", default=None, help="Human-readable project name (default: directory name)")
@@ -74,7 +107,15 @@ def _read_project_config_or_exit(filigree_dir: Path) -> ProjectConfig:
     default=None,
     help="Installation mode (default: ephemeral; ethereal is the pre-3.3.0 alias)",
 )
-def init(prefix: str | None, name: str | None, mode: str | None) -> None:
+@click.option(
+    "--population",
+    type=click.Choice(list(VALID_POPULATIONS)),
+    default=None,
+    help="Which population this project's call log describes. Asked for at a TTY when absent; "
+    "defaults to product-use (with a logged warning) otherwise. Only written for a new project "
+    "or when given explicitly on re-init.",
+)
+def init(prefix: str | None, name: str | None, mode: str | None, population: str | None) -> None:
     """Initialize filigree in the current directory (store at .weft/filigree/)."""
     cwd = Path.cwd()
     # The mutating init/install path must NOT boot on defaults over an unreadable
@@ -246,6 +287,10 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
             config["mode"] = mode
             updated = True
             click.echo(f"  Mode: {mode}")
+        if population is not None:
+            config["population"] = population
+            updated = True
+            click.echo(f"  Population: {population}")
         if updated:
             write_config(store_dir, config)
 
@@ -282,6 +327,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     prefix = prefix or cwd.name
     name = name or cwd.name
     mode = normalize_mode(mode) if mode else EPHEMERAL_MODE
+    population = _resolve_new_project_population(population)
     # Honour an operator weft.toml [filigree].store_dir override at creation time
     # (it is the canonical relocation key) so the store, config, and the conf's
     # db field all land in the SAME place. resolve_store_dir already narrowed it
@@ -299,7 +345,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     # presence of ``.weft/filigree/`` itself. No ``.filigree.conf`` is written
     # — filigree only ever *reads* a legacy conf to one-shot-import-and-retire
     # it (the already-installed branch above). ``weft.toml`` is never written.
-    config = {"prefix": prefix, "name": name, "version": 1, "mode": mode}
+    config = {"prefix": prefix, "name": name, "version": 1, "mode": mode, "population": population}
     write_config(store_dir, config)
 
     db = FiligreeDB(store_dir / DB_FILENAME, prefix=prefix, project_root=cwd, meta_dir=store_dir)
@@ -314,6 +360,7 @@ def init(prefix: str | None, name: str | None, mode: str | None) -> None:
     click.echo(f"Initialized filigree store at {rel_store.as_posix()}/ in {cwd}")
     click.echo(f"  Prefix: {prefix}")
     click.echo(f"  Mode: {mode}")
+    click.echo(f"  Population: {population}")
     click.echo(f"  Database: {store_dir / DB_FILENAME}")
     click.echo(f"  Anchor: {rel_store.as_posix()}/ (store-dir presence; confless — no .filigree.conf)")
     click.echo(f"  Scanners: {store_dir / 'scanners'}/ (add .toml files to register scanners)")
@@ -1200,9 +1247,40 @@ def compact(keep: int, as_json: bool) -> None:
                 click.echo("Vacuumed database")
 
 
+@click.group("config")
+def config_group() -> None:
+    """Read and write project configuration keys."""
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a project config key. Only ``population`` is settable today.
+
+    \b
+    filigree config set population suite-construction
+    filigree config set population product-use
+    """
+    if key != "population":
+        raise click.UsageError(f"Unsupported config key {key!r}. Settable keys: population")
+    if value not in VALID_POPULATIONS:
+        raise click.UsageError(f"Invalid population {value!r}. Valid values: {', '.join(VALID_POPULATIONS)}")
+    try:
+        store_dir = find_filigree_anchor().store_dir
+    except ProjectNotInitialisedError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    config = _read_project_config_or_exit(store_dir)
+    config["population"] = value
+    write_config(store_dir, config)
+    click.echo(f"population = {value}")
+
+
 def register(cli: click.Group) -> None:
     """Register admin commands with the CLI group."""
     cli.add_command(init)
+    cli.add_command(config_group)
     cli.add_command(install)
     cli.add_command(doctor)
     cli.add_command(migrate)

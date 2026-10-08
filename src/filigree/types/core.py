@@ -140,6 +140,7 @@ class ProjectConfig(_ProjectConfigRequired, total=False):
     mode: str
     registry_backend: RegistryBackend
     loomweave: LoomweaveConfig
+    population: str
 
 
 _T = TypeVar("_T")

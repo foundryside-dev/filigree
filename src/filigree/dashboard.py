@@ -34,6 +34,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,6 +58,7 @@ from filigree.core import (
 )
 
 # Re-export so test imports continue to work.
+from filigree.dashboard_call_log import CallLogMiddleware
 from filigree.dashboard_routes.common import _safe_bounded_int as _safe_bounded_int
 from filigree.install_support.version_marker import format_schema_mismatch_guidance
 from filigree.registry import RegistryUnavailableError, RegistryVersionMismatchError
@@ -1089,6 +1091,23 @@ def create_app(*, server_mode: bool = False) -> ASGIApp:
         # and MCP database routing select different projects.
         app.routes.append(Mount("/mcp", app=_mcp_handler))
 
+    # Call-outcome logging (3.4.0 instrumentation). Added last so it is the
+    # outermost middleware and sees auth rejections and CORS preflights too.
+    def _request_population(scope: Any) -> str | None:
+        from filigree.dashboard_auth import extract_federation_scope
+        from filigree.logging import population_for
+
+        if not server_mode:
+            return population_for(dashboard_state.db.meta_dir if dashboard_state.db is not None else None)
+        store = dashboard_state.project_store
+        if store is None:
+            return None
+        query = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("project", [None])[0]
+        key = extract_federation_scope(scope.get("path", ""), query) or store.default_key
+        return population_for(store.store_dir_for(key)) if key else None
+
+    app.add_middleware(CallLogMiddleware, population=_request_population)
+
     return app
 
 
@@ -1248,6 +1267,23 @@ def main(
         _mint_and_guard_federation_token(SERVER_CONFIG_DIR, allow_env_pin=False)
     elif _db is not None:
         _pinned_token_env = _mint_and_guard_federation_token(_db.meta_dir, allow_env_pin=True)
+
+    # JSONL call log: one ``event="call"`` record per HTTP request lands in the
+    # served project's filigree.log (server mode: the daemon's own config dir).
+    # Real serve only — create_app (called directly by tests) never attaches a
+    # file handler.
+    try:
+        from filigree.logging import setup_logging
+
+        if server_mode:
+            from filigree.server import SERVER_CONFIG_DIR
+
+            SERVER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            setup_logging(SERVER_CONFIG_DIR)
+        elif _db is not None:
+            setup_logging(_db.meta_dir)
+    except OSError:
+        logger.warning("Could not open the dashboard call log; HTTP calls will not be logged", exc_info=True)
 
     app = create_app(server_mode=server_mode)
 

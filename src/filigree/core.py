@@ -1423,6 +1423,28 @@ def normalize_mode(value: object) -> str:
     raise ValueError(f"Unknown mode {value!r} in config. Valid modes: {sorted(VALID_MODES)}")
 
 
+# Population tag (3.4.0 instrumentation): which kind of user a project's call log
+# describes. Stored as the ``population`` key in config.json (no schema change);
+# every ``event="call"`` log record carries it so dead-end rates can be read per
+# population.
+POPULATION_SUITE_CONSTRUCTION = "suite-construction"
+POPULATION_PRODUCT_USE = "product-use"
+VALID_POPULATIONS: tuple[str, ...] = (POPULATION_SUITE_CONSTRUCTION, POPULATION_PRODUCT_USE)
+DEFAULT_POPULATION = POPULATION_PRODUCT_USE
+
+
+def read_population(filigree_dir: Path) -> str | None:
+    """Return the project's ``population`` tag, or ``None`` when unset/invalid.
+
+    Never raises: this feeds logging, which must not break a call.
+    """
+    try:
+        value = read_config(filigree_dir).get("population")
+    except (ValueError, TypeError, OSError):
+        return None
+    return value if isinstance(value, str) and value in VALID_POPULATIONS else None
+
+
 VALID_REGISTRY_BACKENDS: frozenset[RegistryBackend] = frozenset(cast("tuple[RegistryBackend, ...]", get_args(RegistryBackend)))
 
 

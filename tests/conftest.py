@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Generator
@@ -114,6 +115,49 @@ def _restore_cwd() -> Generator[None, None, None]:
             current = None  # cwd was a tmp dir already cleaned up mid-test
         if current != str(_REPO_ROOT):
             os.chdir(_REPO_ROOT)
+
+
+class JsonLogCapture(logging.Handler):
+    """Collect ``filigree`` log records as the parsed JSON the file handler writes.
+
+    Every record is run through ``_JsonFormatter`` (the same path the rotating
+    file handler uses) and ``json.loads``-ed, so assertions see exactly the
+    fields a downstream log reader would.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        from filigree.logging import _JsonFormatter
+
+        self.setFormatter(_JsonFormatter())
+        self.records: list[dict[str, object]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(json.loads(self.format(record)))
+
+    def last(self, **match: object) -> dict[str, object]:
+        """Return the newest record whose fields all equal *match*."""
+        for rec in reversed(self.records):
+            if all(k in rec and rec[k] == v for k, v in match.items()):
+                return rec
+        calls = [r for r in self.records if r.get("event") == "call"]
+        msg = f"no log record matching {match!r}; call records seen: {calls!r}"
+        raise AssertionError(msg)
+
+
+@pytest.fixture
+def caplog_json() -> Generator[JsonLogCapture, None, None]:
+    """Capture structured ``filigree`` log records, parsed from the JSON formatter."""
+    logger = logging.getLogger("filigree")
+    capture = JsonLogCapture()
+    previous_level = logger.level
+    logger.addHandler(capture)
+    logger.setLevel(logging.INFO)
+    try:
+        yield capture
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(previous_level)
 
 
 @dataclass

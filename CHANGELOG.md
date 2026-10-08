@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Call-outcome logging on every surface, and a per-project population tag.**
+  MCP tool calls, dashboard HTTP requests and CLI commands each emit one
+  `event="call"` record to the JSONL log: `{surface, name, outcome, code,
+  duration_ms, population}`. `outcome` (`ok`/`error`/`no_op`/`validation`) is
+  read from the returned envelope, so error envelopes, no-op sentinels and
+  schema rejections are visible, not only raised exceptions. MCP records keep
+  the legacy `tool`/`args` fields and log the served (namespaced) tool name;
+  HTTP records use `METHOD <route template>`. New config key `population`
+  (`suite-construction` | `product-use`), set by `filigree init --population`
+  (prompted at a TTY, defaulting to `product-use` with a logged warning
+  otherwise) or `filigree config set population <value>`, shown as
+  `POPULATION:` in the session-context banner. No schema change.
+
 ## [3.3.0] - 2026-09-02
 
 ### Added

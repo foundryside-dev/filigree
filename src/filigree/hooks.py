@@ -28,6 +28,7 @@ from filigree.core import (
     find_filigree_anchor,
     find_filigree_command,
     get_mode,
+    read_population,
 )
 from filigree.install import (
     FILIGREE_INSTRUCTIONS_MARKER,
@@ -99,6 +100,10 @@ def _build_context(db: FiligreeDB, filigree_dir: Path | None = None) -> str:
         elif dashboard_alive:
             lines.append(f"DASHBOARD: http://localhost:{port}")
             lines.append("")
+
+        # Population tag: which kind of user this project's call log describes.
+        lines.append(f"POPULATION: {read_population(filigree_dir) or 'unset'}")
+        lines.append("")
 
     # In-progress work
     in_progress = db.list_issues(status="in_progress")

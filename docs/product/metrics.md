@@ -22,6 +22,7 @@ fallback the MCP surface should have covered).
 | MCP/CLI verb-grammar parity gaps (a verb reachable one surface, not the other) | 0 by 2026-09-30 | open: ≥1 (filigree-4c73f6cf22) | 2026-06-16 |
 | Agent-facing Toolkit-DX defects (F1–F7 epic) open | 0 by 2026-09-30 | epic filigree-18bd3b8c98 open | 2026-06-16 |
 | Broadcast-board adoption — distinct agent actors posting per 4-week window (PDR-0003 / PRD-0001) | ≥ 5 within 28 days of MVP release | BASELINE 0 (not shipped) | 2026-06-16 |
+| Dead-end rate per population — (outcome ∈ {error, validation, no_op}) ÷ calls, read weekly from the JSON `event="call"` log, split by config `population`; Goodhart guard: watch the warnings-to-errors ratio alongside | Target set from first baseline | BASELINE unset | Phase 1.6 |
 
 ## Guardrails (must NOT degrade)
 | Metric | Floor / ceiling | Current | Read on |
